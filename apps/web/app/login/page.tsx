@@ -1,8 +1,8 @@
 import { redirect } from "next/navigation";
 
 import { ShooLoginButton } from "@/components/shoo-login-button";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { getCurrentSessionUser } from "@/lib/auth";
-import { getServerEnv } from "@/lib/env";
 
 type LoginPageProps = {
   searchParams: Promise<{
@@ -16,7 +16,13 @@ const ERROR_MESSAGES: Record<string, string> = {
   missing_email: "Google did not provide an email address for this account.",
   not_allowed: "This Google account is not on the allowlist.",
   invalid_token: "The Shoo token could not be verified.",
+  session_expired: "Your local session expired. Please sign in again.",
 };
+
+const shooBaseUrl =
+  process.env.NEXT_PUBLIC_SHOO_BASE_URL ??
+  process.env.SHOO_BASE_URL ??
+  "https://shoo.dev";
 
 export default async function LoginPage({ searchParams }: LoginPageProps) {
   const sessionUser = await getCurrentSessionUser();
@@ -30,12 +36,15 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
   const loggedOut = clearIdentityOnMount;
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-md flex-col justify-center px-6 py-12">
-      <div className="rounded-[2rem] border border-white/70 bg-white/85 p-8 shadow-[0_24px_90px_rgba(66,37,23,0.14)] backdrop-blur">
-        <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-muted)]">
-          Macro Tracker
-        </p>
-        <h1 className="mt-4 font-serif text-4xl text-[var(--color-ink)]">
+    <main className="mx-auto flex min-h-screen w-full max-w-md flex-col justify-center px-4 py-6 sm:px-6 sm:py-12">
+      <div className="rounded-[2rem] border border-[var(--color-border)] bg-[var(--color-surface)] p-6 shadow-[0_24px_90px_rgba(66,37,23,0.14)] backdrop-blur sm:p-8">
+        <div className="flex items-start justify-between gap-4">
+          <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-muted-strong)]">
+            Macro Tracker
+          </p>
+          <ThemeToggle />
+        </div>
+        <h1 className="mt-5 font-serif text-3xl leading-tight text-[var(--color-ink)] sm:text-4xl">
           Daily macros, built for your phone.
         </h1>
         <p className="mt-4 text-sm leading-7 text-[var(--color-muted)]">
@@ -44,7 +53,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
         </p>
 
         {loggedOut ? (
-          <p className="mt-5 rounded-2xl bg-[var(--color-card-muted)] px-4 py-3 text-sm text-[var(--color-muted)]">
+          <p className="mt-5 rounded-2xl bg-[var(--color-card-muted)] px-4 py-3 text-sm text-[var(--color-muted-strong)]">
             You have been signed out.
           </p>
         ) : null}
@@ -55,9 +64,9 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
           </p>
         ) : null}
 
-        <div className="mt-8">
+        <div className="mt-7">
           <ShooLoginButton
-            shooBaseUrl={getServerEnv().shooBaseUrl}
+            shooBaseUrl={shooBaseUrl}
             clearIdentityOnMount={clearIdentityOnMount}
           />
         </div>

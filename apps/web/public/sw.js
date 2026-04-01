@@ -1,7 +1,5 @@
-const CACHE_NAME = "macro-tracker-v1";
+const CACHE_NAME = "macro-tracker-v2";
 const APP_SHELL = [
-  "/",
-  "/login",
   "/manifest.webmanifest",
   "/icon.svg",
   "/icon-maskable.svg",
@@ -40,6 +38,10 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
+  if (event.request.mode === "navigate") {
+    return;
+  }
+
   event.respondWith(
     caches.match(event.request).then((cachedResponse) => {
       if (cachedResponse) {
@@ -49,7 +51,8 @@ self.addEventListener("fetch", (event) => {
       return fetch(event.request).then((networkResponse) => {
         if (
           networkResponse.ok &&
-          ["document", "script", "style", "image", "font"].includes(
+          !networkResponse.redirected &&
+          ["script", "style", "image", "font"].includes(
             event.request.destination,
           )
         ) {

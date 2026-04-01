@@ -1,16 +1,48 @@
 @import "tailwindcss";
 
 :root {
-  --color-paper: #fcf5eb;
-  --color-paper-soft: #ecdcc6;
-  --color-surface: #f7efe3;
-  --color-card-muted: #f0e5d4;
-  --color-ink: #2f1a11;
-  --color-muted: #7b6556;
-  --color-border: rgba(105, 77, 58, 0.16);
+  --color-paper: #fffaf2;
+  --color-paper-soft: #f2e3cd;
+  --color-surface: rgba(255, 247, 236, 0.86);
+  --color-surface-strong: #fffdf9;
+  --color-card-muted: #efe3d0;
+  --color-card-subtle: rgba(255, 251, 245, 0.82);
+  --color-ink: #26160f;
+  --color-muted: #7b6456;
+  --color-muted-strong: #5a4438;
+  --color-border: rgba(92, 65, 47, 0.16);
+  --color-border-strong: rgba(92, 65, 47, 0.24);
   --color-accent: #ca6b3a;
+  --color-accent-strong: #a85126;
   --color-danger: #b6453c;
-  --background: linear-gradient(180deg, #f6eddf 0%, #fdf8ef 48%, #f7efe2 100%);
+  --color-success: #5d7a5c;
+  --background:
+    radial-gradient(circle at top left, rgba(226, 152, 108, 0.2), transparent 28%),
+    radial-gradient(circle at top right, rgba(202, 107, 58, 0.1), transparent 20%),
+    linear-gradient(180deg, #f6ede2 0%, #fbf5ec 48%, #f4ebde 100%);
+  --foreground: var(--color-ink);
+}
+
+.dark {
+  --color-paper: #151211;
+  --color-paper-soft: #463733;
+  --color-surface: rgba(29, 24, 23, 0.9);
+  --color-surface-strong: #231d1b;
+  --color-card-muted: #2e2624;
+  --color-card-subtle: rgba(36, 30, 28, 0.92);
+  --color-ink: #f7efe5;
+  --color-muted: #b49f95;
+  --color-muted-strong: #d8c2b6;
+  --color-border: rgba(220, 194, 182, 0.12);
+  --color-border-strong: rgba(220, 194, 182, 0.2);
+  --color-accent: #df7f43;
+  --color-accent-strong: #f19860;
+  --color-danger: #f07c71;
+  --color-success: #94bc92;
+  --background:
+    radial-gradient(circle at top left, rgba(223, 127, 67, 0.16), transparent 26%),
+    radial-gradient(circle at bottom right, rgba(120, 155, 123, 0.12), transparent 22%),
+    linear-gradient(180deg, #100d0d 0%, #181313 52%, #120f0f 100%);
   --foreground: var(--color-ink);
 }
 
@@ -27,6 +59,10 @@
 
 html {
   color-scheme: light;
+}
+
+html.dark {
+  color-scheme: dark;
 }
 
 body {
@@ -48,6 +84,19 @@ body::before {
   opacity: 0.8;
 }
 
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
+  background-size: 22px 22px;
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.18), transparent 72%);
+  opacity: 0.3;
+}
+
 a,
 button,
 input {
@@ -56,6 +105,11 @@ input {
 
 input[type="date"]::-webkit-calendar-picker-indicator {
   opacity: 0.7;
+}
+
+input::placeholder {
+  color: var(--color-muted);
+  opacity: 0.86;
 }
 
 .font-serif {

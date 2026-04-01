@@ -15,6 +15,7 @@ import {
 
 import { MealCard, type MealDraft } from "./meal-card";
 import { SummaryCard } from "./summary-card";
+import { ThemeToggle } from "./theme-toggle";
 
 type DashboardShellProps = {
   userEmail: string;
@@ -178,97 +179,103 @@ export function DashboardShell({
   const dailyTotals = dailySummary.totals;
 
   return (
-    <main className="mx-auto w-full max-w-5xl px-4 py-5 sm:px-6 sm:py-8">
-      <section className="rounded-[2rem] border border-[var(--color-border)] bg-[var(--color-surface)]/90 p-5 shadow-[0_30px_90px_rgba(67,41,25,0.12)] backdrop-blur sm:p-8">
+    <main className="mx-auto w-full max-w-5xl px-3 py-3 sm:px-6 sm:py-8">
+      <section className="rounded-[1.75rem] border border-[var(--color-border)] bg-[var(--color-surface)] p-4 shadow-[0_30px_90px_rgba(67,41,25,0.12)] backdrop-blur sm:rounded-[2rem] sm:p-8">
         <div className="flex flex-col gap-6">
           <div className="flex flex-col gap-4">
-            <div className="flex items-start justify-between gap-4">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-muted)]">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+              <div className="min-w-0">
+                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-muted-strong)]">
                   Macro Tracker
                 </p>
-                <h1 className="mt-2 font-serif text-4xl text-[var(--color-ink)] sm:text-5xl">
+                <h1 className="mt-2 max-w-[11ch] font-serif text-3xl leading-[0.95] text-[var(--color-ink)] sm:text-5xl">
                   {formatSelectedDate(selectedDate)}
                 </h1>
-                <p className="mt-2 text-sm text-[var(--color-muted)]">
+                <p className="mt-3 text-sm leading-6 text-[var(--color-muted)]">
                   Signed in as {userEmail}
                 </p>
               </div>
 
-              <form action="/api/auth/logout" method="post">
-                <button
-                  type="submit"
-                  className="rounded-full border border-[var(--color-border)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-muted)] transition hover:border-[var(--color-ink)] hover:text-[var(--color-ink)]"
-                >
-                  Sign out
-                </button>
-              </form>
+              <div className="flex items-center gap-2 self-start">
+                <ThemeToggle />
+                <form action="/api/auth/logout" method="post">
+                  <button
+                    type="submit"
+                    className="rounded-full border border-[var(--color-border-strong)] bg-[var(--color-surface-strong)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-muted-strong)] transition hover:border-[var(--color-ink)] hover:text-[var(--color-ink)]"
+                  >
+                    Sign out
+                  </button>
+                </form>
+              </div>
             </div>
 
-            <div className="grid grid-cols-[auto_1fr_auto] items-center gap-3 rounded-[1.5rem] bg-[var(--color-card-muted)] p-3">
-              <Link
-                href={`/?date=${previousDateString(selectedDate)}`}
-                className="rounded-full bg-white px-4 py-3 text-sm font-semibold text-[var(--color-ink)] shadow-sm transition hover:-translate-y-0.5"
-              >
-                Prev
-              </Link>
+            <div className="rounded-[1.5rem] border border-[var(--color-border)] bg-[var(--color-card-muted)] p-3">
+              <span className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-muted-strong)]">
+                Pick a day
+              </span>
+              <div className="mt-3 grid grid-cols-[auto_1fr_auto] items-center gap-2">
+                <Link
+                  href={`/?date=${previousDateString(selectedDate)}`}
+                  className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface-strong)] px-3 py-3 text-sm font-semibold text-[var(--color-ink)] shadow-sm transition hover:-translate-y-0.5"
+                >
+                  Prev
+                </Link>
 
-              <label className="flex flex-col gap-2">
-                <span className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-muted)]">
-                  Pick a day
-                </span>
-                <input
-                  type="date"
-                  value={selectedDate}
-                  disabled={isPending}
-                  onChange={(event) => navigateToDate(event.target.value)}
-                  className="rounded-2xl border border-[var(--color-border)] bg-white px-4 py-3 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
-                />
-              </label>
+                <label>
+                  <span className="sr-only">Pick a day</span>
+                  <input
+                    type="date"
+                    value={selectedDate}
+                    disabled={isPending}
+                    onChange={(event) => navigateToDate(event.target.value)}
+                    className="w-full rounded-2xl border border-[var(--color-border-strong)] bg-[var(--color-surface-strong)] px-4 py-3 text-base text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
+                  />
+                </label>
 
-              <Link
-                href={`/?date=${nextDateString(selectedDate)}`}
-                className="rounded-full bg-white px-4 py-3 text-sm font-semibold text-[var(--color-ink)] shadow-sm transition hover:-translate-y-0.5"
-              >
-                Next
-              </Link>
+                <Link
+                  href={`/?date=${nextDateString(selectedDate)}`}
+                  className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface-strong)] px-3 py-3 text-sm font-semibold text-[var(--color-ink)] shadow-sm transition hover:-translate-y-0.5"
+                >
+                  Next
+                </Link>
+              </div>
             </div>
           </div>
 
-          <section className="rounded-[1.75rem] bg-[var(--color-ink)] px-5 py-6 text-[var(--color-paper)] sm:px-6">
+          <section className="rounded-[1.5rem] bg-[var(--color-ink)] px-4 py-5 text-[var(--color-paper)] sm:px-6 sm:py-6">
             <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-paper-soft)]">
               Daily totals
             </p>
-            <div className="mt-5 grid grid-cols-2 gap-4 sm:grid-cols-4">
-              <div>
-                <p className="text-xs uppercase tracking-[0.16em] text-[var(--color-paper-soft)]">
+            <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <div className="rounded-2xl bg-white/6 px-4 py-3">
+                <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--color-paper-soft)]">
                   Protein
                 </p>
-                <p className="mt-1 text-2xl font-semibold">
+                <p className="mt-1 text-[1.85rem] font-semibold leading-none">
                   {formatMacroValue(dailyTotals.proteinG)}g
                 </p>
               </div>
-              <div>
-                <p className="text-xs uppercase tracking-[0.16em] text-[var(--color-paper-soft)]">
+              <div className="rounded-2xl bg-white/6 px-4 py-3">
+                <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--color-paper-soft)]">
                   Carbs
                 </p>
-                <p className="mt-1 text-2xl font-semibold">
+                <p className="mt-1 text-[1.85rem] font-semibold leading-none">
                   {formatMacroValue(dailyTotals.carbsG)}g
                 </p>
               </div>
-              <div>
-                <p className="text-xs uppercase tracking-[0.16em] text-[var(--color-paper-soft)]">
+              <div className="rounded-2xl bg-white/6 px-4 py-3">
+                <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--color-paper-soft)]">
                   Fat
                 </p>
-                <p className="mt-1 text-2xl font-semibold">
+                <p className="mt-1 text-[1.85rem] font-semibold leading-none">
                   {formatMacroValue(dailyTotals.fatG)}g
                 </p>
               </div>
-              <div>
-                <p className="text-xs uppercase tracking-[0.16em] text-[var(--color-paper-soft)]">
+              <div className="rounded-2xl bg-white/6 px-4 py-3">
+                <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--color-paper-soft)]">
                   Calories
                 </p>
-                <p className="mt-1 text-2xl font-semibold">
+                <p className="mt-1 text-[1.85rem] font-semibold leading-none">
                   {dailyTotals.caloriesKcal} kcal
                 </p>
               </div>
@@ -276,9 +283,9 @@ export function DashboardShell({
           </section>
 
           <section>
-            <div className="mb-4 flex items-center justify-between gap-4">
+            <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-muted)]">
+                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-muted-strong)]">
                   Meals
                 </p>
                 <p className="mt-2 text-sm text-[var(--color-muted)]">
@@ -288,14 +295,14 @@ export function DashboardShell({
               <button
                 type="button"
                 onClick={addMealDraft}
-                className="rounded-full bg-[var(--color-accent)] px-4 py-3 text-sm font-semibold text-white transition hover:-translate-y-0.5"
+                className="w-full rounded-full bg-[var(--color-accent)] px-4 py-3.5 text-sm font-semibold text-white transition hover:-translate-y-0.5 sm:w-auto"
               >
                 Add meal
               </button>
             </div>
 
             {drafts.length === 0 ? (
-              <div className="rounded-[1.75rem] border border-dashed border-[var(--color-border)] bg-white/60 px-5 py-8 text-center text-sm text-[var(--color-muted)]">
+              <div className="rounded-[1.5rem] border border-dashed border-[var(--color-border-strong)] bg-[var(--color-card-subtle)] px-5 py-7 text-center text-sm leading-7 text-[var(--color-muted)]">
                 No meals logged yet. Add one to start tracking this day.
               </div>
             ) : null}
@@ -321,7 +328,7 @@ export function DashboardShell({
 
           <section>
             <div className="mb-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-muted)]">
+              <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-muted-strong)]">
                 Averages
               </p>
               <p className="mt-2 text-sm text-[var(--color-muted)]">

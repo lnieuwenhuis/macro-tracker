@@ -5,6 +5,7 @@ import { getDb, type DatabaseClient } from "./client";
 import { mealEntries, users } from "./schema";
 import { validateMealEntryInput } from "./validators";
 import type {
+  DailyOverview,
   DailySummary,
   MacroNumbers,
   MealEntryInput,
@@ -19,6 +20,7 @@ type DailyTotalsRow = {
   carbsG: string | number;
   fatG: string | number;
   caloriesKcal: string | number;
+  itemCount?: string | number;
 };
 
 type UserSelectRow = {
@@ -302,6 +304,46 @@ export async function getPeriodAverages(
       rolling30Rows,
     ),
   ];
+}
+
+export async function getRecentDailyOverviews(
+  userId: string,
+  selectedDate: string,
+  limit = 8,
+  db?: DatabaseClient,
+): Promise<DailyOverview[]> {
+  const database = await resolveDb(db);
+
+  const rows = await database
+    .select({
+      entryDate: mealEntries.entryDate,
+      proteinG: sql<string>`coalesce(sum(${mealEntries.proteinG}), 0)`,
+      carbsG: sql<string>`coalesce(sum(${mealEntries.carbsG}), 0)`,
+      fatG: sql<string>`coalesce(sum(${mealEntries.fatG}), 0)`,
+      caloriesKcal: sql<string>`coalesce(sum(${mealEntries.caloriesKcal}), 0)`,
+      itemCount: sql<string>`count(${mealEntries.id})`,
+    })
+    .from(mealEntries)
+    .where(
+      and(
+        eq(mealEntries.userId, userId),
+        lte(mealEntries.entryDate, selectedDate),
+      ),
+    )
+    .groupBy(mealEntries.entryDate)
+    .orderBy(desc(mealEntries.entryDate))
+    .limit(limit);
+
+  return (rows as DailyTotalsRow[]).map((row) => ({
+    date: row.entryDate,
+    itemCount: toNumber(row.itemCount),
+    totals: {
+      proteinG: roundToSingleDecimal(toNumber(row.proteinG)),
+      carbsG: roundToSingleDecimal(toNumber(row.carbsG)),
+      fatG: roundToSingleDecimal(toNumber(row.fatG)),
+      caloriesKcal: toNumber(row.caloriesKcal),
+    },
+  }));
 }
 
 export async function getDashboardData(

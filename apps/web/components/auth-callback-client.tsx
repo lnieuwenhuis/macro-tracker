@@ -16,6 +16,26 @@ export function AuthCallbackClient({
   useEffect(() => {
     let cancelled = false;
 
+    async function resetDevServiceWorkers() {
+      if (
+        process.env.NODE_ENV === "production" ||
+        typeof window === "undefined" ||
+        !("serviceWorker" in navigator)
+      ) {
+        return;
+      }
+
+      const registrations = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(
+        registrations.map((registration) => registration.unregister()),
+      );
+
+      if ("caches" in window) {
+        const cacheNames = await caches.keys();
+        await Promise.all(cacheNames.map((cacheName) => caches.delete(cacheName)));
+      }
+    }
+
     async function completeSignIn() {
       const auth = createShooAuth({
         shooBaseUrl,
@@ -48,11 +68,13 @@ export function AuthCallbackClient({
         if (!response.ok) {
           auth.clearIdentity();
           const code = payload.code ?? "login_failed";
+          await resetDevServiceWorkers();
           window.location.replace(`/login?error=${encodeURIComponent(code)}`);
           return;
         }
 
         auth.clearIdentity();
+        await resetDevServiceWorkers();
         window.location.replace("/");
       } catch (error) {
         auth.clearIdentity();

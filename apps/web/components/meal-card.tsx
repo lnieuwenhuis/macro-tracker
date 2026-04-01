@@ -50,7 +50,7 @@ function NumericInput({
         value={value}
         disabled={busy}
         onChange={(event) => onChange(event.target.value)}
-        className="w-full rounded-2xl border border-[var(--color-border)] bg-[var(--color-card-muted)] px-4 py-3 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
+        className="w-full rounded-2xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-4 py-3 text-base text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
       />
     </label>
   );
@@ -67,13 +67,13 @@ export function MealCard({
   const heading = draft.label.trim() || "New meal";
 
   return (
-    <article className="rounded-[1.75rem] border border-[var(--color-border)] bg-white/90 p-5 shadow-[0_18px_50px_rgba(74,45,28,0.08)]">
+    <article className="rounded-[1.5rem] border border-[var(--color-border)] bg-[var(--color-card-subtle)] p-4 shadow-[0_18px_50px_rgba(74,45,28,0.08)] sm:p-5">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-muted)]">
+          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-muted-strong)]">
             Meal
           </p>
-          <h3 className="mt-1 font-serif text-2xl text-[var(--color-ink)]">
+          <h3 className="mt-1 font-serif text-[1.65rem] leading-tight text-[var(--color-ink)]">
             {heading}
           </h3>
         </div>
@@ -81,14 +81,14 @@ export function MealCard({
           type="button"
           disabled={busy}
           onClick={() => onDelete(draft.clientId)}
-          className="rounded-full border border-[var(--color-border)] px-3 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-muted)] transition hover:border-[var(--color-danger)] hover:text-[var(--color-danger)] disabled:opacity-50"
+          className="rounded-full border border-[var(--color-border-strong)] px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--color-muted)] transition hover:border-[var(--color-danger)] hover:text-[var(--color-danger)] disabled:opacity-50"
         >
           Delete
         </button>
       </div>
 
-      <label className="mt-5 block space-y-2">
-        <span className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-muted)]">
+      <label className="mt-4 block space-y-2">
+        <span className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-muted-strong)]">
           Name
         </span>
         <input
@@ -98,12 +98,12 @@ export function MealCard({
           onChange={(event) =>
             onChange(draft.clientId, "label", event.target.value)
           }
-          className="w-full rounded-2xl border border-[var(--color-border)] bg-[var(--color-card-muted)] px-4 py-3 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
+          className="w-full rounded-2xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-4 py-3 text-base text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
           placeholder="Lunch, post-workout, late snack..."
         />
       </label>
 
-      <div className="mt-5 grid grid-cols-2 gap-3">
+      <div className="mt-4 grid grid-cols-2 gap-3">
         <NumericInput
           label="Protein"
           value={draft.proteinG}
@@ -142,7 +142,7 @@ export function MealCard({
         type="button"
         disabled={busy}
         onClick={() => onSave(draft.clientId)}
-        className="mt-5 w-full rounded-full bg-[var(--color-accent)] px-4 py-3 text-sm font-semibold text-white transition-transform duration-150 hover:-translate-y-0.5 disabled:cursor-wait disabled:opacity-70"
+        className="mt-4 w-full rounded-full bg-[var(--color-accent)] px-4 py-3.5 text-sm font-semibold text-white transition-transform duration-150 hover:-translate-y-0.5 disabled:cursor-wait disabled:opacity-70"
       >
         {busy ? "Saving..." : "Save meal"}
       </button>

@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Fraunces, Space_Grotesk } from "next/font/google";
+import Script from "next/script";
 
 import { ServiceWorkerRegister } from "@/components/service-worker-register";
 
@@ -30,6 +31,16 @@ export const metadata: Metadata = {
   },
 };
 
+const themeInitScript = `
+  try {
+    var storedTheme = window.localStorage.getItem("macro-tracker-theme");
+    var theme = storedTheme === "light" || storedTheme === "dark"
+      ? storedTheme
+      : (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.classList.toggle("dark", theme === "dark");
+  } catch (error) {}
+`;
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -38,9 +49,13 @@ export default function RootLayout({
   return (
     <html
       lang="en"
+      suppressHydrationWarning
       className={`${spaceGrotesk.variable} ${fraunces.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">
+        <Script id="theme-init" strategy="beforeInteractive">
+          {themeInitScript}
+        </Script>
         <ServiceWorkerRegister />
         {children}
       </body>

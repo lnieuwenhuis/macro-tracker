@@ -22,7 +22,15 @@ type SaveMealEntryInput = {
 };
 
 function toActionError(error: unknown) {
-  return error instanceof Error ? error.message : "Something went wrong.";
+  if (!(error instanceof Error)) {
+    return "Something went wrong.";
+  }
+
+  if (error.message.includes("Failed query:")) {
+    return "Unable to save this change right now. Sign in again if the issue persists.";
+  }
+
+  return error.message;
 }
 
 export async function saveMealEntryAction(

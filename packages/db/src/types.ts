@@ -26,6 +26,12 @@ export type DailySummary = {
   meals: MealEntryRecord[];
 };
 
+export type DailyOverview = {
+  date: string;
+  totals: MacroNumbers;
+  itemCount: number;
+};
+
 export type PeriodAverageLabel = "week" | "month" | "rolling7" | "rolling30";
 
 export type PeriodAverage = {
