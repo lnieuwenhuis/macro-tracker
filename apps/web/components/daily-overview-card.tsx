@@ -1,59 +1,38 @@
-import type { DailyOverview } from "@macro-tracker/db";
+import type { DailyOverview, MacroGoals } from "@macro-tracker/db";
 
-import { formatMacroValue, formatShortDate } from "@/lib/formatting";
+import { formatShortDate } from "@/lib/formatting";
+import { MacroBarGroup } from "./macro-bar";
 
 type DailyOverviewCardProps = {
   overview: DailyOverview;
+  goals?: MacroGoals | null;
 };
 
-export function DailyOverviewCard({ overview }: DailyOverviewCardProps) {
+export function DailyOverviewCard({ overview, goals }: DailyOverviewCardProps) {
   return (
-    <article className="rounded-[1.35rem] border border-[var(--color-border)] bg-[var(--color-shell-panel)] p-4">
-      <div className="flex items-start justify-between gap-4">
+    <article className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-shell-panel)] p-4">
+      <div className="mb-3 flex items-center justify-between gap-3">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--color-muted-strong)]">
+          <p className="text-sm font-bold text-[var(--color-ink)]">
             {formatShortDate(overview.date)}
           </p>
-          <p className="mt-2 text-sm text-[var(--color-muted)]">
-            {overview.itemCount} {overview.itemCount === 1 ? "food item" : "food items"}
+          <p className="mt-0.5 text-xs text-[var(--color-muted)]">
+            {overview.itemCount} {overview.itemCount === 1 ? "item" : "items"}
           </p>
         </div>
-        <div className="text-right">
-          <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--color-muted-strong)]">
-            Calories
-          </p>
-          <p className="mt-1 text-2xl font-semibold text-[var(--color-ink)]">
-            {overview.totals.caloriesKcal}
-          </p>
-        </div>
+        <span className="text-lg font-bold tabular-nums text-[var(--color-ink)]">
+          {overview.totals.caloriesKcal}
+          <span className="ml-0.5 text-[10px] font-semibold text-[var(--color-muted)]">kcal</span>
+        </span>
       </div>
 
-      <div className="mt-4 grid grid-cols-3 gap-3">
-        <div className="rounded-2xl bg-[var(--color-app-bg)] px-3 py-3">
-          <p className="text-[11px] uppercase tracking-[0.14em] text-[var(--color-muted-strong)]">
-            Protein
-          </p>
-          <p className="mt-1 text-lg font-semibold text-[var(--color-ink)]">
-            {formatMacroValue(overview.totals.proteinG)}g
-          </p>
-        </div>
-        <div className="rounded-2xl bg-[var(--color-app-bg)] px-3 py-3">
-          <p className="text-[11px] uppercase tracking-[0.14em] text-[var(--color-muted-strong)]">
-            Carbs
-          </p>
-          <p className="mt-1 text-lg font-semibold text-[var(--color-ink)]">
-            {formatMacroValue(overview.totals.carbsG)}g
-          </p>
-        </div>
-        <div className="rounded-2xl bg-[var(--color-app-bg)] px-3 py-3">
-          <p className="text-[11px] uppercase tracking-[0.14em] text-[var(--color-muted-strong)]">
-            Fat
-          </p>
-          <p className="mt-1 text-lg font-semibold text-[var(--color-ink)]">
-            {formatMacroValue(overview.totals.fatG)}g
-          </p>
-        </div>
-      </div>
+      <MacroBarGroup
+        proteinG={overview.totals.proteinG}
+        carbsG={overview.totals.carbsG}
+        fatG={overview.totals.fatG}
+        caloriesKcal={overview.totals.caloriesKcal}
+        goals={goals}
+      />
     </article>
   );
 }

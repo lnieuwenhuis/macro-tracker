@@ -10,20 +10,14 @@ import {
   previousDateString,
 } from "@/lib/formatting";
 
-import { ThemeToggle } from "./theme-toggle";
+import { HamburgerMenu } from "./hamburger-menu";
 
 type AppShellProps = {
   userEmail: string;
   selectedDate: string;
-  activeTab: "log" | "summary";
+  activeTab: "log" | "summary" | "goals";
   children: ReactNode;
 };
-
-function tabClass(active: boolean) {
-  return active
-    ? "border-[var(--color-accent)] bg-[var(--color-accent)] text-white"
-    : "border-[var(--color-border)] bg-[var(--color-shell-panel)] text-[var(--color-muted-strong)]";
-}
 
 export function AppShell({
   userEmail,
@@ -33,7 +27,8 @@ export function AppShell({
 }: AppShellProps) {
   const router = useRouter();
   const [isPending, startNavigation] = useTransition();
-  const basePath = activeTab === "summary" ? "/summary" : "/";
+  const basePath =
+    activeTab === "summary" ? "/summary" : activeTab === "goals" ? "/goals" : "/";
 
   function navigateToDate(nextDate: string) {
     startTransition(() => {
@@ -44,82 +39,69 @@ export function AppShell({
   return (
     <main className="min-h-screen bg-[var(--color-app-bg)] text-[var(--color-ink)]">
       <div className="mx-auto flex min-h-screen w-full max-w-3xl flex-col">
-        <header className="px-5 pb-5 pt-[calc(1rem+env(safe-area-inset-top))] sm:px-6 sm:pb-6 sm:pt-6">
-          <div className="flex items-start justify-between gap-4">
-            <div className="min-w-0">
-              <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-muted-strong)]">
-                Macro Tracker
-              </p>
-              <h1 className="mt-2 max-w-[10ch] font-serif text-[2.85rem] leading-[0.92] text-[var(--color-ink)] sm:max-w-none sm:text-5xl">
-                {formatSelectedDate(selectedDate)}
-              </h1>
-              <p className="mt-3 text-sm leading-6 text-[var(--color-muted)]">
-                Signed in as {userEmail}
-              </p>
-            </div>
-
-            <div className="flex shrink-0 items-center gap-2">
-              <ThemeToggle />
-              <form action="/api/auth/logout" method="post">
-                <button
-                  type="submit"
-                  className="rounded-full border border-[var(--color-border)] bg-[var(--color-shell-panel)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-muted-strong)] transition hover:border-[var(--color-ink)] hover:text-[var(--color-ink)]"
-                >
-                  Sign out
-                </button>
-              </form>
-            </div>
+        {/* Top bar: hamburger + date nav */}
+        <header className="px-4 pb-3 pt-[calc(0.75rem+env(safe-area-inset-top))] sm:px-6">
+          {/* Row 1: hamburger + title + spacer */}
+          <div className="flex items-center gap-3">
+            <HamburgerMenu
+              userEmail={userEmail}
+              selectedDate={selectedDate}
+              activeTab={activeTab}
+            />
+            <h1 className="flex-1 text-center font-serif text-xl font-semibold text-[var(--color-ink)]">
+              {activeTab === "log" ? "Food Log" : activeTab === "summary" ? "Summary" : "Goals"}
+            </h1>
+            {/* Invisible spacer to keep title centered */}
+            <div className="h-10 w-10" />
           </div>
 
-          <nav className="mt-5 grid grid-cols-2 gap-2">
+          {/* Row 2: date navigation */}
+          <div className="mt-3 flex items-center justify-between gap-2 rounded-2xl border border-[var(--color-border)] bg-[var(--color-shell-panel)] px-2 py-1.5">
             <Link
-              href={`/?date=${selectedDate}`}
-              className={`rounded-full border px-4 py-3 text-center text-sm font-semibold transition ${tabClass(activeTab === "log")}`}
+              href={`${basePath}?date=${previousDateString(selectedDate)}`}
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--color-ink)] transition hover:bg-[var(--color-card-muted)]"
+              aria-label="Previous day"
             >
-              Food log
+              <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M11 4l-5 5 5 5" />
+              </svg>
             </Link>
+
+            <button
+              type="button"
+              className="relative flex-1 text-center"
+              onClick={() => {
+                const input = document.getElementById("date-picker-hidden") as HTMLInputElement;
+                input?.showPicker?.();
+              }}
+            >
+              <span className="text-sm font-semibold text-[var(--color-ink)]">
+                {formatSelectedDate(selectedDate)}
+              </span>
+              <input
+                id="date-picker-hidden"
+                type="date"
+                value={selectedDate}
+                disabled={isPending}
+                onChange={(event) => navigateToDate(event.target.value)}
+                className="absolute inset-0 opacity-0 cursor-pointer"
+                aria-label="Pick a day"
+              />
+            </button>
+
             <Link
-              href={`/summary?date=${selectedDate}`}
-              className={`rounded-full border px-4 py-3 text-center text-sm font-semibold transition ${tabClass(activeTab === "summary")}`}
+              href={`${basePath}?date=${nextDateString(selectedDate)}`}
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--color-ink)] transition hover:bg-[var(--color-card-muted)]"
+              aria-label="Next day"
             >
-              Summary
+              <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M7 4l5 5-5 5" />
+              </svg>
             </Link>
-          </nav>
-
-          <div className="mt-4 rounded-[1.5rem] border border-[var(--color-border)] bg-[var(--color-shell-panel)] p-3">
-            <span className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-muted-strong)]">
-              Pick a day
-            </span>
-            <div className="mt-3 grid grid-cols-[auto_1fr_auto] items-center gap-2">
-              <Link
-                href={`${basePath}?date=${previousDateString(selectedDate)}`}
-                className="rounded-full border border-[var(--color-border)] bg-[var(--color-app-bg)] px-3 py-3 text-sm font-semibold text-[var(--color-ink)]"
-              >
-                Prev
-              </Link>
-
-              <label>
-                <span className="sr-only">Pick a day</span>
-                <input
-                  type="date"
-                  value={selectedDate}
-                  disabled={isPending}
-                  onChange={(event) => navigateToDate(event.target.value)}
-                  className="w-full rounded-2xl border border-[var(--color-border)] bg-[var(--color-app-bg)] px-4 py-3 text-base text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
-                />
-              </label>
-
-              <Link
-                href={`${basePath}?date=${nextDateString(selectedDate)}`}
-                className="rounded-full border border-[var(--color-border)] bg-[var(--color-app-bg)] px-3 py-3 text-sm font-semibold text-[var(--color-ink)]"
-              >
-                Next
-              </Link>
-            </div>
           </div>
         </header>
 
-        <div className="flex-1 px-5 pb-[calc(1.25rem+env(safe-area-inset-bottom))] sm:px-6">
+        <div className="flex-1 px-4 pb-[calc(1.25rem+env(safe-area-inset-bottom))] sm:px-6">
           {children}
         </div>
       </div>

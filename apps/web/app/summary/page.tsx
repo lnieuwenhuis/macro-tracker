@@ -4,6 +4,7 @@ import {
   getPeriodAverages,
   getRecentDailyOverviews,
   getUserById,
+  getUserGoals,
 } from "@macro-tracker/db";
 
 import { SummaryShell } from "@/components/summary-shell";
@@ -20,10 +21,11 @@ export default async function SummaryPage({ searchParams }: SummaryPageProps) {
   const params = await searchParams;
   const selectedDate = ensureDateString(params.date);
 
-  const [dailySummary, periodAverages, recentOverviews, user] = await Promise.all([
+  const [dailySummary, periodAverages, recentOverviews, goals, user] = await Promise.all([
     getDailySummary(sessionUser.userId, selectedDate),
     getPeriodAverages(sessionUser.userId, selectedDate),
     getRecentDailyOverviews(sessionUser.userId, selectedDate),
+    getUserGoals(sessionUser.userId),
     getUserById(sessionUser.userId),
   ]);
 
@@ -34,6 +36,7 @@ export default async function SummaryPage({ searchParams }: SummaryPageProps) {
       dailySummary={dailySummary}
       periodAverages={periodAverages}
       recentOverviews={recentOverviews}
+      goals={goals}
     />
   );
 }

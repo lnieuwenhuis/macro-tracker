@@ -1,62 +1,47 @@
-import type { PeriodAverage } from "@macro-tracker/db";
+import type { MacroGoals, PeriodAverage } from "@macro-tracker/db";
 
-import { formatMacroValue, formatPeriodRange } from "@/lib/formatting";
+import { formatPeriodRange } from "@/lib/formatting";
+import { MacroBarGroup } from "./macro-bar";
 
 type SummaryCardProps = {
   summary: PeriodAverage;
+  goals?: MacroGoals | null;
 };
 
 const LABELS: Record<PeriodAverage["label"], string> = {
-  week: "ISO week",
-  month: "Calendar month",
-  rolling7: "Rolling 7 days",
-  rolling30: "Rolling 30 days",
+  week: "ISO Week",
+  month: "Calendar Month",
+  rolling7: "Rolling 7 Days",
+  rolling30: "Rolling 30 Days",
 };
 
-function MacroLine({
-  label,
-  value,
-  suffix,
-}: {
-  label: string;
-  value: number;
-  suffix: string;
-}) {
+export function SummaryCard({ summary, goals }: SummaryCardProps) {
   return (
-    <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-card-muted)] px-4 py-3">
-      <span className="block text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--color-muted-strong)]">
-        {label}
-      </span>
-      <span className="mt-1 block text-lg font-semibold text-[var(--color-ink)]">
-        {formatMacroValue(value)}
-        {suffix}
-      </span>
-    </div>
-  );
-}
-
-export function SummaryCard({ summary }: SummaryCardProps) {
-  return (
-    <section className="rounded-[1.5rem] border border-[var(--color-border)] bg-[var(--color-card-subtle)] p-4 shadow-[0_18px_50px_rgba(74,45,28,0.08)] sm:p-5">
-      <p className="text-xs font-semibold uppercase tracking-[0.22em] text-[var(--color-muted-strong)]">
-        {LABELS[summary.label]}
-      </p>
-      <h3 className="mt-2 font-serif text-[1.7rem] leading-tight text-[var(--color-ink)]">
-        {summary.loggedDays} logged {summary.loggedDays === 1 ? "day" : "days"}
-      </h3>
-      <p className="mt-2 text-sm text-[var(--color-muted)]">
-        {formatPeriodRange(summary.startDate, summary.endDate)}
-      </p>
-      <div className="mt-4 grid grid-cols-2 gap-3">
-        <MacroLine label="Protein" value={summary.averages.proteinG} suffix="g" />
-        <MacroLine label="Carbs" value={summary.averages.carbsG} suffix="g" />
-        <MacroLine label="Fat" value={summary.averages.fatG} suffix="g" />
-        <MacroLine
-          label="Calories"
-          value={summary.averages.caloriesKcal}
-          suffix=" kcal"
-        />
+    <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-card-subtle)] p-4 shadow-[0_8px_24px_rgba(74,45,28,0.06)]">
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-bold text-[var(--color-ink)]">
+            {LABELS[summary.label]}
+          </h3>
+          <p className="mt-0.5 text-xs text-[var(--color-muted)]">
+            {formatPeriodRange(summary.startDate, summary.endDate)}
+            {" \u00B7 "}
+            {summary.loggedDays} {summary.loggedDays === 1 ? "day" : "days"}
+          </p>
+        </div>
+        <span className="text-lg font-bold tabular-nums text-[var(--color-ink)]">
+          {Math.round(summary.averages.caloriesKcal)}
+          <span className="ml-0.5 text-[10px] font-semibold text-[var(--color-muted)]">kcal</span>
+        </span>
       </div>
+
+      <MacroBarGroup
+        proteinG={summary.averages.proteinG}
+        carbsG={summary.averages.carbsG}
+        fatG={summary.averages.fatG}
+        caloriesKcal={summary.averages.caloriesKcal}
+        goals={goals}
+      />
     </section>
   );
 }

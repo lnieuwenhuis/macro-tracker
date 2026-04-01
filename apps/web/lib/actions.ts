@@ -1,6 +1,14 @@
 "use server";
 
-import { createMealEntry, deleteMealEntry, updateMealEntry } from "@macro-tracker/db";
+import {
+  createMealEntry,
+  createPreset,
+  deleteMealEntry,
+  deletePreset,
+  saveUserGoals,
+  updateMealEntry,
+} from "@macro-tracker/db";
+import type { FoodPreset } from "@macro-tracker/db";
 import { revalidatePath } from "next/cache";
 
 import { requireSessionUser } from "./auth";
@@ -85,5 +93,52 @@ export async function deleteMealEntryAction(
       ok: false,
       error: toActionError(error),
     };
+  }
+}
+
+type SaveGoalsInput = {
+  caloriesKcal: number | null;
+  proteinG: number | null;
+  carbsG: number | null;
+  fatG: number | null;
+};
+
+export async function saveGoalsAction(input: SaveGoalsInput): Promise<ActionResult> {
+  const sessionUser = await requireSessionUser();
+
+  try {
+    await saveUserGoals(sessionUser.userId, input);
+    revalidatePath("/", "layout");
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      error: toActionError(error),
+    };
+  }
+}
+
+type SavePresetInput = Omit<FoodPreset, "id" | "userId">;
+type SavePresetResult = ActionResult & { preset?: FoodPreset };
+
+export async function savePresetAction(input: SavePresetInput): Promise<SavePresetResult> {
+  const sessionUser = await requireSessionUser();
+
+  try {
+    const preset = await createPreset(sessionUser.userId, input);
+    return { ok: true, preset };
+  } catch (error) {
+    return { ok: false, error: toActionError(error) };
+  }
+}
+
+export async function deletePresetAction(input: { id: string }): Promise<ActionResult> {
+  const sessionUser = await requireSessionUser();
+
+  try {
+    await deletePreset(sessionUser.userId, input.id);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: toActionError(error) };
   }
 }

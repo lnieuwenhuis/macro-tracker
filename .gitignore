@@ -13,6 +13,9 @@ coverage
 .env.local
 .env.*.local
 
+# claude code local settings
+.claude/settings.local.json
+
 # system
 .DS_Store
 Thumbs.db

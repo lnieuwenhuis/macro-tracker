@@ -24,6 +24,10 @@ export const users = pgTable(
     lastLoginAt: timestamp("last_login_at", { withTimezone: true })
       .defaultNow()
       .notNull(),
+    goalCaloriesKcal: integer("goal_calories_kcal"),
+    goalProteinG: numeric("goal_protein_g", { precision: 6, scale: 1 }),
+    goalCarbsG: numeric("goal_carbs_g", { precision: 6, scale: 1 }),
+    goalFatG: numeric("goal_fat_g", { precision: 6, scale: 1 }),
   },
   (table) => [
     uniqueIndex("users_shoo_pairwise_sub_key").on(table.shooPairwiseSub),
@@ -62,7 +66,30 @@ export const mealEntries = pgTable(
   ],
 );
 
+export const foodPresets = pgTable(
+  "food_presets",
+  {
+    id: uuid("id").primaryKey().notNull(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    label: text("label").notNull(),
+    proteinG: numeric("protein_g", { precision: 6, scale: 1 }).notNull(),
+    carbsG: numeric("carbs_g", { precision: 6, scale: 1 }).notNull(),
+    fatG: numeric("fat_g", { precision: 6, scale: 1 }).notNull(),
+    caloriesKcal: integer("calories_kcal").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    index("food_presets_user_idx").on(table.userId),
+  ],
+);
+
 export type UserRow = typeof users.$inferSelect;
 export type NewUserRow = typeof users.$inferInsert;
 export type MealEntryRow = typeof mealEntries.$inferSelect;
 export type NewMealEntryRow = typeof mealEntries.$inferInsert;
+export type FoodPresetRow = typeof foodPresets.$inferSelect;
+export type NewFoodPresetRow = typeof foodPresets.$inferInsert;

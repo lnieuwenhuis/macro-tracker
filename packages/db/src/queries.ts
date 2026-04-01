@@ -1,12 +1,14 @@
-import { and, desc, eq, gte, lte, max, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, lte, max, sql } from "drizzle-orm";
 
 import { getPeriodRanges } from "./dates";
 import { getDb, type DatabaseClient } from "./client";
-import { mealEntries, users } from "./schema";
+import { foodPresets, mealEntries, users } from "./schema";
 import { validateMealEntryInput } from "./validators";
 import type {
   DailyOverview,
   DailySummary,
+  FoodPreset,
+  MacroGoals,
   MacroNumbers,
   MealEntryInput,
   MealEntryRecord,
@@ -453,6 +455,47 @@ export async function deleteMealEntry(
   return Boolean(deleted);
 }
 
+export async function getUserGoals(
+  userId: string,
+  db?: DatabaseClient,
+): Promise<MacroGoals> {
+  const database = await resolveDb(db);
+  const [user] = await database
+    .select({
+      goalCaloriesKcal: users.goalCaloriesKcal,
+      goalProteinG: users.goalProteinG,
+      goalCarbsG: users.goalCarbsG,
+      goalFatG: users.goalFatG,
+    })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+
+  return {
+    caloriesKcal: user?.goalCaloriesKcal ?? null,
+    proteinG: user?.goalProteinG != null ? roundToSingleDecimal(toNumber(user.goalProteinG)) : null,
+    carbsG: user?.goalCarbsG != null ? roundToSingleDecimal(toNumber(user.goalCarbsG)) : null,
+    fatG: user?.goalFatG != null ? roundToSingleDecimal(toNumber(user.goalFatG)) : null,
+  };
+}
+
+export async function saveUserGoals(
+  userId: string,
+  goals: MacroGoals,
+  db?: DatabaseClient,
+): Promise<void> {
+  const database = await resolveDb(db);
+  await database
+    .update(users)
+    .set({
+      goalCaloriesKcal: goals.caloriesKcal,
+      goalProteinG: goals.proteinG != null ? goals.proteinG.toFixed(1) : null,
+      goalCarbsG: goals.carbsG != null ? goals.carbsG.toFixed(1) : null,
+      goalFatG: goals.fatG != null ? goals.fatG.toFixed(1) : null,
+    })
+    .where(eq(users.id, userId));
+}
+
 export async function listRecentMealEntries(userId: string, db?: DatabaseClient) {
   const database = await resolveDb(db);
 
@@ -471,4 +514,75 @@ export async function listRecentMealEntries(userId: string, db?: DatabaseClient)
     .from(mealEntries)
     .where(eq(mealEntries.userId, userId))
     .orderBy(desc(mealEntries.entryDate), mealEntries.sortOrder);
+}
+
+export async function getPresets(userId: string, db?: DatabaseClient): Promise<FoodPreset[]> {
+  const database = await resolveDb(db);
+  const rows = await database
+    .select({
+      id: foodPresets.id,
+      userId: foodPresets.userId,
+      label: foodPresets.label,
+      proteinG: foodPresets.proteinG,
+      carbsG: foodPresets.carbsG,
+      fatG: foodPresets.fatG,
+      caloriesKcal: foodPresets.caloriesKcal,
+    })
+    .from(foodPresets)
+    .where(eq(foodPresets.userId, userId))
+    .orderBy(asc(foodPresets.label));
+
+  return rows.map((row) => ({
+    id: row.id,
+    userId: row.userId,
+    label: row.label,
+    proteinG: roundToSingleDecimal(toNumber(row.proteinG)),
+    carbsG: roundToSingleDecimal(toNumber(row.carbsG)),
+    fatG: roundToSingleDecimal(toNumber(row.fatG)),
+    caloriesKcal: toNumber(row.caloriesKcal),
+  }));
+}
+
+export async function createPreset(
+  userId: string,
+  input: Omit<FoodPreset, "id" | "userId">,
+  db?: DatabaseClient,
+): Promise<FoodPreset> {
+  const database = await resolveDb(db);
+  const [created] = await database
+    .insert(foodPresets)
+    .values({
+      id: crypto.randomUUID(),
+      userId,
+      label: input.label.trim(),
+      proteinG: input.proteinG.toFixed(1),
+      carbsG: input.carbsG.toFixed(1),
+      fatG: input.fatG.toFixed(1),
+      caloriesKcal: Math.round(input.caloriesKcal),
+    })
+    .returning();
+
+  return {
+    id: created.id,
+    userId: created.userId,
+    label: created.label,
+    proteinG: roundToSingleDecimal(toNumber(created.proteinG)),
+    carbsG: roundToSingleDecimal(toNumber(created.carbsG)),
+    fatG: roundToSingleDecimal(toNumber(created.fatG)),
+    caloriesKcal: toNumber(created.caloriesKcal),
+  };
+}
+
+export async function deletePreset(
+  userId: string,
+  presetId: string,
+  db?: DatabaseClient,
+): Promise<boolean> {
+  const database = await resolveDb(db);
+  const [deleted] = await database
+    .delete(foodPresets)
+    .where(and(eq(foodPresets.id, presetId), eq(foodPresets.userId, userId)))
+    .returning();
+
+  return Boolean(deleted);
 }

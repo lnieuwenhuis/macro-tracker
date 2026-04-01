@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+
 type MealDraft = {
   clientId: string;
   id?: string;
@@ -29,123 +31,221 @@ function NumericInput({
   value,
   busy,
   step,
+  unit,
   onChange,
 }: {
   label: string;
   value: string;
   busy: boolean;
   step: string;
+  unit: string;
   onChange: (value: string) => void;
 }) {
   return (
-    <label className="space-y-2">
-      <span className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-muted-strong)]">
+    <label className="block">
+      <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--color-muted-strong)]">
         {label}
       </span>
-      <input
-        type="number"
-        inputMode="decimal"
-        min="0"
-        step={step}
-        value={value}
-        disabled={busy}
-        onChange={(event) => onChange(event.target.value)}
-        className="w-full rounded-2xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-4 py-3 text-base text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
-      />
+      <div className="relative">
+        <input
+          type="number"
+          inputMode="decimal"
+          min="0"
+          step={step}
+          value={value}
+          disabled={busy}
+          onChange={(event) => onChange(event.target.value)}
+          className="w-full rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-3 py-2.5 pr-9 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
+        />
+        <span className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-[var(--color-muted)]">
+          {unit}
+        </span>
+      </div>
     </label>
   );
 }
 
-export function MealCard({
-  draft,
-  busy,
-  error,
-  onChange,
-  onSave,
-  onDelete,
-}: MealCardProps) {
-  const heading = draft.label.trim() || "New meal";
+export function MealCard({ draft, busy, error, onChange, onSave, onDelete }: MealCardProps) {
+  const isSaved = Boolean(draft.id);
+  const [isExpanded, setIsExpanded] = useState(!isSaved);
+
+  const heading = draft.label.trim() || "New item";
+  const hasValues =
+    Boolean(draft.proteinG) ||
+    Boolean(draft.carbsG) ||
+    Boolean(draft.fatG) ||
+    Boolean(draft.caloriesKcal);
 
   return (
-    <article className="rounded-[1.5rem] border border-[var(--color-border)] bg-[var(--color-card-subtle)] p-4 shadow-[0_18px_50px_rgba(74,45,28,0.08)] sm:p-5">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-muted-strong)]">
-            Food item
-          </p>
-          <h3 className="mt-1 font-serif text-[1.65rem] leading-tight text-[var(--color-ink)]">
-            {heading}
-          </h3>
-        </div>
+    <article className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-card-subtle)] shadow-[0_4px_16px_rgba(74,45,28,0.05)]">
+      {/* Header row — always visible */}
+      <div
+        className={`flex items-center gap-2 px-4 py-3 ${!isExpanded ? "cursor-pointer" : ""}`}
+        onClick={!isExpanded ? () => setIsExpanded(true) : undefined}
+        role={!isExpanded ? "button" : undefined}
+        tabIndex={!isExpanded ? 0 : undefined}
+        onKeyDown={
+          !isExpanded
+            ? (e) => {
+                if (e.key === "Enter" || e.key === " ") setIsExpanded(true);
+              }
+            : undefined
+        }
+      >
+        <h3 className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--color-ink)]">
+          {heading}
+        </h3>
+
+        {/* Macro chips — only when collapsed */}
+        {!isExpanded && hasValues && (
+          <div className="flex shrink-0 flex-wrap items-center gap-1">
+            {draft.proteinG ? (
+              <span className="rounded-md bg-[color-mix(in_srgb,var(--color-bar-protein)_12%,transparent)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-bar-protein)]">
+                P {draft.proteinG}g
+              </span>
+            ) : null}
+            {draft.carbsG ? (
+              <span className="rounded-md bg-[color-mix(in_srgb,var(--color-bar-carbs)_12%,transparent)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-bar-carbs)]">
+                C {draft.carbsG}g
+              </span>
+            ) : null}
+            {draft.fatG ? (
+              <span className="rounded-md bg-[color-mix(in_srgb,var(--color-bar-fat)_12%,transparent)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-bar-fat)]">
+                F {draft.fatG}g
+              </span>
+            ) : null}
+            {draft.caloriesKcal ? (
+              <span className="rounded-md bg-[var(--color-shell-panel)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-muted-strong)]">
+                {draft.caloriesKcal} kcal
+              </span>
+            ) : null}
+          </div>
+        )}
+
+        {/* Expand / collapse chevron */}
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            setIsExpanded(!isExpanded);
+          }}
+          className="shrink-0 rounded-lg p-1 text-[var(--color-muted)] transition hover:text-[var(--color-ink)]"
+          aria-label={isExpanded ? "Collapse" : "Expand"}
+        >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            {isExpanded ? (
+              <polyline points="4,10 8,6 12,10" />
+            ) : (
+              <polyline points="4,6 8,10 12,6" />
+            )}
+          </svg>
+        </button>
+
+        {/* Delete button */}
         <button
           type="button"
           disabled={busy}
-          onClick={() => onDelete(draft.clientId)}
-          className="rounded-full border border-[var(--color-border-strong)] px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--color-muted)] transition hover:border-[var(--color-danger)] hover:text-[var(--color-danger)] disabled:opacity-50"
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete(draft.clientId);
+          }}
+          className="shrink-0 rounded-lg p-1 text-[var(--color-muted)] transition hover:text-[var(--color-danger)] disabled:opacity-50"
+          aria-label={`Delete ${heading}`}
         >
-          Delete
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.6"
+            strokeLinecap="round"
+          >
+            <line x1="4" y1="4" x2="12" y2="12" />
+            <line x1="12" y1="4" x2="4" y2="12" />
+          </svg>
         </button>
       </div>
 
-      <label className="mt-4 block space-y-2">
-        <span className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-muted-strong)]">
-          Name
-        </span>
-        <input
-          type="text"
-          value={draft.label}
-          disabled={busy}
-          onChange={(event) =>
-            onChange(draft.clientId, "label", event.target.value)
-          }
-          className="w-full rounded-2xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-4 py-3 text-base text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
-          placeholder="500g quark, banana, oats, chicken breast..."
-        />
-      </label>
+      {/* Expanded body */}
+      {isExpanded && (
+        <div className="border-t border-[var(--color-border)] px-4 pb-4 pt-3">
+          {/* Name input */}
+          <label className="block">
+            <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--color-muted-strong)]">
+              Name
+            </span>
+            <input
+              type="text"
+              value={draft.label}
+              disabled={busy}
+              onChange={(event) => onChange(draft.clientId, "label", event.target.value)}
+              className="w-full rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-3 py-2.5 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
+              placeholder="Chicken breast, rice, banana..."
+              autoFocus={!isSaved}
+            />
+          </label>
 
-      <div className="mt-4 grid grid-cols-2 gap-3">
-        <NumericInput
-          label="Protein"
-          value={draft.proteinG}
-          busy={busy}
-          step="0.1"
-          onChange={(value) => onChange(draft.clientId, "proteinG", value)}
-        />
-        <NumericInput
-          label="Carbs"
-          value={draft.carbsG}
-          busy={busy}
-          step="0.1"
-          onChange={(value) => onChange(draft.clientId, "carbsG", value)}
-        />
-        <NumericInput
-          label="Fat"
-          value={draft.fatG}
-          busy={busy}
-          step="0.1"
-          onChange={(value) => onChange(draft.clientId, "fatG", value)}
-        />
-        <NumericInput
-          label="Calories"
-          value={draft.caloriesKcal}
-          busy={busy}
-          step="1"
-          onChange={(value) => onChange(draft.clientId, "caloriesKcal", value)}
-        />
-      </div>
+          {/* Macro inputs — 2×2 grid */}
+          <div className="mt-3 grid grid-cols-2 gap-2">
+            <NumericInput
+              label="Protein"
+              value={draft.proteinG}
+              busy={busy}
+              step="0.1"
+              unit="g"
+              onChange={(value) => onChange(draft.clientId, "proteinG", value)}
+            />
+            <NumericInput
+              label="Carbs"
+              value={draft.carbsG}
+              busy={busy}
+              step="0.1"
+              unit="g"
+              onChange={(value) => onChange(draft.clientId, "carbsG", value)}
+            />
+            <NumericInput
+              label="Fat"
+              value={draft.fatG}
+              busy={busy}
+              step="0.1"
+              unit="g"
+              onChange={(value) => onChange(draft.clientId, "fatG", value)}
+            />
+            <NumericInput
+              label="Calories"
+              value={draft.caloriesKcal}
+              busy={busy}
+              step="1"
+              unit="kcal"
+              onChange={(value) => onChange(draft.clientId, "caloriesKcal", value)}
+            />
+          </div>
 
-      {error ? (
-        <p className="mt-4 text-sm text-[var(--color-danger)]">{error}</p>
-      ) : null}
+          {error ? (
+            <p className="mt-3 text-sm text-[var(--color-danger)]">{error}</p>
+          ) : null}
 
-      <button
-        type="button"
-        disabled={busy}
-        onClick={() => onSave(draft.clientId)}
-        className="mt-4 w-full rounded-full bg-[var(--color-accent)] px-4 py-3.5 text-sm font-semibold text-white transition-transform duration-150 hover:-translate-y-0.5 disabled:cursor-wait disabled:opacity-70"
-      >
-        {busy ? "Saving..." : "Save food"}
-      </button>
+          {/* Save button */}
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => onSave(draft.clientId)}
+            className="mt-3 w-full rounded-xl bg-[var(--color-accent)] px-4 py-2.5 text-sm font-semibold text-white transition-transform duration-150 hover:-translate-y-0.5 disabled:cursor-wait disabled:opacity-70"
+          >
+            {busy ? "Saving..." : isSaved ? "Update" : "Save"}
+          </button>
+        </div>
+      )}
     </article>
   );
 }

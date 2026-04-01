@@ -1,9 +1,10 @@
 "use client";
 
-import type { DailyOverview, DailySummary, PeriodAverage } from "@macro-tracker/db";
+import type { DailyOverview, DailySummary, MacroGoals, PeriodAverage } from "@macro-tracker/db";
 
 import { AppShell } from "./app-shell";
 import { DailyOverviewCard } from "./daily-overview-card";
+import { MacroBarGroup } from "./macro-bar";
 import { SummaryCard } from "./summary-card";
 
 type SummaryShellProps = {
@@ -12,6 +13,7 @@ type SummaryShellProps = {
   dailySummary: DailySummary;
   periodAverages: PeriodAverage[];
   recentOverviews: DailyOverview[];
+  goals: MacroGoals;
 };
 
 export function SummaryShell({
@@ -20,6 +22,7 @@ export function SummaryShell({
   dailySummary,
   periodAverages,
   recentOverviews,
+  goals,
 }: SummaryShellProps) {
   const dailyTotals = dailySummary.totals;
 
@@ -29,78 +32,58 @@ export function SummaryShell({
       selectedDate={selectedDate}
       activeTab="summary"
     >
-      <div className="space-y-6">
-        <section className="rounded-[1.75rem] border border-[var(--color-border)] bg-[var(--color-surface-strong)] px-5 py-5 shadow-[0_18px_40px_rgba(0,0,0,0.08)]">
-          <div className="flex items-end justify-between gap-4">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-muted-strong)]">
-                Daily snapshot
-              </p>
-              <p className="mt-2 text-sm leading-6 text-[var(--color-muted)]">
-                Totals for the selected day.
-              </p>
-            </div>
-            <p className="text-3xl font-semibold text-[var(--color-ink)]">
+      <div className="space-y-5">
+        {/* Daily snapshot with bar charts */}
+        <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5 shadow-[0_12px_32px_rgba(0,0,0,0.06)]">
+          <div className="mb-4 flex items-center justify-between">
+            <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
+              Daily Snapshot
+            </h2>
+            <span className="text-2xl font-bold tabular-nums text-[var(--color-ink)]">
               {dailyTotals.caloriesKcal}
-            </p>
+              <span className="ml-1 text-xs font-semibold text-[var(--color-muted)]">kcal</span>
+            </span>
           </div>
 
-          <div className="mt-4 grid grid-cols-3 gap-3">
-            <div className="rounded-2xl bg-[var(--color-card-muted)] px-4 py-3">
-              <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--color-muted-strong)]">
-                Protein
-              </p>
-              <p className="mt-1 text-xl font-semibold text-[var(--color-ink)]">
-                {dailyTotals.proteinG}g
-              </p>
-            </div>
-            <div className="rounded-2xl bg-[var(--color-card-muted)] px-4 py-3">
-              <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--color-muted-strong)]">
-                Carbs
-              </p>
-              <p className="mt-1 text-xl font-semibold text-[var(--color-ink)]">
-                {dailyTotals.carbsG}g
-              </p>
-            </div>
-            <div className="rounded-2xl bg-[var(--color-card-muted)] px-4 py-3">
-              <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--color-muted-strong)]">
-                Fat
-              </p>
-              <p className="mt-1 text-xl font-semibold text-[var(--color-ink)]">
-                {dailyTotals.fatG}g
-              </p>
-            </div>
-          </div>
+          <MacroBarGroup
+            proteinG={dailyTotals.proteinG}
+            carbsG={dailyTotals.carbsG}
+            fatG={dailyTotals.fatG}
+            caloriesKcal={dailyTotals.caloriesKcal}
+            goals={goals}
+          />
         </section>
 
+        {/* Period averages with bar charts */}
         <section>
           <div className="mb-4">
-            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-muted-strong)]">
-              Average macros
-            </p>
-            <p className="mt-2 text-sm text-[var(--color-muted)]">
-              Based only on days where at least one food item was logged.
+            <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
+              Average Macros
+            </h2>
+            <p className="mt-1.5 text-sm text-[var(--color-muted)]">
+              Based on days with logged food.
             </p>
           </div>
-          <div className="grid gap-4">
+          <div className="space-y-3">
             {periodAverages.map((summary) => (
-              <SummaryCard key={summary.label} summary={summary} />
+              <SummaryCard key={summary.label} summary={summary} goals={goals} />
             ))}
           </div>
         </section>
 
+        {/* Recent days */}
         <section>
           <div className="mb-4">
-            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-muted-strong)]">
-              Recent days
-            </p>
-            <p className="mt-2 text-sm text-[var(--color-muted)]">
-              Quick overview of your most recent logged days.
+            <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
+              Recent Days
+            </h2>
+            <p className="mt-1.5 text-sm text-[var(--color-muted)]">
+              Your most recent logged days.
             </p>
           </div>
           <div className="space-y-3">
             {recentOverviews.map((overview) => (
-              <DailyOverviewCard key={overview.date} overview={overview} />
+              <DailyOverviewCard key={overview.date} overview={overview} goals={goals} />
             ))}
           </div>
         </section>

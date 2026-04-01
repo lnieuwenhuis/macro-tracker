@@ -18,6 +18,10 @@
   --color-accent-strong: #a85126;
   --color-danger: #b6453c;
   --color-success: #5d7a5c;
+  --color-bar-protein: #6a9e68;
+  --color-bar-carbs: #5a8fc2;
+  --color-bar-fat: #d4785a;
+  --color-bar-calories: #ca6b3a;
   --background:
     radial-gradient(circle at top left, rgba(226, 152, 108, 0.2), transparent 28%),
     radial-gradient(circle at top right, rgba(202, 107, 58, 0.1), transparent 20%),
@@ -43,6 +47,10 @@
   --color-accent-strong: #f19860;
   --color-danger: #f07c71;
   --color-success: #94bc92;
+  --color-bar-protein: #7ab878;
+  --color-bar-carbs: #6ba3d6;
+  --color-bar-fat: #e08a6a;
+  --color-bar-calories: #df7f43;
   --background:
     radial-gradient(circle at top left, rgba(223, 127, 67, 0.16), transparent 26%),
     radial-gradient(circle at bottom right, rgba(120, 155, 123, 0.12), transparent 22%),
@@ -117,4 +125,22 @@ input::placeholder {
 
 .font-serif {
   font-family: var(--font-fraunces), serif;
+}
+
+@keyframes slideIn {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }

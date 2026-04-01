@@ -1,19 +1,23 @@
 "use client";
 
-import type { DailySummary, MealEntryRecord } from "@macro-tracker/db";
+import type { DailySummary, FoodPreset, MacroGoals, MealEntryRecord } from "@macro-tracker/db";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 
-import { deleteMealEntryAction, saveMealEntryAction } from "@/lib/actions";
-import { formatMacroValue } from "@/lib/formatting";
+import { deletePresetAction, deleteMealEntryAction, savePresetAction, saveMealEntryAction } from "@/lib/actions";
 
+import { AddFoodButton } from "./add-food-button";
 import { AppShell } from "./app-shell";
+import { MacroBarGroup } from "./macro-bar";
 import { MealCard, type MealDraft } from "./meal-card";
+import { PresetModal } from "./preset-modal";
 
 type DashboardShellProps = {
   userEmail: string;
   selectedDate: string;
   dailySummary: DailySummary;
+  goals: MacroGoals;
+  presets: FoodPreset[];
 };
 
 type ErrorState = Record<string, string | null>;
@@ -43,6 +47,18 @@ function createEmptyDraft(sortOrder: number): MealDraft {
   };
 }
 
+function createDraftFromPreset(preset: FoodPreset, sortOrder: number): MealDraft {
+  return {
+    clientId: `draft-${crypto.randomUUID()}`,
+    label: preset.label,
+    proteinG: String(preset.proteinG),
+    carbsG: String(preset.carbsG),
+    fatG: String(preset.fatG),
+    caloriesKcal: String(preset.caloriesKcal),
+    sortOrder,
+  };
+}
+
 function toNumber(value: string, fallback = 0) {
   if (!value.trim()) {
     return fallback;
@@ -56,6 +72,8 @@ export function DashboardShell({
   userEmail,
   selectedDate,
   dailySummary,
+  goals,
+  presets: initialPresets,
 }: DashboardShellProps) {
   const router = useRouter();
   const [drafts, setDrafts] = useState<MealDraft[]>(() =>
@@ -64,6 +82,13 @@ export function DashboardShell({
   const [errors, setErrors] = useState<ErrorState>({});
   const [activeMutation, setActiveMutation] = useState<string | null>(null);
   const [isPending, beginMutation] = useTransition();
+
+  const [showPresetsModal, setShowPresetsModal] = useState(false);
+  const [localPresets, setLocalPresets] = useState<FoodPreset[]>(initialPresets);
+
+  function nextSortOrder() {
+    return drafts.reduce((highest, draft) => Math.max(highest, draft.sortOrder), -1) + 1;
+  }
 
   function updateDraft(
     clientId: string,
@@ -81,11 +106,16 @@ export function DashboardShell({
     }));
   }
 
-  function addMealDraft() {
-    const nextOrder =
-      drafts.reduce((highest, draft) => Math.max(highest, draft.sortOrder), -1) + 1;
+  function addCustomDraft() {
+    setDrafts((currentDrafts) => [...currentDrafts, createEmptyDraft(nextSortOrder())]);
+  }
 
-    setDrafts((currentDrafts) => [...currentDrafts, createEmptyDraft(nextOrder)]);
+  function addDraftFromPreset(preset: FoodPreset) {
+    setDrafts((currentDrafts) => [
+      ...currentDrafts,
+      createDraftFromPreset(preset, nextSortOrder()),
+    ]);
+    setShowPresetsModal(false);
   }
 
   function removeLocalDraft(clientId: string) {
@@ -161,88 +191,79 @@ export function DashboardShell({
     });
   }
 
+  async function handleSavePreset(input: Omit<FoodPreset, "id" | "userId">) {
+    const result = await savePresetAction(input);
+    if (result.ok && result.preset) {
+      setLocalPresets((prev) =>
+        [...prev, result.preset!].sort((a, b) => a.label.localeCompare(b.label)),
+      );
+    }
+  }
+
+  async function handleDeletePreset(presetId: string) {
+    // Optimistic removal
+    setLocalPresets((prev) => prev.filter((p) => p.id !== presetId));
+    await deletePresetAction({ id: presetId });
+  }
+
   const dailyTotals = dailySummary.totals;
 
   return (
     <AppShell userEmail={userEmail} selectedDate={selectedDate} activeTab="log">
-      <div className="space-y-6">
-        <section className="rounded-[1.75rem] border border-[var(--color-border)] bg-[var(--color-surface-strong)] px-5 py-5 shadow-[0_18px_40px_rgba(0,0,0,0.08)]">
-          <div className="flex items-end justify-between gap-4">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-muted-strong)]">
-                Daily totals
-              </p>
-              <p className="mt-2 text-sm leading-6 text-[var(--color-muted)]">
-                Everything logged for the selected day.
-              </p>
-            </div>
-            <p className="text-3xl font-semibold text-[var(--color-ink)]">
+      <div className="space-y-5">
+        {/* Daily Report — macro bar charts */}
+        <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5 shadow-[0_12px_32px_rgba(0,0,0,0.06)]">
+          <div className="mb-4 flex items-center justify-between">
+            <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
+              Daily Report
+            </h2>
+            <span className="text-2xl font-bold tabular-nums text-[var(--color-ink)]">
               {dailyTotals.caloriesKcal}
-            </p>
+              <span className="ml-1 text-xs font-semibold text-[var(--color-muted)]">kcal</span>
+            </span>
           </div>
 
-          <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <div className="rounded-2xl bg-[var(--color-card-muted)] px-4 py-3">
-              <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--color-muted-strong)]">
-                Protein
-              </p>
-              <p className="mt-1 text-[1.85rem] font-semibold leading-none text-[var(--color-ink)]">
-                {formatMacroValue(dailyTotals.proteinG)}g
-              </p>
-            </div>
-            <div className="rounded-2xl bg-[var(--color-card-muted)] px-4 py-3">
-              <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--color-muted-strong)]">
-                Carbs
-              </p>
-              <p className="mt-1 text-[1.85rem] font-semibold leading-none text-[var(--color-ink)]">
-                {formatMacroValue(dailyTotals.carbsG)}g
-              </p>
-            </div>
-            <div className="rounded-2xl bg-[var(--color-card-muted)] px-4 py-3">
-              <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--color-muted-strong)]">
-                Fat
-              </p>
-              <p className="mt-1 text-[1.85rem] font-semibold leading-none text-[var(--color-ink)]">
-                {formatMacroValue(dailyTotals.fatG)}g
-              </p>
-            </div>
-            <div className="rounded-2xl bg-[var(--color-card-muted)] px-4 py-3">
-              <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--color-muted-strong)]">
-                Calories
-              </p>
-              <p className="mt-1 text-[1.85rem] font-semibold leading-none text-[var(--color-ink)]">
-                {dailyTotals.caloriesKcal} kcal
-              </p>
-            </div>
-          </div>
+          <MacroBarGroup
+            proteinG={dailyTotals.proteinG}
+            carbsG={dailyTotals.carbsG}
+            fatG={dailyTotals.fatG}
+            caloriesKcal={dailyTotals.caloriesKcal}
+            goals={goals}
+          />
         </section>
 
+        {/* Food log */}
         <section>
-          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-muted-strong)]">
-                Food log
-              </p>
-              <p className="mt-2 text-sm leading-6 text-[var(--color-muted)]">
-                Log one food item per card. Add multiple items for a full meal.
-              </p>
-            </div>
-            <button
-              type="button"
-              onClick={addMealDraft}
-              className="w-full rounded-full bg-[var(--color-accent)] px-4 py-3.5 text-sm font-semibold text-white transition hover:-translate-y-0.5 sm:w-auto"
-            >
-              Add food
-            </button>
+          <div className="mb-4 flex items-center justify-between">
+            <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
+              Food Items
+            </h2>
+            <AddFoodButton onCustom={addCustomDraft} onPreset={() => setShowPresetsModal(true)} />
           </div>
 
           {drafts.length === 0 ? (
-            <div className="rounded-[1.5rem] border border-dashed border-[var(--color-border-strong)] bg-[var(--color-shell-panel)] px-5 py-7 text-center text-sm leading-7 text-[var(--color-muted)]">
-              No food items logged yet. Add one to start tracking this day.
+            <div className="rounded-2xl border border-dashed border-[var(--color-border-strong)] bg-[var(--color-shell-panel)] px-5 py-8 text-center">
+              <p className="text-sm text-[var(--color-muted)]">No food items logged yet.</p>
+              <div className="mt-3 flex justify-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowPresetsModal(true)}
+                  className="rounded-full border border-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-[var(--color-accent)] transition hover:-translate-y-0.5"
+                >
+                  From preset
+                </button>
+                <button
+                  type="button"
+                  onClick={addCustomDraft}
+                  className="rounded-full bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-white transition hover:-translate-y-0.5"
+                >
+                  Add custom
+                </button>
+              </div>
             </div>
           ) : null}
 
-          <div className="space-y-4">
+          <div className="space-y-3">
             {drafts.map((draft) => {
               const busy = isPending && activeMutation === draft.clientId;
 
@@ -261,6 +282,17 @@ export function DashboardShell({
           </div>
         </section>
       </div>
+
+      {/* Presets modal */}
+      {showPresetsModal && (
+        <PresetModal
+          presets={localPresets}
+          onClose={() => setShowPresetsModal(false)}
+          onSelect={addDraftFromPreset}
+          onSave={handleSavePreset}
+          onDelete={handleDeletePreset}
+        />
+      )}
     </AppShell>
   );
 }

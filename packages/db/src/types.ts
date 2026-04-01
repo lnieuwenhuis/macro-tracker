@@ -5,6 +5,13 @@ export type MacroNumbers = {
   caloriesKcal: number;
 };
 
+export type MacroGoals = {
+  proteinG: number | null;
+  carbsG: number | null;
+  fatG: number | null;
+  caloriesKcal: number | null;
+};
+
 export type MealEntryInput = {
   date: string;
   label: string;
@@ -52,4 +59,14 @@ export type ShooProfile = {
 export type SessionUser = {
   userId: string;
   email: string;
+};
+
+export type FoodPreset = {
+  id: string;
+  userId: string;
+  label: string;
+  proteinG: number;
+  carbsG: number;
+  fatG: number;
+  caloriesKcal: number;
 };

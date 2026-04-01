@@ -137,7 +137,11 @@ async function bootstrapLocalSchema(db: PgliteDatabase<typeof schema>) {
       "display_name" text,
       "picture_url" text,
       "created_at" timestamp with time zone DEFAULT now() NOT NULL,
-      "last_login_at" timestamp with time zone DEFAULT now() NOT NULL
+      "last_login_at" timestamp with time zone DEFAULT now() NOT NULL,
+      "goal_calories_kcal" integer,
+      "goal_protein_g" numeric(6, 1),
+      "goal_carbs_g" numeric(6, 1),
+      "goal_fat_g" numeric(6, 1)
     )
   `));
   await db.execute(
@@ -173,6 +177,23 @@ async function bootstrapLocalSchema(db: PgliteDatabase<typeof schema>) {
   await db.execute(
     sql.raw(
       `CREATE INDEX IF NOT EXISTS "meal_entries_user_date_sort_idx" ON "meal_entries" USING btree ("user_id","entry_date","sort_order")`,
+    ),
+  );
+  await db.execute(sql.raw(`
+    CREATE TABLE IF NOT EXISTS "food_presets" (
+      "id" uuid PRIMARY KEY NOT NULL,
+      "user_id" uuid NOT NULL REFERENCES "users"("id") ON DELETE cascade,
+      "label" text NOT NULL,
+      "protein_g" numeric(6, 1) NOT NULL,
+      "carbs_g" numeric(6, 1) NOT NULL,
+      "fat_g" numeric(6, 1) NOT NULL,
+      "calories_kcal" integer NOT NULL,
+      "created_at" timestamp with time zone DEFAULT now() NOT NULL
+    )
+  `));
+  await db.execute(
+    sql.raw(
+      `CREATE INDEX IF NOT EXISTS "food_presets_user_idx" ON "food_presets" USING btree ("user_id")`,
     ),
   );
 }

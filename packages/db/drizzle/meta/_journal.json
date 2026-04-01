@@ -8,6 +8,20 @@
       "when": 1775066504500,
       "tag": "0000_yielding_the_spike",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1775071787880,
+      "tag": "0001_lucky_maelstrom",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1775072603330,
+      "tag": "0002_parched_romulus",
+      "breakpoints": true
     }
   ]
 }
