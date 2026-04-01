@@ -48,20 +48,22 @@ export async function verifyShooToken(
   idToken: string,
   options?: {
     appUrl?: string;
+    appOrigin?: string;
     shooBaseUrl?: string;
     issuer?: string;
     jwks?: JwksResolver;
   },
 ) {
   const env = getServerEnv();
-  const appUrl = options?.appUrl ?? env.appUrl;
+  const appOrigin =
+    options?.appOrigin ?? new URL(options?.appUrl ?? env.appUrl).origin;
   const shooBaseUrl = options?.shooBaseUrl ?? env.shooBaseUrl;
   const issuer = options?.issuer ?? shooBaseUrl;
   const jwks = options?.jwks ?? getJwks(shooBaseUrl);
 
   const { payload } = await jwtVerify(idToken, jwks, {
     issuer,
-    audience: `origin:${new URL(appUrl).origin}`,
+    audience: `origin:${appOrigin}`,
   });
 
   if (typeof payload.pairwise_sub !== "string") {
@@ -78,8 +80,15 @@ export async function verifyShooToken(
 export async function authorizeShooLogin(
   idToken: string,
   db?: DatabaseClient,
+  options?: {
+    appUrl?: string;
+    appOrigin?: string;
+    shooBaseUrl?: string;
+    issuer?: string;
+    jwks?: JwksResolver;
+  },
 ) {
-  const claims = await verifyShooToken(idToken);
+  const claims = await verifyShooToken(idToken, options);
   return authorizeVerifiedShooClaims(claims, db);
 }
 

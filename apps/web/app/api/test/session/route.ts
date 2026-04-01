@@ -3,7 +3,7 @@ import { sql } from "drizzle-orm";
 import { NextResponse } from "next/server";
 
 import { getServerEnv } from "@/lib/env";
-import { applySessionCookie } from "@/lib/session";
+import { applySessionCookie, isSecureRequest } from "@/lib/session";
 import { isEmailAllowed } from "@/lib/shoo";
 
 async function ensureTestSchema() {
@@ -61,7 +61,7 @@ async function ensureTestSchema() {
 
 async function createTestSessionResponse(
   email: string | undefined,
-  requestUrl: string,
+  request: Request,
   options: {
     redirectOnSuccess: boolean;
   },
@@ -91,7 +91,7 @@ async function createTestSessionResponse(
     db,
   );
   const response = options.redirectOnSuccess
-    ? NextResponse.redirect(new URL("/", requestUrl))
+    ? NextResponse.redirect(new URL("/", request.url))
     : NextResponse.json({
         ok: true,
         user: {
@@ -103,6 +103,8 @@ async function createTestSessionResponse(
   await applySessionCookie(response, {
     userId: user.id,
     email: user.email,
+  }, {
+    secure: isSecureRequest(request),
   });
 
   return response;
@@ -116,7 +118,7 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const email = url.searchParams.get("email")?.trim().toLowerCase();
 
-  return createTestSessionResponse(email, request.url, {
+  return createTestSessionResponse(email, request, {
     redirectOnSuccess: true,
   });
 }
@@ -129,7 +131,7 @@ export async function POST(request: Request) {
   const body = (await request.json()) as { email?: string };
   const email = body.email?.trim().toLowerCase();
 
-  return createTestSessionResponse(email, request.url, {
+  return createTestSessionResponse(email, request, {
     redirectOnSuccess: false,
   });
 }

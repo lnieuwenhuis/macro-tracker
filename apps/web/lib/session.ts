@@ -4,6 +4,7 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 
 import { getServerEnv } from "./env";
+import { getRequestProtocol } from "./request";
 
 export const SESSION_COOKIE_NAME = "mt_session";
 export const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
@@ -12,14 +13,21 @@ function getSessionKey() {
   return new TextEncoder().encode(getServerEnv().sessionSecret);
 }
 
-function getCookieOptions(maxAge = SESSION_MAX_AGE_SECONDS) {
+function getCookieOptions(
+  maxAge = SESSION_MAX_AGE_SECONDS,
+  secure = getServerEnv().appUrl.startsWith("https://"),
+) {
   return {
     httpOnly: true,
     sameSite: "lax" as const,
-    secure: getServerEnv().appUrl.startsWith("https://"),
+    secure,
     path: "/",
     maxAge,
   };
+}
+
+export function isSecureRequest(request: Request) {
+  return getRequestProtocol(request) === "https:";
 }
 
 export async function createSessionToken(user: SessionUser) {
@@ -69,13 +77,25 @@ export async function getSessionUserFromCookies() {
 export async function applySessionCookie(
   response: NextResponse,
   user: SessionUser,
+  options?: {
+    secure?: boolean;
+  },
 ) {
   const token = await createSessionToken(user);
-  response.cookies.set(SESSION_COOKIE_NAME, token, getCookieOptions());
+  response.cookies.set(
+    SESSION_COOKIE_NAME,
+    token,
+    getCookieOptions(SESSION_MAX_AGE_SECONDS, options?.secure),
+  );
   return response;
 }
 
-export function clearSessionCookie(response: NextResponse) {
-  response.cookies.set(SESSION_COOKIE_NAME, "", getCookieOptions(0));
+export function clearSessionCookie(
+  response: NextResponse,
+  options?: {
+    secure?: boolean;
+  },
+) {
+  response.cookies.set(SESSION_COOKIE_NAME, "", getCookieOptions(0, options?.secure));
   return response;
 }

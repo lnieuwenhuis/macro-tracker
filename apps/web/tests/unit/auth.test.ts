@@ -7,9 +7,12 @@ import {
   isEmailAllowed,
   verifyShooToken,
 } from "@/lib/shoo";
+import { getRequestOrigin } from "@/lib/request";
+import { applySessionCookie, SESSION_COOKIE_NAME } from "@/lib/session";
 import { getUserById, type DatabaseRuntime } from "@macro-tracker/db";
 import { createTestDatabase } from "@macro-tracker/db/testing";
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from "jose";
+import { NextResponse } from "next/server";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { resetServerEnvForTests } from "@/lib/env";
@@ -104,6 +107,21 @@ describe("shoo auth helpers", () => {
     ).rejects.toThrow();
   });
 
+  it("verifies a Shoo token against the current request origin", async () => {
+    const token = await createToken({
+      audience: "origin:https://macro.safasfly.dev",
+    });
+
+    const payload = await verifyShooToken(token, {
+      appOrigin: "https://macro.safasfly.dev",
+      shooBaseUrl: "https://shoo.dev",
+      issuer: "https://shoo.dev",
+      jwks: localJwks,
+    });
+
+    expect(payload.email).toBe("coach@example.com");
+  });
+
   it("checks the allowlist and persists an authorized user session", async () => {
     expect(isEmailAllowed("coach@example.com")).toBe(true);
     expect(isEmailAllowed("stranger@example.com")).toBe(false);
@@ -123,5 +141,34 @@ describe("shoo auth helpers", () => {
     const sessionToken = await createSessionToken(result.sessionUser);
     const sessionUser = await verifySessionToken(sessionToken);
     expect(sessionUser).toEqual(result.sessionUser);
+  });
+
+  it("uses forwarded headers to resolve the public request origin", () => {
+    const request = new Request("http://127.0.0.1:3000/api/auth/shoo/verify", {
+      headers: {
+        "x-forwarded-proto": "https",
+        "x-forwarded-host": "macro.safasfly.dev",
+      },
+    });
+
+    expect(getRequestOrigin(request)).toBe("https://macro.safasfly.dev");
+  });
+
+  it("can set a secure session cookie from the current request protocol", async () => {
+    const response = NextResponse.json({ ok: true });
+
+    await applySessionCookie(
+      response,
+      {
+        userId: "user-123",
+        email: "coach@example.com",
+      },
+      {
+        secure: true,
+      },
+    );
+
+    expect(response.cookies.get(SESSION_COOKIE_NAME)?.value).toBeTruthy();
+    expect(response.headers.get("set-cookie")).toContain("Secure");
   });
 });
