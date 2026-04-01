@@ -1,27 +1,19 @@
 "use client";
 
-import type { DailySummary, MealEntryRecord, PeriodAverage } from "@macro-tracker/db";
-import Link from "next/link";
+import type { DailySummary, MealEntryRecord } from "@macro-tracker/db";
 import { useRouter } from "next/navigation";
-import { startTransition, useState, useTransition } from "react";
+import { useState, useTransition } from "react";
 
 import { deleteMealEntryAction, saveMealEntryAction } from "@/lib/actions";
-import {
-  formatMacroValue,
-  formatSelectedDate,
-  nextDateString,
-  previousDateString,
-} from "@/lib/formatting";
+import { formatMacroValue } from "@/lib/formatting";
 
+import { AppShell } from "./app-shell";
 import { MealCard, type MealDraft } from "./meal-card";
-import { SummaryCard } from "./summary-card";
-import { ThemeToggle } from "./theme-toggle";
 
 type DashboardShellProps = {
   userEmail: string;
   selectedDate: string;
   dailySummary: DailySummary;
-  periodAverages: PeriodAverage[];
 };
 
 type ErrorState = Record<string, string | null>;
@@ -64,7 +56,6 @@ export function DashboardShell({
   userEmail,
   selectedDate,
   dailySummary,
-  periodAverages,
 }: DashboardShellProps) {
   const router = useRouter();
   const [drafts, setDrafts] = useState<MealDraft[]>(() =>
@@ -108,12 +99,6 @@ export function DashboardShell({
     });
   }
 
-  function navigateToDate(nextDate: string) {
-    startTransition(() => {
-      router.push(`/?date=${nextDate}`);
-    });
-  }
-
   function handleSave(clientId: string) {
     const draft = drafts.find((entry) => entry.clientId === clientId);
     if (!draft) {
@@ -136,7 +121,7 @@ export function DashboardShell({
       if (!result.ok) {
         setErrors((currentErrors) => ({
           ...currentErrors,
-          [clientId]: result.error ?? "Unable to save meal.",
+          [clientId]: result.error ?? "Unable to save food item.",
         }));
         setActiveMutation(null);
         return;
@@ -166,7 +151,7 @@ export function DashboardShell({
       if (!result.ok) {
         setErrors((currentErrors) => ({
           ...currentErrors,
-          [clientId]: result.error ?? "Unable to delete meal.",
+          [clientId]: result.error ?? "Unable to delete food item.",
         }));
         setActiveMutation(null);
         return;
@@ -179,170 +164,103 @@ export function DashboardShell({
   const dailyTotals = dailySummary.totals;
 
   return (
-    <main className="mx-auto w-full max-w-5xl px-3 py-3 sm:px-6 sm:py-8">
-      <section className="rounded-[1.75rem] border border-[var(--color-border)] bg-[var(--color-surface)] p-4 shadow-[0_30px_90px_rgba(67,41,25,0.12)] backdrop-blur sm:rounded-[2rem] sm:p-8">
-        <div className="flex flex-col gap-6">
-          <div className="flex flex-col gap-4">
-            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-              <div className="min-w-0">
-                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-muted-strong)]">
-                  Macro Tracker
-                </p>
-                <h1 className="mt-2 max-w-[11ch] font-serif text-3xl leading-[0.95] text-[var(--color-ink)] sm:text-5xl">
-                  {formatSelectedDate(selectedDate)}
-                </h1>
-                <p className="mt-3 text-sm leading-6 text-[var(--color-muted)]">
-                  Signed in as {userEmail}
-                </p>
-              </div>
-
-              <div className="flex items-center gap-2 self-start">
-                <ThemeToggle />
-                <form action="/api/auth/logout" method="post">
-                  <button
-                    type="submit"
-                    className="rounded-full border border-[var(--color-border-strong)] bg-[var(--color-surface-strong)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-muted-strong)] transition hover:border-[var(--color-ink)] hover:text-[var(--color-ink)]"
-                  >
-                    Sign out
-                  </button>
-                </form>
-              </div>
+    <AppShell userEmail={userEmail} selectedDate={selectedDate} activeTab="log">
+      <div className="space-y-6">
+        <section className="rounded-[1.75rem] border border-[var(--color-border)] bg-[var(--color-surface-strong)] px-5 py-5 shadow-[0_18px_40px_rgba(0,0,0,0.08)]">
+          <div className="flex items-end justify-between gap-4">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-muted-strong)]">
+                Daily totals
+              </p>
+              <p className="mt-2 text-sm leading-6 text-[var(--color-muted)]">
+                Everything logged for the selected day.
+              </p>
             </div>
-
-            <div className="rounded-[1.5rem] border border-[var(--color-border)] bg-[var(--color-card-muted)] p-3">
-              <span className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-muted-strong)]">
-                Pick a day
-              </span>
-              <div className="mt-3 grid grid-cols-[auto_1fr_auto] items-center gap-2">
-                <Link
-                  href={`/?date=${previousDateString(selectedDate)}`}
-                  className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface-strong)] px-3 py-3 text-sm font-semibold text-[var(--color-ink)] shadow-sm transition hover:-translate-y-0.5"
-                >
-                  Prev
-                </Link>
-
-                <label>
-                  <span className="sr-only">Pick a day</span>
-                  <input
-                    type="date"
-                    value={selectedDate}
-                    disabled={isPending}
-                    onChange={(event) => navigateToDate(event.target.value)}
-                    className="w-full rounded-2xl border border-[var(--color-border-strong)] bg-[var(--color-surface-strong)] px-4 py-3 text-base text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
-                  />
-                </label>
-
-                <Link
-                  href={`/?date=${nextDateString(selectedDate)}`}
-                  className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface-strong)] px-3 py-3 text-sm font-semibold text-[var(--color-ink)] shadow-sm transition hover:-translate-y-0.5"
-                >
-                  Next
-                </Link>
-              </div>
-            </div>
+            <p className="text-3xl font-semibold text-[var(--color-ink)]">
+              {dailyTotals.caloriesKcal}
+            </p>
           </div>
 
-          <section className="rounded-[1.5rem] bg-[var(--color-ink)] px-4 py-5 text-[var(--color-paper)] sm:px-6 sm:py-6">
-            <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-paper-soft)]">
-              Daily totals
-            </p>
-            <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
-              <div className="rounded-2xl bg-white/6 px-4 py-3">
-                <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--color-paper-soft)]">
-                  Protein
-                </p>
-                <p className="mt-1 text-[1.85rem] font-semibold leading-none">
-                  {formatMacroValue(dailyTotals.proteinG)}g
-                </p>
-              </div>
-              <div className="rounded-2xl bg-white/6 px-4 py-3">
-                <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--color-paper-soft)]">
-                  Carbs
-                </p>
-                <p className="mt-1 text-[1.85rem] font-semibold leading-none">
-                  {formatMacroValue(dailyTotals.carbsG)}g
-                </p>
-              </div>
-              <div className="rounded-2xl bg-white/6 px-4 py-3">
-                <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--color-paper-soft)]">
-                  Fat
-                </p>
-                <p className="mt-1 text-[1.85rem] font-semibold leading-none">
-                  {formatMacroValue(dailyTotals.fatG)}g
-                </p>
-              </div>
-              <div className="rounded-2xl bg-white/6 px-4 py-3">
-                <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--color-paper-soft)]">
-                  Calories
-                </p>
-                <p className="mt-1 text-[1.85rem] font-semibold leading-none">
-                  {dailyTotals.caloriesKcal} kcal
-                </p>
-              </div>
+          <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <div className="rounded-2xl bg-[var(--color-card-muted)] px-4 py-3">
+              <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--color-muted-strong)]">
+                Protein
+              </p>
+              <p className="mt-1 text-[1.85rem] font-semibold leading-none text-[var(--color-ink)]">
+                {formatMacroValue(dailyTotals.proteinG)}g
+              </p>
             </div>
-          </section>
-
-          <section>
-            <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-muted-strong)]">
-                  Meals
-                </p>
-                <p className="mt-2 text-sm text-[var(--color-muted)]">
-                  Custom entries for the selected day.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={addMealDraft}
-                className="w-full rounded-full bg-[var(--color-accent)] px-4 py-3.5 text-sm font-semibold text-white transition hover:-translate-y-0.5 sm:w-auto"
-              >
-                Add meal
-              </button>
+            <div className="rounded-2xl bg-[var(--color-card-muted)] px-4 py-3">
+              <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--color-muted-strong)]">
+                Carbs
+              </p>
+              <p className="mt-1 text-[1.85rem] font-semibold leading-none text-[var(--color-ink)]">
+                {formatMacroValue(dailyTotals.carbsG)}g
+              </p>
             </div>
-
-            {drafts.length === 0 ? (
-              <div className="rounded-[1.5rem] border border-dashed border-[var(--color-border-strong)] bg-[var(--color-card-subtle)] px-5 py-7 text-center text-sm leading-7 text-[var(--color-muted)]">
-                No meals logged yet. Add one to start tracking this day.
-              </div>
-            ) : null}
-
-            <div className="space-y-4">
-              {drafts.map((draft) => {
-                const busy = isPending && activeMutation === draft.clientId;
-
-                return (
-                  <MealCard
-                    key={draft.clientId}
-                    draft={draft}
-                    busy={busy}
-                    error={errors[draft.clientId]}
-                    onChange={updateDraft}
-                    onSave={handleSave}
-                    onDelete={handleDelete}
-                  />
-                );
-              })}
+            <div className="rounded-2xl bg-[var(--color-card-muted)] px-4 py-3">
+              <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--color-muted-strong)]">
+                Fat
+              </p>
+              <p className="mt-1 text-[1.85rem] font-semibold leading-none text-[var(--color-ink)]">
+                {formatMacroValue(dailyTotals.fatG)}g
+              </p>
             </div>
-          </section>
+            <div className="rounded-2xl bg-[var(--color-card-muted)] px-4 py-3">
+              <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--color-muted-strong)]">
+                Calories
+              </p>
+              <p className="mt-1 text-[1.85rem] font-semibold leading-none text-[var(--color-ink)]">
+                {dailyTotals.caloriesKcal} kcal
+              </p>
+            </div>
+          </div>
+        </section>
 
-          <section>
-            <div className="mb-4">
+        <section>
+          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
               <p className="text-xs font-semibold uppercase tracking-[0.24em] text-[var(--color-muted-strong)]">
-                Averages
+                Food log
               </p>
-              <p className="mt-2 text-sm text-[var(--color-muted)]">
-                Based only on days where at least one meal was logged.
+              <p className="mt-2 text-sm leading-6 text-[var(--color-muted)]">
+                Log one food item per card. Add multiple items for a full meal.
               </p>
             </div>
-            <div className="grid gap-4 lg:grid-cols-2">
-              {periodAverages.map((summary) => (
-                <SummaryCard key={summary.label} summary={summary} />
-              ))}
+            <button
+              type="button"
+              onClick={addMealDraft}
+              className="w-full rounded-full bg-[var(--color-accent)] px-4 py-3.5 text-sm font-semibold text-white transition hover:-translate-y-0.5 sm:w-auto"
+            >
+              Add food
+            </button>
+          </div>
+
+          {drafts.length === 0 ? (
+            <div className="rounded-[1.5rem] border border-dashed border-[var(--color-border-strong)] bg-[var(--color-shell-panel)] px-5 py-7 text-center text-sm leading-7 text-[var(--color-muted)]">
+              No food items logged yet. Add one to start tracking this day.
             </div>
-          </section>
-        </div>
-      </section>
-    </main>
+          ) : null}
+
+          <div className="space-y-4">
+            {drafts.map((draft) => {
+              const busy = isPending && activeMutation === draft.clientId;
+
+              return (
+                <MealCard
+                  key={draft.clientId}
+                  draft={draft}
+                  busy={busy}
+                  error={errors[draft.clientId]}
+                  onChange={updateDraft}
+                  onSave={handleSave}
+                  onDelete={handleDelete}
+                />
+              );
+            })}
+          </div>
+        </section>
+      </div>
+    </AppShell>
   );
 }

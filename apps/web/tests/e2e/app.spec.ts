@@ -8,7 +8,7 @@ test("redirects unauthenticated users to login", async ({ page }) => {
   ).toBeVisible();
 });
 
-test("allows an allowlisted user to track meals across days", async ({
+test("allows an allowlisted user to track food items across days", async ({
   page,
 }) => {
   await page.goto("/api/test/session?email=coach@example.com");
@@ -19,31 +19,31 @@ test("allows an allowlisted user to track meals across days", async ({
 
   await datePicker.fill("2026-03-17");
   await expect(page).toHaveURL(/date=2026-03-17/);
-  await page.getByRole("button", { name: "Add meal" }).click();
+  await page.getByRole("button", { name: "Add food" }).click();
   const firstMealCard = page.locator("article").last();
   const firstMealName = firstMealCard.getByPlaceholder(
-    "Lunch, post-workout, late snack...",
+    "500g quark, banana, oats, chicken breast...",
   );
-  await firstMealName.fill("Lunch");
+  await firstMealName.fill("Greek yogurt");
   await firstMealCard.getByLabel("Protein").fill("30");
   await firstMealCard.getByLabel("Carbs").fill("40");
   await firstMealCard.getByLabel("Fat").fill("10");
   await firstMealCard.getByLabel("Calories").fill("370");
-  await firstMealCard.getByRole("button", { name: "Save meal" }).click();
+  await firstMealCard.getByRole("button", { name: "Save food" }).click();
 
   await datePicker.fill("2026-03-19");
   await expect(page).toHaveURL(/date=2026-03-19/);
-  await page.getByRole("button", { name: "Add meal" }).click();
+  await page.getByRole("button", { name: "Add food" }).click();
   const secondMealCard = page.locator("article").last();
   const secondMealName = secondMealCard.getByPlaceholder(
-    "Lunch, post-workout, late snack...",
+    "500g quark, banana, oats, chicken breast...",
   );
-  await secondMealName.fill("Dinner");
+  await secondMealName.fill("Chicken breast");
   await secondMealCard.getByLabel("Protein").fill("50");
   await secondMealCard.getByLabel("Carbs").fill("60");
   await secondMealCard.getByLabel("Fat").fill("20");
   await secondMealCard.getByLabel("Calories").fill("620");
-  await secondMealCard.getByRole("button", { name: "Save meal" }).click();
+  await secondMealCard.getByRole("button", { name: "Save food" }).click();
 
   const dailyTotalsCard = page.locator("section").filter({ hasText: "Daily totals" }).first();
   await expect(dailyTotalsCard).toContainText("50g");
@@ -51,6 +51,7 @@ test("allows an allowlisted user to track meals across days", async ({
   await expect(dailyTotalsCard).toContainText("20g");
   await expect(dailyTotalsCard).toContainText("620 kcal");
 
+  await page.goto("/summary?date=2026-03-19");
   const rolling7Card = page
     .locator("section")
     .filter({ hasText: "Rolling 7 days" })

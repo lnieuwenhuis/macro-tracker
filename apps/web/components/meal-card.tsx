@@ -39,7 +39,7 @@ function NumericInput({
 }) {
   return (
     <label className="space-y-2">
-      <span className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-muted)]">
+      <span className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-muted-strong)]">
         {label}
       </span>
       <input
@@ -71,7 +71,7 @@ export function MealCard({
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-muted-strong)]">
-            Meal
+            Food item
           </p>
           <h3 className="mt-1 font-serif text-[1.65rem] leading-tight text-[var(--color-ink)]">
             {heading}
@@ -99,7 +99,7 @@ export function MealCard({
             onChange(draft.clientId, "label", event.target.value)
           }
           className="w-full rounded-2xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-4 py-3 text-base text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
-          placeholder="Lunch, post-workout, late snack..."
+          placeholder="500g quark, banana, oats, chicken breast..."
         />
       </label>
 
@@ -144,7 +144,7 @@ export function MealCard({
         onClick={() => onSave(draft.clientId)}
         className="mt-4 w-full rounded-full bg-[var(--color-accent)] px-4 py-3.5 text-sm font-semibold text-white transition-transform duration-150 hover:-translate-y-0.5 disabled:cursor-wait disabled:opacity-70"
       >
-        {busy ? "Saving..." : "Save meal"}
+        {busy ? "Saving..." : "Save food"}
       </button>
     </article>
   );

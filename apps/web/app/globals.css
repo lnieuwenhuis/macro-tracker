@@ -3,6 +3,8 @@
 :root {
   --color-paper: #fffaf2;
   --color-paper-soft: #f2e3cd;
+  --color-app-bg: #efe5d6;
+  --color-shell-panel: rgba(255, 248, 239, 0.38);
   --color-surface: rgba(255, 247, 236, 0.86);
   --color-surface-strong: #fffdf9;
   --color-card-muted: #efe3d0;
@@ -26,6 +28,8 @@
 .dark {
   --color-paper: #151211;
   --color-paper-soft: #463733;
+  --color-app-bg: #1f1818;
+  --color-shell-panel: rgba(55, 44, 41, 0.66);
   --color-surface: rgba(29, 24, 23, 0.9);
   --color-surface-strong: #231d1b;
   --color-card-muted: #2e2624;
@@ -66,10 +70,9 @@ html.dark {
 }
 
 body {
-  background: var(--background);
+  background: var(--color-app-bg);
   color: var(--foreground);
   font-family: var(--font-space-grotesk), sans-serif;
-  background-attachment: fixed;
   min-height: 100vh;
 }
 
@@ -79,9 +82,9 @@ body::before {
   inset: 0;
   pointer-events: none;
   background:
-    radial-gradient(circle at top left, rgba(202, 107, 58, 0.22), transparent 28%),
-    radial-gradient(circle at bottom right, rgba(105, 139, 107, 0.16), transparent 22%);
-  opacity: 0.8;
+    radial-gradient(circle at top left, rgba(202, 107, 58, 0.18), transparent 24%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 40%);
+  opacity: 0.55;
 }
 
 body::after {
@@ -94,7 +97,7 @@ body::after {
     linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
   background-size: 22px 22px;
   mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.18), transparent 72%);
-  opacity: 0.3;
+  opacity: 0.18;
 }
 
 a,

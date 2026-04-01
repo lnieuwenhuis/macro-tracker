@@ -1,0 +1,39 @@
+import {
+  ensureDateString,
+  getDailySummary,
+  getPeriodAverages,
+  getRecentDailyOverviews,
+  getUserById,
+} from "@macro-tracker/db";
+
+import { SummaryShell } from "@/components/summary-shell";
+import { requireSessionUser } from "@/lib/auth";
+
+type SummaryPageProps = {
+  searchParams: Promise<{
+    date?: string;
+  }>;
+};
+
+export default async function SummaryPage({ searchParams }: SummaryPageProps) {
+  const sessionUser = await requireSessionUser();
+  const params = await searchParams;
+  const selectedDate = ensureDateString(params.date);
+
+  const [dailySummary, periodAverages, recentOverviews, user] = await Promise.all([
+    getDailySummary(sessionUser.userId, selectedDate),
+    getPeriodAverages(sessionUser.userId, selectedDate),
+    getRecentDailyOverviews(sessionUser.userId, selectedDate),
+    getUserById(sessionUser.userId),
+  ]);
+
+  return (
+    <SummaryShell
+      userEmail={user?.email ?? sessionUser.email}
+      selectedDate={selectedDate}
+      dailySummary={dailySummary}
+      periodAverages={periodAverages}
+      recentOverviews={recentOverviews}
+    />
+  );
+}
