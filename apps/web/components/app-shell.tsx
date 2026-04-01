@@ -2,13 +2,14 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { startTransition, type ReactNode, useTransition } from "react";
+import { type ReactNode, useEffect, useTransition } from "react";
 
 import {
   formatSelectedDate,
   nextDateString,
   previousDateString,
 } from "@/lib/formatting";
+import { getLocalDateString, getStartupDateRedirect } from "@/lib/startup-date";
 
 import { HamburgerMenu } from "./hamburger-menu";
 
@@ -30,8 +31,29 @@ export function AppShell({
   const basePath =
     activeTab === "summary" ? "/summary" : activeTab === "goals" ? "/goals" : "/";
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const nextDate = getStartupDateRedirect({
+      requestedDate: params.get("date"),
+      selectedDate,
+      localDate: getLocalDateString(),
+    });
+
+    if (!nextDate) {
+      return;
+    }
+
+    params.set("date", nextDate);
+
+    startNavigation(() => {
+      router.replace(`${window.location.pathname}?${params.toString()}`, {
+        scroll: false,
+      });
+    });
+  }, [router, selectedDate, startNavigation]);
+
   function navigateToDate(nextDate: string) {
-    startTransition(() => {
+    startNavigation(() => {
       router.push(`${basePath}?date=${nextDate}`);
     });
   }

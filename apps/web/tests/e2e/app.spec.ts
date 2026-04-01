@@ -12,10 +12,20 @@ test("allows an allowlisted user to track food items across days", async ({
   page,
 }) => {
   await page.goto("/api/test/session?email=coach@example.com");
-  await expect(page).toHaveURL(/\/$/);
   await expect(page.getByText("Signed in as coach@example.com")).toBeVisible();
 
   const datePicker = page.getByLabel("Pick a day");
+  const currentBrowserDate = await page.evaluate(() => {
+    const value = new Date();
+    const year = value.getFullYear();
+    const month = String(value.getMonth() + 1).padStart(2, "0");
+    const day = String(value.getDate()).padStart(2, "0");
+
+    return `${year}-${month}-${day}`;
+  });
+
+  await expect(page).toHaveURL(new RegExp(`\\?date=${currentBrowserDate}$`));
+  await expect(datePicker).toHaveValue(currentBrowserDate);
 
   await datePicker.fill("2026-03-17");
   await expect(page).toHaveURL(/date=2026-03-17/);
