@@ -1,5 +1,6 @@
 import { PGlite } from "@electric-sql/pglite";
 import { sql } from "drizzle-orm";
+import { migrate as migrateNode } from "drizzle-orm/node-postgres/migrator";
 import { drizzle as drizzleNode, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { drizzle as drizzlePglite, type PgliteDatabase } from "drizzle-orm/pglite";
 import { existsSync } from "node:fs";
@@ -73,6 +74,10 @@ const pgliteDistPath = resolve(
 
 function getPgliteAssetPath(fileName: string) {
   return resolve(pgliteDistPath, fileName);
+}
+
+function getMigrationsFolder() {
+  return resolve(dbPackageRoot, "drizzle");
 }
 
 async function loadPgliteAssets(): Promise<PgliteAssets> {
@@ -198,6 +203,18 @@ async function bootstrapLocalSchema(db: PgliteDatabase<typeof schema>) {
   );
 }
 
+async function ensureDatabaseSchema(runtime: DatabaseRuntime) {
+  if (runtime.mode === "postgres") {
+    console.info("Ensuring database schema via Drizzle migrations");
+    await migrateNode(runtime.db as NodePgDatabase<typeof schema>, {
+      migrationsFolder: getMigrationsFolder(),
+    });
+    console.info("Database schema is ready");
+  }
+
+  return runtime;
+}
+
 export async function createDatabaseRuntime(
   connectionString = process.env.DATABASE_URL,
 ): Promise<DatabaseRuntime> {
@@ -248,7 +265,9 @@ export function setDatabaseRuntimeForTesting(runtime?: DatabaseRuntime) {
 
 export async function getDatabaseRuntime() {
   if (!globalDatabaseState.__macroTrackerRuntime) {
-    globalDatabaseState.__macroTrackerRuntime = createDatabaseRuntime();
+    globalDatabaseState.__macroTrackerRuntime = createDatabaseRuntime().then(
+      ensureDatabaseSchema,
+    );
   }
 
   return globalDatabaseState.__macroTrackerRuntime;

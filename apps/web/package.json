@@ -5,7 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
+    "start": "node ./scripts/start-with-migrations.mjs",
     "lint": "eslint .",
     "test": "vitest run",
     "test:e2e": "playwright test"
