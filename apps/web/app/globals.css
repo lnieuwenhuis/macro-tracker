@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+:root {
+  --color-paper: #fcf5eb;
+  --color-paper-soft: #ecdcc6;
+  --color-surface: #f7efe3;
+  --color-card-muted: #f0e5d4;
+  --color-ink: #2f1a11;
+  --color-muted: #7b6556;
+  --color-border: rgba(105, 77, 58, 0.16);
+  --color-accent: #ca6b3a;
+  --color-danger: #b6453c;
+  --background: linear-gradient(180deg, #f6eddf 0%, #fdf8ef 48%, #f7efe2 100%);
+  --foreground: var(--color-ink);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-space-grotesk);
+  --font-serif: var(--font-fraunces);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  color-scheme: light;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-space-grotesk), sans-serif;
+  background-attachment: fixed;
+  min-height: 100vh;
+}
+
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at top left, rgba(202, 107, 58, 0.22), transparent 28%),
+    radial-gradient(circle at bottom right, rgba(105, 139, 107, 0.16), transparent 22%);
+  opacity: 0.8;
+}
+
+a,
+button,
+input {
+  -webkit-tap-highlight-color: transparent;
+}
+
+input[type="date"]::-webkit-calendar-picker-indicator {
+  opacity: 0.7;
+}
+
+.font-serif {
+  font-family: var(--font-fraunces), serif;
+}

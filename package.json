@@ -1,0 +1,15 @@
+{
+  "name": "macro-tracker",
+  "private": true,
+  "packageManager": "pnpm@10.28.2",
+  "scripts": {
+    "build": "pnpm --filter @macro-tracker/web build",
+    "dev": "pnpm --filter @macro-tracker/web dev",
+    "lint": "pnpm --filter @macro-tracker/web lint",
+    "test": "pnpm -r test",
+    "test:e2e": "pnpm --filter @macro-tracker/web test:e2e",
+    "db:generate": "pnpm --filter @macro-tracker/db db:generate",
+    "db:migrate": "pnpm --filter @macro-tracker/db db:migrate",
+    "db:studio": "pnpm --filter @macro-tracker/db db:studio"
+  }
+}
