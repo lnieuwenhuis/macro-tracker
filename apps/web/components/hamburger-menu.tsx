@@ -8,7 +8,7 @@ import { ThemeToggle } from "./theme-toggle";
 type HamburgerMenuProps = {
   userEmail: string;
   selectedDate: string;
-  activeTab: "log" | "summary" | "goals";
+  activeTab: "log" | "summary" | "goals" | "stats";
 };
 
 export function HamburgerMenu({
@@ -154,6 +154,21 @@ export function HamburgerMenu({
                   <line x1="14" y1="9" x2="16" y2="9" />
                 </svg>
                 Goals
+              </Link>
+              <Link
+                href={`/stats`}
+                onClick={() => setOpen(false)}
+                className={`flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-semibold transition ${
+                  activeTab === "stats"
+                    ? "bg-[var(--color-accent)] text-white"
+                    : "text-[var(--color-ink)] hover:bg-[var(--color-card-muted)]"
+                }`}
+              >
+                <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="2,14 6,8 9,11 12,5 16,9" />
+                  <circle cx="16" cy="9" r="1.5" fill="currentColor" stroke="none" />
+                </svg>
+                Stats
               </Link>
             </nav>
 

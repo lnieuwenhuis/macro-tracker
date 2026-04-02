@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useSyncExternalStore } from "react";
 
 const STORAGE_KEY = "macro-tracker-theme";
 
@@ -26,30 +26,44 @@ function getPreferredTheme(): Theme {
     : "light";
 }
 
+function subscribeToTheme(callback: () => void) {
+  if (typeof window === "undefined") {
+    return () => {};
+  }
+
+  const handleChange = () => callback();
+  window.addEventListener("storage", handleChange);
+  window.addEventListener("macro-tracker-theme-change", handleChange);
+
+  return () => {
+    window.removeEventListener("storage", handleChange);
+    window.removeEventListener("macro-tracker-theme-change", handleChange);
+  };
+}
+
 export function ThemeToggle() {
-  const [theme, setTheme] = useState<Theme>("light");
-  const [ready, setReady] = useState(false);
+  const theme = useSyncExternalStore<Theme>(
+    subscribeToTheme,
+    getPreferredTheme,
+    () => "light",
+  );
 
   useEffect(() => {
-    const nextTheme = getPreferredTheme();
-    applyTheme(nextTheme);
-    setTheme(nextTheme);
-    setReady(true);
-  }, []);
+    applyTheme(theme);
+  }, [theme]);
 
   function toggleTheme() {
     const nextTheme = theme === "dark" ? "light" : "dark";
-    setTheme(nextTheme);
     window.localStorage.setItem(STORAGE_KEY, nextTheme);
     applyTheme(nextTheme);
+    window.dispatchEvent(new Event("macro-tracker-theme-change"));
   }
 
   return (
     <button
       type="button"
       onClick={toggleTheme}
-      disabled={!ready}
-      className="rounded-full border border-[var(--color-border-strong)] bg-[var(--color-surface-strong)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-[var(--color-ink)] shadow-[0_10px_24px_rgba(10,10,10,0.08)] transition hover:-translate-y-0.5 disabled:opacity-70"
+      className="rounded-full border border-[var(--color-border-strong)] bg-[var(--color-surface-strong)] px-4 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-[var(--color-ink)] shadow-[0_10px_24px_rgba(10,10,10,0.08)] transition hover:-translate-y-0.5"
       aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
     >
       {theme === "dark" ? "Light" : "Dark"}

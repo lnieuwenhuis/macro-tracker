@@ -70,3 +70,22 @@ export type FoodPreset = {
   fatG: number;
   caloriesKcal: number;
 };
+
+export type StatsPageData = {
+  allDailyTotals: Array<{
+    date: string;
+    proteinG: number;
+    carbsG: number;
+    fatG: number;
+    caloriesKcal: number;
+  }>;
+  totalDaysTracked: number;
+  currentStreak: number;
+  longestStreak: number;
+  totalProteinG: number;
+  totalCarbsG: number;
+  totalFatG: number;
+  totalCaloriesKcal: number;
+  bestCalorieDay: { date: string; caloriesKcal: number } | null;
+  topLabels: Array<{ label: string; count: number }>;
+};

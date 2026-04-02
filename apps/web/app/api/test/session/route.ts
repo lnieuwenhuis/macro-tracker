@@ -4,7 +4,6 @@ import { NextResponse } from "next/server";
 
 import { getServerEnv } from "@/lib/env";
 import { applySessionCookie, isSecureRequest } from "@/lib/session";
-import { isEmailAllowed } from "@/lib/shoo";
 
 async function ensureTestSchema() {
   const db = await getDb();
@@ -70,13 +69,6 @@ async function createTestSessionResponse(
     return NextResponse.json(
       { error: "Email is required." },
       { status: 400 },
-    );
-  }
-
-  if (!isEmailAllowed(email)) {
-    return NextResponse.json(
-      { error: "Email is not allowed." },
-      { status: 403 },
     );
   }
 

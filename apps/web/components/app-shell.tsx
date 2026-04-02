@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { type ReactNode, useEffect, useTransition } from "react";
+import { type ReactNode, useEffect, useRef, useSyncExternalStore, useTransition } from "react";
 
 import {
   formatSelectedDate,
@@ -16,9 +16,20 @@ import { HamburgerMenu } from "./hamburger-menu";
 type AppShellProps = {
   userEmail: string;
   selectedDate: string;
-  activeTab: "log" | "summary" | "goals";
+  activeTab: "log" | "summary" | "goals" | "stats";
   children: ReactNode;
 };
+
+function subscribeToNothing() {
+  return () => {};
+}
+
+function getShowPickerSupport() {
+  return (
+    typeof HTMLInputElement !== "undefined" &&
+    "showPicker" in HTMLInputElement.prototype
+  );
+}
 
 export function AppShell({
   userEmail,
@@ -28,8 +39,17 @@ export function AppShell({
 }: AppShellProps) {
   const router = useRouter();
   const [isPending, startNavigation] = useTransition();
+  const supportsShowPicker = useSyncExternalStore(
+    subscribeToNothing,
+    getShowPickerSupport,
+    () => true,
+  );
+  const dateInputRef = useRef<HTMLInputElement>(null);
   const basePath =
-    activeTab === "summary" ? "/summary" : activeTab === "goals" ? "/goals" : "/";
+    activeTab === "summary" ? "/summary"
+    : activeTab === "goals" ? "/goals"
+    : activeTab === "stats" ? "/stats"
+    : "/";
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -71,7 +91,7 @@ export function AppShell({
               activeTab={activeTab}
             />
             <h1 className="flex-1 text-center font-serif text-xl font-semibold text-[var(--color-ink)]">
-              {activeTab === "log" ? "Food Log" : activeTab === "summary" ? "Summary" : "Goals"}
+              {activeTab === "log" ? "Food Log" : activeTab === "summary" ? "Summary" : activeTab === "stats" ? "Stats" : "Goals"}
             </h1>
             {/* Invisible spacer to keep title centered */}
             <div className="h-10 w-10" />
@@ -89,27 +109,41 @@ export function AppShell({
               </svg>
             </Link>
 
-            <button
-              type="button"
-              className="relative flex-1 text-center"
-              onClick={() => {
-                const input = document.getElementById("date-picker-hidden") as HTMLInputElement;
-                input?.showPicker?.();
-              }}
-            >
-              <span className="text-sm font-semibold text-[var(--color-ink)]">
-                {formatSelectedDate(selectedDate)}
-              </span>
-              <input
-                id="date-picker-hidden"
-                type="date"
-                value={selectedDate}
-                disabled={isPending}
-                onChange={(event) => navigateToDate(event.target.value)}
-                className="absolute inset-0 opacity-0 cursor-pointer"
-                aria-label="Pick a day"
-              />
-            </button>
+            {supportsShowPicker ? (
+              <button
+                type="button"
+                className="relative flex-1 text-center"
+                onClick={() => dateInputRef.current?.showPicker?.()}
+              >
+                <span className="text-sm font-semibold text-[var(--color-ink)]">
+                  {formatSelectedDate(selectedDate)}
+                </span>
+                <input
+                  ref={dateInputRef}
+                  type="date"
+                  value={selectedDate}
+                  disabled={isPending}
+                  onChange={(event) => navigateToDate(event.target.value)}
+                  className="absolute inset-0 cursor-pointer opacity-0"
+                  aria-label="Pick a day"
+                />
+              </button>
+            ) : (
+              <label className="flex flex-1 flex-col items-center gap-1 py-1 text-center">
+                <span className="text-sm font-semibold text-[var(--color-ink)]">
+                  {formatSelectedDate(selectedDate)}
+                </span>
+                <input
+                  ref={dateInputRef}
+                  type="date"
+                  value={selectedDate}
+                  disabled={isPending}
+                  onChange={(event) => navigateToDate(event.target.value)}
+                  className="w-[9.75rem] rounded-lg border border-[var(--color-border-strong)] bg-[var(--color-surface-strong)] px-2 py-1 text-xs text-[var(--color-ink)] outline-none"
+                  aria-label="Pick a day"
+                />
+              </label>
+            )}
 
             <Link
               href={`${basePath}?date=${nextDateString(selectedDate)}`}

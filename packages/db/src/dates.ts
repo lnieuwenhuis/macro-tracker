@@ -54,6 +54,49 @@ export function nextDateString(value: string) {
   return toDateString(addDays(parseISO(value), 1));
 }
 
+export function computeStreaks(
+  sortedDates: string[],
+  today: string,
+): { currentStreak: number; longestStreak: number } {
+  if (sortedDates.length === 0) {
+    return { currentStreak: 0, longestStreak: 0 };
+  }
+
+  const dateSet = new Set(sortedDates);
+
+  let currentStreak = 0;
+  let checkDate = today;
+  while (dateSet.has(checkDate)) {
+    currentStreak++;
+    checkDate = previousDateString(checkDate);
+  }
+
+  if (currentStreak === 0) {
+    checkDate = previousDateString(today);
+    while (dateSet.has(checkDate)) {
+      currentStreak++;
+      checkDate = previousDateString(checkDate);
+    }
+  }
+
+  let longestStreak = 1;
+  let streak = 1;
+  for (let index = 1; index < sortedDates.length; index++) {
+    if (previousDateString(sortedDates[index]) === sortedDates[index - 1]) {
+      streak++;
+      continue;
+    }
+
+    longestStreak = Math.max(longestStreak, streak);
+    streak = 1;
+  }
+
+  return {
+    currentStreak,
+    longestStreak: Math.max(longestStreak, streak),
+  };
+}
+
 export function getIsoWeekRange(value: string): DateRange {
   const date = parseISO(value);
 

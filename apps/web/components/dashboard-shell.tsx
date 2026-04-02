@@ -4,7 +4,7 @@ import type { DailySummary, FoodPreset, MacroGoals, MealEntryRecord } from "@mac
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 
-import { deletePresetAction, deleteMealEntryAction, savePresetAction, saveMealEntryAction } from "@/lib/actions";
+import { deletePresetAction, deleteMealEntryAction, savePresetAction, saveMealEntryAction, updatePresetAction } from "@/lib/actions";
 
 import { AddFoodButton } from "./add-food-button";
 import { AppShell } from "./app-shell";
@@ -21,6 +21,9 @@ type DashboardShellProps = {
 };
 
 type ErrorState = Record<string, string | null>;
+type PresetMutationState =
+  | { type: "save" }
+  | { type: "update" | "delete"; presetId: string };
 
 function mealToDraft(meal: MealEntryRecord): MealDraft {
   return {
@@ -85,6 +88,8 @@ export function DashboardShell({
 
   const [showPresetsModal, setShowPresetsModal] = useState(false);
   const [localPresets, setLocalPresets] = useState<FoodPreset[]>(initialPresets);
+  const [presetMutation, setPresetMutation] = useState<PresetMutationState | null>(null);
+  const [presetError, setPresetError] = useState<string | null>(null);
 
   function nextSortOrder() {
     return drafts.reduce((highest, draft) => Math.max(highest, draft.sortOrder), -1) + 1;
@@ -115,6 +120,7 @@ export function DashboardShell({
       ...currentDrafts,
       createDraftFromPreset(preset, nextSortOrder()),
     ]);
+    setPresetError(null);
     setShowPresetsModal(false);
   }
 
@@ -192,18 +198,68 @@ export function DashboardShell({
   }
 
   async function handleSavePreset(input: Omit<FoodPreset, "id" | "userId">) {
-    const result = await savePresetAction(input);
-    if (result.ok && result.preset) {
+    setPresetError(null);
+    setPresetMutation({ type: "save" });
+
+    try {
+      const result = await savePresetAction(input);
+      const savedPreset = result.preset;
+      if (!result.ok || !savedPreset) {
+        setPresetError(result.error ?? "Unable to save preset.");
+        return false;
+      }
+
       setLocalPresets((prev) =>
-        [...prev, result.preset!].sort((a, b) => a.label.localeCompare(b.label)),
+        [...prev, savedPreset].sort((a, b) => a.label.localeCompare(b.label)),
       );
+      return true;
+    } finally {
+      setPresetMutation(null);
     }
   }
 
   async function handleDeletePreset(presetId: string) {
-    // Optimistic removal
+    const previousPresets = localPresets;
+
+    setPresetError(null);
+    setPresetMutation({ type: "delete", presetId });
     setLocalPresets((prev) => prev.filter((p) => p.id !== presetId));
-    await deletePresetAction({ id: presetId });
+
+    try {
+      const result = await deletePresetAction({ id: presetId });
+      if (!result.ok) {
+        setLocalPresets(previousPresets);
+        setPresetError(result.error ?? "Unable to delete preset.");
+        return false;
+      }
+
+      return true;
+    } finally {
+      setPresetMutation(null);
+    }
+  }
+
+  async function handleUpdatePreset(id: string, input: Omit<FoodPreset, "id" | "userId">) {
+    setPresetError(null);
+    setPresetMutation({ type: "update", presetId: id });
+
+    try {
+      const result = await updatePresetAction({ id, ...input });
+      const updatedPreset = result.preset;
+      if (!result.ok || !updatedPreset) {
+        setPresetError(result.error ?? "Unable to update preset.");
+        return false;
+      }
+
+      setLocalPresets((prev) =>
+        prev
+          .map((preset) => (preset.id === id ? updatedPreset : preset))
+          .sort((a, b) => a.label.localeCompare(b.label)),
+      );
+      return true;
+    } finally {
+      setPresetMutation(null);
+    }
   }
 
   const dailyTotals = dailySummary.totals;
@@ -238,7 +294,13 @@ export function DashboardShell({
             <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
               Food Items
             </h2>
-            <AddFoodButton onCustom={addCustomDraft} onPreset={() => setShowPresetsModal(true)} />
+            <AddFoodButton
+              onCustom={addCustomDraft}
+              onPreset={() => {
+                setPresetError(null);
+                setShowPresetsModal(true);
+              }}
+            />
           </div>
 
           {drafts.length === 0 ? (
@@ -247,7 +309,10 @@ export function DashboardShell({
               <div className="mt-3 flex justify-center gap-2">
                 <button
                   type="button"
-                  onClick={() => setShowPresetsModal(true)}
+                  onClick={() => {
+                    setPresetError(null);
+                    setShowPresetsModal(true);
+                  }}
                   className="rounded-full border border-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-[var(--color-accent)] transition hover:-translate-y-0.5"
                 >
                   From preset
@@ -287,9 +352,15 @@ export function DashboardShell({
       {showPresetsModal && (
         <PresetModal
           presets={localPresets}
-          onClose={() => setShowPresetsModal(false)}
+          mutation={presetMutation}
+          errorMessage={presetError}
+          onClose={() => {
+            setPresetError(null);
+            setShowPresetsModal(false);
+          }}
           onSelect={addDraftFromPreset}
           onSave={handleSavePreset}
+          onUpdate={handleUpdatePreset}
           onDelete={handleDeletePreset}
         />
       )}

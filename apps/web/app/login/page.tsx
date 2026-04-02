@@ -14,7 +14,6 @@ type LoginPageProps = {
 const ERROR_MESSAGES: Record<string, string> = {
   login_failed: "Sign-in did not complete. Please try again.",
   missing_email: "Google did not provide an email address for this account.",
-  not_allowed: "This Google account is not on the allowlist.",
   invalid_token: "The Shoo token could not be verified.",
   session_expired: "Your local session expired. Please sign in again.",
 };
@@ -48,7 +47,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
           Daily macros, built for your phone.
         </h1>
         <p className="mt-4 text-sm leading-7 text-[var(--color-muted)]">
-          Sign in with an allowlisted Google account to log meals, review daily
+          Sign in with your Google account to log meals, review daily
           totals, and compare your weekly and monthly averages.
         </p>
 

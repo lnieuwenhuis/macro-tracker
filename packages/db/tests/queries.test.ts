@@ -1,4 +1,5 @@
 import {
+  computeStreaks,
   createMealEntry,
   deleteMealEntry,
   getDailySummary,
@@ -179,6 +180,28 @@ describe("database queries", () => {
       carbsG: 42,
       fatG: 11,
       caloriesKcal: 395,
+    });
+  });
+
+  it("computes streaks from local date strings", () => {
+    expect(
+      computeStreaks(
+        ["2026-03-01", "2026-03-02", "2026-03-04", "2026-03-05", "2026-03-06"],
+        "2026-03-07",
+      ),
+    ).toEqual({
+      currentStreak: 3,
+      longestStreak: 3,
+    });
+
+    expect(
+      computeStreaks(
+        ["2026-03-01", "2026-03-02", "2026-03-04", "2026-03-05", "2026-03-06"],
+        "2026-03-06",
+      ),
+    ).toEqual({
+      currentStreak: 3,
+      longestStreak: 3,
     });
   });
 });

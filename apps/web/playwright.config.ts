@@ -18,7 +18,6 @@ export default defineConfig({
       DATABASE_URL: "memory:",
       APP_URL: appUrl,
       SESSION_SECRET: "test-secret",
-      ALLOWED_EMAILS: "coach@example.com",
       ENABLE_TEST_ROUTES: "true",
       SHOO_BASE_URL: "https://shoo.dev",
     },

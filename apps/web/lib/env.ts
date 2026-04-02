@@ -2,7 +2,6 @@ type ServerEnv = {
   appUrl: string;
   sessionSecret: string;
   shooBaseUrl: string;
-  allowedEmails: string[];
   enableTestRoutes: boolean;
 };
 
@@ -16,13 +15,6 @@ function readRequiredEnv(name: string, fallback?: string) {
   }
 
   return value;
-}
-
-function parseAllowedEmails(value: string) {
-  return value
-    .split(",")
-    .map((email) => email.trim().toLowerCase())
-    .filter(Boolean);
 }
 
 export function getServerEnv(): ServerEnv {
@@ -40,7 +32,6 @@ export function getServerEnv(): ServerEnv {
     appUrl,
     sessionSecret,
     shooBaseUrl: process.env.SHOO_BASE_URL ?? "https://shoo.dev",
-    allowedEmails: parseAllowedEmails(process.env.ALLOWED_EMAILS ?? ""),
     enableTestRoutes:
       process.env.NODE_ENV === "test" ||
       process.env.ENABLE_TEST_ROUTES === "true",

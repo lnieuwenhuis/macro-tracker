@@ -37,13 +37,6 @@ export class ShooAuthError extends Error {
   }
 }
 
-export function isEmailAllowed(
-  email: string,
-  allowedEmails = getServerEnv().allowedEmails,
-) {
-  return allowedEmails.includes(email.trim().toLowerCase());
-}
-
 export async function verifyShooToken(
   idToken: string,
   options?: {
@@ -105,13 +98,6 @@ export async function authorizeVerifiedShooClaims(
   }
 
   const email = claims.email.trim().toLowerCase();
-  if (!isEmailAllowed(email)) {
-    throw new ShooAuthError(
-      "This Google account is not allowed to use the app.",
-      403,
-      "not_allowed",
-    );
-  }
 
   const user = await upsertUserFromShooProfile(
     {

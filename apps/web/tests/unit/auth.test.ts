@@ -4,7 +4,6 @@ import {
 } from "@/lib/session";
 import {
   authorizeVerifiedShooClaims,
-  isEmailAllowed,
   verifyShooToken,
 } from "@/lib/shoo";
 import { getRequestOrigin } from "@/lib/request";
@@ -34,7 +33,6 @@ describe("shoo auth helpers", () => {
 
   beforeEach(async () => {
     process.env.APP_URL = "http://localhost:3000";
-    process.env.ALLOWED_EMAILS = "coach@example.com,friend@example.com";
     process.env.SESSION_SECRET = "test-secret";
     process.env.SHOO_BASE_URL = "https://shoo.dev";
     resetServerEnvForTests();
@@ -122,10 +120,7 @@ describe("shoo auth helpers", () => {
     expect(payload.email).toBe("coach@example.com");
   });
 
-  it("checks the allowlist and persists an authorized user session", async () => {
-    expect(isEmailAllowed("coach@example.com")).toBe(true);
-    expect(isEmailAllowed("stranger@example.com")).toBe(false);
-
+  it("persists an authorized user session", async () => {
     const result = await authorizeVerifiedShooClaims(
       {
         pairwise_sub: "ps_authorized",

@@ -7,6 +7,7 @@ import {
   deletePreset,
   saveUserGoals,
   updateMealEntry,
+  updatePreset,
 } from "@macro-tracker/db";
 import type { FoodPreset } from "@macro-tracker/db";
 import { revalidatePath } from "next/cache";
@@ -138,6 +139,26 @@ export async function deletePresetAction(input: { id: string }): Promise<ActionR
   try {
     await deletePreset(sessionUser.userId, input.id);
     return { ok: true };
+  } catch (error) {
+    return { ok: false, error: toActionError(error) };
+  }
+}
+
+type UpdatePresetInput = { id: string } & Omit<FoodPreset, "id" | "userId">;
+type UpdatePresetResult = ActionResult & { preset?: FoodPreset };
+
+export async function updatePresetAction(input: UpdatePresetInput): Promise<UpdatePresetResult> {
+  const sessionUser = await requireSessionUser();
+
+  try {
+    const preset = await updatePreset(sessionUser.userId, input.id, {
+      label: input.label,
+      proteinG: input.proteinG,
+      carbsG: input.carbsG,
+      fatG: input.fatG,
+      caloriesKcal: input.caloriesKcal,
+    });
+    return { ok: true, preset };
   } catch (error) {
     return { ok: false, error: toActionError(error) };
   }

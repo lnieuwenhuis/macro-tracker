@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, gte, lte, max, sql } from "drizzle-orm";
 
-import { getPeriodRanges } from "./dates";
+import { computeStreaks, getPeriodRanges } from "./dates";
 import { getDb, type DatabaseClient } from "./client";
 import { foodPresets, mealEntries, users } from "./schema";
 import { validateMealEntryInput } from "./validators";
@@ -14,6 +14,7 @@ import type {
   MealEntryRecord,
   PeriodAverage,
   ShooProfile,
+  StatsPageData,
 } from "./types";
 
 type DailyTotalsRow = {
@@ -573,6 +574,40 @@ export async function createPreset(
   };
 }
 
+export async function updatePreset(
+  userId: string,
+  presetId: string,
+  input: Omit<FoodPreset, "id" | "userId">,
+  db?: DatabaseClient,
+): Promise<FoodPreset> {
+  const database = await resolveDb(db);
+  const [updated] = await database
+    .update(foodPresets)
+    .set({
+      label: input.label.trim(),
+      proteinG: input.proteinG.toFixed(1),
+      carbsG: input.carbsG.toFixed(1),
+      fatG: input.fatG.toFixed(1),
+      caloriesKcal: Math.round(input.caloriesKcal),
+    })
+    .where(and(eq(foodPresets.id, presetId), eq(foodPresets.userId, userId)))
+    .returning();
+
+  if (!updated) {
+    throw new Error("Preset not found.");
+  }
+
+  return {
+    id: updated.id,
+    userId: updated.userId,
+    label: updated.label,
+    proteinG: roundToSingleDecimal(toNumber(updated.proteinG)),
+    carbsG: roundToSingleDecimal(toNumber(updated.carbsG)),
+    fatG: roundToSingleDecimal(toNumber(updated.fatG)),
+    caloriesKcal: toNumber(updated.caloriesKcal),
+  };
+}
+
 export async function deletePreset(
   userId: string,
   presetId: string,
@@ -585,4 +620,76 @@ export async function deletePreset(
     .returning();
 
   return Boolean(deleted);
+}
+
+export async function getStatsPageData(
+  userId: string,
+  today: string,
+  db?: DatabaseClient,
+): Promise<StatsPageData> {
+  const database = await resolveDb(db);
+
+  const [dailyRows, labelRows] = await Promise.all([
+    database
+      .select({
+        entryDate: mealEntries.entryDate,
+        proteinG: sql<string>`coalesce(sum(${mealEntries.proteinG}), 0)`,
+        carbsG: sql<string>`coalesce(sum(${mealEntries.carbsG}), 0)`,
+        fatG: sql<string>`coalesce(sum(${mealEntries.fatG}), 0)`,
+        caloriesKcal: sql<string>`coalesce(sum(${mealEntries.caloriesKcal}), 0)`,
+      })
+      .from(mealEntries)
+      .where(eq(mealEntries.userId, userId))
+      .groupBy(mealEntries.entryDate)
+      .orderBy(asc(mealEntries.entryDate)),
+    database
+      .select({
+        label: mealEntries.label,
+        count: sql<string>`count(*)`,
+      })
+      .from(mealEntries)
+      .where(eq(mealEntries.userId, userId))
+      .groupBy(mealEntries.label)
+      .orderBy(desc(sql`count(*)`))
+      .limit(5),
+  ]);
+
+  const sortedDates = dailyRows.map((r) => r.entryDate);
+  const { currentStreak, longestStreak } = computeStreaks(sortedDates, today);
+
+  let totalProteinG = 0;
+  let totalCarbsG = 0;
+  let totalFatG = 0;
+  let totalCaloriesKcal = 0;
+  let bestCalorieDay: { date: string; caloriesKcal: number } | null = null;
+
+  for (const row of dailyRows) {
+    const cals = Math.round(toNumber(row.caloriesKcal));
+    totalProteinG += toNumber(row.proteinG);
+    totalCarbsG += toNumber(row.carbsG);
+    totalFatG += toNumber(row.fatG);
+    totalCaloriesKcal += cals;
+    if (!bestCalorieDay || cals > bestCalorieDay.caloriesKcal) {
+      bestCalorieDay = { date: row.entryDate, caloriesKcal: cals };
+    }
+  }
+
+  return {
+    allDailyTotals: dailyRows.map((row) => ({
+      date: row.entryDate,
+      proteinG: roundToSingleDecimal(toNumber(row.proteinG)),
+      carbsG: roundToSingleDecimal(toNumber(row.carbsG)),
+      fatG: roundToSingleDecimal(toNumber(row.fatG)),
+      caloriesKcal: Math.round(toNumber(row.caloriesKcal)),
+    })),
+    totalDaysTracked: dailyRows.length,
+    currentStreak,
+    longestStreak,
+    totalProteinG: Math.round(totalProteinG),
+    totalCarbsG: Math.round(totalCarbsG),
+    totalFatG: Math.round(totalFatG),
+    totalCaloriesKcal: Math.round(totalCaloriesKcal),
+    bestCalorieDay,
+    topLabels: labelRows.map((r) => ({ label: r.label, count: toNumber(r.count) })),
+  };
 }
