@@ -71,6 +71,29 @@ export type FoodPreset = {
   caloriesKcal: number;
 };
 
+export type WeightEntryInput = {
+  date: string;
+  weightKg: number;
+  bodyFatPct: number | null;
+  notes: string | null;
+};
+
+export type WeightEntryRecord = WeightEntryInput & {
+  id: string;
+  userId: string;
+};
+
+export type WeightPageData = {
+  entries: WeightEntryRecord[];
+  goalWeightKg: number | null;
+  stats: {
+    currentWeight: number | null;
+    weekChange: number | null;
+    monthChange: number | null;
+    trendDirection: "up" | "down" | "stable" | null;
+  };
+};
+
 export type StatsPageData = {
   allDailyTotals: Array<{
     date: string;

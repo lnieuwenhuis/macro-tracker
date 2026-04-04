@@ -2,8 +2,8 @@ import { and, asc, desc, eq, gte, lte, max, sql } from "drizzle-orm";
 
 import { computeStreaks, getPeriodRanges } from "./dates";
 import { getDb, type DatabaseClient } from "./client";
-import { foodPresets, mealEntries, users } from "./schema";
-import { validateMealEntryInput } from "./validators";
+import { foodPresets, mealEntries, users, weightEntries } from "./schema";
+import { validateMealEntryInput, validateWeightEntryInput } from "./validators";
 import type {
   DailyOverview,
   DailySummary,
@@ -15,6 +15,9 @@ import type {
   PeriodAverage,
   ShooProfile,
   StatsPageData,
+  WeightEntryInput,
+  WeightEntryRecord,
+  WeightPageData,
 } from "./types";
 
 type DailyTotalsRow = {
@@ -691,5 +694,234 @@ export async function getStatsPageData(
     totalCaloriesKcal: Math.round(totalCaloriesKcal),
     bestCalorieDay,
     topLabels: labelRows.map((r) => ({ label: r.label, count: toNumber(r.count) })),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Weight tracking
+// ---------------------------------------------------------------------------
+
+function roundToTwoDecimals(value: number) {
+  return Math.round(value * 100) / 100;
+}
+
+function mapWeightRow(row: {
+  id: string;
+  userId: string;
+  entryDate: string;
+  weightKg: string | number;
+  bodyFatPct: string | number | null;
+  notes: string | null;
+}): WeightEntryRecord {
+  return {
+    id: row.id,
+    userId: row.userId,
+    date: row.entryDate,
+    weightKg: roundToTwoDecimals(toNumber(row.weightKg)),
+    bodyFatPct:
+      row.bodyFatPct != null
+        ? roundToSingleDecimal(toNumber(row.bodyFatPct))
+        : null,
+    notes: row.notes,
+  };
+}
+
+export async function getWeightEntries(
+  userId: string,
+  db?: DatabaseClient,
+): Promise<WeightEntryRecord[]> {
+  const database = await resolveDb(db);
+  const rows = await database
+    .select({
+      id: weightEntries.id,
+      userId: weightEntries.userId,
+      entryDate: weightEntries.entryDate,
+      weightKg: weightEntries.weightKg,
+      bodyFatPct: weightEntries.bodyFatPct,
+      notes: weightEntries.notes,
+    })
+    .from(weightEntries)
+    .where(eq(weightEntries.userId, userId))
+    .orderBy(asc(weightEntries.entryDate));
+
+  return rows.map(mapWeightRow);
+}
+
+export async function createWeightEntry(
+  userId: string,
+  input: WeightEntryInput,
+  db?: DatabaseClient,
+): Promise<WeightEntryRecord> {
+  const database = await resolveDb(db);
+  const normalized = validateWeightEntryInput(input);
+
+  const [created] = await database
+    .insert(weightEntries)
+    .values({
+      id: crypto.randomUUID(),
+      userId,
+      entryDate: normalized.date,
+      weightKg: normalized.weightKg.toFixed(2),
+      bodyFatPct:
+        normalized.bodyFatPct != null
+          ? normalized.bodyFatPct.toFixed(1)
+          : null,
+      notes: normalized.notes,
+      updatedAt: new Date(),
+    })
+    .onConflictDoUpdate({
+      target: [weightEntries.userId, weightEntries.entryDate],
+      set: {
+        weightKg: normalized.weightKg.toFixed(2),
+        bodyFatPct:
+          normalized.bodyFatPct != null
+            ? normalized.bodyFatPct.toFixed(1)
+            : null,
+        notes: normalized.notes,
+        updatedAt: new Date(),
+      },
+    })
+    .returning();
+
+  return mapWeightRow(created);
+}
+
+export async function deleteWeightEntry(
+  userId: string,
+  entryId: string,
+  db?: DatabaseClient,
+): Promise<boolean> {
+  const database = await resolveDb(db);
+  const [deleted] = await database
+    .delete(weightEntries)
+    .where(
+      and(eq(weightEntries.id, entryId), eq(weightEntries.userId, userId)),
+    )
+    .returning();
+
+  return Boolean(deleted);
+}
+
+export async function getWeightGoal(
+  userId: string,
+  db?: DatabaseClient,
+): Promise<number | null> {
+  const database = await resolveDb(db);
+  const [user] = await database
+    .select({ goalWeightKg: users.goalWeightKg })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+
+  return user?.goalWeightKg != null
+    ? roundToTwoDecimals(toNumber(user.goalWeightKg))
+    : null;
+}
+
+export async function saveWeightGoal(
+  userId: string,
+  goalWeightKg: number | null,
+  db?: DatabaseClient,
+): Promise<void> {
+  const database = await resolveDb(db);
+  await database
+    .update(users)
+    .set({
+      goalWeightKg:
+        goalWeightKg != null ? goalWeightKg.toFixed(2) : null,
+    })
+    .where(eq(users.id, userId));
+}
+
+export async function getWeightPageData(
+  userId: string,
+  today: string,
+  db?: DatabaseClient,
+): Promise<WeightPageData> {
+  const database = await resolveDb(db);
+
+  const [entries, goalWeightKg] = await Promise.all([
+    getWeightEntries(userId, database),
+    getWeightGoal(userId, database),
+  ]);
+
+  let currentWeight: number | null = null;
+  let weekChange: number | null = null;
+  let monthChange: number | null = null;
+  let trendDirection: WeightPageData["stats"]["trendDirection"] = null;
+
+  if (entries.length > 0) {
+    const latest = entries[entries.length - 1]!;
+    currentWeight = latest.weightKg;
+
+    // Find entry closest to 7 days ago
+    const todayMs = new Date(today).getTime();
+    const weekAgoMs = todayMs - 7 * 24 * 60 * 60 * 1000;
+    const monthAgoMs = todayMs - 30 * 24 * 60 * 60 * 1000;
+
+    let closestWeek: WeightEntryRecord | null = null;
+    let closestMonth: WeightEntryRecord | null = null;
+
+    for (const entry of entries) {
+      const entryMs = new Date(entry.date).getTime();
+      if (entryMs <= weekAgoMs) {
+        if (
+          !closestWeek ||
+          Math.abs(entryMs - weekAgoMs) <
+            Math.abs(new Date(closestWeek.date).getTime() - weekAgoMs)
+        ) {
+          closestWeek = entry;
+        }
+      }
+      if (entryMs <= monthAgoMs) {
+        if (
+          !closestMonth ||
+          Math.abs(entryMs - monthAgoMs) <
+            Math.abs(new Date(closestMonth.date).getTime() - monthAgoMs)
+        ) {
+          closestMonth = entry;
+        }
+      }
+    }
+
+    if (closestWeek) {
+      weekChange = roundToTwoDecimals(
+        latest.weightKg - closestWeek.weightKg,
+      );
+    }
+    if (closestMonth) {
+      monthChange = roundToTwoDecimals(
+        latest.weightKg - closestMonth.weightKg,
+      );
+    }
+
+    // Trend: compare last 3 entries if available
+    if (entries.length >= 3) {
+      const last3 = entries.slice(-3);
+      const diffs = [
+        last3[1]!.weightKg - last3[0]!.weightKg,
+        last3[2]!.weightKg - last3[1]!.weightKg,
+      ];
+      const avgDiff = (diffs[0]! + diffs[1]!) / 2;
+      if (avgDiff > 0.1) trendDirection = "up";
+      else if (avgDiff < -0.1) trendDirection = "down";
+      else trendDirection = "stable";
+    } else if (entries.length === 2) {
+      const diff = entries[1]!.weightKg - entries[0]!.weightKg;
+      if (diff > 0.1) trendDirection = "up";
+      else if (diff < -0.1) trendDirection = "down";
+      else trendDirection = "stable";
+    }
+  }
+
+  return {
+    entries,
+    goalWeightKg,
+    stats: {
+      currentWeight,
+      weekChange,
+      monthChange,
+      trendDirection,
+    },
   };
 }

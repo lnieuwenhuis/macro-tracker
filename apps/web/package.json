@@ -15,6 +15,7 @@
     "@shoojs/auth": "^0.2.2",
     "date-fns": "^4.1.0",
     "drizzle-orm": "^0.45.2",
+    "html5-qrcode": "^2.3.8",
     "jose": "^6.2.2",
     "next": "16.2.2",
     "pg": "^8.20.0",

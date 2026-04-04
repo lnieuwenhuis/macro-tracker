@@ -5,9 +5,12 @@ import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 
 import { deletePresetAction, deleteMealEntryAction, savePresetAction, saveMealEntryAction, updatePresetAction } from "@/lib/actions";
+import type { OpenFoodFactsProduct } from "@/lib/openfoodfacts";
 
 import { AddFoodButton } from "./add-food-button";
 import { AppShell } from "./app-shell";
+import { BarcodeResult } from "./barcode-result";
+import { BarcodeScanner } from "./barcode-scanner";
 import { MacroBarGroup } from "./macro-bar";
 import { MealCard, type MealDraft } from "./meal-card";
 import { PresetModal } from "./preset-modal";
@@ -90,6 +93,11 @@ export function DashboardShell({
   const [localPresets, setLocalPresets] = useState<FoodPreset[]>(initialPresets);
   const [presetMutation, setPresetMutation] = useState<PresetMutationState | null>(null);
   const [presetError, setPresetError] = useState<string | null>(null);
+
+  // Barcode scanner state
+  const [showScanner, setShowScanner] = useState(false);
+  const [scanResult, setScanResult] = useState<OpenFoodFactsProduct | null>(null);
+  const [notFoundBarcode, setNotFoundBarcode] = useState<string | null>(null);
 
   function nextSortOrder() {
     return drafts.reduce((highest, draft) => Math.max(highest, draft.sortOrder), -1) + 1;
@@ -300,6 +308,11 @@ export function DashboardShell({
                 setPresetError(null);
                 setShowPresetsModal(true);
               }}
+              onScan={() => {
+                setScanResult(null);
+                setNotFoundBarcode(null);
+                setShowScanner(true);
+              }}
             />
           </div>
 
@@ -362,6 +375,59 @@ export function DashboardShell({
           onSave={handleSavePreset}
           onUpdate={handleUpdatePreset}
           onDelete={handleDeletePreset}
+        />
+      )}
+
+      {/* Barcode scanner modal */}
+      {showScanner && (
+        <BarcodeScanner
+          onScan={(product) => {
+            setShowScanner(false);
+            setScanResult(product);
+            setNotFoundBarcode(null);
+          }}
+          onNotFound={(barcode) => {
+            setShowScanner(false);
+            setScanResult(null);
+            setNotFoundBarcode(barcode);
+          }}
+          onClose={() => setShowScanner(false)}
+        />
+      )}
+
+      {/* Barcode result modal */}
+      {(scanResult || notFoundBarcode) && (
+        <BarcodeResult
+          product={scanResult}
+          notFoundBarcode={notFoundBarcode}
+          onAddToLog={(macros) => {
+            setDrafts((currentDrafts) => [
+              ...currentDrafts,
+              {
+                clientId: `draft-${crypto.randomUUID()}`,
+                label: macros.label,
+                proteinG: String(macros.proteinG),
+                carbsG: String(macros.carbsG),
+                fatG: String(macros.fatG),
+                caloriesKcal: String(macros.caloriesKcal),
+                sortOrder: nextSortOrder(),
+              },
+            ]);
+            setScanResult(null);
+            setNotFoundBarcode(null);
+          }}
+          onSaveAsPreset={(input) => {
+            handleSavePreset(input);
+          }}
+          onScanAnother={() => {
+            setScanResult(null);
+            setNotFoundBarcode(null);
+            setShowScanner(true);
+          }}
+          onClose={() => {
+            setScanResult(null);
+            setNotFoundBarcode(null);
+          }}
         />
       )}
     </AppShell>

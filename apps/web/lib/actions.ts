@@ -3,9 +3,12 @@
 import {
   createMealEntry,
   createPreset,
+  createWeightEntry,
   deleteMealEntry,
   deletePreset,
+  deleteWeightEntry,
   saveUserGoals,
+  saveWeightGoal,
   updateMealEntry,
   updatePreset,
 } from "@macro-tracker/db";
@@ -159,6 +162,59 @@ export async function updatePresetAction(input: UpdatePresetInput): Promise<Upda
       caloriesKcal: input.caloriesKcal,
     });
     return { ok: true, preset };
+  } catch (error) {
+    return { ok: false, error: toActionError(error) };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Weight tracking
+// ---------------------------------------------------------------------------
+
+type SaveWeightEntryInput = {
+  date: string;
+  weightKg: number;
+  bodyFatPct: number | null;
+  notes: string | null;
+};
+
+export async function saveWeightEntryAction(
+  input: SaveWeightEntryInput,
+): Promise<ActionResult> {
+  const sessionUser = await requireSessionUser();
+
+  try {
+    await createWeightEntry(sessionUser.userId, input);
+    revalidatePath("/weight", "page");
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: toActionError(error) };
+  }
+}
+
+export async function deleteWeightEntryAction(
+  input: { id: string },
+): Promise<ActionResult> {
+  const sessionUser = await requireSessionUser();
+
+  try {
+    await deleteWeightEntry(sessionUser.userId, input.id);
+    revalidatePath("/weight", "page");
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: toActionError(error) };
+  }
+}
+
+export async function saveWeightGoalAction(
+  input: { goalWeightKg: number | null },
+): Promise<ActionResult> {
+  const sessionUser = await requireSessionUser();
+
+  try {
+    await saveWeightGoal(sessionUser.userId, input.goalWeightKg);
+    revalidatePath("/weight", "page");
+    return { ok: true };
   } catch (error) {
     return { ok: false, error: toActionError(error) };
   }

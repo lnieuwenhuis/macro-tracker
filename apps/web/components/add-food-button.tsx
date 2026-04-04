@@ -5,9 +5,10 @@ import { useEffect, useRef, useState } from "react";
 type AddFoodButtonProps = {
   onCustom: () => void;
   onPreset: () => void;
+  onScan: () => void;
 };
 
-export function AddFoodButton({ onCustom, onPreset }: AddFoodButtonProps) {
+export function AddFoodButton({ onCustom, onPreset, onScan }: AddFoodButtonProps) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -95,6 +96,33 @@ export function AddFoodButton({ onCustom, onPreset }: AddFoodButtonProps) {
               <line x1="2.5" y1="7.5" x2="12.5" y2="7.5" />
             </svg>
             Custom
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setOpen(false);
+              onScan();
+            }}
+            className="flex w-full items-center gap-2.5 px-4 py-2.5 text-sm font-medium text-[var(--color-ink)] transition hover:bg-[var(--color-shell-panel)]"
+          >
+            <svg
+              width="15"
+              height="15"
+              viewBox="0 0 15 15"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              strokeLinecap="round"
+            >
+              <rect x="1" y="1" width="4" height="4" />
+              <rect x="10" y="1" width="4" height="4" />
+              <rect x="1" y="10" width="4" height="4" />
+              <line x1="7.5" y1="1" x2="7.5" y2="6" />
+              <line x1="7.5" y1="9" x2="7.5" y2="14" />
+              <line x1="10" y1="10" x2="14" y2="10" />
+              <line x1="10" y1="13" x2="14" y2="13" />
+            </svg>
+            Scan
           </button>
         </div>
       )}

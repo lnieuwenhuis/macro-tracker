@@ -16,7 +16,7 @@ import { HamburgerMenu } from "./hamburger-menu";
 type AppShellProps = {
   userEmail: string;
   selectedDate: string;
-  activeTab: "log" | "summary" | "goals" | "stats";
+  activeTab: "log" | "summary" | "goals" | "stats" | "weight";
   children: ReactNode;
 };
 
@@ -49,6 +49,7 @@ export function AppShell({
     activeTab === "summary" ? "/summary"
     : activeTab === "goals" ? "/goals"
     : activeTab === "stats" ? "/stats"
+    : activeTab === "weight" ? "/weight"
     : "/";
 
   useEffect(() => {
@@ -91,7 +92,7 @@ export function AppShell({
               activeTab={activeTab}
             />
             <h1 className="flex-1 text-center font-serif text-xl font-semibold text-[var(--color-ink)]">
-              {activeTab === "log" ? "Food Log" : activeTab === "summary" ? "Summary" : activeTab === "stats" ? "Stats" : "Goals"}
+              {activeTab === "log" ? "Food Log" : activeTab === "summary" ? "Summary" : activeTab === "stats" ? "Stats" : activeTab === "weight" ? "Weight" : "Goals"}
             </h1>
             {/* Invisible spacer to keep title centered */}
             <div className="h-10 w-10" />

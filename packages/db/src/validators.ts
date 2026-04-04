@@ -1,4 +1,4 @@
-import type { MacroNumbers, MealEntryInput } from "./types";
+import type { MacroNumbers, MealEntryInput, WeightEntryInput } from "./types";
 
 export class MealEntryValidationError extends Error {
   constructor(message: string) {
@@ -9,6 +9,13 @@ export class MealEntryValidationError extends Error {
 
 function roundToSingleDecimal(value: number) {
   return Math.round(value * 10) / 10;
+}
+
+export class WeightEntryValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WeightEntryValidationError";
+  }
 }
 
 function assertFiniteNonNegative(value: number, fieldName: string) {
@@ -72,5 +79,47 @@ export function validateMealEntryInput(input: MealEntryInput): MealEntryInput {
     ...macros,
     label,
     sortOrder,
+  };
+}
+
+function roundToTwoDecimals(value: number) {
+  return Math.round(value * 100) / 100;
+}
+
+export function validateWeightEntryInput(
+  input: WeightEntryInput,
+): WeightEntryInput {
+  const weightKg = Number(input.weightKg);
+
+  if (!Number.isFinite(weightKg) || weightKg <= 0) {
+    throw new WeightEntryValidationError(
+      "Weight must be a positive number.",
+    );
+  }
+
+  if (weightKg > 999.99) {
+    throw new WeightEntryValidationError(
+      "Weight must be less than 1000 kg.",
+    );
+  }
+
+  let bodyFatPct = input.bodyFatPct;
+  if (bodyFatPct != null) {
+    bodyFatPct = Number(bodyFatPct);
+    if (!Number.isFinite(bodyFatPct) || bodyFatPct < 0 || bodyFatPct > 100) {
+      throw new WeightEntryValidationError(
+        "Body fat percentage must be between 0 and 100.",
+      );
+    }
+    bodyFatPct = roundToSingleDecimal(bodyFatPct);
+  }
+
+  const notes = input.notes?.trim() || null;
+
+  return {
+    date: input.date,
+    weightKg: roundToTwoDecimals(weightKg),
+    bodyFatPct: bodyFatPct ?? null,
+    notes,
   };
 }
