@@ -1,4 +1,4 @@
-import type { MacroNumbers, MealEntryInput, WeightEntryInput } from "./types";
+import type { MacroNumbers, MealEntryInput, RecipeInput, WeightEntryInput } from "./types";
 
 export class MealEntryValidationError extends Error {
   constructor(message: string) {
@@ -80,6 +80,52 @@ export function validateMealEntryInput(input: MealEntryInput): MealEntryInput {
     label,
     sortOrder,
   };
+}
+
+export class RecipeValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RecipeValidationError";
+  }
+}
+
+export function validateRecipeInput(input: RecipeInput): RecipeInput {
+  const label = input.label.trim();
+  if (!label) {
+    throw new RecipeValidationError("Recipe name is required.");
+  }
+
+  const portions = Math.round(input.portions);
+  if (!Number.isFinite(portions) || portions < 1) {
+    throw new RecipeValidationError("Portions must be at least 1.");
+  }
+  if (portions > 999) {
+    throw new RecipeValidationError("Portions must be less than 1000.");
+  }
+
+  if (input.ingredients.length === 0) {
+    throw new RecipeValidationError(
+      "A recipe must have at least one ingredient.",
+    );
+  }
+
+  const ingredients = input.ingredients.map((ing, i) => {
+    const ingLabel = ing.label.trim();
+    if (!ingLabel) {
+      throw new RecipeValidationError(
+        `Ingredient ${i + 1} name is required.`,
+      );
+    }
+    const macros = normalizeMacroNumbers({
+      proteinG: ing.proteinG,
+      carbsG: ing.carbsG,
+      fatG: ing.fatG,
+      caloriesKcal: ing.caloriesKcal,
+    });
+    return { ...macros, label: ingLabel };
+  });
+
+  return { label, portions, ingredients };
 }
 
 function roundToTwoDecimals(value: number) {

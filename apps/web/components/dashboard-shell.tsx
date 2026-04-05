@@ -1,6 +1,6 @@
 "use client";
 
-import type { DailySummary, FoodPreset, MacroGoals, MealEntryRecord } from "@macro-tracker/db";
+import type { DailySummary, FoodPreset, MacroGoals, MealEntryRecord, RecipeRecord } from "@macro-tracker/db";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 
@@ -14,6 +14,7 @@ import { BarcodeScanner } from "./barcode-scanner";
 import { MacroBarGroup } from "./macro-bar";
 import { MealCard, type MealDraft } from "./meal-card";
 import { PresetModal } from "./preset-modal";
+import { RecipePickerModal } from "./recipe-picker-modal";
 
 type DashboardShellProps = {
   userEmail: string;
@@ -21,6 +22,7 @@ type DashboardShellProps = {
   dailySummary: DailySummary;
   goals: MacroGoals;
   presets: FoodPreset[];
+  recipes: RecipeRecord[];
 };
 
 type ErrorState = Record<string, string | null>;
@@ -80,6 +82,7 @@ export function DashboardShell({
   dailySummary,
   goals,
   presets: initialPresets,
+  recipes,
 }: DashboardShellProps) {
   const router = useRouter();
   const [drafts, setDrafts] = useState<MealDraft[]>(() =>
@@ -93,6 +96,9 @@ export function DashboardShell({
   const [localPresets, setLocalPresets] = useState<FoodPreset[]>(initialPresets);
   const [presetMutation, setPresetMutation] = useState<PresetMutationState | null>(null);
   const [presetError, setPresetError] = useState<string | null>(null);
+
+  // Recipe picker state
+  const [showRecipePickerModal, setShowRecipePickerModal] = useState(false);
 
   // Barcode scanner state
   const [showScanner, setShowScanner] = useState(false);
@@ -130,6 +136,23 @@ export function DashboardShell({
     ]);
     setPresetError(null);
     setShowPresetsModal(false);
+  }
+
+  function addDraftFromRecipe(recipe: RecipeRecord) {
+    const macros = recipe.perPortionMacros;
+    setDrafts((currentDrafts) => [
+      ...currentDrafts,
+      {
+        clientId: `draft-${crypto.randomUUID()}`,
+        label: `${recipe.label} (1 portion)`,
+        proteinG: String(macros.proteinG),
+        carbsG: String(macros.carbsG),
+        fatG: String(macros.fatG),
+        caloriesKcal: String(macros.caloriesKcal),
+        sortOrder: nextSortOrder(),
+      },
+    ]);
+    setShowRecipePickerModal(false);
   }
 
   function removeLocalDraft(clientId: string) {
@@ -313,6 +336,7 @@ export function DashboardShell({
                 setNotFoundBarcode(null);
                 setShowScanner(true);
               }}
+              onRecipe={() => setShowRecipePickerModal(true)}
             />
           </div>
 
@@ -375,6 +399,15 @@ export function DashboardShell({
           onSave={handleSavePreset}
           onUpdate={handleUpdatePreset}
           onDelete={handleDeletePreset}
+        />
+      )}
+
+      {/* Recipe picker modal */}
+      {showRecipePickerModal && (
+        <RecipePickerModal
+          recipes={recipes}
+          onClose={() => setShowRecipePickerModal(false)}
+          onSelect={addDraftFromRecipe}
         />
       )}
 

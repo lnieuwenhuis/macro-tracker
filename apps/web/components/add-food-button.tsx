@@ -6,9 +6,10 @@ type AddFoodButtonProps = {
   onCustom: () => void;
   onPreset: () => void;
   onScan: () => void;
+  onRecipe?: () => void;
 };
 
-export function AddFoodButton({ onCustom, onPreset, onScan }: AddFoodButtonProps) {
+export function AddFoodButton({ onCustom, onPreset, onScan, onRecipe }: AddFoodButtonProps) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -124,6 +125,33 @@ export function AddFoodButton({ onCustom, onPreset, onScan }: AddFoodButtonProps
             </svg>
             Scan
           </button>
+          {onRecipe && (
+            <button
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                onRecipe();
+              }}
+              className="flex w-full items-center gap-2.5 px-4 py-2.5 text-sm font-medium text-[var(--color-ink)] transition hover:bg-[var(--color-shell-panel)]"
+            >
+              <svg
+                width="15"
+                height="15"
+                viewBox="0 0 15 15"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M3 1.5h9a1.5 1.5 0 0 1 1.5 1.5v9a1.5 1.5 0 0 1-1.5 1.5H3A1.5 1.5 0 0 1 1.5 12V3A1.5 1.5 0 0 1 3 1.5z" />
+                <path d="M5 5h5" />
+                <path d="M5 7.5h5" />
+                <path d="M5 10h3" />
+              </svg>
+              Recipe
+            </button>
+          )}
         </div>
       )}
     </div>

@@ -3,16 +3,20 @@
 import {
   createMealEntry,
   createPreset,
+  createRecipe,
   createWeightEntry,
   deleteMealEntry,
   deletePreset,
+  deleteRecipe,
   deleteWeightEntry,
+  getRecipeById,
   saveUserGoals,
   saveWeightGoal,
   updateMealEntry,
   updatePreset,
+  updateRecipe,
 } from "@macro-tracker/db";
-import type { FoodPreset } from "@macro-tracker/db";
+import type { FoodPreset, RecipeRecord } from "@macro-tracker/db";
 import { revalidatePath } from "next/cache";
 
 import { requireSessionUser } from "./auth";
@@ -214,6 +218,87 @@ export async function saveWeightGoalAction(
   try {
     await saveWeightGoal(sessionUser.userId, input.goalWeightKg);
     revalidatePath("/weight", "page");
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: toActionError(error) };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Recipes
+// ---------------------------------------------------------------------------
+
+type SaveRecipeInput = {
+  id?: string;
+  label: string;
+  portions: number;
+  ingredients: Array<{
+    label: string;
+    proteinG: number;
+    carbsG: number;
+    fatG: number;
+    caloriesKcal: number;
+  }>;
+};
+
+type SaveRecipeResult = ActionResult & { recipe?: RecipeRecord };
+
+export async function saveRecipeAction(
+  input: SaveRecipeInput,
+): Promise<SaveRecipeResult> {
+  const sessionUser = await requireSessionUser();
+
+  try {
+    const recipe = input.id
+      ? await updateRecipe(sessionUser.userId, input.id, input)
+      : await createRecipe(sessionUser.userId, input);
+    revalidatePath("/recipes", "page");
+    return { ok: true, recipe };
+  } catch (error) {
+    return { ok: false, error: toActionError(error) };
+  }
+}
+
+export async function deleteRecipeAction(
+  input: { id: string },
+): Promise<ActionResult> {
+  const sessionUser = await requireSessionUser();
+
+  try {
+    await deleteRecipe(sessionUser.userId, input.id);
+    revalidatePath("/recipes", "page");
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: toActionError(error) };
+  }
+}
+
+type LogRecipePortionInput = {
+  recipeId: string;
+  date: string;
+};
+
+export async function logRecipePortionAction(
+  input: LogRecipePortionInput,
+): Promise<ActionResult> {
+  const sessionUser = await requireSessionUser();
+
+  try {
+    const recipe = await getRecipeById(sessionUser.userId, input.recipeId);
+    if (!recipe) {
+      throw new Error("Recipe not found.");
+    }
+
+    await createMealEntry(sessionUser.userId, {
+      date: input.date,
+      label: `${recipe.label} (1 portion)`,
+      proteinG: recipe.perPortionMacros.proteinG,
+      carbsG: recipe.perPortionMacros.carbsG,
+      fatG: recipe.perPortionMacros.fatG,
+      caloriesKcal: recipe.perPortionMacros.caloriesKcal,
+    });
+
+    revalidatePath("/", "page");
     return { ok: true };
   } catch (error) {
     return { ok: false, error: toActionError(error) };

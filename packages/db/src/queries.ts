@@ -2,8 +2,8 @@ import { and, asc, desc, eq, gte, lte, max, sql } from "drizzle-orm";
 
 import { computeStreaks, getPeriodRanges } from "./dates";
 import { getDb, type DatabaseClient } from "./client";
-import { foodPresets, mealEntries, users, weightEntries } from "./schema";
-import { validateMealEntryInput, validateWeightEntryInput } from "./validators";
+import { foodPresets, mealEntries, recipeIngredients, recipes, users, weightEntries } from "./schema";
+import { validateMealEntryInput, validateRecipeInput, validateWeightEntryInput } from "./validators";
 import type {
   DailyOverview,
   DailySummary,
@@ -13,6 +13,9 @@ import type {
   MealEntryInput,
   MealEntryRecord,
   PeriodAverage,
+  RecipeIngredientRecord,
+  RecipeInput,
+  RecipeRecord,
   ShooProfile,
   StatsPageData,
   WeightEntryInput,
@@ -924,4 +927,260 @@ export async function getWeightPageData(
       trendDirection,
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Recipes
+// ---------------------------------------------------------------------------
+
+function buildRecipeRecord(
+  recipe: { id: string; userId: string; label: string; portions: number },
+  ingredientRows: Array<{
+    id: string;
+    recipeId: string;
+    sortOrder: number;
+    label: string;
+    proteinG: string | number;
+    carbsG: string | number;
+    fatG: string | number;
+    caloriesKcal: number;
+  }>,
+): RecipeRecord {
+  const ingredients: RecipeIngredientRecord[] = ingredientRows.map((row) => ({
+    id: row.id,
+    recipeId: row.recipeId,
+    sortOrder: row.sortOrder,
+    label: row.label,
+    proteinG: roundToSingleDecimal(toNumber(row.proteinG)),
+    carbsG: roundToSingleDecimal(toNumber(row.carbsG)),
+    fatG: roundToSingleDecimal(toNumber(row.fatG)),
+    caloriesKcal: toNumber(row.caloriesKcal),
+  }));
+
+  const totalMacros = ingredients.reduce(
+    (acc, ing) => ({
+      proteinG: roundToSingleDecimal(acc.proteinG + ing.proteinG),
+      carbsG: roundToSingleDecimal(acc.carbsG + ing.carbsG),
+      fatG: roundToSingleDecimal(acc.fatG + ing.fatG),
+      caloriesKcal: acc.caloriesKcal + ing.caloriesKcal,
+    }),
+    zeroMacros(),
+  );
+
+  const portions = Math.max(recipe.portions, 1);
+  const perPortionMacros: MacroNumbers = {
+    proteinG: roundToSingleDecimal(totalMacros.proteinG / portions),
+    carbsG: roundToSingleDecimal(totalMacros.carbsG / portions),
+    fatG: roundToSingleDecimal(totalMacros.fatG / portions),
+    caloriesKcal: Math.round(totalMacros.caloriesKcal / portions),
+  };
+
+  return {
+    id: recipe.id,
+    userId: recipe.userId,
+    label: recipe.label,
+    portions,
+    ingredients,
+    totalMacros,
+    perPortionMacros,
+  };
+}
+
+export async function getRecipes(
+  userId: string,
+  db?: DatabaseClient,
+): Promise<RecipeRecord[]> {
+  const database = await resolveDb(db);
+
+  const recipeRows = await database
+    .select({
+      id: recipes.id,
+      userId: recipes.userId,
+      label: recipes.label,
+      portions: recipes.portions,
+    })
+    .from(recipes)
+    .where(eq(recipes.userId, userId))
+    .orderBy(asc(recipes.label));
+
+  if (recipeRows.length === 0) return [];
+
+  const ingredientRows = await database
+    .select({
+      id: recipeIngredients.id,
+      recipeId: recipeIngredients.recipeId,
+      sortOrder: recipeIngredients.sortOrder,
+      label: recipeIngredients.label,
+      proteinG: recipeIngredients.proteinG,
+      carbsG: recipeIngredients.carbsG,
+      fatG: recipeIngredients.fatG,
+      caloriesKcal: recipeIngredients.caloriesKcal,
+    })
+    .from(recipeIngredients)
+    .orderBy(asc(recipeIngredients.sortOrder));
+
+  const ingredientsByRecipe = new Map<string, typeof ingredientRows>();
+  for (const row of ingredientRows) {
+    const existing = ingredientsByRecipe.get(row.recipeId) ?? [];
+    existing.push(row);
+    ingredientsByRecipe.set(row.recipeId, existing);
+  }
+
+  return recipeRows.map((recipe) =>
+    buildRecipeRecord(recipe, ingredientsByRecipe.get(recipe.id) ?? []),
+  );
+}
+
+export async function getRecipeById(
+  userId: string,
+  recipeId: string,
+  db?: DatabaseClient,
+): Promise<RecipeRecord | null> {
+  const database = await resolveDb(db);
+
+  const [recipe] = await database
+    .select({
+      id: recipes.id,
+      userId: recipes.userId,
+      label: recipes.label,
+      portions: recipes.portions,
+    })
+    .from(recipes)
+    .where(and(eq(recipes.id, recipeId), eq(recipes.userId, userId)))
+    .limit(1);
+
+  if (!recipe) return null;
+
+  const ingredientRows = await database
+    .select({
+      id: recipeIngredients.id,
+      recipeId: recipeIngredients.recipeId,
+      sortOrder: recipeIngredients.sortOrder,
+      label: recipeIngredients.label,
+      proteinG: recipeIngredients.proteinG,
+      carbsG: recipeIngredients.carbsG,
+      fatG: recipeIngredients.fatG,
+      caloriesKcal: recipeIngredients.caloriesKcal,
+    })
+    .from(recipeIngredients)
+    .where(eq(recipeIngredients.recipeId, recipeId))
+    .orderBy(asc(recipeIngredients.sortOrder));
+
+  return buildRecipeRecord(recipe, ingredientRows);
+}
+
+export async function createRecipe(
+  userId: string,
+  input: RecipeInput,
+  db?: DatabaseClient,
+): Promise<RecipeRecord> {
+  const database = await resolveDb(db);
+  const validated = validateRecipeInput(input);
+  const recipeId = crypto.randomUUID();
+
+  const [created] = await database
+    .insert(recipes)
+    .values({
+      id: recipeId,
+      userId,
+      label: validated.label,
+      portions: validated.portions,
+      updatedAt: new Date(),
+    })
+    .returning();
+
+  const ingredientRows = [];
+  for (let i = 0; i < validated.ingredients.length; i++) {
+    const ing = validated.ingredients[i]!;
+    const [row] = await database
+      .insert(recipeIngredients)
+      .values({
+        id: crypto.randomUUID(),
+        recipeId,
+        sortOrder: i,
+        label: ing.label,
+        proteinG: ing.proteinG.toFixed(1),
+        carbsG: ing.carbsG.toFixed(1),
+        fatG: ing.fatG.toFixed(1),
+        caloriesKcal: Math.round(ing.caloriesKcal),
+      })
+      .returning();
+    ingredientRows.push(row!);
+  }
+
+  return buildRecipeRecord(created!, ingredientRows);
+}
+
+export async function updateRecipe(
+  userId: string,
+  recipeId: string,
+  input: RecipeInput,
+  db?: DatabaseClient,
+): Promise<RecipeRecord> {
+  const database = await resolveDb(db);
+  const validated = validateRecipeInput(input);
+
+  // Verify ownership
+  const [existing] = await database
+    .select({ id: recipes.id })
+    .from(recipes)
+    .where(and(eq(recipes.id, recipeId), eq(recipes.userId, userId)))
+    .limit(1);
+
+  if (!existing) {
+    throw new Error("Recipe not found.");
+  }
+
+  // Update recipe row
+  await database
+    .update(recipes)
+    .set({
+      label: validated.label,
+      portions: validated.portions,
+      updatedAt: new Date(),
+    })
+    .where(eq(recipes.id, recipeId));
+
+  // Replace all ingredients
+  await database
+    .delete(recipeIngredients)
+    .where(eq(recipeIngredients.recipeId, recipeId));
+
+  const ingredientRows = [];
+  for (let i = 0; i < validated.ingredients.length; i++) {
+    const ing = validated.ingredients[i]!;
+    const [row] = await database
+      .insert(recipeIngredients)
+      .values({
+        id: crypto.randomUUID(),
+        recipeId,
+        sortOrder: i,
+        label: ing.label,
+        proteinG: ing.proteinG.toFixed(1),
+        carbsG: ing.carbsG.toFixed(1),
+        fatG: ing.fatG.toFixed(1),
+        caloriesKcal: Math.round(ing.caloriesKcal),
+      })
+      .returning();
+    ingredientRows.push(row!);
+  }
+
+  return buildRecipeRecord(
+    { id: recipeId, userId, label: validated.label, portions: validated.portions },
+    ingredientRows,
+  );
+}
+
+export async function deleteRecipe(
+  userId: string,
+  recipeId: string,
+  db?: DatabaseClient,
+): Promise<boolean> {
+  const database = await resolveDb(db);
+  const [deleted] = await database
+    .delete(recipes)
+    .where(and(eq(recipes.id, recipeId), eq(recipes.userId, userId)))
+    .returning();
+
+  return Boolean(deleted);
 }

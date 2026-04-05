@@ -94,6 +94,36 @@ export type WeightPageData = {
   };
 };
 
+export type RecipeIngredientInput = {
+  label: string;
+  proteinG: number;
+  carbsG: number;
+  fatG: number;
+  caloriesKcal: number;
+};
+
+export type RecipeIngredientRecord = RecipeIngredientInput & {
+  id: string;
+  recipeId: string;
+  sortOrder: number;
+};
+
+export type RecipeInput = {
+  label: string;
+  portions: number;
+  ingredients: RecipeIngredientInput[];
+};
+
+export type RecipeRecord = {
+  id: string;
+  userId: string;
+  label: string;
+  portions: number;
+  ingredients: RecipeIngredientRecord[];
+  totalMacros: MacroNumbers;
+  perPortionMacros: MacroNumbers;
+};
+
 export type StatsPageData = {
   allDailyTotals: Array<{
     date: string;

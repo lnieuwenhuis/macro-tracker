@@ -119,7 +119,54 @@ export const weightEntries = pgTable(
   ],
 );
 
+export const recipes = pgTable(
+  "recipes",
+  {
+    id: uuid("id").primaryKey().notNull(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    label: text("label").notNull(),
+    portions: integer("portions").notNull().default(1),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    index("recipes_user_idx").on(table.userId),
+  ],
+);
+
+export const recipeIngredients = pgTable(
+  "recipe_ingredients",
+  {
+    id: uuid("id").primaryKey().notNull(),
+    recipeId: uuid("recipe_id")
+      .notNull()
+      .references(() => recipes.id, { onDelete: "cascade" }),
+    sortOrder: integer("sort_order").notNull(),
+    label: text("label").notNull(),
+    proteinG: numeric("protein_g", { precision: 6, scale: 1 }).notNull(),
+    carbsG: numeric("carbs_g", { precision: 6, scale: 1 }).notNull(),
+    fatG: numeric("fat_g", { precision: 6, scale: 1 }).notNull(),
+    caloriesKcal: integer("calories_kcal").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    index("recipe_ingredients_recipe_idx").on(table.recipeId),
+  ],
+);
+
 export type FoodPresetRow = typeof foodPresets.$inferSelect;
 export type NewFoodPresetRow = typeof foodPresets.$inferInsert;
 export type WeightEntryRow = typeof weightEntries.$inferSelect;
 export type NewWeightEntryRow = typeof weightEntries.$inferInsert;
+export type RecipeRow = typeof recipes.$inferSelect;
+export type NewRecipeRow = typeof recipes.$inferInsert;
+export type RecipeIngredientRow = typeof recipeIngredients.$inferSelect;
+export type NewRecipeIngredientRow = typeof recipeIngredients.$inferInsert;

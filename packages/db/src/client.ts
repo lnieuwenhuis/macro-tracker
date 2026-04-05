@@ -224,6 +224,39 @@ async function bootstrapLocalSchema(db: PgliteDatabase<typeof schema>) {
       `CREATE INDEX IF NOT EXISTS "weight_entries_user_date_idx" ON "weight_entries" USING btree ("user_id","entry_date")`,
     ),
   );
+  await db.execute(sql.raw(`
+    CREATE TABLE IF NOT EXISTS "recipes" (
+      "id" uuid PRIMARY KEY NOT NULL,
+      "user_id" uuid NOT NULL REFERENCES "users"("id") ON DELETE cascade,
+      "label" text NOT NULL,
+      "portions" integer DEFAULT 1 NOT NULL,
+      "created_at" timestamp with time zone DEFAULT now() NOT NULL,
+      "updated_at" timestamp with time zone DEFAULT now() NOT NULL
+    )
+  `));
+  await db.execute(
+    sql.raw(
+      `CREATE INDEX IF NOT EXISTS "recipes_user_idx" ON "recipes" USING btree ("user_id")`,
+    ),
+  );
+  await db.execute(sql.raw(`
+    CREATE TABLE IF NOT EXISTS "recipe_ingredients" (
+      "id" uuid PRIMARY KEY NOT NULL,
+      "recipe_id" uuid NOT NULL REFERENCES "recipes"("id") ON DELETE cascade,
+      "sort_order" integer NOT NULL,
+      "label" text NOT NULL,
+      "protein_g" numeric(6, 1) NOT NULL,
+      "carbs_g" numeric(6, 1) NOT NULL,
+      "fat_g" numeric(6, 1) NOT NULL,
+      "calories_kcal" integer NOT NULL,
+      "created_at" timestamp with time zone DEFAULT now() NOT NULL
+    )
+  `));
+  await db.execute(
+    sql.raw(
+      `CREATE INDEX IF NOT EXISTS "recipe_ingredients_recipe_idx" ON "recipe_ingredients" USING btree ("recipe_id")`,
+    ),
+  );
 }
 
 async function ensureDatabaseSchema(runtime: DatabaseRuntime) {
