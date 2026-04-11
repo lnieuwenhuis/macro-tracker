@@ -24,6 +24,8 @@ type MealCardProps = {
   ) => void;
   onSave: (clientId: string) => void;
   onDelete: (clientId: string) => void;
+  onDuplicate: (clientId: string) => void;
+  onCopyToToday?: (clientId: string) => void;
 };
 
 function NumericInput({
@@ -65,7 +67,7 @@ function NumericInput({
   );
 }
 
-export function MealCard({ draft, busy, error, onChange, onSave, onDelete }: MealCardProps) {
+export function MealCard({ draft, busy, error, onChange, onSave, onDelete, onDuplicate, onCopyToToday }: MealCardProps) {
   const isSaved = Boolean(draft.id);
   const [isExpanded, setIsExpanded] = useState(!isSaved);
 
@@ -121,6 +123,66 @@ export function MealCard({ draft, busy, error, onChange, onSave, onDelete }: Mea
             ) : null}
           </div>
         )}
+
+        {/* Copy to today button — only shown when onCopyToToday is provided and entry is saved */}
+        {onCopyToToday && isSaved && (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={(e) => {
+              e.stopPropagation();
+              onCopyToToday(draft.clientId);
+            }}
+            className="shrink-0 rounded-lg p-1 text-[var(--color-muted)] transition hover:text-[var(--color-accent)] disabled:opacity-50"
+            aria-label={`Copy ${heading} to today`}
+            title="Copy to today"
+          >
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <rect x="2" y="3" width="12" height="10" rx="1.5" />
+              <line x1="2" y1="7" x2="14" y2="7" />
+              <line x1="5" y1="1" x2="5" y2="5" />
+              <line x1="11" y1="1" x2="11" y2="5" />
+              <line x1="8" y1="13" x2="8" y2="9" />
+              <polyline points="6,11 8,9 10,11" />
+            </svg>
+          </button>
+        )}
+
+        {/* Duplicate button */}
+        <button
+          type="button"
+          disabled={busy}
+          onClick={(e) => {
+            e.stopPropagation();
+            onDuplicate(draft.clientId);
+          }}
+          className="shrink-0 rounded-lg p-1 text-[var(--color-muted)] transition hover:text-[var(--color-ink)] disabled:opacity-50"
+          aria-label={`Duplicate ${heading}`}
+          title="Duplicate"
+        >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.6"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <rect x="5" y="5" width="8" height="8" rx="1.5" />
+            <path d="M3 11V4a1 1 0 0 1 1-1h7" />
+          </svg>
+        </button>
 
         {/* Expand / collapse chevron */}
         <button

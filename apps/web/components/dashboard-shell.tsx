@@ -2,7 +2,7 @@
 
 import type { DailySummary, FoodPreset, MacroGoals, MealEntryRecord, RecipeRecord } from "@macro-tracker/db";
 import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
+import { useMemo, useState, useTransition } from "react";
 
 import { deletePresetAction, deleteMealEntryAction, savePresetAction, saveMealEntryAction, updatePresetAction } from "@/lib/actions";
 import type { OpenFoodFactsProduct } from "@/lib/openfoodfacts";
@@ -293,6 +293,63 @@ export function DashboardShell({
     }
   }
 
+  const todayStr = useMemo(() => {
+    const now = new Date();
+    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  }, []);
+  const isViewingToday = selectedDate === todayStr;
+
+  function handleDuplicate(clientId: string) {
+    setDrafts((currentDrafts) => {
+      const draft = currentDrafts.find((d) => d.clientId === clientId);
+      if (!draft) return currentDrafts;
+
+      const maxSortOrder = currentDrafts.reduce(
+        (max, d) => Math.max(max, d.sortOrder),
+        -1,
+      );
+
+      return [
+        ...currentDrafts,
+        {
+          clientId: `draft-${crypto.randomUUID()}`,
+          label: draft.label,
+          proteinG: draft.proteinG,
+          carbsG: draft.carbsG,
+          fatG: draft.fatG,
+          caloriesKcal: draft.caloriesKcal,
+          sortOrder: maxSortOrder + 1,
+        },
+      ];
+    });
+  }
+
+  function handleCopyToToday(clientId: string) {
+    const draft = drafts.find((d) => d.clientId === clientId);
+    if (!draft) return;
+
+    setActiveMutation(clientId);
+    beginMutation(async () => {
+      const result = await saveMealEntryAction({
+        date: todayStr,
+        label: draft.label,
+        proteinG: toNumber(draft.proteinG),
+        carbsG: toNumber(draft.carbsG),
+        fatG: toNumber(draft.fatG),
+        caloriesKcal: Math.round(toNumber(draft.caloriesKcal)),
+      });
+
+      if (!result.ok) {
+        setErrors((currentErrors) => ({
+          ...currentErrors,
+          [clientId]: result.error ?? "Unable to copy entry to today.",
+        }));
+      }
+
+      setActiveMutation(null);
+    });
+  }
+
   const dailyTotals = dailySummary.totals;
 
   return (
@@ -378,6 +435,8 @@ export function DashboardShell({
                   onChange={updateDraft}
                   onSave={handleSave}
                   onDelete={handleDelete}
+                  onDuplicate={handleDuplicate}
+                  onCopyToToday={isViewingToday ? undefined : handleCopyToToday}
                 />
               );
             })}

@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, lte, max, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, lte, max, sql } from "drizzle-orm";
 
 import { computeStreaks, getPeriodRanges } from "./dates";
 import { getDb, type DatabaseClient } from "./client";
@@ -272,30 +272,12 @@ export async function getPeriodAverages(
   const ranges = getPeriodRanges(selectedDate);
   const database = await resolveDb(db);
 
-  const weekRows = await getDailyTotalsForRange(
-    userId,
-    ranges.week.startDate,
-    ranges.week.endDate,
-    database,
-  );
-  const monthRows = await getDailyTotalsForRange(
-    userId,
-    ranges.month.startDate,
-    ranges.month.endDate,
-    database,
-  );
-  const rolling7Rows = await getDailyTotalsForRange(
-    userId,
-    ranges.rolling7.startDate,
-    ranges.rolling7.endDate,
-    database,
-  );
-  const rolling30Rows = await getDailyTotalsForRange(
-    userId,
-    ranges.rolling30.startDate,
-    ranges.rolling30.endDate,
-    database,
-  );
+  const [weekRows, monthRows, rolling7Rows, rolling30Rows] = await Promise.all([
+    getDailyTotalsForRange(userId, ranges.week.startDate, ranges.week.endDate, database),
+    getDailyTotalsForRange(userId, ranges.month.startDate, ranges.month.endDate, database),
+    getDailyTotalsForRange(userId, ranges.rolling7.startDate, ranges.rolling7.endDate, database),
+    getDailyTotalsForRange(userId, ranges.rolling30.startDate, ranges.rolling30.endDate, database),
+  ]);
 
   return [
     buildAverage("week", ranges.week.startDate, ranges.week.endDate, weekRows),
@@ -503,7 +485,7 @@ export async function saveUserGoals(
     .where(eq(users.id, userId));
 }
 
-export async function listRecentMealEntries(userId: string, db?: DatabaseClient) {
+export async function listRecentMealEntries(userId: string, limit = 200, db?: DatabaseClient) {
   const database = await resolveDb(db);
 
   return database
@@ -520,7 +502,8 @@ export async function listRecentMealEntries(userId: string, db?: DatabaseClient)
     })
     .from(mealEntries)
     .where(eq(mealEntries.userId, userId))
-    .orderBy(desc(mealEntries.entryDate), mealEntries.sortOrder);
+    .orderBy(desc(mealEntries.entryDate), mealEntries.sortOrder)
+    .limit(limit);
 }
 
 export async function getPresets(userId: string, db?: DatabaseClient): Promise<FoodPreset[]> {
@@ -1005,6 +988,7 @@ export async function getRecipes(
 
   if (recipeRows.length === 0) return [];
 
+  const recipeIds = recipeRows.map((r) => r.id);
   const ingredientRows = await database
     .select({
       id: recipeIngredients.id,
@@ -1017,6 +1001,7 @@ export async function getRecipes(
       caloriesKcal: recipeIngredients.caloriesKcal,
     })
     .from(recipeIngredients)
+    .where(inArray(recipeIngredients.recipeId, recipeIds))
     .orderBy(asc(recipeIngredients.sortOrder));
 
   const ingredientsByRecipe = new Map<string, typeof ingredientRows>();

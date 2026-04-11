@@ -29,9 +29,19 @@ export type OpenFoodFactsResult =
  */
 export async function lookupBarcode(
   barcode: string,
+  signal?: AbortSignal,
 ): Promise<OpenFoodFactsResult> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 10_000);
+
+  // Respect an externally provided signal as well
+  signal?.addEventListener("abort", () => controller.abort(), { once: true });
+
   try {
-    const response = await fetch(`/api/barcode/${encodeURIComponent(barcode)}`);
+    const response = await fetch(`/api/barcode/${encodeURIComponent(barcode)}`, {
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       return { found: false, barcode };
@@ -59,6 +69,7 @@ export async function lookupBarcode(
       },
     };
   } catch {
+    clearTimeout(timeoutId);
     return { found: false, barcode };
   }
 }

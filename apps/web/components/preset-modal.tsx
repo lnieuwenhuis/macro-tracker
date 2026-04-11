@@ -1,7 +1,7 @@
 "use client";
 
 import type { FoodPreset } from "@macro-tracker/db";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type PresetMutationState =
   | { type: "save" }
@@ -108,6 +108,9 @@ export function PresetModal({
     onClose();
   }
 
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
   useEffect(() => {
     function handleKey(e: KeyboardEvent) {
       if (mutation) {
@@ -118,13 +121,14 @@ export function PresetModal({
         if (editingId) {
           setEditingId(null);
         } else {
-          onClose();
+          onCloseRef.current();
         }
       }
     }
     document.addEventListener("keydown", handleKey);
     return () => document.removeEventListener("keydown", handleKey);
-  }, [editingId, mutation, onClose]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- onClose stored in ref; stable deps only
+  }, [editingId, mutation]);
 
   async function handleSave() {
     if (!draft.label.trim()) return;

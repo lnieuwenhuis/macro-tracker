@@ -1,7 +1,7 @@
 "use client";
 
 import type { RecipeRecord } from "@macro-tracker/db";
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 
 type RecipePickerModalProps = {
   recipes: RecipeRecord[];
@@ -14,13 +14,17 @@ export function RecipePickerModal({
   onClose,
   onSelect,
 }: RecipePickerModalProps) {
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
   useEffect(() => {
     function handleKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onClose();
+      if (e.key === "Escape") onCloseRef.current();
     }
     document.addEventListener("keydown", handleKey);
     return () => document.removeEventListener("keydown", handleKey);
-  }, [onClose]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- onClose stored in ref; effect runs once
+  }, []);
 
   return (
     <>
