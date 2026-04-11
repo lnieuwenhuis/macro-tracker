@@ -14,6 +14,7 @@ type IngredientCardProps = {
   disabled?: boolean;
   onChange: (clientId: string, draft: IngredientDraft) => void;
   onDelete: (clientId: string) => void;
+  onDuplicate: (clientId: string) => void;
 };
 
 function NumericInput({
@@ -60,6 +61,7 @@ export function IngredientCard({
   disabled,
   onChange,
   onDelete,
+  onDuplicate,
 }: IngredientCardProps) {
   function update(field: keyof IngredientDraft, value: string) {
     onChange(draft.clientId, { ...draft, [field]: value });
@@ -89,6 +91,28 @@ export function IngredientCard({
               className="w-full rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-3 py-2 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-60"
             />
           </label>
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={() => onDuplicate(draft.clientId)}
+            className="mt-5 shrink-0 rounded-lg p-1.5 text-[var(--color-muted)] transition hover:text-[var(--color-ink)] disabled:opacity-50"
+            aria-label={`Duplicate ${draft.label || "ingredient"}`}
+            title="Duplicate"
+          >
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <rect x="5" y="5" width="8" height="8" rx="1.5" />
+              <path d="M3 11V4a1 1 0 0 1 1-1h7" />
+            </svg>
+          </button>
           <button
             type="button"
             disabled={disabled}

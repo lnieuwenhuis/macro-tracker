@@ -4,7 +4,7 @@ import type { RecipeRecord } from "@macro-tracker/db";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 
-import { deleteRecipeAction, logRecipePortionAction } from "@/lib/actions";
+import { deleteRecipeAction, logRecipePortionAction, saveRecipeAction } from "@/lib/actions";
 
 type RecipeCardProps = {
   recipe: RecipeRecord;
@@ -26,6 +26,28 @@ export function RecipeCard({ recipe, selectedDate }: RecipeCardProps) {
       });
       if (!result.ok) {
         setError(result.error ?? "Unable to log portion.");
+        return;
+      }
+      router.refresh();
+    });
+  }
+
+  function handleDuplicate() {
+    setError(null);
+    startTransition(async () => {
+      const result = await saveRecipeAction({
+        label: `${recipe.label} (copy)`,
+        portions: recipe.portions,
+        ingredients: recipe.ingredients.map((ing) => ({
+          label: ing.label,
+          proteinG: ing.proteinG,
+          carbsG: ing.carbsG,
+          fatG: ing.fatG,
+          caloriesKcal: ing.caloriesKcal,
+        })),
+      });
+      if (!result.ok) {
+        setError(result.error ?? "Unable to duplicate recipe.");
         return;
       }
       router.refresh();
@@ -185,7 +207,20 @@ export function RecipeCard({ recipe, selectedDate }: RecipeCardProps) {
               onClick={handleLogPortion}
               className="flex-1 rounded-xl bg-[var(--color-accent)] px-4 py-2.5 text-sm font-semibold text-white transition hover:-translate-y-0.5 disabled:cursor-wait disabled:opacity-70"
             >
-              {isPending ? "Logging..." : "Log 1 portion"}
+              {isPending ? "Saving..." : "Log 1 portion"}
+            </button>
+            <button
+              type="button"
+              disabled={isPending}
+              onClick={handleDuplicate}
+              className="rounded-xl border border-[var(--color-border-strong)] px-3 py-2.5 text-sm font-semibold text-[var(--color-muted)] transition hover:text-[var(--color-ink)] disabled:cursor-wait disabled:opacity-70"
+              aria-label={`Duplicate ${recipe.label}`}
+              title="Duplicate recipe"
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                <rect x="5" y="5" width="8" height="8" rx="1.5" />
+                <path d="M3 11V4a1 1 0 0 1 1-1h7" />
+              </svg>
             </button>
             <button
               type="button"

@@ -121,6 +121,21 @@ export function RecipeBuilderShell({
     setIngredients((prev) => prev.filter((ing) => ing.clientId !== clientId));
   }
 
+  function duplicateIngredient(clientId: string) {
+    setIngredients((prev) => {
+      const source = prev.find((ing) => ing.clientId === clientId);
+      if (!source) return prev;
+      const index = prev.findIndex((ing) => ing.clientId === clientId);
+      const copy: IngredientDraft = {
+        ...source,
+        clientId: `ing-${crypto.randomUUID()}`,
+      };
+      const next = [...prev];
+      next.splice(index + 1, 0, copy);
+      return next;
+    });
+  }
+
   function handleSave() {
     setError(null);
     startTransition(async () => {
@@ -298,6 +313,7 @@ export function RecipeBuilderShell({
                 disabled={isPending}
                 onChange={updateIngredient}
                 onDelete={deleteIngredient}
+                onDuplicate={duplicateIngredient}
               />
             ))}
           </div>
