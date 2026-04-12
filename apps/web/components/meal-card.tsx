@@ -80,9 +80,9 @@ export function MealCard({ draft, busy, error, onChange, onSave, onDelete, onDup
 
   return (
     <article className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-card-subtle)] shadow-[0_4px_16px_rgba(74,45,28,0.05)]">
-      {/* Header row — always visible */}
+      {/* Header — always visible */}
       <div
-        className={`flex items-center gap-2 px-4 py-3 ${!isExpanded ? "cursor-pointer" : ""}`}
+        className={`px-4 py-3 ${!isExpanded ? "cursor-pointer" : ""}`}
         onClick={!isExpanded ? () => setIsExpanded(true) : undefined}
         role={!isExpanded ? "button" : undefined}
         tabIndex={!isExpanded ? 0 : undefined}
@@ -94,148 +94,191 @@ export function MealCard({ draft, busy, error, onChange, onSave, onDelete, onDup
             : undefined
         }
       >
-        <h3 className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--color-ink)]">
-          {heading}
-        </h3>
+        {/* Row 1: name + (when expanded) action buttons */}
+        <div className="flex items-center gap-2">
+          <h3 className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--color-ink)]">
+            {heading}
+          </h3>
 
-        {/* Macro chips — only when collapsed */}
-        {!isExpanded && hasValues && (
-          <div className="flex shrink-0 flex-wrap items-center gap-1">
-            {draft.proteinG ? (
-              <span className="rounded-md bg-[color-mix(in_srgb,var(--color-bar-protein)_12%,transparent)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-bar-protein)]">
-                P {draft.proteinG}g
-              </span>
-            ) : null}
-            {draft.carbsG ? (
-              <span className="rounded-md bg-[color-mix(in_srgb,var(--color-bar-carbs)_12%,transparent)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-bar-carbs)]">
-                C {draft.carbsG}g
-              </span>
-            ) : null}
-            {draft.fatG ? (
-              <span className="rounded-md bg-[color-mix(in_srgb,var(--color-bar-fat)_12%,transparent)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-bar-fat)]">
-                F {draft.fatG}g
-              </span>
-            ) : null}
-            {draft.caloriesKcal ? (
-              <span className="rounded-md bg-[var(--color-shell-panel)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-muted-strong)]">
-                {draft.caloriesKcal} kcal
-              </span>
-            ) : null}
+          {/* When expanded: buttons sit next to the name as before */}
+          {isExpanded && (
+            <>
+              {onCopyToToday && isSaved && (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onCopyToToday(draft.clientId);
+                  }}
+                  className="shrink-0 rounded-lg p-1 text-[var(--color-muted)] transition hover:text-[var(--color-accent)] disabled:opacity-50"
+                  aria-label={`Copy ${heading} to today`}
+                  title="Copy to today"
+                >
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="2" y="3" width="12" height="10" rx="1.5" />
+                    <line x1="2" y1="7" x2="14" y2="7" />
+                    <line x1="5" y1="1" x2="5" y2="5" />
+                    <line x1="11" y1="1" x2="11" y2="5" />
+                    <line x1="8" y1="13" x2="8" y2="9" />
+                    <polyline points="6,11 8,9 10,11" />
+                  </svg>
+                </button>
+              )}
+
+              <button
+                type="button"
+                disabled={busy}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDuplicate(draft.clientId);
+                }}
+                className="shrink-0 rounded-lg p-1 text-[var(--color-muted)] transition hover:text-[var(--color-ink)] disabled:opacity-50"
+                aria-label={`Duplicate ${heading}`}
+                title="Duplicate"
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="5" y="5" width="8" height="8" rx="1.5" />
+                  <path d="M3 11V4a1 1 0 0 1 1-1h7" />
+                </svg>
+              </button>
+
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsExpanded(false);
+                }}
+                className="shrink-0 rounded-lg p-1 text-[var(--color-muted)] transition hover:text-[var(--color-ink)]"
+                aria-label="Collapse"
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="4,10 8,6 12,10" />
+                </svg>
+              </button>
+
+              <button
+                type="button"
+                disabled={busy}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDelete(draft.clientId);
+                }}
+                className="shrink-0 rounded-lg p-1 text-[var(--color-muted)] transition hover:text-[var(--color-danger)] disabled:opacity-50"
+                aria-label={`Delete ${heading}`}
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+                  <line x1="4" y1="4" x2="12" y2="12" />
+                  <line x1="12" y1="4" x2="4" y2="12" />
+                </svg>
+              </button>
+            </>
+          )}
+        </div>
+
+        {/* Row 2 (collapsed only): macro chips + action buttons */}
+        {!isExpanded && (
+          <div className="mt-1.5 flex items-center gap-1">
+            {/* Macro chips */}
+            {hasValues && (
+              <div className="flex flex-1 flex-wrap items-center gap-1">
+                {draft.proteinG ? (
+                  <span className="rounded-md bg-[color-mix(in_srgb,var(--color-bar-protein)_12%,transparent)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-bar-protein)]">
+                    P {draft.proteinG}g
+                  </span>
+                ) : null}
+                {draft.carbsG ? (
+                  <span className="rounded-md bg-[color-mix(in_srgb,var(--color-bar-carbs)_12%,transparent)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-bar-carbs)]">
+                    C {draft.carbsG}g
+                  </span>
+                ) : null}
+                {draft.fatG ? (
+                  <span className="rounded-md bg-[color-mix(in_srgb,var(--color-bar-fat)_12%,transparent)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-bar-fat)]">
+                    F {draft.fatG}g
+                  </span>
+                ) : null}
+                {draft.caloriesKcal ? (
+                  <span className="rounded-md bg-[var(--color-shell-panel)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-muted-strong)]">
+                    {draft.caloriesKcal} kcal
+                  </span>
+                ) : null}
+              </div>
+            )}
+
+            {/* Buttons pushed to the right */}
+            <div className="ml-auto flex items-center gap-0.5">
+              {onCopyToToday && isSaved && (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onCopyToToday(draft.clientId);
+                  }}
+                  className="shrink-0 rounded-lg p-1 text-[var(--color-muted)] transition hover:text-[var(--color-accent)] disabled:opacity-50"
+                  aria-label={`Copy ${heading} to today`}
+                  title="Copy to today"
+                >
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                    <rect x="2" y="3" width="12" height="10" rx="1.5" />
+                    <line x1="2" y1="7" x2="14" y2="7" />
+                    <line x1="5" y1="1" x2="5" y2="5" />
+                    <line x1="11" y1="1" x2="11" y2="5" />
+                    <line x1="8" y1="13" x2="8" y2="9" />
+                    <polyline points="6,11 8,9 10,11" />
+                  </svg>
+                </button>
+              )}
+
+              <button
+                type="button"
+                disabled={busy}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDuplicate(draft.clientId);
+                }}
+                className="shrink-0 rounded-lg p-1 text-[var(--color-muted)] transition hover:text-[var(--color-ink)] disabled:opacity-50"
+                aria-label={`Duplicate ${heading}`}
+                title="Duplicate"
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="5" y="5" width="8" height="8" rx="1.5" />
+                  <path d="M3 11V4a1 1 0 0 1 1-1h7" />
+                </svg>
+              </button>
+
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setIsExpanded(true);
+                }}
+                className="shrink-0 rounded-lg p-1 text-[var(--color-muted)] transition hover:text-[var(--color-ink)]"
+                aria-label="Expand"
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="4,6 8,10 12,6" />
+                </svg>
+              </button>
+
+              <button
+                type="button"
+                disabled={busy}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onDelete(draft.clientId);
+                }}
+                className="shrink-0 rounded-lg p-1 text-[var(--color-muted)] transition hover:text-[var(--color-danger)] disabled:opacity-50"
+                aria-label={`Delete ${heading}`}
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+                  <line x1="4" y1="4" x2="12" y2="12" />
+                  <line x1="12" y1="4" x2="4" y2="12" />
+                </svg>
+              </button>
+            </div>
           </div>
         )}
-
-        {/* Copy to today button — only shown when onCopyToToday is provided and entry is saved */}
-        {onCopyToToday && isSaved && (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={(e) => {
-              e.stopPropagation();
-              onCopyToToday(draft.clientId);
-            }}
-            className="shrink-0 rounded-lg p-1 text-[var(--color-muted)] transition hover:text-[var(--color-accent)] disabled:opacity-50"
-            aria-label={`Copy ${heading} to today`}
-            title="Copy to today"
-          >
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 16 16"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.6"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <rect x="2" y="3" width="12" height="10" rx="1.5" />
-              <line x1="2" y1="7" x2="14" y2="7" />
-              <line x1="5" y1="1" x2="5" y2="5" />
-              <line x1="11" y1="1" x2="11" y2="5" />
-              <line x1="8" y1="13" x2="8" y2="9" />
-              <polyline points="6,11 8,9 10,11" />
-            </svg>
-          </button>
-        )}
-
-        {/* Duplicate button */}
-        <button
-          type="button"
-          disabled={busy}
-          onClick={(e) => {
-            e.stopPropagation();
-            onDuplicate(draft.clientId);
-          }}
-          className="shrink-0 rounded-lg p-1 text-[var(--color-muted)] transition hover:text-[var(--color-ink)] disabled:opacity-50"
-          aria-label={`Duplicate ${heading}`}
-          title="Duplicate"
-        >
-          <svg
-            width="16"
-            height="16"
-            viewBox="0 0 16 16"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.6"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <rect x="5" y="5" width="8" height="8" rx="1.5" />
-            <path d="M3 11V4a1 1 0 0 1 1-1h7" />
-          </svg>
-        </button>
-
-        {/* Expand / collapse chevron */}
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            setIsExpanded(!isExpanded);
-          }}
-          className="shrink-0 rounded-lg p-1 text-[var(--color-muted)] transition hover:text-[var(--color-ink)]"
-          aria-label={isExpanded ? "Collapse" : "Expand"}
-        >
-          <svg
-            width="16"
-            height="16"
-            viewBox="0 0 16 16"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            {isExpanded ? (
-              <polyline points="4,10 8,6 12,10" />
-            ) : (
-              <polyline points="4,6 8,10 12,6" />
-            )}
-          </svg>
-        </button>
-
-        {/* Delete button */}
-        <button
-          type="button"
-          disabled={busy}
-          onClick={(e) => {
-            e.stopPropagation();
-            onDelete(draft.clientId);
-          }}
-          className="shrink-0 rounded-lg p-1 text-[var(--color-muted)] transition hover:text-[var(--color-danger)] disabled:opacity-50"
-          aria-label={`Delete ${heading}`}
-        >
-          <svg
-            width="16"
-            height="16"
-            viewBox="0 0 16 16"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.6"
-            strokeLinecap="round"
-          >
-            <line x1="4" y1="4" x2="12" y2="12" />
-            <line x1="12" y1="4" x2="4" y2="12" />
-          </svg>
-        </button>
       </div>
 
       {/* Expanded body */}

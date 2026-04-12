@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, inArray, lte, max, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, ilike, inArray, lte, max, sql } from "drizzle-orm";
 
 import { computeStreaks, getPeriodRanges } from "./dates";
 import { getDb, type DatabaseClient } from "./client";
@@ -504,6 +504,39 @@ export async function listRecentMealEntries(userId: string, limit = 200, db?: Da
     .where(eq(mealEntries.userId, userId))
     .orderBy(desc(mealEntries.entryDate), mealEntries.sortOrder)
     .limit(limit);
+}
+
+export async function searchMealEntries(
+  userId: string,
+  query: string,
+  db?: DatabaseClient,
+): Promise<MealEntryRecord[]> {
+  if (!query.trim()) return [];
+
+  const database = await resolveDb(db);
+  const rows = await database
+    .select({
+      id: mealEntries.id,
+      userId: mealEntries.userId,
+      date: mealEntries.entryDate,
+      label: mealEntries.label,
+      sortOrder: mealEntries.sortOrder,
+      proteinG: mealEntries.proteinG,
+      carbsG: mealEntries.carbsG,
+      fatG: mealEntries.fatG,
+      caloriesKcal: mealEntries.caloriesKcal,
+    })
+    .from(mealEntries)
+    .where(
+      and(
+        eq(mealEntries.userId, userId),
+        ilike(mealEntries.label, `%${query}%`),
+      ),
+    )
+    .orderBy(desc(mealEntries.entryDate), asc(mealEntries.sortOrder))
+    .limit(50);
+
+  return rows.map(mapMealRow);
 }
 
 export async function getPresets(userId: string, db?: DatabaseClient): Promise<FoodPreset[]> {
@@ -1168,4 +1201,77 @@ export async function deleteRecipe(
     .returning();
 
   return Boolean(deleted);
+}
+
+// ---------------------------------------------------------------------------
+// Leaderboard / personal records
+// ---------------------------------------------------------------------------
+
+export type LeaderboardStats = {
+  currentStreak: number;
+  longestStreak: number;
+  totalDaysTracked: number;
+  bestCalorieDay: { date: string; caloriesKcal: number } | null;
+  bestProteinDay: { date: string; proteinG: number } | null;
+  bestCarbsDay: { date: string; carbsG: number } | null;
+  mostActiveDay: { date: string; entryCount: number } | null;
+};
+
+export async function getLeaderboardStats(
+  userId: string,
+  today: string,
+  db?: DatabaseClient,
+): Promise<LeaderboardStats> {
+  const database = await resolveDb(db);
+
+  const rows = await database
+    .select({
+      entryDate: mealEntries.entryDate,
+      proteinG: sql<string>`coalesce(sum(${mealEntries.proteinG}), 0)`,
+      carbsG: sql<string>`coalesce(sum(${mealEntries.carbsG}), 0)`,
+      caloriesKcal: sql<string>`coalesce(sum(${mealEntries.caloriesKcal}), 0)`,
+      entryCount: sql<string>`count(${mealEntries.id})`,
+    })
+    .from(mealEntries)
+    .where(eq(mealEntries.userId, userId))
+    .groupBy(mealEntries.entryDate)
+    .orderBy(asc(mealEntries.entryDate));
+
+  const sortedDates = rows.map((r) => r.entryDate);
+  const { currentStreak, longestStreak } = computeStreaks(sortedDates, today);
+
+  let bestCalorieDay: LeaderboardStats["bestCalorieDay"] = null;
+  let bestProteinDay: LeaderboardStats["bestProteinDay"] = null;
+  let bestCarbsDay: LeaderboardStats["bestCarbsDay"] = null;
+  let mostActiveDay: LeaderboardStats["mostActiveDay"] = null;
+
+  for (const row of rows) {
+    const cals = Math.round(toNumber(row.caloriesKcal));
+    const protein = roundToSingleDecimal(toNumber(row.proteinG));
+    const carbs = roundToSingleDecimal(toNumber(row.carbsG));
+    const count = toNumber(row.entryCount);
+
+    if (!bestCalorieDay || cals > bestCalorieDay.caloriesKcal) {
+      bestCalorieDay = { date: row.entryDate, caloriesKcal: cals };
+    }
+    if (!bestProteinDay || protein > bestProteinDay.proteinG) {
+      bestProteinDay = { date: row.entryDate, proteinG: protein };
+    }
+    if (!bestCarbsDay || carbs > bestCarbsDay.carbsG) {
+      bestCarbsDay = { date: row.entryDate, carbsG: carbs };
+    }
+    if (!mostActiveDay || count > mostActiveDay.entryCount) {
+      mostActiveDay = { date: row.entryDate, entryCount: count };
+    }
+  }
+
+  return {
+    currentStreak,
+    longestStreak,
+    totalDaysTracked: rows.length,
+    bestCalorieDay,
+    bestProteinDay,
+    bestCarbsDay,
+    mostActiveDay,
+  };
 }

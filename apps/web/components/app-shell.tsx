@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { type ReactNode, useEffect, useRef, useSyncExternalStore, useTransition } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useSyncExternalStore, useTransition } from "react";
 
 import {
   formatSelectedDate,
@@ -45,6 +45,8 @@ export function AppShell({
     () => true,
   );
   const dateInputRef = useRef<HTMLInputElement>(null);
+  const todayStr = useMemo(() => getLocalDateString(), []);
+  const isToday = selectedDate === todayStr;
   const basePath =
     activeTab === "summary" ? "/summary"
     : activeTab === "recipes" ? "/recipes"
@@ -157,6 +159,26 @@ export function AppShell({
               </svg>
             </Link>
           </div>
+
+          {/* Jump to today — only shown when not on today */}
+          {!isToday && (
+            <div className="mt-2 flex justify-center">
+              <button
+                type="button"
+                onClick={() => navigateToDate(todayStr)}
+                disabled={isPending}
+                className="inline-flex items-center gap-1.5 rounded-full bg-[var(--color-accent)]/10 px-3 py-1 text-xs font-semibold text-[var(--color-accent)] transition hover:bg-[var(--color-accent)]/20 disabled:opacity-50"
+              >
+                <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="1" y="2" width="10" height="9" rx="1.5" />
+                  <line x1="1" y1="5" x2="11" y2="5" />
+                  <line x1="4" y1="1" x2="4" y2="3" />
+                  <line x1="8" y1="1" x2="8" y2="3" />
+                </svg>
+                Today
+              </button>
+            </div>
+          )}
         </header>
 
         <div className="flex-1 px-4 pb-[calc(1.25rem+env(safe-area-inset-bottom))] sm:px-6">

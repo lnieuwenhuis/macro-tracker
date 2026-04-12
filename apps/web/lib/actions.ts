@@ -9,14 +9,16 @@ import {
   deletePreset,
   deleteRecipe,
   deleteWeightEntry,
+  getLeaderboardStats,
   getRecipeById,
   saveUserGoals,
   saveWeightGoal,
+  searchMealEntries,
   updateMealEntry,
   updatePreset,
   updateRecipe,
 } from "@macro-tracker/db";
-import type { FoodPreset, RecipeRecord } from "@macro-tracker/db";
+import type { FoodPreset, LeaderboardStats, MealEntryRecord, RecipeRecord } from "@macro-tracker/db";
 import { revalidatePath } from "next/cache";
 
 import { requireSessionUser } from "./auth";
@@ -273,6 +275,21 @@ export async function deleteRecipeAction(
   }
 }
 
+type SearchMealEntriesResult = ActionResult & { results?: MealEntryRecord[] };
+
+export async function searchMealEntriesAction(
+  input: { query: string },
+): Promise<SearchMealEntriesResult> {
+  const sessionUser = await requireSessionUser();
+
+  try {
+    const results = await searchMealEntries(sessionUser.userId, input.query);
+    return { ok: true, results };
+  } catch (error) {
+    return { ok: false, error: toActionError(error) };
+  }
+}
+
 type LogRecipePortionInput = {
   recipeId: string;
   date: string;
@@ -300,6 +317,25 @@ export async function logRecipePortionAction(
 
     revalidatePath("/", "page");
     return { ok: true };
+  } catch (error) {
+    return { ok: false, error: toActionError(error) };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Leaderboard / personal records
+// ---------------------------------------------------------------------------
+
+type FetchLeaderboardResult =
+  | { ok: true; stats: LeaderboardStats }
+  | { ok: false; error: string };
+
+export async function fetchLeaderboardStatsAction(): Promise<FetchLeaderboardResult> {
+  const sessionUser = await requireSessionUser();
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const stats = await getLeaderboardStats(sessionUser.userId, today);
+    return { ok: true, stats };
   } catch (error) {
     return { ok: false, error: toActionError(error) };
   }

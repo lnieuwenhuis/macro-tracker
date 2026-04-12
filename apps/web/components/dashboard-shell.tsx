@@ -11,6 +11,7 @@ import { AddFoodButton } from "./add-food-button";
 import { AppShell } from "./app-shell";
 import { BarcodeResult } from "./barcode-result";
 import { BarcodeScanner } from "./barcode-scanner";
+import { FoodSearchModal } from "./food-search-modal";
 import { MacroBarGroup } from "./macro-bar";
 import { MealCard, type MealDraft } from "./meal-card";
 import { PresetModal } from "./preset-modal";
@@ -99,6 +100,9 @@ export function DashboardShell({
 
   // Recipe picker state
   const [showRecipePickerModal, setShowRecipePickerModal] = useState(false);
+
+  // Food search state
+  const [showSearchModal, setShowSearchModal] = useState(false);
 
   // Barcode scanner state
   const [showScanner, setShowScanner] = useState(false);
@@ -382,7 +386,19 @@ export function DashboardShell({
             <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
               Food Items
             </h2>
-            <AddFoodButton
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowSearchModal(true)}
+                className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--color-muted)] transition hover:bg-[var(--color-card-muted)] hover:text-[var(--color-ink)]"
+                aria-label="Search food history"
+              >
+                <svg width="17" height="17" viewBox="0 0 17 17" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="7.5" cy="7.5" r="5" />
+                  <line x1="11.5" y1="11.5" x2="15" y2="15" />
+                </svg>
+              </button>
+              <AddFoodButton
               onCustom={addCustomDraft}
               onPreset={() => {
                 setPresetError(null);
@@ -395,6 +411,7 @@ export function DashboardShell({
               }}
               onRecipe={() => setShowRecipePickerModal(true)}
             />
+            </div>
           </div>
 
           {drafts.length === 0 ? (
@@ -443,6 +460,17 @@ export function DashboardShell({
           </div>
         </section>
       </div>
+
+      {/* Food search modal */}
+      {showSearchModal && (
+        <FoodSearchModal
+          onClose={() => setShowSearchModal(false)}
+          onViewDate={(date) => {
+            setShowSearchModal(false);
+            router.push(`/?date=${date}`);
+          }}
+        />
+      )}
 
       {/* Presets modal */}
       {showPresetsModal && (
