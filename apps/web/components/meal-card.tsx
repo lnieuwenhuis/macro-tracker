@@ -17,6 +17,8 @@ type MealCardProps = {
   draft: MealDraft;
   busy: boolean;
   error?: string | null;
+  /** True for ~2 s after a successful copy-to-today so the button can show confirmation. */
+  isCopied?: boolean;
   onChange: (
     clientId: string,
     field: keyof Omit<MealDraft, "clientId" | "id" | "sortOrder">,
@@ -67,16 +69,19 @@ function NumericInput({
   );
 }
 
-export function MealCard({ draft, busy, error, onChange, onSave, onDelete, onDuplicate, onCopyToToday }: MealCardProps) {
+export function MealCard({ draft, busy, error, isCopied = false, onChange, onSave, onDelete, onDuplicate, onCopyToToday }: MealCardProps) {
   const isSaved = Boolean(draft.id);
   const [isExpanded, setIsExpanded] = useState(!isSaved);
 
   const heading = draft.label.trim() || "New item";
+  // A macro chip is only worth showing when the value is meaningfully positive.
+  // parseFloat handles both "" (NaN → false) and "0" (0 → false) correctly.
+  const isPositive = (v: string) => parseFloat(v) > 0;
   const hasValues =
-    Boolean(draft.proteinG) ||
-    Boolean(draft.carbsG) ||
-    Boolean(draft.fatG) ||
-    Boolean(draft.caloriesKcal);
+    isPositive(draft.proteinG) ||
+    isPositive(draft.carbsG) ||
+    isPositive(draft.fatG) ||
+    isPositive(draft.caloriesKcal);
 
   return (
     <article className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-card-subtle)] shadow-[0_4px_16px_rgba(74,45,28,0.05)]">
@@ -106,14 +111,14 @@ export function MealCard({ draft, busy, error, onChange, onSave, onDelete, onDup
               {onCopyToToday && isSaved && (
                 <button
                   type="button"
-                  disabled={busy}
+                  disabled={busy || isCopied}
                   onClick={(e) => {
                     e.stopPropagation();
                     onCopyToToday(draft.clientId);
                   }}
-                  className="shrink-0 rounded-lg p-1 text-[var(--color-muted)] transition hover:text-[var(--color-accent)] disabled:opacity-50"
-                  aria-label={`Copy ${heading} to today`}
-                  title="Copy to today"
+                  className={`shrink-0 rounded-lg p-1 transition disabled:opacity-50 ${isCopied ? "text-[var(--color-accent)]" : "text-[var(--color-muted)] hover:text-[var(--color-accent)]"}`}
+                  aria-label={isCopied ? `${heading} copied to today` : `Copy ${heading} to today`}
+                  title={isCopied ? "Copied to today!" : "Copy to today"}
                 >
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
                     <rect x="2" y="3" width="12" height="10" rx="1.5" />
@@ -182,22 +187,22 @@ export function MealCard({ draft, busy, error, onChange, onSave, onDelete, onDup
             {/* Macro chips */}
             {hasValues && (
               <div className="flex flex-1 flex-wrap items-center gap-1">
-                {draft.proteinG ? (
+                {isPositive(draft.proteinG) ? (
                   <span className="rounded-md bg-[color-mix(in_srgb,var(--color-bar-protein)_12%,transparent)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-bar-protein)]">
                     P {draft.proteinG}g
                   </span>
                 ) : null}
-                {draft.carbsG ? (
+                {isPositive(draft.carbsG) ? (
                   <span className="rounded-md bg-[color-mix(in_srgb,var(--color-bar-carbs)_12%,transparent)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-bar-carbs)]">
                     C {draft.carbsG}g
                   </span>
                 ) : null}
-                {draft.fatG ? (
+                {isPositive(draft.fatG) ? (
                   <span className="rounded-md bg-[color-mix(in_srgb,var(--color-bar-fat)_12%,transparent)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-bar-fat)]">
                     F {draft.fatG}g
                   </span>
                 ) : null}
-                {draft.caloriesKcal ? (
+                {isPositive(draft.caloriesKcal) ? (
                   <span className="rounded-md bg-[var(--color-shell-panel)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-muted-strong)]">
                     {draft.caloriesKcal} kcal
                   </span>
@@ -210,14 +215,14 @@ export function MealCard({ draft, busy, error, onChange, onSave, onDelete, onDup
               {onCopyToToday && isSaved && (
                 <button
                   type="button"
-                  disabled={busy}
+                  disabled={busy || isCopied}
                   onClick={(e) => {
                     e.stopPropagation();
                     onCopyToToday(draft.clientId);
                   }}
-                  className="shrink-0 rounded-lg p-1 text-[var(--color-muted)] transition hover:text-[var(--color-accent)] disabled:opacity-50"
-                  aria-label={`Copy ${heading} to today`}
-                  title="Copy to today"
+                  className={`shrink-0 rounded-lg p-1 transition disabled:opacity-50 ${isCopied ? "text-[var(--color-accent)]" : "text-[var(--color-muted)] hover:text-[var(--color-accent)]"}`}
+                  aria-label={isCopied ? `${heading} copied to today` : `Copy ${heading} to today`}
+                  title={isCopied ? "Copied to today!" : "Copy to today"}
                 >
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
                     <rect x="2" y="3" width="12" height="10" rx="1.5" />

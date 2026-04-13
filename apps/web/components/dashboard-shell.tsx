@@ -7,6 +7,7 @@ import { useMemo, useState, useTransition } from "react";
 import { deletePresetAction, deleteMealEntryAction, savePresetAction, saveMealEntryAction, updatePresetAction } from "@/lib/actions";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
 import type { OpenFoodFactsProduct } from "@/lib/openfoodfacts";
+import { getLocalDateString } from "@/lib/startup-date";
 
 import { AddFoodButton } from "./add-food-button";
 import { AppShell } from "./app-shell";
@@ -37,10 +38,12 @@ function mealToDraft(meal: MealEntryRecord): MealDraft {
     clientId: meal.id,
     id: meal.id,
     label: meal.label,
-    proteinG: meal.proteinG ? String(meal.proteinG) : "",
-    carbsG: meal.carbsG ? String(meal.carbsG) : "",
-    fatG: meal.fatG ? String(meal.fatG) : "",
-    caloriesKcal: meal.caloriesKcal ? String(meal.caloriesKcal) : "",
+    // Use String() unconditionally: a falsy check like `meal.proteinG ? ...`
+    // incorrectly converts a legitimate 0 value into an empty string.
+    proteinG: String(meal.proteinG),
+    carbsG: String(meal.carbsG),
+    fatG: String(meal.fatG),
+    caloriesKcal: String(meal.caloriesKcal),
     sortOrder: meal.sortOrder,
   };
 }
@@ -104,6 +107,10 @@ export function DashboardShell({
 
   // Food search state
   const [showSearchModal, setShowSearchModal] = useState(false);
+
+  // Tracks cards that were recently copied to today so the button can give
+  // brief visual confirmation before returning to its normal state.
+  const [copiedCardIds, setCopiedCardIds] = useState<Set<string>>(new Set());
 
   // Barcode scanner state
   const [showScanner, setShowScanner] = useState(false);
@@ -298,10 +305,7 @@ export function DashboardShell({
     }
   }
 
-  const todayStr = useMemo(() => {
-    const now = new Date();
-    return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
-  }, []);
+  const todayStr = useMemo(() => getLocalDateString(), []);
   const isViewingToday = selectedDate === todayStr;
 
   function handleDuplicate(clientId: string) {
@@ -349,6 +353,16 @@ export function DashboardShell({
           ...currentErrors,
           [clientId]: result.error ?? "Unable to copy entry to today.",
         }));
+      } else {
+        // Show a brief "copied" confirmation on the button, then clear it.
+        setCopiedCardIds((prev) => new Set([...prev, clientId]));
+        setTimeout(() => {
+          setCopiedCardIds((prev) => {
+            const next = new Set(prev);
+            next.delete(clientId);
+            return next;
+          });
+        }, 2000);
       }
 
       setActiveMutation(null);
@@ -450,6 +464,7 @@ export function DashboardShell({
                   draft={draft}
                   busy={busy}
                   error={errors[draft.clientId]}
+                  isCopied={copiedCardIds.has(draft.clientId)}
                   onChange={updateDraft}
                   onSave={handleSave}
                   onDelete={handleDelete}

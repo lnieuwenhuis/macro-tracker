@@ -47,10 +47,15 @@ export function FoodSearchModal({ onClose, onViewDate }: FoodSearchModalProps) {
       return;
     }
 
+    let cancelled = false;
     setIsSearching(true);
+
     const timer = setTimeout(async () => {
       try {
         const result = await searchMealEntriesAction({ query: query.trim() });
+        // Guard against the component having unmounted or the query having
+        // changed while the network request was in flight.
+        if (cancelled) return;
         if (result.ok && result.results) {
           setResults(result.results);
           setError(null);
@@ -59,11 +64,12 @@ export function FoodSearchModal({ onClose, onViewDate }: FoodSearchModalProps) {
           setResults([]);
         }
       } finally {
-        setIsSearching(false);
+        if (!cancelled) setIsSearching(false);
       }
     }, 350);
 
     return () => {
+      cancelled = true;
       clearTimeout(timer);
     };
   }, [query]);

@@ -76,23 +76,33 @@ export function HamburgerMenu({
   const [leaderboardError, setLeaderboardError] = useState(false);
 
   useEffect(() => {
-    if (!open || leaderboard !== null || leaderboardError) return;
+    // Don't fetch when the menu is closed or data is already loaded.
+    // Deliberately omit leaderboardError from this guard so the fetch retries
+    // on the next open if a previous attempt failed.
+    if (!open || leaderboard !== null) return;
 
     let cancelled = false;
+    setLeaderboardError(false);
 
-    fetchLeaderboardStatsAction().then((result) => {
-      if (cancelled) return;
-      if (result.ok) {
-        setLeaderboard(result.stats);
-      } else {
-        setLeaderboardError(true);
-      }
-    });
+    fetchLeaderboardStatsAction()
+      .then((result) => {
+        if (cancelled) return;
+        if (result.ok) {
+          setLeaderboard(result.stats);
+        } else {
+          setLeaderboardError(true);
+        }
+      })
+      .catch(() => {
+        // Handles network-level rejections (e.g. offline) that bypass the
+        // server action's own try/catch.
+        if (!cancelled) setLeaderboardError(true);
+      });
 
     return () => {
       cancelled = true;
     };
-  }, [open, leaderboard, leaderboardError]);
+  }, [open, leaderboard]);
 
   useEffect(() => {
     if (!open) return;
@@ -310,9 +320,13 @@ export function HamburgerMenu({
                   Your Records
                 </p>
 
-                {!leaderboardError && !leaderboard ? (
+                {leaderboardError ? (
+                  <p className="text-xs text-[var(--color-muted)]">
+                    Could not load records. Close and reopen the menu to retry.
+                  </p>
+                ) : !leaderboard ? (
                   <LeaderboardSkeleton />
-                ) : leaderboard ? (
+                ) : (
                   <div className="space-y-0.5">
                     {leaderboard.bestCalorieDay && (
                       <StatRow
@@ -432,7 +446,7 @@ export function HamburgerMenu({
                       }
                     />
                   </div>
-                ) : null}
+                )}
               </div>
             </div>
 
