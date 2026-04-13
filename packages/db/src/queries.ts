@@ -536,9 +536,21 @@ export async function searchMealEntries(
       ),
     )
     .orderBy(desc(mealEntries.entryDate), asc(mealEntries.sortOrder))
-    .limit(50);
+    .limit(100);
 
-  return rows.map(mapMealRow);
+  // Deduplicate: keep only the most recent entry for each unique
+  // (label, proteinG, carbsG, fatG, caloriesKcal) combination so the same
+  // food logged on multiple days only appears once in the results.
+  const seen = new Set<string>();
+  const unique: MealEntryRecord[] = [];
+  for (const row of rows.map(mapMealRow)) {
+    const key = `${row.label.toLowerCase()}|${row.proteinG}|${row.carbsG}|${row.fatG}|${row.caloriesKcal}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      unique.push(row);
+    }
+  }
+  return unique.slice(0, 50);
 }
 
 export async function getPresets(userId: string, db?: DatabaseClient): Promise<FoodPreset[]> {
