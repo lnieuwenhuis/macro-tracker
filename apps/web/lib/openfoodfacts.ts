@@ -9,7 +9,7 @@ export type OpenFoodFactsProduct = {
   servingSizeG: number | null;
   imageUrl: string | null;
   /** Which data source provided this result */
-  source?: "openfoodfacts" | "albert_heijn" | "jumbo";
+  source?: "openfoodfacts" | "albert_heijn" | "jumbo" | "custom";
 };
 
 export type OpenFoodFactsResult =

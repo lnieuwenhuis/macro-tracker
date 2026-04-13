@@ -10,6 +10,30 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 
+export const barcodeProducts = pgTable(
+  "barcode_products",
+  {
+    id: uuid("id").primaryKey().notNull(),
+    barcode: text("barcode").notNull(),
+    name: text("name").notNull(),
+    brands: text("brands").notNull().default(""),
+    proteinG: numeric("protein_g", { precision: 6, scale: 1 }).notNull(),
+    carbsG: numeric("carbs_g", { precision: 6, scale: 1 }).notNull(),
+    fatG: numeric("fat_g", { precision: 6, scale: 1 }).notNull(),
+    caloriesKcal: integer("calories_kcal").notNull(),
+    servingSizeG: numeric("serving_size_g", { precision: 6, scale: 1 }),
+    addedByUserId: uuid("added_by_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("barcode_products_barcode_key").on(table.barcode),
+  ],
+);
+
 export const users = pgTable(
   "users",
   {
@@ -170,3 +194,5 @@ export type RecipeRow = typeof recipes.$inferSelect;
 export type NewRecipeRow = typeof recipes.$inferInsert;
 export type RecipeIngredientRow = typeof recipeIngredients.$inferSelect;
 export type NewRecipeIngredientRow = typeof recipeIngredients.$inferInsert;
+export type BarcodeProductRow = typeof barcodeProducts.$inferSelect;
+export type NewBarcodeProductRow = typeof barcodeProducts.$inferInsert;

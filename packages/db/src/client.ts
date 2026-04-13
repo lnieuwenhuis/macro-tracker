@@ -257,6 +257,26 @@ async function bootstrapLocalSchema(db: PgliteDatabase<typeof schema>) {
       `CREATE INDEX IF NOT EXISTS "recipe_ingredients_recipe_idx" ON "recipe_ingredients" USING btree ("recipe_id")`,
     ),
   );
+  await db.execute(sql.raw(`
+    CREATE TABLE IF NOT EXISTS "barcode_products" (
+      "id" uuid PRIMARY KEY NOT NULL,
+      "barcode" text NOT NULL,
+      "name" text NOT NULL,
+      "brands" text DEFAULT '' NOT NULL,
+      "protein_g" numeric(6, 1) NOT NULL,
+      "carbs_g" numeric(6, 1) NOT NULL,
+      "fat_g" numeric(6, 1) NOT NULL,
+      "calories_kcal" integer NOT NULL,
+      "serving_size_g" numeric(6, 1),
+      "added_by_user_id" uuid REFERENCES "users"("id") ON DELETE SET NULL,
+      "created_at" timestamp with time zone DEFAULT now() NOT NULL
+    )
+  `));
+  await db.execute(
+    sql.raw(
+      `CREATE UNIQUE INDEX IF NOT EXISTS "barcode_products_barcode_key" ON "barcode_products" USING btree ("barcode")`,
+    ),
+  );
 }
 
 async function ensureDatabaseSchema(runtime: DatabaseRuntime) {

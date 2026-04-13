@@ -275,6 +275,20 @@ input::placeholder {
   }
 }
 
+@keyframes scanLine {
+  0%,
+  100% {
+    top: 8%;
+  }
+  50% {
+    top: 88%;
+  }
+}
+
+.scan-line {
+  animation: scanLine 1.8s ease-in-out infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .macro-screen-stage,
   .macro-loading-shell,

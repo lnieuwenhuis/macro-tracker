@@ -124,6 +124,22 @@ export type RecipeRecord = {
   perPortionMacros: MacroNumbers;
 };
 
+export type CustomBarcodeProductInput = {
+  barcode: string;
+  name: string;
+  brands: string;
+  proteinG: number;
+  carbsG: number;
+  fatG: number;
+  caloriesKcal: number;
+  servingSizeG: number | null;
+};
+
+export type CustomBarcodeProduct = CustomBarcodeProductInput & {
+  id: string;
+  addedByUserId: string | null;
+};
+
 export type StatsPageData = {
   allDailyTotals: Array<{
     date: string;

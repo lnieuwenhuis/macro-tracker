@@ -18,7 +18,7 @@ export type BarcodeProduct = {
   caloriesKcal: number;
   servingSizeG: number | null;
   imageUrl: string | null;
-  source: "openfoodfacts" | "albert_heijn" | "jumbo";
+  source: "openfoodfacts" | "albert_heijn" | "jumbo" | "custom";
 };
 
 export type BarcodeResult =

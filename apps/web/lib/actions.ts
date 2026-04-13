@@ -11,6 +11,7 @@ import {
   deleteWeightEntry,
   getLeaderboardStats,
   getRecipeById,
+  saveCustomBarcodeProduct,
   saveUserGoals,
   saveWeightGoal,
   searchMealEntries,
@@ -18,7 +19,7 @@ import {
   updatePreset,
   updateRecipe,
 } from "@macro-tracker/db";
-import type { FoodPreset, LeaderboardStats, MealEntryRecord, RecipeRecord } from "@macro-tracker/db";
+import type { CustomBarcodeProduct, FoodPreset, LeaderboardStats, MealEntryRecord, RecipeRecord } from "@macro-tracker/db";
 import { revalidatePath } from "next/cache";
 
 import { requireSessionUser } from "./auth";
@@ -317,6 +318,38 @@ export async function logRecipePortionAction(
 
     revalidatePath("/", "page");
     return { ok: true };
+  } catch (error) {
+    return { ok: false, error: toActionError(error) };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Community barcode catalogue
+// ---------------------------------------------------------------------------
+
+type SaveCustomBarcodeProductInput = {
+  barcode: string;
+  name: string;
+  brands: string;
+  proteinG: number;
+  carbsG: number;
+  fatG: number;
+  caloriesKcal: number;
+  servingSizeG: number | null;
+};
+
+type SaveCustomBarcodeProductResult = ActionResult & {
+  product?: CustomBarcodeProduct;
+};
+
+export async function saveCustomBarcodeProductAction(
+  input: SaveCustomBarcodeProductInput,
+): Promise<SaveCustomBarcodeProductResult> {
+  const sessionUser = await requireSessionUser();
+
+  try {
+    const product = await saveCustomBarcodeProduct(sessionUser.userId, input);
+    return { ok: true, product };
   } catch (error) {
     return { ok: false, error: toActionError(error) };
   }

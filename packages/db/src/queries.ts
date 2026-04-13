@@ -2,9 +2,11 @@ import { and, asc, desc, eq, gte, ilike, inArray, lte, max, sql } from "drizzle-
 
 import { computeStreaks, getPeriodRanges } from "./dates";
 import { getDb, type DatabaseClient } from "./client";
-import { foodPresets, mealEntries, recipeIngredients, recipes, users, weightEntries } from "./schema";
+import { barcodeProducts, foodPresets, mealEntries, recipeIngredients, recipes, users, weightEntries } from "./schema";
 import { validateMealEntryInput, validateRecipeInput, validateWeightEntryInput } from "./validators";
 import type {
+  CustomBarcodeProduct,
+  CustomBarcodeProductInput,
   DailyOverview,
   DailySummary,
   FoodPreset,
@@ -1274,4 +1276,79 @@ export async function getLeaderboardStats(
     bestCarbsDay,
     mostActiveDay,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Community barcode product catalogue
+// ---------------------------------------------------------------------------
+
+function mapBarcodeProductRow(row: {
+  id: string;
+  barcode: string;
+  name: string;
+  brands: string;
+  proteinG: string | number;
+  carbsG: string | number;
+  fatG: string | number;
+  caloriesKcal: number;
+  servingSizeG: string | number | null;
+  addedByUserId: string | null;
+}): CustomBarcodeProduct {
+  return {
+    id: row.id,
+    barcode: row.barcode,
+    name: row.name,
+    brands: row.brands,
+    proteinG: roundToSingleDecimal(toNumber(row.proteinG)),
+    carbsG: roundToSingleDecimal(toNumber(row.carbsG)),
+    fatG: roundToSingleDecimal(toNumber(row.fatG)),
+    caloriesKcal: toNumber(row.caloriesKcal),
+    servingSizeG:
+      row.servingSizeG != null
+        ? roundToSingleDecimal(toNumber(row.servingSizeG))
+        : null,
+    addedByUserId: row.addedByUserId,
+  };
+}
+
+export async function lookupCustomBarcodeProduct(
+  barcode: string,
+  db?: DatabaseClient,
+): Promise<CustomBarcodeProduct | null> {
+  const database = await resolveDb(db);
+
+  const [row] = await database
+    .select()
+    .from(barcodeProducts)
+    .where(eq(barcodeProducts.barcode, barcode))
+    .limit(1);
+
+  return row ? mapBarcodeProductRow(row) : null;
+}
+
+export async function saveCustomBarcodeProduct(
+  addedByUserId: string,
+  input: CustomBarcodeProductInput,
+  db?: DatabaseClient,
+): Promise<CustomBarcodeProduct> {
+  const database = await resolveDb(db);
+
+  const [created] = await database
+    .insert(barcodeProducts)
+    .values({
+      id: crypto.randomUUID(),
+      barcode: input.barcode.trim(),
+      name: input.name.trim(),
+      brands: input.brands.trim(),
+      proteinG: input.proteinG.toFixed(1),
+      carbsG: input.carbsG.toFixed(1),
+      fatG: input.fatG.toFixed(1),
+      caloriesKcal: Math.round(input.caloriesKcal),
+      servingSizeG:
+        input.servingSizeG != null ? input.servingSizeG.toFixed(1) : null,
+      addedByUserId,
+    })
+    .returning();
+
+  return mapBarcodeProductRow(created);
 }
