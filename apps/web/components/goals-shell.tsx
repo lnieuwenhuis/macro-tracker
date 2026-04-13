@@ -184,6 +184,13 @@ export function GoalsShell({ userEmail, selectedDate, goals }: GoalsShellProps) 
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const goalsAreSet =
+    goals.caloriesKcal != null ||
+    goals.proteinG != null ||
+    goals.carbsG != null ||
+    goals.fatG != null;
+  const [calculatorOpen, setCalculatorOpen] = useState(!goalsAreSet);
+
   const [calories, setCalories] = useState(
     goals.caloriesKcal != null ? String(goals.caloriesKcal) : "",
   );
@@ -296,18 +303,39 @@ export function GoalsShell({ userEmail, selectedDate, goals }: GoalsShellProps) 
         </div>
 
         <div className="rounded-[28px] border border-[var(--color-border-strong)] bg-[var(--color-surface-strong)] p-5">
-          <div>
-            <h3 className="text-sm font-bold text-[var(--color-ink)]">
-              Macro calculator
-            </h3>
-            <p className="mt-1.5 text-sm text-[var(--color-muted)]">
-              Uses the Mifflin-St Jeor formula, activity multipliers, preset
-              calorie adjustments, and weight-based protein targets before
-              splitting the remaining calories into carbs and fat.
-            </p>
-          </div>
+          <button
+            type="button"
+            onClick={() => setCalculatorOpen((o) => !o)}
+            className="flex w-full items-start justify-between gap-3 text-left"
+          >
+            <div>
+              <h3 className="text-sm font-bold text-[var(--color-ink)]">
+                Macro calculator
+              </h3>
+              <p className="mt-1.5 text-sm text-[var(--color-muted)]">
+                Uses the Mifflin-St Jeor formula, activity multipliers, preset
+                calorie adjustments, and weight-based protein targets before
+                splitting the remaining calories into carbs and fat.
+              </p>
+            </div>
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 18 18"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className={`mt-0.5 shrink-0 text-[var(--color-muted)] transition-transform duration-200 ${calculatorOpen ? "rotate-180" : ""}`}
+            >
+              <path d="M4 6l5 5 5-5" />
+            </svg>
+          </button>
 
-          <div className="mt-4 grid grid-cols-2 gap-3">
+          {calculatorOpen && (
+            <>
+              <div className="mt-4 grid grid-cols-2 gap-3">
             <ToggleButton
               label="Male"
               description="Mifflin-St Jeor male formula"
@@ -517,6 +545,8 @@ export function GoalsShell({ userEmail, selectedDate, goals }: GoalsShellProps) 
               </p>
             )}
           </div>
+            </>
+          )}
         </div>
 
         {/* Goal inputs */}

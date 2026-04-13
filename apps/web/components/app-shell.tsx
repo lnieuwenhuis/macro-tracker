@@ -64,6 +64,15 @@ export function AppShell({
   const nextDateHref = `${basePath}?date=${nextDateString(selectedDate)}`;
   const screenMotion = resolveNavigationMotion(pathname, selectedDate);
   const screenKey = `${pathname}?date=${selectedDate}`;
+  const isDayMotion =
+    screenMotion === "day-forward" ||
+    screenMotion === "day-backward" ||
+    screenMotion === "day-jump";
+  // For day changes, keep the outer shell (header) mounted and only animate
+  // the content. For screen/intro transitions, animate the whole shell.
+  const outerKey = isDayMotion ? pathname : screenKey;
+  const outerMotion = isDayMotion ? "none" : screenMotion;
+  const contentMotion = isDayMotion ? screenMotion : "none";
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -111,8 +120,8 @@ export function AppShell({
     <main className="min-h-screen bg-[var(--color-app-bg)] text-[var(--color-ink)]">
       <div className="mx-auto flex min-h-screen w-full max-w-3xl flex-col">
         <div
-          key={screenKey}
-          data-screen-motion={screenMotion}
+          key={outerKey}
+          data-screen-motion={outerMotion}
           className="macro-screen-stage flex min-h-screen flex-col"
         >
           {/* Top bar: hamburger + date nav */}
@@ -229,7 +238,11 @@ export function AppShell({
             )}
           </header>
 
-          <div className="flex-1 px-4 pb-[calc(1.25rem+env(safe-area-inset-bottom))] sm:px-6">
+          <div
+            key={screenKey}
+            data-screen-motion={contentMotion}
+            className="macro-screen-stage flex-1 px-4 pb-[calc(1.25rem+env(safe-area-inset-bottom))] sm:px-6"
+          >
             {children}
           </div>
         </div>

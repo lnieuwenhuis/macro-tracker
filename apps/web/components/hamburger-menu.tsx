@@ -159,7 +159,7 @@ export function HamburgerMenu({
             if (e.target === e.currentTarget) setOpen(false);
           }}
         >
-          <div className="fixed inset-0 bg-black/40 backdrop-blur-sm" />
+          <div className="fixed inset-0 bg-black/40 backdrop-blur-sm" onClick={() => setOpen(false)} />
 
           <div
             ref={panelRef}
