@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useMemo, useState, useTransition } from "react";
 
 import { deletePresetAction, deleteMealEntryAction, savePresetAction, saveMealEntryAction, updatePresetAction } from "@/lib/actions";
+import { prepareNavigationMotion } from "@/lib/navigation-motion";
 import type { OpenFoodFactsProduct } from "@/lib/openfoodfacts";
 
 import { AddFoodButton } from "./add-food-button";
@@ -467,7 +468,9 @@ export function DashboardShell({
           onClose={() => setShowSearchModal(false)}
           onViewDate={(date) => {
             setShowSearchModal(false);
-            router.push(`/?date=${date}`);
+            const href = `/?date=${date}`;
+            prepareNavigationMotion(href, "day-jump");
+            router.push(href);
           }}
         />
       )}

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 
 import { deleteRecipeAction, logRecipePortionAction, saveRecipeAction } from "@/lib/actions";
+import { prepareNavigationMotion } from "@/lib/navigation-motion";
 
 type RecipeCardProps = {
   recipe: RecipeRecord;
@@ -225,9 +226,11 @@ export function RecipeCard({ recipe, selectedDate }: RecipeCardProps) {
             <button
               type="button"
               disabled={isPending}
-              onClick={() =>
-                router.push(`/recipes/${recipe.id}/edit?date=${selectedDate}`)
-              }
+              onClick={() => {
+                const href = `/recipes/${recipe.id}/edit?date=${selectedDate}`;
+                prepareNavigationMotion(href, "screen");
+                router.push(href);
+              }}
               className="rounded-xl border border-[var(--color-border-strong)] px-3 py-2.5 text-sm font-semibold text-[var(--color-muted)] transition hover:text-[var(--color-ink)]"
               aria-label={`Edit ${recipe.label}`}
             >

@@ -1,10 +1,10 @@
 "use client";
 
 import type { RecipeRecord } from "@macro-tracker/db";
-import Link from "next/link";
 
 import { AppShell } from "./app-shell";
 import { RecipeCard } from "./recipe-card";
+import { TransitionLink } from "./transition-link";
 
 type RecipesShellProps = {
   userEmail: string;
@@ -25,8 +25,9 @@ export function RecipesShell({
           <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
             My Recipes
           </h2>
-          <Link
+          <TransitionLink
             href={`/recipes/new?date=${selectedDate}`}
+            motion="screen"
             className="flex h-9 items-center gap-1.5 rounded-full bg-[var(--color-accent)] px-4 text-sm font-semibold text-white shadow-md transition hover:-translate-y-0.5"
           >
             <svg
@@ -42,7 +43,7 @@ export function RecipesShell({
               <line x1="2" y1="7" x2="12" y2="7" />
             </svg>
             New Recipe
-          </Link>
+          </TransitionLink>
         </div>
 
         {/* Recipe list */}
@@ -51,12 +52,13 @@ export function RecipesShell({
             <p className="text-sm text-[var(--color-muted)]">
               No recipes yet — create one to get started.
             </p>
-            <Link
+            <TransitionLink
               href={`/recipes/new?date=${selectedDate}`}
+              motion="screen"
               className="mt-3 inline-flex rounded-full bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-white transition hover:-translate-y-0.5"
             >
               Create recipe
-            </Link>
+            </TransitionLink>
           </div>
         ) : (
           <div className="space-y-3">

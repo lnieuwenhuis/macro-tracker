@@ -1,6 +1,6 @@
 "use client";
 
-import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
 import type { LeaderboardStats } from "@macro-tracker/db";
@@ -8,6 +8,7 @@ import type { LeaderboardStats } from "@macro-tracker/db";
 import { fetchLeaderboardStatsAction } from "@/lib/actions";
 import { formatShortDate } from "@/lib/formatting";
 import { ThemeToggle } from "./theme-toggle";
+import { TransitionLink } from "./transition-link";
 
 type HamburgerMenuProps = {
   userEmail: string;
@@ -68,6 +69,7 @@ export function HamburgerMenu({
   selectedDate,
   activeTab,
 }: HamburgerMenuProps) {
+  const router = useRouter();
   const [open, setOpen] = useState(false);
   const panelRef = useRef<HTMLDivElement>(null);
   const [leaderboard, setLeaderboard] = useState<LeaderboardStats | null>(null);
@@ -113,6 +115,19 @@ export function HamburgerMenu({
       document.body.style.overflow = "";
     };
   }, [open]);
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+
+    router.prefetch(`/?date=${selectedDate}`);
+    router.prefetch(`/summary?date=${selectedDate}`);
+    router.prefetch(`/recipes?date=${selectedDate}`);
+    router.prefetch(`/goals?date=${selectedDate}`);
+    router.prefetch("/stats");
+    router.prefetch("/weight");
+  }, [open, router, selectedDate]);
 
   return (
     <>
@@ -180,8 +195,9 @@ export function HamburgerMenu({
             {/* Scrollable middle: nav + leaderboard */}
             <div className="flex-1 overflow-y-auto">
               <nav className="px-4 py-5 space-y-1">
-                <Link
+                <TransitionLink
                   href={`/?date=${selectedDate}`}
+                  motion="screen"
                   onClick={() => setOpen(false)}
                   className={`flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-semibold transition ${
                     activeTab === "log"
@@ -195,9 +211,10 @@ export function HamburgerMenu({
                     <path d="M7 7v8" />
                   </svg>
                   Food Log
-                </Link>
-                <Link
+                </TransitionLink>
+                <TransitionLink
                   href={`/summary?date=${selectedDate}`}
+                  motion="screen"
                   onClick={() => setOpen(false)}
                   className={`flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-semibold transition ${
                     activeTab === "summary"
@@ -211,9 +228,10 @@ export function HamburgerMenu({
                     <rect x="13" y="2" width="3" height="14" />
                   </svg>
                   Summary
-                </Link>
-                <Link
+                </TransitionLink>
+                <TransitionLink
                   href={`/recipes?date=${selectedDate}`}
+                  motion="screen"
                   onClick={() => setOpen(false)}
                   className={`flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-semibold transition ${
                     activeTab === "recipes"
@@ -228,9 +246,10 @@ export function HamburgerMenu({
                     <path d="M6 12h4" />
                   </svg>
                   Recipes
-                </Link>
-                <Link
+                </TransitionLink>
+                <TransitionLink
                   href={`/goals?date=${selectedDate}`}
+                  motion="screen"
                   onClick={() => setOpen(false)}
                   className={`flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-semibold transition ${
                     activeTab === "goals"
@@ -247,9 +266,10 @@ export function HamburgerMenu({
                     <line x1="14" y1="9" x2="16" y2="9" />
                   </svg>
                   Goals
-                </Link>
-                <Link
+                </TransitionLink>
+                <TransitionLink
                   href={`/stats`}
+                  motion="screen"
                   onClick={() => setOpen(false)}
                   className={`flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-semibold transition ${
                     activeTab === "stats"
@@ -262,9 +282,10 @@ export function HamburgerMenu({
                     <circle cx="16" cy="9" r="1.5" fill="currentColor" stroke="none" />
                   </svg>
                   Stats
-                </Link>
-                <Link
+                </TransitionLink>
+                <TransitionLink
                   href={`/weight`}
+                  motion="screen"
                   onClick={() => setOpen(false)}
                   className={`flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-semibold transition ${
                     activeTab === "weight"
@@ -280,7 +301,7 @@ export function HamburgerMenu({
                     <path d="M4 14h10" />
                   </svg>
                   Weight
-                </Link>
+                </TransitionLink>
               </nav>
 
               {/* Leaderboard / personal records */}

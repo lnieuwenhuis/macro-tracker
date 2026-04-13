@@ -127,6 +127,64 @@ input::placeholder {
   font-family: var(--font-fraunces), serif;
 }
 
+.macro-screen-stage {
+  animation-duration: 420ms;
+  animation-fill-mode: both;
+  animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: opacity, transform, filter;
+}
+
+.macro-screen-stage[data-screen-motion="none"] {
+  animation: none;
+}
+
+.macro-screen-stage[data-screen-motion="intro"] {
+  animation-name: macroScreenIntro;
+}
+
+.macro-screen-stage[data-screen-motion="screen"] {
+  animation-name: macroScreenSwap;
+}
+
+.macro-screen-stage[data-screen-motion="day-forward"] {
+  animation-duration: 320ms;
+  animation-name: macroScreenForward;
+}
+
+.macro-screen-stage[data-screen-motion="day-backward"] {
+  animation-duration: 320ms;
+  animation-name: macroScreenBackward;
+}
+
+.macro-screen-stage[data-screen-motion="day-jump"] {
+  animation-duration: 260ms;
+  animation-name: macroScreenJump;
+}
+
+.macro-loading-shell {
+  animation: macroScreenJump 220ms ease-out both;
+}
+
+.macro-loading-block {
+  position: relative;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--color-card-muted) 82%, white 18%);
+}
+
+.macro-loading-block::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    110deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.36) 30%,
+    transparent 58%
+  );
+  transform: translateX(-100%);
+  animation: macroLoadingSweep 1.15s ease-in-out infinite;
+}
+
 @keyframes slideIn {
   from {
     transform: translateX(-100%);
@@ -142,5 +200,91 @@ input::placeholder {
   }
   to {
     opacity: 1;
+  }
+}
+
+@keyframes macroScreenIntro {
+  from {
+    opacity: 0;
+    transform: translateY(24px) scale(0.985);
+    filter: blur(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+@keyframes macroScreenSwap {
+  from {
+    opacity: 0;
+    transform: translateY(16px) scale(0.992);
+    filter: blur(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+@keyframes macroScreenForward {
+  from {
+    opacity: 0;
+    transform: translateX(34px);
+    filter: blur(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+    filter: blur(0);
+  }
+}
+
+@keyframes macroScreenBackward {
+  from {
+    opacity: 0;
+    transform: translateX(-34px);
+    filter: blur(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+    filter: blur(0);
+  }
+}
+
+@keyframes macroScreenJump {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes macroLoadingSweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .macro-screen-stage,
+  .macro-loading-shell,
+  .macro-loading-block::after {
+    animation: none !important;
+  }
+
+  .macro-screen-stage {
+    opacity: 1;
+    transform: none;
+    filter: none;
   }
 }

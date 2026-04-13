@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 
 import { saveRecipeAction } from "@/lib/actions";
+import { prepareNavigationMotion } from "@/lib/navigation-motion";
 import type { OpenFoodFactsProduct } from "@/lib/openfoodfacts";
 
 import { AddFoodButton } from "./add-food-button";
@@ -157,7 +158,9 @@ export function RecipeBuilderShell({
         return;
       }
 
-      router.push(`/recipes?date=${selectedDate}`);
+      const href = `/recipes?date=${selectedDate}`;
+      prepareNavigationMotion(href, "screen");
+      router.push(href);
       router.refresh();
     });
   }
@@ -351,7 +354,11 @@ export function RecipeBuilderShell({
         <button
           type="button"
           disabled={isPending}
-          onClick={() => router.push(`/recipes?date=${selectedDate}`)}
+          onClick={() => {
+            const href = `/recipes?date=${selectedDate}`;
+            prepareNavigationMotion(href, "screen");
+            router.push(href);
+          }}
           className="w-full rounded-xl border border-[var(--color-border-strong)] px-4 py-2.5 text-sm font-semibold text-[var(--color-muted)] transition hover:text-[var(--color-ink)]"
         >
           Cancel
