@@ -1,7 +1,8 @@
 "use client";
 
 import type { RecipeRecord } from "@macro-tracker/db";
-import { useEffect, useRef } from "react";
+import { useEffect } from "react";
+import { OverlayPortal, useBodyScrollLock } from "./overlay-portal";
 
 type RecipePickerModalProps = {
   recipes: RecipeRecord[];
@@ -14,20 +15,18 @@ export function RecipePickerModal({
   onClose,
   onSelect,
 }: RecipePickerModalProps) {
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
+  useBodyScrollLock();
 
   useEffect(() => {
     function handleKey(e: KeyboardEvent) {
-      if (e.key === "Escape") onCloseRef.current();
+      if (e.key === "Escape") onClose();
     }
     document.addEventListener("keydown", handleKey);
     return () => document.removeEventListener("keydown", handleKey);
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- onClose stored in ref; effect runs once
-  }, []);
+  }, [onClose]);
 
   return (
-    <>
+    <OverlayPortal>
       {/* Backdrop */}
       <div
         className="fixed inset-0 z-40 bg-black/40 backdrop-blur-[2px]"
@@ -110,6 +109,6 @@ export function RecipePickerModal({
           </div>
         )}
       </div>
-    </>
+    </OverlayPortal>
   );
 }

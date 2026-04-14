@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { saveMealEntryAction, searchMealEntriesAction } from "@/lib/actions";
 import { formatSelectedDate } from "@/lib/formatting";
 import { getLocalDateString } from "@/lib/startup-date";
+import { OverlayPortal, useBodyScrollLock } from "./overlay-portal";
 
 type FoodSearchModalProps = {
   onClose: () => void;
@@ -20,8 +21,7 @@ export function FoodSearchModal({ onClose, onViewDate }: FoodSearchModalProps) {
   const [copyingId, setCopyingId] = useState<string | null>(null);
   const [copiedIds, setCopiedIds] = useState<Set<string>>(new Set());
   const inputRef = useRef<HTMLInputElement>(null);
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
+  useBodyScrollLock();
 
   const todayStr = useMemo(() => getLocalDateString(), []);
 
@@ -32,12 +32,12 @@ export function FoodSearchModal({ onClose, onViewDate }: FoodSearchModalProps) {
   useEffect(() => {
     function handleKey(e: KeyboardEvent) {
       if (e.key === "Escape") {
-        onCloseRef.current();
+        onClose();
       }
     }
     document.addEventListener("keydown", handleKey);
     return () => document.removeEventListener("keydown", handleKey);
-  }, []);
+  }, [onClose]);
 
   useEffect(() => {
     if (!query.trim()) {
@@ -102,7 +102,7 @@ export function FoodSearchModal({ onClose, onViewDate }: FoodSearchModalProps) {
   }
 
   return (
-    <>
+    <OverlayPortal>
       {/* Backdrop */}
       <div
         className="fixed inset-0 z-40 bg-black/40 backdrop-blur-[2px]"
@@ -229,6 +229,6 @@ export function FoodSearchModal({ onClose, onViewDate }: FoodSearchModalProps) {
           </div>
         )}
       </div>
-    </>
+    </OverlayPortal>
   );
 }

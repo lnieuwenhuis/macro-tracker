@@ -1,7 +1,8 @@
 "use client";
 
 import type { FoodPreset } from "@macro-tracker/db";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
+import { OverlayPortal, useBodyScrollLock } from "./overlay-portal";
 
 type PresetMutationState =
   | { type: "save" }
@@ -94,6 +95,7 @@ export function PresetModal({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState<PresetDraft>(emptyDraft);
   const mutationsDisabled = mutation !== null;
+  useBodyScrollLock();
 
   function dismissModal() {
     if (mutation) {
@@ -107,10 +109,6 @@ export function PresetModal({
 
     onClose();
   }
-
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-
   useEffect(() => {
     function handleKey(e: KeyboardEvent) {
       if (mutation) {
@@ -121,14 +119,13 @@ export function PresetModal({
         if (editingId) {
           setEditingId(null);
         } else {
-          onCloseRef.current();
+          onClose();
         }
       }
     }
     document.addEventListener("keydown", handleKey);
     return () => document.removeEventListener("keydown", handleKey);
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- onClose stored in ref; stable deps only
-  }, [editingId, mutation]);
+  }, [editingId, mutation, onClose]);
 
   async function handleSave() {
     if (!draft.label.trim()) return;
@@ -172,7 +169,7 @@ export function PresetModal({
   }
 
   return (
-    <>
+    <OverlayPortal>
       {/* Backdrop */}
       <div
         className="fixed inset-0 z-40 bg-black/40 backdrop-blur-[2px]"
@@ -190,7 +187,7 @@ export function PresetModal({
       >
         {/* Header */}
         <div className="mb-4 flex items-center justify-between">
-            <h2 className="text-base font-bold text-[var(--color-ink)]">Food Presets</h2>
+          <h2 className="text-base font-bold text-[var(--color-ink)]">Food Presets</h2>
           <button
             type="button"
             onClick={onClose}
@@ -377,6 +374,6 @@ export function PresetModal({
           </div>
         )}
       </div>
-    </>
+    </OverlayPortal>
   );
 }
