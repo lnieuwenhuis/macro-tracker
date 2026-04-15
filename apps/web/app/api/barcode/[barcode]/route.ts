@@ -17,27 +17,37 @@ export async function GET(
     );
   }
 
-  // 0. Check our community catalogue first — fastest and most reliable
-  const customProduct = await lookupCustomBarcodeProduct(barcode);
-  if (customProduct) {
-    return NextResponse.json({
-      found: true,
-      product: {
-        name: customProduct.name,
-        brands: customProduct.brands,
-        barcode: customProduct.barcode,
-        proteinG: customProduct.proteinG,
-        carbsG: customProduct.carbsG,
-        fatG: customProduct.fatG,
-        caloriesKcal: customProduct.caloriesKcal,
-        servingSizeG: customProduct.servingSizeG,
-        imageUrl: null,
-        source: "custom",
-      },
-    });
+  // 0. Check our community catalogue first — fastest and most reliable.
+  //    Wrapped in try/catch so a database error never blocks the external
+  //    provider chain that follows.
+  try {
+    const customProduct = await lookupCustomBarcodeProduct(barcode);
+    if (customProduct) {
+      return NextResponse.json({
+        found: true,
+        product: {
+          name: customProduct.name,
+          brands: customProduct.brands,
+          barcode: customProduct.barcode,
+          proteinG: customProduct.proteinG,
+          carbsG: customProduct.carbsG,
+          fatG: customProduct.fatG,
+          caloriesKcal: customProduct.caloriesKcal,
+          servingSizeG: customProduct.servingSizeG,
+          imageUrl: null,
+          source: "custom",
+        },
+      });
+    }
+  } catch {
+    // Database unavailable — fall through to external providers
   }
 
   // 1–3. Fall back to the external provider chain (OFF → AH → Jumbo)
-  const result = await lookupBarcodeChain(barcode);
-  return NextResponse.json(result);
+  try {
+    const result = await lookupBarcodeChain(barcode);
+    return NextResponse.json(result);
+  } catch {
+    return NextResponse.json({ found: false, barcode }, { status: 502 });
+  }
 }
