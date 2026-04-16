@@ -4,6 +4,7 @@ import {
   deleteMealEntry,
   getDailySummary,
   getPeriodAverages,
+  getRecentQuickAddCandidates,
   updateMealEntry,
   upsertUserFromShooProfile,
   type DatabaseRuntime,
@@ -203,5 +204,69 @@ describe("database queries", () => {
       currentStreak: 3,
       longestStreak: 3,
     });
+  });
+
+  it("returns recent quick add candidates deduped to the most recent matching food", async () => {
+    await createMealEntry(
+      userId,
+      {
+        date: "2026-03-17",
+        label: "Chicken Rice Bowl",
+        proteinG: 42,
+        carbsG: 55,
+        fatG: 12,
+        caloriesKcal: 520,
+      },
+      runtime.db,
+    );
+    const mostRecentDuplicate = await createMealEntry(
+      userId,
+      {
+        date: "2026-03-19",
+        label: "  chicken   rice bowl ",
+        proteinG: 42,
+        carbsG: 55,
+        fatG: 12,
+        caloriesKcal: 520,
+      },
+      runtime.db,
+    );
+    await createMealEntry(
+      userId,
+      {
+        date: "2026-03-18",
+        label: "Greek Yogurt",
+        proteinG: 25,
+        carbsG: 15,
+        fatG: 5,
+        caloriesKcal: 205,
+      },
+      runtime.db,
+    );
+
+    const recent = await getRecentQuickAddCandidates(userId, 10, runtime.db);
+
+    expect(recent).toEqual([
+      {
+        source: "recent",
+        sourceId: mostRecentDuplicate.id,
+        sourceDate: "2026-03-19",
+        label: "  chicken   rice bowl ",
+        proteinG: 42,
+        carbsG: 55,
+        fatG: 12,
+        caloriesKcal: 520,
+      },
+      {
+        source: "recent",
+        sourceId: expect.any(String),
+        sourceDate: "2026-03-18",
+        label: "Greek Yogurt",
+        proteinG: 25,
+        carbsG: 15,
+        fatG: 5,
+        caloriesKcal: 205,
+      },
+    ]);
   });
 });

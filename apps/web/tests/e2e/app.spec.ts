@@ -1,4 +1,44 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
+
+async function signInAs(page: Page, email = "coach@example.com") {
+  await page.goto(`/api/test/session?email=${encodeURIComponent(email)}`);
+  await expect(page).toHaveURL(/\?date=/);
+  await expect(page.getByRole("heading", { name: "Food Log" })).toBeVisible();
+}
+
+async function addCustomFood(
+  page: Page,
+  input: {
+    label: string;
+    proteinG: string;
+    carbsG: string;
+    fatG: string;
+    caloriesKcal: string;
+  },
+) {
+  await page.getByRole("button", { name: "Add food" }).click();
+  await page.getByRole("button", { name: "Custom" }).click();
+
+  const draftCard = page.locator("article").last();
+  await draftCard
+    .getByPlaceholder("Chicken breast, rice, banana...")
+    .fill(input.label);
+  await draftCard.getByLabel("Protein").fill(input.proteinG);
+  await draftCard.getByLabel("Carbs").fill(input.carbsG);
+  await draftCard.getByLabel("Fat").fill(input.fatG);
+  await draftCard.getByLabel("Calories").fill(input.caloriesKcal);
+  await draftCard.getByRole("button", { name: "Save" }).click();
+}
+
+async function saveGoals(page: Page) {
+  await page.goto("/goals?date=2026-03-19");
+  await page.getByLabel("Calories").fill("2200");
+  await page.getByLabel("Protein").fill("180");
+  await page.getByLabel("Carbs").fill("220");
+  await page.getByLabel("Fat").fill("70");
+  await page.getByRole("button", { name: "Save goals" }).click();
+  await expect(page.getByRole("button", { name: "Saved!" })).toBeVisible();
+}
 
 test("redirects unauthenticated users to login", async ({ page }) => {
   await page.goto("/");
@@ -8,65 +48,65 @@ test("redirects unauthenticated users to login", async ({ page }) => {
   ).toBeVisible();
 });
 
-test("allows an allowlisted user to track food items across days", async ({
+test("goal-enabled users see remaining today and best fits, and quick add appends an unsaved draft", async ({
   page,
 }) => {
-  await page.goto("/api/test/session?email=coach@example.com");
-  await expect(page.getByText("Signed in as coach@example.com")).toBeVisible();
+  await signInAs(page);
+  await saveGoals(page);
 
-  const datePicker = page.getByLabel("Pick a day");
-  const currentBrowserDate = await page.evaluate(() => {
-    const value = new Date();
-    const year = value.getFullYear();
-    const month = String(value.getMonth() + 1).padStart(2, "0");
-    const day = String(value.getDate()).padStart(2, "0");
-
-    return `${year}-${month}-${day}`;
+  await page.goto("/?date=2026-03-19");
+  await addCustomFood(page, {
+    label: "Quick Add Yogurt",
+    proteinG: "30",
+    carbsG: "20",
+    fatG: "5",
+    caloriesKcal: "245",
   });
 
-  await expect(page).toHaveURL(new RegExp(`\\?date=${currentBrowserDate}$`));
-  await expect(datePicker).toHaveValue(currentBrowserDate);
+  await expect(
+    page.getByRole("heading", { name: "Remaining Today" }),
+  ).toBeVisible();
+  await expect(page.getByText("Best Fits")).toBeVisible();
 
-  await datePicker.fill("2026-03-17");
-  await expect(page).toHaveURL(/date=2026-03-17/);
-  await page.getByRole("button", { name: "Add food" }).click();
-  const firstMealCard = page.locator("article").last();
-  const firstMealName = firstMealCard.getByPlaceholder(
-    "500g quark, banana, oats, chicken breast...",
-  );
-  await firstMealName.fill("Greek yogurt");
-  await firstMealCard.getByLabel("Protein").fill("30");
-  await firstMealCard.getByLabel("Carbs").fill("40");
-  await firstMealCard.getByLabel("Fat").fill("10");
-  await firstMealCard.getByLabel("Calories").fill("370");
-  await firstMealCard.getByRole("button", { name: "Save food" }).click();
+  const quickAddButton = page.getByRole("button", {
+    name: "Add Quick Add Yogurt",
+  }).first();
+  await expect(quickAddButton).toBeVisible();
+  await quickAddButton.click();
 
-  await datePicker.fill("2026-03-19");
-  await expect(page).toHaveURL(/date=2026-03-19/);
-  await page.getByRole("button", { name: "Add food" }).click();
-  const secondMealCard = page.locator("article").last();
-  const secondMealName = secondMealCard.getByPlaceholder(
-    "500g quark, banana, oats, chicken breast...",
-  );
-  await secondMealName.fill("Chicken breast");
-  await secondMealCard.getByLabel("Protein").fill("50");
-  await secondMealCard.getByLabel("Carbs").fill("60");
-  await secondMealCard.getByLabel("Fat").fill("20");
-  await secondMealCard.getByLabel("Calories").fill("620");
-  await secondMealCard.getByRole("button", { name: "Save food" }).click();
+  const latestDraft = page.locator("article").last();
+  await expect(
+    latestDraft.getByPlaceholder("Chicken breast, rice, banana..."),
+  ).toHaveValue("Quick Add Yogurt");
+  await expect(latestDraft.getByLabel("Protein")).toHaveValue("30");
+  await expect(latestDraft.getByLabel("Carbs")).toHaveValue("20");
+  await expect(latestDraft.getByLabel("Fat")).toHaveValue("5");
+  await expect(latestDraft.getByLabel("Calories")).toHaveValue("245");
+  await expect(latestDraft.getByRole("button", { name: "Save" })).toBeVisible();
+});
 
-  const dailyTotalsCard = page.locator("section").filter({ hasText: "Daily totals" }).first();
-  await expect(dailyTotalsCard).toContainText("50g");
-  await expect(dailyTotalsCard).toContainText("60g");
-  await expect(dailyTotalsCard).toContainText("20g");
-  await expect(dailyTotalsCard).toContainText("620 kcal");
+test("users without goals see the quick add fallback and no best fits rail", async ({
+  page,
+}) => {
+  await signInAs(page);
 
-  await page.goto("/summary?date=2026-03-19");
-  const rolling7Card = page
-    .locator("section")
-    .filter({ hasText: "Rolling 7 days" })
-    .first();
-  await expect(rolling7Card).toContainText("2 logged days");
+  await page.goto("/goals?date=2026-03-19");
+  await page.getByRole("button", { name: "Clear all" }).click();
+  await page.getByRole("button", { name: "Save goals" }).click();
+  await expect(page.getByRole("button", { name: "Saved!" })).toBeVisible();
+
+  await page.goto("/?date=2026-03-19");
+
+  await expect(
+    page.getByRole("heading", { name: "Remaining Today" }),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Set calorie or macro targets to see what is left for the day."),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Set goals to unlock Best Fits based on what is left for today."),
+  ).toBeVisible();
+  await expect(page.getByText("Best Fits")).not.toBeVisible();
 });
 
 test("blocks non-allowlisted test logins", async ({ request }) => {

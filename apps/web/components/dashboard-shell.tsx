@@ -1,12 +1,28 @@
 "use client";
 
-import type { DailySummary, FoodPreset, MacroGoals, MealEntryRecord, RecipeRecord } from "@macro-tracker/db";
+import type {
+  DailySummary,
+  FoodPreset,
+  MacroGoals,
+  MealEntryRecord,
+  QuickAddCandidate,
+  RecentQuickAddItem,
+  RecipeRecord,
+} from "@macro-tracker/db";
 import { useRouter } from "next/navigation";
 import { useMemo, useState, useTransition } from "react";
 
 import { deletePresetAction, deleteMealEntryAction, savePresetAction, saveMealEntryAction, touchPresetAction, updatePresetAction } from "@/lib/actions";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
 import type { OpenFoodFactsProduct } from "@/lib/openfoodfacts";
+import {
+  computeLiveTotalsFromDrafts,
+  computeRemainingFromGoals,
+  dedupeBestFitCandidates,
+  hasAnyMacroGoals,
+  presetToQuickAddCandidate,
+  rankQuickAddCandidates,
+} from "@/lib/quick-add";
 import { getLocalDateString } from "@/lib/startup-date";
 
 import { AddFoodButton } from "./add-food-button";
@@ -17,7 +33,10 @@ import { FoodSearchModal } from "./food-search-modal";
 import { MacroBarGroup } from "./macro-bar";
 import { MealCard, type MealDraft } from "./meal-card";
 import { PresetModal } from "./preset-modal";
+import { QuickAddRail } from "./quick-add-rail";
+import { RemainingMacrosCard } from "./remaining-macros-card";
 import { RecipePickerModal } from "./recipe-picker-modal";
+import { TransitionLink } from "./transition-link";
 
 type DashboardShellProps = {
   userEmail: string;
@@ -25,6 +44,7 @@ type DashboardShellProps = {
   dailySummary: DailySummary;
   goals: MacroGoals;
   presets: FoodPreset[];
+  recentQuickAddItems: RecentQuickAddItem[];
   recipes: RecipeRecord[];
 };
 
@@ -60,14 +80,24 @@ function createEmptyDraft(sortOrder: number): MealDraft {
   };
 }
 
-function createDraftFromPreset(preset: FoodPreset, sortOrder: number): MealDraft {
+function getNextSortOrder(drafts: MealDraft[]) {
+  return drafts.reduce((highest, draft) => Math.max(highest, draft.sortOrder), -1) + 1;
+}
+
+function createDraftFromPrefill(
+  prefill: Pick<
+    QuickAddCandidate,
+    "label" | "proteinG" | "carbsG" | "fatG" | "caloriesKcal"
+  >,
+  sortOrder: number,
+): MealDraft {
   return {
     clientId: `draft-${crypto.randomUUID()}`,
-    label: preset.label,
-    proteinG: String(preset.proteinG),
-    carbsG: String(preset.carbsG),
-    fatG: String(preset.fatG),
-    caloriesKcal: String(preset.caloriesKcal),
+    label: prefill.label,
+    proteinG: String(prefill.proteinG),
+    carbsG: String(prefill.carbsG),
+    fatG: String(prefill.fatG),
+    caloriesKcal: String(prefill.caloriesKcal),
     sortOrder,
   };
 }
@@ -87,6 +117,7 @@ export function DashboardShell({
   dailySummary,
   goals,
   presets: initialPresets,
+  recentQuickAddItems,
   recipes,
 }: DashboardShellProps) {
   const router = useRouter();
@@ -117,10 +148,6 @@ export function DashboardShell({
   const [scanResult, setScanResult] = useState<OpenFoodFactsProduct | null>(null);
   const [notFoundBarcode, setNotFoundBarcode] = useState<string | null>(null);
 
-  function nextSortOrder() {
-    return drafts.reduce((highest, draft) => Math.max(highest, draft.sortOrder), -1) + 1;
-  }
-
   function updateDraft(
     clientId: string,
     field: keyof Omit<MealDraft, "clientId" | "id" | "sortOrder">,
@@ -138,37 +165,51 @@ export function DashboardShell({
   }
 
   function addCustomDraft() {
-    setDrafts((currentDrafts) => [...currentDrafts, createEmptyDraft(nextSortOrder())]);
+    setDrafts((currentDrafts) => [
+      ...currentDrafts,
+      createEmptyDraft(getNextSortOrder(currentDrafts)),
+    ]);
+  }
+
+  function appendPrefilledDraft(
+    prefill: Pick<
+      QuickAddCandidate,
+      "label" | "proteinG" | "carbsG" | "fatG" | "caloriesKcal"
+    > & {
+      source?: QuickAddCandidate["source"];
+      sourceId?: string;
+    },
+  ) {
+    setDrafts((currentDrafts) => [
+      ...currentDrafts,
+      createDraftFromPrefill(prefill, getNextSortOrder(currentDrafts)),
+    ]);
+    setPresetError(null);
+
+    if (prefill.source === "preset" && prefill.sourceId) {
+      void touchPresetAction({ id: prefill.sourceId });
+    }
   }
 
   function addDraftFromPreset(preset: FoodPreset) {
-    setDrafts((currentDrafts) => [
-      ...currentDrafts,
-      createDraftFromPreset(preset, nextSortOrder()),
-    ]);
-    setPresetError(null);
-    // Fire-and-forget: mark this preset as most-recently-used so the next time
-    // the modal opens it floats to the top of the list. We don't block the UI
-    // on the result or surface errors — sort order is best-effort.
-    void touchPresetAction({ id: preset.id });
+    appendPrefilledDraft(presetToQuickAddCandidate(preset));
     setShowPresetsModal(false);
   }
 
   function addDraftFromRecipe(recipe: RecipeRecord) {
     const macros = recipe.perPortionMacros;
-    setDrafts((currentDrafts) => [
-      ...currentDrafts,
-      {
-        clientId: `draft-${crypto.randomUUID()}`,
-        label: `${recipe.label} (1 portion)`,
-        proteinG: String(macros.proteinG),
-        carbsG: String(macros.carbsG),
-        fatG: String(macros.fatG),
-        caloriesKcal: String(macros.caloriesKcal),
-        sortOrder: nextSortOrder(),
-      },
-    ]);
+    appendPrefilledDraft({
+      label: `${recipe.label} (1 portion)`,
+      proteinG: macros.proteinG,
+      carbsG: macros.carbsG,
+      fatG: macros.fatG,
+      caloriesKcal: macros.caloriesKcal,
+    });
     setShowRecipePickerModal(false);
+  }
+
+  function handleQuickAddSelect(candidate: QuickAddCandidate) {
+    appendPrefilledDraft(candidate);
   }
 
   function removeLocalDraft(clientId: string) {
@@ -373,7 +414,19 @@ export function DashboardShell({
     });
   }
 
-  const dailyTotals = dailySummary.totals;
+  const liveTotals = computeLiveTotalsFromDrafts(drafts);
+  const remainingToday = computeRemainingFromGoals(liveTotals, goals);
+  const goalsAreSet = hasAnyMacroGoals(goals);
+  const bestFits = goalsAreSet
+    ? rankQuickAddCandidates(
+        dedupeBestFitCandidates([
+          ...localPresets.map(presetToQuickAddCandidate),
+          ...recentQuickAddItems,
+        ]),
+        remainingToday,
+      ).slice(0, 8)
+    : [];
+  const recentRepeats = recentQuickAddItems.slice(0, 8);
 
   return (
     <AppShell userEmail={userEmail} selectedDate={selectedDate} activeTab="log">
@@ -385,18 +438,75 @@ export function DashboardShell({
               Daily Report
             </h2>
             <span className="text-2xl font-bold tabular-nums text-[var(--color-ink)]">
-              {dailyTotals.caloriesKcal}
+              {liveTotals.caloriesKcal}
               <span className="ml-1 text-xs font-semibold text-[var(--color-muted)]">kcal</span>
             </span>
           </div>
 
           <MacroBarGroup
-            proteinG={dailyTotals.proteinG}
-            carbsG={dailyTotals.carbsG}
-            fatG={dailyTotals.fatG}
-            caloriesKcal={dailyTotals.caloriesKcal}
+            proteinG={liveTotals.proteinG}
+            carbsG={liveTotals.carbsG}
+            fatG={liveTotals.fatG}
+            caloriesKcal={liveTotals.caloriesKcal}
             goals={goals}
           />
+        </section>
+
+        <RemainingMacrosCard
+          goals={goals}
+          remaining={remainingToday}
+          selectedDate={selectedDate}
+        />
+
+        <section className="space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
+              Quick Add
+            </h2>
+            <span className="text-xs text-[var(--color-muted)]">
+              Prefills a draft card
+            </span>
+          </div>
+
+          {goalsAreSet ? (
+            bestFits.length > 0 ? (
+              <QuickAddRail title="Best Fits" items={bestFits} onSelect={handleQuickAddSelect} />
+            ) : (
+              <div className="rounded-2xl border border-dashed border-[var(--color-border-strong)] bg-[var(--color-shell-panel)] p-4">
+                <p className="text-sm text-[var(--color-muted)]">
+                  Best fits will appear once you have presets or recent foods to rank.
+                </p>
+              </div>
+            )
+          ) : (
+            <div className="rounded-2xl border border-dashed border-[var(--color-border-strong)] bg-[var(--color-shell-panel)] p-4">
+              <div className="flex items-center justify-between gap-4">
+                <p className="text-sm text-[var(--color-muted)]">
+                  Set goals to unlock Best Fits based on what is left for today.
+                </p>
+                <TransitionLink
+                  href={`/goals?date=${selectedDate}`}
+                  className="shrink-0 rounded-full border border-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-[var(--color-accent)] transition hover:-translate-y-0.5"
+                >
+                  Go to goals
+                </TransitionLink>
+              </div>
+            </div>
+          )}
+
+          {recentRepeats.length > 0 ? (
+            <QuickAddRail
+              title="Recent Repeats"
+              items={recentRepeats}
+              onSelect={handleQuickAddSelect}
+            />
+          ) : (
+            <div className="rounded-2xl border border-dashed border-[var(--color-border-strong)] bg-[var(--color-shell-panel)] p-4">
+              <p className="text-sm text-[var(--color-muted)]">
+                Recent repeats will show up here after you log a few foods.
+              </p>
+            </div>
+          )}
         </section>
 
         {/* Food log */}
@@ -543,18 +653,13 @@ export function DashboardShell({
           product={scanResult}
           notFoundBarcode={notFoundBarcode}
           onAddToLog={(macros) => {
-            setDrafts((currentDrafts) => [
-              ...currentDrafts,
-              {
-                clientId: `draft-${crypto.randomUUID()}`,
-                label: macros.label,
-                proteinG: String(macros.proteinG),
-                carbsG: String(macros.carbsG),
-                fatG: String(macros.fatG),
-                caloriesKcal: String(macros.caloriesKcal),
-                sortOrder: nextSortOrder(),
-              },
-            ]);
+            appendPrefilledDraft({
+              label: macros.label,
+              proteinG: macros.proteinG,
+              carbsG: macros.carbsG,
+              fatG: macros.fatG,
+              caloriesKcal: macros.caloriesKcal,
+            });
             setScanResult(null);
             setNotFoundBarcode(null);
           }}

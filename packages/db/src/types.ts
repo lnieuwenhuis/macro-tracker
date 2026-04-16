@@ -71,6 +71,24 @@ export type FoodPreset = {
   caloriesKcal: number;
 };
 
+export type QuickAddSource = "preset" | "recent";
+
+export type QuickAddCandidate = {
+  source: QuickAddSource;
+  sourceId: string;
+  label: string;
+  proteinG: number;
+  carbsG: number;
+  fatG: number;
+  caloriesKcal: number;
+  sourceDate: string | null;
+};
+
+export type RecentQuickAddItem = QuickAddCandidate & {
+  source: "recent";
+  sourceDate: string;
+};
+
 export type WeightEntryInput = {
   date: string;
   weightKg: number;

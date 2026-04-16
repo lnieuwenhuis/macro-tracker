@@ -1,4 +1,12 @@
-import { ensureDateString, getDailySummary, getPresets, getRecipes, getUserById, getUserGoals } from "@macro-tracker/db";
+import {
+  ensureDateString,
+  getDailySummary,
+  getPresets,
+  getRecentQuickAddCandidates,
+  getRecipes,
+  getUserById,
+  getUserGoals,
+} from "@macro-tracker/db";
 
 import { DashboardShell } from "@/components/dashboard-shell";
 import { requireSessionUser } from "@/lib/auth";
@@ -14,11 +22,12 @@ export default async function HomePage({ searchParams }: HomePageProps) {
   const params = await searchParams;
   const selectedDate = ensureDateString(params.date);
 
-  const [dailySummary, goals, user, presets, recipes] = await Promise.all([
+  const [dailySummary, goals, user, presets, recentQuickAddItems, recipes] = await Promise.all([
     getDailySummary(sessionUser.userId, selectedDate),
     getUserGoals(sessionUser.userId),
     getUserById(sessionUser.userId),
     getPresets(sessionUser.userId),
+    getRecentQuickAddCandidates(sessionUser.userId),
     getRecipes(sessionUser.userId),
   ]);
   const dashboardKey = JSON.stringify({ selectedDate, dailySummary });
@@ -31,6 +40,7 @@ export default async function HomePage({ searchParams }: HomePageProps) {
       dailySummary={dailySummary}
       goals={goals}
       presets={presets}
+      recentQuickAddItems={recentQuickAddItems}
       recipes={recipes}
     />
   );

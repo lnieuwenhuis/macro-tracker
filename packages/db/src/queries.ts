@@ -15,6 +15,8 @@ import type {
   MealEntryInput,
   MealEntryRecord,
   PeriodAverage,
+  QuickAddCandidate,
+  RecentQuickAddItem,
   RecipeIngredientRecord,
   RecipeInput,
   RecipeRecord,
@@ -57,6 +59,20 @@ function zeroMacros(): MacroNumbers {
 
 function roundToSingleDecimal(value: number) {
   return Math.round(value * 10) / 10;
+}
+
+function normalizeQuickAddLabel(label: string) {
+  return label.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function getQuickAddCandidateKey(candidate: Pick<QuickAddCandidate, "label" | "proteinG" | "carbsG" | "fatG" | "caloriesKcal">) {
+  return [
+    normalizeQuickAddLabel(candidate.label),
+    roundToSingleDecimal(candidate.proteinG),
+    roundToSingleDecimal(candidate.carbsG),
+    roundToSingleDecimal(candidate.fatG),
+    Math.round(candidate.caloriesKcal),
+  ].join("|");
 }
 
 function mapMealRow(row: {
@@ -584,6 +600,63 @@ export async function getPresets(userId: string, db?: DatabaseClient): Promise<F
     fatG: roundToSingleDecimal(toNumber(row.fatG)),
     caloriesKcal: toNumber(row.caloriesKcal),
   }));
+}
+
+export async function getRecentQuickAddCandidates(
+  userId: string,
+  limit = 24,
+  db?: DatabaseClient,
+): Promise<RecentQuickAddItem[]> {
+  const database = await resolveDb(db);
+  const rows = await database
+    .select({
+      id: mealEntries.id,
+      entryDate: mealEntries.entryDate,
+      label: mealEntries.label,
+      proteinG: mealEntries.proteinG,
+      carbsG: mealEntries.carbsG,
+      fatG: mealEntries.fatG,
+      caloriesKcal: mealEntries.caloriesKcal,
+      createdAt: mealEntries.createdAt,
+    })
+    .from(mealEntries)
+    .where(eq(mealEntries.userId, userId))
+    .orderBy(
+      desc(mealEntries.entryDate),
+      desc(mealEntries.createdAt),
+      desc(mealEntries.sortOrder),
+    )
+    .limit(limit * 8);
+
+  const seen = new Set<string>();
+  const unique: RecentQuickAddItem[] = [];
+
+  for (const row of rows) {
+    const candidate: RecentQuickAddItem = {
+      source: "recent",
+      sourceId: row.id,
+      label: row.label,
+      proteinG: roundToSingleDecimal(toNumber(row.proteinG)),
+      carbsG: roundToSingleDecimal(toNumber(row.carbsG)),
+      fatG: roundToSingleDecimal(toNumber(row.fatG)),
+      caloriesKcal: toNumber(row.caloriesKcal),
+      sourceDate: row.entryDate,
+    };
+    const key = getQuickAddCandidateKey(candidate);
+
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    unique.push(candidate);
+
+    if (unique.length >= limit) {
+      break;
+    }
+  }
+
+  return unique;
 }
 
 export async function touchPresetLastUsed(
