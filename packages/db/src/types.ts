@@ -172,4 +172,11 @@ export type QuickAddCandidate = {
   sourceDate?: string;
   /** Preset ID, used for touch/ranking (preset items only) */
   presetId?: string;
+  /**
+   * UTC hour (0–23) at the centre of the 3-hour window where this food is most
+   * frequently logged. Only set when habitCount ≥ 3 (a clear, repeated habit).
+   */
+  peakHourUtc?: number;
+  /** Number of log entries that fall within the peak time window. */
+  habitCount?: number;
 };

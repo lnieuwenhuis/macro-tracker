@@ -8,23 +8,6 @@ type QuickAddRailProps = {
   emptyState?: React.ReactNode;
 };
 
-function SourceDot({ source }: { source: QuickAddCandidate["source"] }) {
-  if (source === "preset") {
-    return (
-      <span
-        title="Preset"
-        className="mt-0.5 size-1.5 shrink-0 rounded-full bg-[var(--color-accent)]"
-      />
-    );
-  }
-  return (
-    <span
-      title="Recent"
-      className="mt-0.5 size-1.5 shrink-0 rounded-full bg-[var(--color-muted)]"
-    />
-  );
-}
-
 function QuickAddCard({
   candidate,
   onAdd,
@@ -39,13 +22,10 @@ function QuickAddCard({
       className="flex w-40 shrink-0 flex-col gap-2 rounded-2xl border border-[var(--color-border)] bg-[var(--color-card-subtle)] p-3.5 text-left shadow-[0_4px_16px_rgba(74,45,28,0.05)] transition hover:-translate-y-0.5 hover:border-[var(--color-accent)] active:translate-y-0"
       aria-label={`Quick add ${candidate.label}`}
     >
-      {/* Label row */}
-      <div className="flex items-start justify-between gap-1.5">
-        <span className="line-clamp-2 text-[13px] font-semibold leading-tight text-[var(--color-ink)]">
-          {candidate.label}
-        </span>
-        <SourceDot source={candidate.source} />
-      </div>
+      {/* Label */}
+      <span className="line-clamp-2 text-[13px] font-semibold leading-tight text-[var(--color-ink)]">
+        {candidate.label}
+      </span>
 
       {/* Calories */}
       <span className="text-base font-bold tabular-nums text-[var(--color-ink)]">

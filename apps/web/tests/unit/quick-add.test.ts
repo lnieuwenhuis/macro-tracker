@@ -288,7 +288,8 @@ describe("rankCandidates", () => {
   };
 
   it("ranks higher-protein items first when protein is the main deficit", () => {
-    const ranked = rankCandidates([lowProteinItem, highProteinItem], remaining);
+    // Pass a fixed hour with no habit signal to isolate macro scoring
+    const ranked = rankCandidates([lowProteinItem, highProteinItem], remaining, 10, 12);
     expect(ranked[0]!.label).toBe("Chicken breast");
   });
 
@@ -302,7 +303,7 @@ describe("rankCandidates", () => {
       source: "recent" as const,
       sourceDate: `2026-04-${String(i + 1).padStart(2, "0")}`,
     }));
-    expect(rankCandidates(many, remaining, 5)).toHaveLength(5);
+    expect(rankCandidates(many, remaining, 5, 12)).toHaveLength(5);
   });
 
   it("works without errors when all goals are null (no-goal mode)", () => {
@@ -313,7 +314,7 @@ describe("rankCandidates", () => {
       caloriesKcal: null,
     };
     expect(() =>
-      rankCandidates([highProteinItem, lowProteinItem], noGoalRemaining),
+      rankCandidates([highProteinItem, lowProteinItem], noGoalRemaining, 10, 12),
     ).not.toThrow();
   });
 
@@ -327,8 +328,79 @@ describe("rankCandidates", () => {
     const result = rankCandidates(
       [highProteinItem, lowProteinItem],
       overGoalRemaining,
+      10,
+      12,
     );
     expect(result.length).toBeGreaterThan(0);
+  });
+
+  it("boosts a habit food to the top when the current hour is near its peak", () => {
+    const habitOats: QuickAddCandidate = {
+      label: "Oats",
+      proteinG: 5,
+      carbsG: 30,
+      fatG: 3,
+      caloriesKcal: 170,
+      source: "recent",
+      sourceDate: "2026-04-15",
+      peakHourUtc: 7, // consistently eaten at ~7 UTC
+      habitCount: 5,
+    };
+
+    // highProteinItem has much better macro fit but no habit signal
+    // At hour 7, the habit boost should override
+    const ranked = rankCandidates(
+      [highProteinItem, habitOats],
+      remaining,
+      10,
+      7, // current hour matches habitOats peak
+    );
+    expect(ranked[0]!.label).toBe("Oats");
+  });
+
+  it("does not boost a habit food when the current hour is far from its peak", () => {
+    const habitOats: QuickAddCandidate = {
+      label: "Oats",
+      proteinG: 5,
+      carbsG: 30,
+      fatG: 3,
+      caloriesKcal: 170,
+      source: "recent",
+      sourceDate: "2026-04-15",
+      peakHourUtc: 7,
+      habitCount: 5,
+    };
+
+    // At hour 20 (evening) the habit boost is inactive; macro scoring wins
+    const ranked = rankCandidates(
+      [highProteinItem, habitOats],
+      remaining,
+      10,
+      20,
+    );
+    expect(ranked[0]!.label).toBe("Chicken breast");
+  });
+
+  it("ignores habit signal when habitCount is below threshold", () => {
+    const weakHabit: QuickAddCandidate = {
+      label: "Yogurt",
+      proteinG: 5,
+      carbsG: 10,
+      fatG: 2,
+      caloriesKcal: 80,
+      source: "recent",
+      peakHourUtc: 8,
+      habitCount: 2, // below the ≥3 threshold
+    };
+
+    const ranked = rankCandidates(
+      [highProteinItem, weakHabit],
+      remaining,
+      10,
+      8,
+    );
+    // highProteinItem wins because weakHabit's habit is not counted
+    expect(ranked[0]!.label).toBe("Chicken breast");
   });
 });
 
