@@ -9,6 +9,7 @@ import { SummaryCard } from "./summary-card";
 
 type SummaryShellProps = {
   userEmail: string;
+  canAccessAdmin: boolean;
   selectedDate: string;
   dailySummary: DailySummary;
   periodAverages: PeriodAverage[];
@@ -18,6 +19,7 @@ type SummaryShellProps = {
 
 export function SummaryShell({
   userEmail,
+  canAccessAdmin,
   selectedDate,
   dailySummary,
   periodAverages,
@@ -29,6 +31,7 @@ export function SummaryShell({
   return (
     <AppShell
       userEmail={userEmail}
+      canAccessAdmin={canAccessAdmin}
       selectedDate={selectedDate}
       activeTab="summary"
     >

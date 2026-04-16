@@ -17,6 +17,7 @@ import { ConfirmDeleteButton } from "./confirm-delete-button";
 
 type WeightShellProps = {
   userEmail: string;
+  canAccessAdmin: boolean;
   today: string;
   weightData: WeightPageData;
 };
@@ -284,6 +285,7 @@ function trendLabel(
 
 export function WeightShell({
   userEmail,
+  canAccessAdmin,
   today,
   weightData,
 }: WeightShellProps) {
@@ -426,7 +428,12 @@ export function WeightShell({
   // Empty state
   if (entries.length === 0) {
     return (
-      <AppShell userEmail={userEmail} selectedDate={today} activeTab="weight">
+      <AppShell
+        userEmail={userEmail}
+        canAccessAdmin={canAccessAdmin}
+        selectedDate={today}
+        activeTab="weight"
+      >
         <div className="space-y-5">
           {/* Entry form always visible */}
           <EntryForm
@@ -480,7 +487,12 @@ export function WeightShell({
   }
 
   return (
-    <AppShell userEmail={userEmail} selectedDate={today} activeTab="weight">
+    <AppShell
+      userEmail={userEmail}
+      canAccessAdmin={canAccessAdmin}
+      selectedDate={today}
+      activeTab="weight"
+    >
       <div className="space-y-5">
         {/* Stat cards */}
         <section>

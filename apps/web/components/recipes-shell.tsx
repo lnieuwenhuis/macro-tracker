@@ -8,17 +8,24 @@ import { TransitionLink } from "./transition-link";
 
 type RecipesShellProps = {
   userEmail: string;
+  canAccessAdmin: boolean;
   selectedDate: string;
   recipes: RecipeRecord[];
 };
 
 export function RecipesShell({
   userEmail,
+  canAccessAdmin,
   selectedDate,
   recipes,
 }: RecipesShellProps) {
   return (
-    <AppShell userEmail={userEmail} selectedDate={selectedDate} activeTab="recipes">
+    <AppShell
+      userEmail={userEmail}
+      canAccessAdmin={canAccessAdmin}
+      selectedDate={selectedDate}
+      activeTab="recipes"
+    >
       <div className="space-y-5">
         {/* Header with create button */}
         <div className="flex items-center justify-between">

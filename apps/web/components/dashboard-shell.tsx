@@ -23,6 +23,7 @@ import { RecipePickerModal } from "./recipe-picker-modal";
 
 type DashboardShellProps = {
   userEmail: string;
+  canAccessAdmin: boolean;
   selectedDate: string;
   dailySummary: DailySummary;
   goals: MacroGoals;
@@ -101,6 +102,7 @@ function toNumber(value: string, fallback = 0) {
 
 export function DashboardShell({
   userEmail,
+  canAccessAdmin,
   selectedDate,
   dailySummary,
   goals,
@@ -458,7 +460,12 @@ export function DashboardShell({
   }
 
   return (
-    <AppShell userEmail={userEmail} selectedDate={selectedDate} activeTab="log">
+    <AppShell
+      userEmail={userEmail}
+      canAccessAdmin={canAccessAdmin}
+      selectedDate={selectedDate}
+      activeTab="log"
+    >
       <div className="space-y-5">
         {/* Daily Report — macro bar charts (live totals) */}
         <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5 shadow-[0_12px_32px_rgba(0,0,0,0.06)]">

@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { getStatsPageData, getUserById, getUserGoals, todayDateString } from "@macro-tracker/db";
+import { canAccessAdmin, getStatsPageData, getUserById, getUserGoals, todayDateString } from "@macro-tracker/db";
 
 import { StatsShell } from "@/components/stats-shell";
 import { requireSessionUser } from "@/lib/auth";
@@ -21,6 +21,7 @@ export default async function StatsPage() {
   return (
     <StatsShell
       userEmail={user?.email ?? sessionUser.email}
+      canAccessAdmin={user ? canAccessAdmin(user.role) : false}
       today={today}
       statsData={statsData}
       goals={goals}

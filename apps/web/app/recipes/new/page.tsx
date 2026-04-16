@@ -1,4 +1,4 @@
-import { ensureDateString, getPresets, getUserById } from "@macro-tracker/db";
+import { canAccessAdmin, ensureDateString, getPresets, getUserById } from "@macro-tracker/db";
 
 import { RecipeBuilderShell } from "@/components/recipe-builder-shell";
 import { requireSessionUser } from "@/lib/auth";
@@ -22,6 +22,7 @@ export default async function NewRecipePage({ searchParams }: NewRecipePageProps
   return (
     <RecipeBuilderShell
       userEmail={user?.email ?? sessionUser.email}
+      canAccessAdmin={user ? canAccessAdmin(user.role) : false}
       selectedDate={selectedDate}
       presets={presets}
       mode="create"

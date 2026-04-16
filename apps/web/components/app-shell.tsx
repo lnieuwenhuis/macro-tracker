@@ -20,6 +20,7 @@ import { TransitionLink } from "./transition-link";
 
 type AppShellProps = {
   userEmail: string;
+  canAccessAdmin: boolean;
   selectedDate: string;
   activeTab: "log" | "summary" | "recipes" | "goals" | "stats" | "weight";
   children: ReactNode;
@@ -38,6 +39,7 @@ function getShowPickerSupport() {
 
 export function AppShell({
   userEmail,
+  canAccessAdmin,
   selectedDate,
   activeTab,
   children,
@@ -165,6 +167,7 @@ export function AppShell({
             <div className="flex items-center gap-3">
               <HamburgerMenu
                 userEmail={userEmail}
+                canAccessAdmin={canAccessAdmin}
                 selectedDate={selectedDate}
                 activeTab={activeTab}
               />

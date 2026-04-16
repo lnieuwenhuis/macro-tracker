@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { getWeightPageData, getUserById, todayDateString } from "@macro-tracker/db";
+import { canAccessAdmin, getWeightPageData, getUserById, todayDateString } from "@macro-tracker/db";
 
 import { WeightShell } from "@/components/weight-shell";
 import { requireSessionUser } from "@/lib/auth";
@@ -20,6 +20,7 @@ export default async function WeightPage() {
   return (
     <WeightShell
       userEmail={user?.email ?? sessionUser.email}
+      canAccessAdmin={user ? canAccessAdmin(user.role) : false}
       today={today}
       weightData={weightData}
     />
