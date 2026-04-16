@@ -20,7 +20,6 @@ import { MealCard, type MealDraft } from "./meal-card";
 import { PresetModal } from "./preset-modal";
 import { QuickAddRail } from "./quick-add-rail";
 import { RecipePickerModal } from "./recipe-picker-modal";
-import { RemainingMacrosCard } from "./remaining-macros-card";
 
 type DashboardShellProps = {
   userEmail: string;
@@ -472,21 +471,11 @@ export function DashboardShell({
           />
         </section>
 
-        {/* Remaining Today card */}
-        <RemainingMacrosCard remaining={remaining} hasGoals={goalsSet} />
-
         {/* Quick Add carousel */}
         <section>
-          <div className="mb-2.5 flex items-baseline justify-between">
-            <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
-              Quick Add
-            </h2>
-            {goalsSet && (
-              <span className="text-[10px] text-[var(--color-muted)]">
-                ranked by your goals
-              </span>
-            )}
-          </div>
+          <h2 className="mb-2.5 text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
+            Quick Add
+          </h2>
           <QuickAddRail
             items={quickAddItems}
             onAdd={addDraftFromCandidate}

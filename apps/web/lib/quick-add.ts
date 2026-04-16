@@ -113,41 +113,62 @@ export function deduplicateCandidates(
 // Ranking
 // ---------------------------------------------------------------------------
 
+/**
+ * Circular distance between two UTC hours (wraps at 24).
+ * e.g. distance(23, 1) = 2, not 22.
+ */
+function hourDistance(a: number, b: number): number {
+  const diff = Math.abs(a - b) % 24;
+  return diff > 12 ? 24 - diff : diff;
+}
+
 function scoreCandidate(
   candidate: QuickAddCandidate,
   remaining: RemainingMacros,
+  currentHourUtc: number,
 ): number {
   let score = 0;
 
-  // 1. Protein contribution — highest priority (weight ×3)
+  // 1. Time-of-day habit boost — applied first so it can surface relevant
+  //    foods even when macro goals aren't set.
+  //    Only triggers when we have confirmed a clear habit (habitCount ≥ 3).
+  if (
+    candidate.habitCount !== undefined &&
+    candidate.habitCount >= 3 &&
+    candidate.peakHourUtc !== undefined
+  ) {
+    const dist = hourDistance(currentHourUtc, candidate.peakHourUtc);
+    if (dist <= 1) score += 120; // within ~1 h of usual time → strong boost
+    else if (dist <= 2) score += 60; // within ~2 h → moderate boost
+  }
+
+  // 2. Protein contribution — highest macro priority (weight ×3)
   if (remaining.proteinG !== null) {
     const remainingClamped = Math.max(0, remaining.proteinG);
     const contribution = Math.min(candidate.proteinG, remainingClamped);
     score += contribution * 3;
   }
 
-  // 2. Calorie proximity — reward fitting within budget; penalise overshoot
+  // 3. Calorie proximity — reward fitting within budget; penalise overshoot
   if (remaining.caloriesKcal !== null) {
     const calBudget = Math.max(0, remaining.caloriesKcal);
     if (candidate.caloriesKcal <= calBudget) {
-      // The closer to the budget the better (max bonus at ≤200 kcal gap)
       const gap = calBudget - candidate.caloriesKcal;
       score += Math.max(0, 200 - gap) * 0.5;
     } else {
-      // Overshoot: penalise proportionally
       const overshoot = candidate.caloriesKcal - calBudget;
       score -= overshoot * 1.5;
     }
   }
 
-  // 3. Carb contribution (weight ×0.5)
+  // 4. Carb contribution (weight ×0.5)
   if (remaining.carbsG !== null) {
     const carbBudget = Math.max(0, remaining.carbsG);
     const contribution = Math.min(candidate.carbsG, carbBudget);
     score += contribution * 0.5;
   }
 
-  // 4. Fat contribution (weight ×0.5)
+  // 5. Fat contribution (weight ×0.5)
   if (remaining.fatG !== null) {
     const fatBudget = Math.max(0, remaining.fatG);
     const contribution = Math.min(candidate.fatG, fatBudget);
@@ -158,18 +179,26 @@ function scoreCandidate(
 }
 
 /**
- * Rank a mixed pool of preset + recent candidates against the remaining macros.
- * Deduplicates first, then scores, then uses recency as the final tie-breaker.
+ * Rank a mixed pool of preset + recent candidates.
+ * Scoring layers (highest to lowest priority):
+ *   1. Time-of-day habit match — foods the user consistently logs near this hour
+ *   2. Protein goal contribution
+ *   3. Calorie budget fit / overshoot penalty
+ *   4. Carb + fat contribution
+ *   5. Recency as tie-breaker
+ *
+ * @param currentHourUtc  Current UTC hour (0–23). Pass `new Date().getUTCHours()`.
  */
 export function rankCandidates(
   candidates: QuickAddCandidate[],
   remaining: RemainingMacros,
   limit = 10,
+  currentHourUtc = new Date().getUTCHours(),
 ): QuickAddCandidate[] {
   const pool = deduplicateCandidates(candidates);
 
   return pool
-    .map((c) => ({ candidate: c, score: scoreCandidate(c, remaining) }))
+    .map((c) => ({ candidate: c, score: scoreCandidate(c, remaining, currentHourUtc) }))
     .sort((a, b) => {
       if (b.score !== a.score) return b.score - a.score;
       // Recency tie-breaker: more recent first. Presets with no date sort last.
