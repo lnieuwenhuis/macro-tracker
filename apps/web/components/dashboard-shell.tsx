@@ -284,6 +284,16 @@ export function DashboardShell({
         return;
       }
 
+      // Stamp the server-assigned ID onto the draft so subsequent edits go
+      // through the update path rather than creating a duplicate entry.
+      if (result.entry) {
+        setDrafts((currentDrafts) =>
+          currentDrafts.map((d) =>
+            d.clientId === clientId ? { ...d, id: result.entry!.id } : d,
+          ),
+        );
+      }
+
       router.refresh();
     });
   }

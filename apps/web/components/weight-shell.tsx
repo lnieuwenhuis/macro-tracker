@@ -389,11 +389,14 @@ export function WeightShell({
     setDeletingId(entryId);
     startTransition(async () => {
       const result = await deleteWeightEntryAction({ id: entryId });
+      setDeletingId(null);
+
       if (!result.ok) {
         setFormError(result.error ?? "Unable to delete entry.");
+        return;
       }
-      setDeletingId(null);
-      // If we were editing this entry, clear edit state.
+
+      // If we were editing this entry, clear the edit form now that it's gone.
       if (editingId === entryId) {
         resetForm();
       }
