@@ -54,36 +54,36 @@ function toActionError(error: unknown) {
   return error.message;
 }
 
+type SaveMealEntryResult = ActionResult & { entry?: MealEntryRecord };
+
 export async function saveMealEntryAction(
   input: SaveMealEntryInput,
-): Promise<ActionResult> {
+): Promise<SaveMealEntryResult> {
   const sessionUser = await requireSessionUser();
 
   try {
-    if (input.id) {
-      await updateMealEntry(sessionUser.userId, input.id, {
-        date: input.date,
-        label: input.label,
-        sortOrder: input.sortOrder ?? 0,
-        proteinG: input.proteinG,
-        carbsG: input.carbsG,
-        fatG: input.fatG,
-        caloriesKcal: input.caloriesKcal,
-      });
-    } else {
-      await createMealEntry(sessionUser.userId, {
-        date: input.date,
-        label: input.label,
-        sortOrder: input.sortOrder,
-        proteinG: input.proteinG,
-        carbsG: input.carbsG,
-        fatG: input.fatG,
-        caloriesKcal: input.caloriesKcal,
-      });
-    }
+    const entry = input.id
+      ? await updateMealEntry(sessionUser.userId, input.id, {
+          date: input.date,
+          label: input.label,
+          sortOrder: input.sortOrder ?? 0,
+          proteinG: input.proteinG,
+          carbsG: input.carbsG,
+          fatG: input.fatG,
+          caloriesKcal: input.caloriesKcal,
+        })
+      : await createMealEntry(sessionUser.userId, {
+          date: input.date,
+          label: input.label,
+          sortOrder: input.sortOrder,
+          proteinG: input.proteinG,
+          carbsG: input.carbsG,
+          fatG: input.fatG,
+          caloriesKcal: input.caloriesKcal,
+        });
 
     revalidatePath("/", "page");
-    return { ok: true };
+    return { ok: true, entry };
   } catch (error) {
     return {
       ok: false,

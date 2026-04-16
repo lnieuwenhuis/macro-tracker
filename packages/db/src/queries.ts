@@ -15,6 +15,7 @@ import type {
   MealEntryInput,
   MealEntryRecord,
   PeriodAverage,
+  QuickAddCandidate,
   RecipeIngredientRecord,
   RecipeInput,
   RecipeRecord,
@@ -1411,4 +1412,121 @@ export async function saveCustomBarcodeProduct(
     .returning();
 
   return mapBarcodeProductRow(created);
+}
+
+// ---------------------------------------------------------------------------
+// Quick-add candidate history
+// ---------------------------------------------------------------------------
+
+export async function getRecentQuickAddCandidates(
+  userId: string,
+  limit = 30,
+  db?: DatabaseClient,
+): Promise<QuickAddCandidate[]> {
+  const database = await resolveDb(db);
+
+  // Fetch more rows than needed: extra history gives the habit detector enough
+  // data to spot recurring time-of-day patterns across different days.
+  const rows = await database
+    .select({
+      label: mealEntries.label,
+      date: mealEntries.entryDate,
+      proteinG: mealEntries.proteinG,
+      carbsG: mealEntries.carbsG,
+      fatG: mealEntries.fatG,
+      caloriesKcal: mealEntries.caloriesKcal,
+      createdAt: mealEntries.createdAt,
+    })
+    .from(mealEntries)
+    .where(eq(mealEntries.userId, userId))
+    .orderBy(desc(mealEntries.entryDate), desc(mealEntries.createdAt))
+    .limit(400);
+
+  // First pass: collect UTC-hour observations per unique food key so we can
+  // detect time-of-day habits before we deduplicate down to one row per food.
+  const hourObservations = new Map<string, number[]>();
+  const firstSeenDate = new Map<string, string>();
+
+  for (const row of rows) {
+    const protein = roundToSingleDecimal(toNumber(row.proteinG));
+    const carbs = roundToSingleDecimal(toNumber(row.carbsG));
+    const fat = roundToSingleDecimal(toNumber(row.fatG));
+    const cals = toNumber(row.caloriesKcal);
+    const key = `${row.label.toLowerCase().trim()}|${protein}|${carbs}|${fat}|${cals}`;
+
+    if (!firstSeenDate.has(key)) {
+      firstSeenDate.set(key, row.date);
+    }
+
+    if (row.createdAt) {
+      const hour = new Date(row.createdAt).getUTCHours();
+      const bucket = hourObservations.get(key) ?? [];
+      bucket.push(hour);
+      hourObservations.set(key, bucket);
+    }
+  }
+
+  // Determine whether a food has a clear time-of-day habit.
+  // Strategy: bucket observations into 3-hour windows (8 buckets / day).
+  // A habit exists when ≥ 3 distinct log entries share the same bucket.
+  function detectHabit(
+    hours: number[],
+  ): { peakHourUtc: number; habitCount: number } | null {
+    if (hours.length < 3) return null;
+
+    const bucketCounts: Record<number, number> = {};
+    for (const h of hours) {
+      const bucket = Math.floor(h / 3); // 0–7
+      bucketCounts[bucket] = (bucketCounts[bucket] ?? 0) + 1;
+    }
+
+    let peakBucket = -1;
+    let peakCount = 0;
+    for (const [b, c] of Object.entries(bucketCounts)) {
+      if (c > peakCount) {
+        peakCount = c;
+        peakBucket = Number(b);
+      }
+    }
+
+    if (peakCount < 3) return null;
+
+    // Centre of the 3-hour bucket (e.g. bucket 2 → hours 6-8 → centre = 7)
+    const peakHourUtc = peakBucket * 3 + 1;
+    return { peakHourUtc, habitCount: peakCount };
+  }
+
+  // Second pass: deduplicate, keeping most-recent instance per food, and
+  // attach any detected habit data.
+  const seen = new Set<string>();
+  const candidates: QuickAddCandidate[] = [];
+
+  for (const row of rows) {
+    const protein = roundToSingleDecimal(toNumber(row.proteinG));
+    const carbs = roundToSingleDecimal(toNumber(row.carbsG));
+    const fat = roundToSingleDecimal(toNumber(row.fatG));
+    const cals = toNumber(row.caloriesKcal);
+    const key = `${row.label.toLowerCase().trim()}|${protein}|${carbs}|${fat}|${cals}`;
+
+    if (!seen.has(key)) {
+      seen.add(key);
+      const habit = detectHabit(hourObservations.get(key) ?? []);
+      candidates.push({
+        label: row.label,
+        proteinG: protein,
+        carbsG: carbs,
+        fatG: fat,
+        caloriesKcal: cals,
+        source: "recent",
+        sourceDate: firstSeenDate.get(key) ?? row.date,
+        ...(habit !== null
+          ? { peakHourUtc: habit.peakHourUtc, habitCount: habit.habitCount }
+          : {}),
+      });
+    }
+
+    if (candidates.length >= limit) break;
+  }
+
+  return candidates;
 }
