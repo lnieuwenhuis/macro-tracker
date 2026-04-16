@@ -15,6 +15,7 @@ import type {
   MealEntryInput,
   MealEntryRecord,
   PeriodAverage,
+  QuickAddCandidate,
   RecipeIngredientRecord,
   RecipeInput,
   RecipeRecord,
@@ -1411,4 +1412,60 @@ export async function saveCustomBarcodeProduct(
     .returning();
 
   return mapBarcodeProductRow(created);
+}
+
+// ---------------------------------------------------------------------------
+// Quick-add candidate history
+// ---------------------------------------------------------------------------
+
+export async function getRecentQuickAddCandidates(
+  userId: string,
+  limit = 30,
+  db?: DatabaseClient,
+): Promise<QuickAddCandidate[]> {
+  const database = await resolveDb(db);
+
+  // Pull recent meals (fetch more than needed so dedup has enough to work with)
+  const rows = await database
+    .select({
+      label: mealEntries.label,
+      date: mealEntries.entryDate,
+      proteinG: mealEntries.proteinG,
+      carbsG: mealEntries.carbsG,
+      fatG: mealEntries.fatG,
+      caloriesKcal: mealEntries.caloriesKcal,
+    })
+    .from(mealEntries)
+    .where(eq(mealEntries.userId, userId))
+    .orderBy(desc(mealEntries.entryDate), desc(mealEntries.createdAt))
+    .limit(200);
+
+  // Deduplicate by normalised (label + macros), keeping the most-recent instance
+  const seen = new Set<string>();
+  const candidates: QuickAddCandidate[] = [];
+
+  for (const row of rows) {
+    const protein = roundToSingleDecimal(toNumber(row.proteinG));
+    const carbs = roundToSingleDecimal(toNumber(row.carbsG));
+    const fat = roundToSingleDecimal(toNumber(row.fatG));
+    const cals = toNumber(row.caloriesKcal);
+    const key = `${row.label.toLowerCase().trim()}|${protein}|${carbs}|${fat}|${cals}`;
+
+    if (!seen.has(key)) {
+      seen.add(key);
+      candidates.push({
+        label: row.label,
+        proteinG: protein,
+        carbsG: carbs,
+        fatG: fat,
+        caloriesKcal: cals,
+        source: "recent",
+        sourceDate: row.date,
+      });
+    }
+
+    if (candidates.length >= limit) break;
+  }
+
+  return candidates;
 }

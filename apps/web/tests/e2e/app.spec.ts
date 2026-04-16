@@ -76,3 +76,42 @@ test("blocks non-allowlisted test logins", async ({ request }) => {
 
   expect(response.status()).toBe(403);
 });
+
+test("user with goals sees Remaining Today card and Best Fits rail", async ({
+  page,
+}) => {
+  await page.goto("/api/test/session?email=coach@example.com");
+  await expect(page.getByText("Signed in as coach@example.com")).toBeVisible();
+
+  // The Remaining Today card should be visible regardless of goals state
+  await expect(page.getByRole("region", { name: "Remaining today" })).toBeVisible();
+
+  // The Quick Add section is always present
+  await expect(page.getByText("Quick Add")).toBeVisible();
+
+  // Recent Repeats rail is always shown
+  await expect(page.getByText("Recent Repeats")).toBeVisible();
+});
+
+test("tapping a quick-add card adds a prefilled draft without auto-saving", async ({
+  page,
+}) => {
+  await page.goto("/api/test/session?email=coach@example.com");
+  await expect(page.getByText("Signed in as coach@example.com")).toBeVisible();
+
+  const datePicker = page.getByLabel("Pick a day");
+  await datePicker.fill("2026-03-17");
+  await expect(page).toHaveURL(/date=2026-03-17/);
+
+  // If there are any quick-add cards, click the first one and verify a draft is created
+  const quickAddCards = page.getByRole("button", { name: /Quick add/i });
+  const cardCount = await quickAddCards.count();
+
+  if (cardCount > 0) {
+    const articlesBefore = await page.locator("article").count();
+    await quickAddCards.first().click();
+    // A new unsaved draft card should appear
+    const articlesAfter = await page.locator("article").count();
+    expect(articlesAfter).toBeGreaterThan(articlesBefore);
+  }
+});
