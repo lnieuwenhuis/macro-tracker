@@ -1,10 +1,11 @@
 "use client";
 
-import type { DailySummary, FoodPreset, MacroGoals, MealEntryRecord, RecipeRecord } from "@macro-tracker/db";
+import type { DailySummary, FoodPreset, MacroGoals, MealEntryRecord, QuickAddCandidate, RecipeRecord } from "@macro-tracker/db";
 import { useRouter } from "next/navigation";
 import { useMemo, useState, useTransition } from "react";
 
 import { deletePresetAction, deleteMealEntryAction, savePresetAction, saveMealEntryAction, touchPresetAction, updatePresetAction } from "@/lib/actions";
+import { computeLiveTotals, computeRemaining, getRecentRepeats, hasAnyGoal, rankCandidates } from "@/lib/quick-add";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
 import type { OpenFoodFactsProduct } from "@/lib/openfoodfacts";
 import { getLocalDateString } from "@/lib/startup-date";
@@ -17,7 +18,9 @@ import { FoodSearchModal } from "./food-search-modal";
 import { MacroBarGroup } from "./macro-bar";
 import { MealCard, type MealDraft } from "./meal-card";
 import { PresetModal } from "./preset-modal";
+import { QuickAddRail, GoalsCTARail } from "./quick-add-rail";
 import { RecipePickerModal } from "./recipe-picker-modal";
+import { RemainingMacrosCard } from "./remaining-macros-card";
 
 type DashboardShellProps = {
   userEmail: string;
@@ -26,6 +29,7 @@ type DashboardShellProps = {
   goals: MacroGoals;
   presets: FoodPreset[];
   recipes: RecipeRecord[];
+  recentCandidates: QuickAddCandidate[];
 };
 
 type ErrorState = Record<string, string | null>;
@@ -72,6 +76,21 @@ function createDraftFromPreset(preset: FoodPreset, sortOrder: number): MealDraft
   };
 }
 
+function createDraftFromCandidate(
+  candidate: QuickAddCandidate,
+  sortOrder: number,
+): MealDraft {
+  return {
+    clientId: `draft-${crypto.randomUUID()}`,
+    label: candidate.label,
+    proteinG: String(candidate.proteinG),
+    carbsG: String(candidate.carbsG),
+    fatG: String(candidate.fatG),
+    caloriesKcal: String(candidate.caloriesKcal),
+    sortOrder,
+  };
+}
+
 function toNumber(value: string, fallback = 0) {
   if (!value.trim()) {
     return fallback;
@@ -88,6 +107,7 @@ export function DashboardShell({
   goals,
   presets: initialPresets,
   recipes,
+  recentCandidates,
 }: DashboardShellProps) {
   const router = useRouter();
   const [drafts, setDrafts] = useState<MealDraft[]>(() =>
@@ -116,6 +136,49 @@ export function DashboardShell({
   const [showScanner, setShowScanner] = useState(false);
   const [scanResult, setScanResult] = useState<OpenFoodFactsProduct | null>(null);
   const [notFoundBarcode, setNotFoundBarcode] = useState<string | null>(null);
+
+  // ---------------------------------------------------------------------------
+  // Live totals + remaining (react to unsaved drafts immediately)
+  // ---------------------------------------------------------------------------
+
+  const liveTotals = useMemo(() => computeLiveTotals(drafts), [drafts]);
+  const remaining = useMemo(
+    () => computeRemaining(liveTotals, goals),
+    [liveTotals, goals],
+  );
+  const goalsSet = useMemo(() => hasAnyGoal(goals), [goals]);
+
+  // ---------------------------------------------------------------------------
+  // Quick-add rails
+  // ---------------------------------------------------------------------------
+
+  // Build a unified candidate pool: preset candidates + recent history candidates
+  const allCandidates = useMemo<QuickAddCandidate[]>(() => {
+    const presetCandidates: QuickAddCandidate[] = localPresets.map((p) => ({
+      label: p.label,
+      proteinG: p.proteinG,
+      carbsG: p.carbsG,
+      fatG: p.fatG,
+      caloriesKcal: p.caloriesKcal,
+      source: "preset" as const,
+      presetId: p.id,
+    }));
+    return [...presetCandidates, ...recentCandidates];
+  }, [localPresets, recentCandidates]);
+
+  const bestFits = useMemo(
+    () => (goalsSet ? rankCandidates(allCandidates, remaining, 10) : []),
+    [allCandidates, remaining, goalsSet],
+  );
+
+  const recentRepeats = useMemo(
+    () => getRecentRepeats(allCandidates, 10),
+    [allCandidates],
+  );
+
+  // ---------------------------------------------------------------------------
+  // Draft helpers
+  // ---------------------------------------------------------------------------
 
   function nextSortOrder() {
     return drafts.reduce((highest, draft) => Math.max(highest, draft.sortOrder), -1) + 1;
@@ -169,6 +232,19 @@ export function DashboardShell({
       },
     ]);
     setShowRecipePickerModal(false);
+  }
+
+  /** Source-agnostic: tap any quick-add card to open a prefilled draft (no auto-save). */
+  function addDraftFromCandidate(candidate: QuickAddCandidate) {
+    setDrafts((currentDrafts) => [
+      ...currentDrafts,
+      createDraftFromCandidate(candidate, nextSortOrder()),
+    ]);
+
+    // If this was a preset candidate, touch it so its sort order floats up.
+    if (candidate.source === "preset" && candidate.presetId) {
+      void touchPresetAction({ id: candidate.presetId });
+    }
   }
 
   function removeLocalDraft(clientId: string) {
@@ -373,29 +449,63 @@ export function DashboardShell({
     });
   }
 
-  const dailyTotals = dailySummary.totals;
-
   return (
     <AppShell userEmail={userEmail} selectedDate={selectedDate} activeTab="log">
       <div className="space-y-5">
-        {/* Daily Report — macro bar charts */}
+        {/* Daily Report — macro bar charts (live totals) */}
         <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5 shadow-[0_12px_32px_rgba(0,0,0,0.06)]">
           <div className="mb-4 flex items-center justify-between">
             <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
               Daily Report
             </h2>
             <span className="text-2xl font-bold tabular-nums text-[var(--color-ink)]">
-              {dailyTotals.caloriesKcal}
+              {liveTotals.caloriesKcal}
               <span className="ml-1 text-xs font-semibold text-[var(--color-muted)]">kcal</span>
             </span>
           </div>
 
           <MacroBarGroup
-            proteinG={dailyTotals.proteinG}
-            carbsG={dailyTotals.carbsG}
-            fatG={dailyTotals.fatG}
-            caloriesKcal={dailyTotals.caloriesKcal}
+            proteinG={liveTotals.proteinG}
+            carbsG={liveTotals.carbsG}
+            fatG={liveTotals.fatG}
+            caloriesKcal={liveTotals.caloriesKcal}
             goals={goals}
+          />
+        </section>
+
+        {/* Remaining Today card */}
+        <RemainingMacrosCard remaining={remaining} hasGoals={goalsSet} />
+
+        {/* Quick Add section */}
+        <section className="space-y-3">
+          <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
+            Quick Add
+          </h2>
+
+          {goalsSet ? (
+            <QuickAddRail
+              title="Best Fits"
+              items={bestFits}
+              onAdd={addDraftFromCandidate}
+              emptyState={
+                <p className="text-sm text-[var(--color-muted)]">
+                  Add some presets or log foods to see suggestions.
+                </p>
+              }
+            />
+          ) : (
+            <GoalsCTARail title="Best Fits" />
+          )}
+
+          <QuickAddRail
+            title="Recent Repeats"
+            items={recentRepeats}
+            onAdd={addDraftFromCandidate}
+            emptyState={
+              <p className="text-sm text-[var(--color-muted)]">
+                Your recently logged foods will appear here.
+              </p>
+            }
           />
         </section>
 
