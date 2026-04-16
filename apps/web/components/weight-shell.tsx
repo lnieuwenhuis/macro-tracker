@@ -2,16 +2,18 @@
 
 import type { WeightPageData, WeightEntryRecord } from "@macro-tracker/db";
 import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 
 import {
   deleteWeightEntryAction,
   saveWeightEntryAction,
   saveWeightGoalAction,
+  updateWeightEntryAction,
 } from "@/lib/actions";
 import { formatShortDate } from "@/lib/formatting";
 
 import { AppShell } from "./app-shell";
+import { ConfirmDeleteButton } from "./confirm-delete-button";
 
 type WeightShellProps = {
   userEmail: string;
@@ -56,7 +58,25 @@ function WeightTrendChart({
   entries: WeightEntryRecord[];
   goalWeightKg: number | null;
 }) {
+  const [selectedPointId, setSelectedPointId] = useState<string | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
   const last30 = entries.slice(-30);
+
+  // Dismiss tooltip when clicking outside the chart container
+  useEffect(() => {
+    if (!selectedPointId) return;
+    function handleOutside(e: MouseEvent) {
+      if (
+        containerRef.current &&
+        !containerRef.current.contains(e.target as Node)
+      ) {
+        setSelectedPointId(null);
+      }
+    }
+    document.addEventListener("mousedown", handleOutside);
+    return () => document.removeEventListener("mousedown", handleOutside);
+  }, [selectedPointId]);
 
   if (last30.length < 2) {
     return (
@@ -81,6 +101,7 @@ function WeightTrendChart({
   const padTop = 4;
   const totalW = 300;
   const usableW = totalW - padX * 2;
+  const svgH = chartH + padTop + 4;
 
   const xStep = last30.length > 1 ? usableW / (last30.length - 1) : 0;
 
@@ -104,58 +125,125 @@ function WeightTrendChart({
       ? padTop + chartH - ((goalWeightKg - minW) / range) * chartH
       : null;
 
+  const selectedPoint = selectedPointId
+    ? points.find((p) => p.entry.id === selectedPointId) ?? null
+    : null;
+
   return (
-    <div className="overflow-x-auto">
-      <svg
-        width="100%"
-        height={chartH + padTop + 4}
-        viewBox={`0 0 ${totalW} ${chartH + padTop + 4}`}
-        preserveAspectRatio="none"
-        className="block w-full"
-        style={{ minWidth: totalW }}
-      >
-        {/* Filled area */}
-        <polygon
-          points={areaPoints}
-          fill="var(--color-accent)"
-          opacity="0.12"
-        />
-
-        {/* Goal line */}
-        {goalY != null && (
-          <line
-            x1={0}
-            y1={goalY}
-            x2={totalW}
-            y2={goalY}
-            stroke="var(--color-accent)"
-            strokeWidth="1.5"
-            strokeDasharray="4 3"
-            opacity="0.7"
-          />
-        )}
-
-        {/* Line */}
-        <polyline
-          points={polylinePoints}
-          fill="none"
-          stroke="var(--color-accent)"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-
-        {/* Dots */}
-        {points.map((p) => (
-          <circle
-            key={p.entry.id}
-            cx={p.x}
-            cy={p.y}
-            r="3"
+    <div>
+      {/* Chart — relative so the HTML tooltip overlay can be positioned inside */}
+      <div ref={containerRef} className="relative overflow-x-auto">
+        <svg
+          width="100%"
+          height={svgH}
+          viewBox={`0 0 ${totalW} ${svgH}`}
+          preserveAspectRatio="none"
+          className="block w-full"
+          style={{ minWidth: totalW }}
+        >
+          {/* Filled area */}
+          <polygon
+            points={areaPoints}
             fill="var(--color-accent)"
+            opacity="0.12"
           />
-        ))}
-      </svg>
+
+          {/* Goal line */}
+          {goalY != null && (
+            <line
+              x1={0}
+              y1={goalY}
+              x2={totalW}
+              y2={goalY}
+              stroke="var(--color-accent)"
+              strokeWidth="1.5"
+              strokeDasharray="4 3"
+              opacity="0.7"
+            />
+          )}
+
+          {/* Line */}
+          <polyline
+            points={polylinePoints}
+            fill="none"
+            stroke="var(--color-accent)"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+
+          {/* Visual dots */}
+          {points.map((p) => (
+            <circle
+              key={p.entry.id}
+              cx={p.x}
+              cy={p.y}
+              r="3"
+              fill="var(--color-accent)"
+            />
+          ))}
+
+          {/* Highlight ring around selected dot */}
+          {selectedPoint && (
+            <circle
+              cx={selectedPoint.x}
+              cy={selectedPoint.y}
+              r="6"
+              fill="var(--color-accent)"
+              opacity="0.3"
+            />
+          )}
+
+          {/* Invisible larger hit-targets for tap/click */}
+          {points.map((p) => (
+            <circle
+              key={`hit-${p.entry.id}`}
+              cx={p.x}
+              cy={p.y}
+              r="10"
+              fill="transparent"
+              style={{ cursor: "pointer" }}
+              onClick={() =>
+                setSelectedPointId((prev) =>
+                  prev === p.entry.id ? null : p.entry.id,
+                )
+              }
+            />
+          ))}
+        </svg>
+
+        {/* HTML tooltip — positioned via percentage x (maps correctly through
+            preserveAspectRatio="none" x-stretch) and pixel y (no y-stretch
+            because SVG height attribute matches viewBox height). */}
+        {selectedPoint && (
+          <div
+            className="pointer-events-none absolute z-10"
+            style={{
+              left: `${(selectedPoint.x / totalW) * 100}%`,
+              top: `${selectedPoint.y}px`,
+              transform: "translate(-50%, calc(-100% - 10px))",
+            }}
+          >
+            <div className="whitespace-nowrap rounded-lg bg-[var(--color-ink)] px-2.5 py-1.5 text-center shadow-lg">
+              <p className="text-xs font-bold text-white">
+                {selectedPoint.entry.weightKg} kg
+              </p>
+              <p className="text-[10px] text-white/70">
+                {formatShortDate(selectedPoint.entry.date)}
+              </p>
+            </div>
+            {/* Caret arrow */}
+            <div
+              className="mx-auto h-0 w-0"
+              style={{
+                borderLeft: "5px solid transparent",
+                borderRight: "5px solid transparent",
+                borderTop: "5px solid var(--color-ink)",
+              }}
+            />
+          </div>
+        )}
+      </div>
 
       <div className="mt-1 flex justify-between text-[10px] text-[var(--color-muted)]">
         <span>{last30[0] ? formatShortDate(last30[0].date) : ""}</span>
@@ -217,8 +305,41 @@ export function WeightShell({
 
   // Delete state
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  // Edit state — when set, the entry form is in update mode and targets
+  // the given entry id instead of inserting a new row.
+  const [editingId, setEditingId] = useState<string | null>(null);
 
   const { entries, stats } = weightData;
+
+  function resetForm() {
+    setFormDate(today);
+    setFormWeight("");
+    setFormBodyFat("");
+    setFormNotes("");
+    setEditingId(null);
+    setFormError(null);
+  }
+
+  function handleStartEdit(entry: WeightEntryRecord) {
+    setFormDate(entry.date);
+    setFormWeight(String(entry.weightKg));
+    setFormBodyFat(entry.bodyFatPct != null ? String(entry.bodyFatPct) : "");
+    setFormNotes(entry.notes ?? "");
+    setEditingId(entry.id);
+    setFormError(null);
+
+    // Scroll the form into view so the user can see the fields populate.
+    if (typeof window !== "undefined") {
+      requestAnimationFrame(() => {
+        const el = document.getElementById("weight-entry-form");
+        el?.scrollIntoView({ behavior: "smooth", block: "center" });
+      });
+    }
+  }
+
+  function handleCancelEdit() {
+    resetForm();
+  }
 
   function handleSaveEntry() {
     setFormError(null);
@@ -239,21 +360,27 @@ export function WeightShell({
     }
 
     startTransition(async () => {
-      const result = await saveWeightEntryAction({
-        date: formDate,
-        weightKg,
-        bodyFatPct,
-        notes: formNotes.trim() || null,
-      });
+      const result = editingId
+        ? await updateWeightEntryAction({
+            id: editingId,
+            date: formDate,
+            weightKg,
+            bodyFatPct,
+            notes: formNotes.trim() || null,
+          })
+        : await saveWeightEntryAction({
+            date: formDate,
+            weightKg,
+            bodyFatPct,
+            notes: formNotes.trim() || null,
+          });
 
       if (!result.ok) {
         setFormError(result.error ?? "Unable to save entry.");
         return;
       }
 
-      setFormWeight("");
-      setFormBodyFat("");
-      setFormNotes("");
+      resetForm();
       router.refresh();
     });
   }
@@ -266,6 +393,10 @@ export function WeightShell({
         setFormError(result.error ?? "Unable to delete entry.");
       }
       setDeletingId(null);
+      // If we were editing this entry, clear edit state.
+      if (editingId === entryId) {
+        resetForm();
+      }
       router.refresh();
     });
   }
@@ -302,11 +433,13 @@ export function WeightShell({
             formNotes={formNotes}
             formError={formError}
             isPending={isPending}
+            isEditing={editingId !== null}
             onDateChange={setFormDate}
             onWeightChange={setFormWeight}
             onBodyFatChange={setFormBodyFat}
             onNotesChange={setFormNotes}
             onSave={handleSaveEntry}
+            onCancelEdit={handleCancelEdit}
           />
 
           <section className="flex min-h-[40vh] items-center justify-center">
@@ -411,11 +544,13 @@ export function WeightShell({
           formNotes={formNotes}
           formError={formError}
           isPending={isPending}
+          isEditing={editingId !== null}
           onDateChange={setFormDate}
           onWeightChange={setFormWeight}
           onBodyFatChange={setFormBodyFat}
           onNotesChange={setFormNotes}
           onSave={handleSaveEntry}
+          onCancelEdit={handleCancelEdit}
         />
 
         {/* Goal weight */}
@@ -481,10 +616,33 @@ export function WeightShell({
                 </div>
                 <button
                   type="button"
+                  disabled={isPending}
+                  onClick={() => handleStartEdit(entry)}
+                  className={`ml-3 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition ${
+                    editingId === entry.id
+                      ? "bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
+                      : "text-[var(--color-muted)] hover:text-[var(--color-accent)]"
+                  }`}
+                  aria-label={`Edit entry from ${formatShortDate(entry.date)}`}
+                >
+                  <svg
+                    width="14"
+                    height="14"
+                    viewBox="0 0 14 14"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <path d="M9.5 2.5l2 2L4 12H2v-2L9.5 2.5z" />
+                  </svg>
+                </button>
+                <ConfirmDeleteButton
                   disabled={isPending && deletingId === entry.id}
-                  onClick={() => handleDeleteEntry(entry.id)}
-                  className="ml-3 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--color-muted)] transition hover:text-[var(--color-danger)]"
-                  aria-label="Delete entry"
+                  onConfirm={() => handleDeleteEntry(entry.id)}
+                  ariaLabel="Delete entry"
+                  className="ml-1 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--color-muted)] transition hover:text-[var(--color-danger)]"
                 >
                   <svg
                     width="15"
@@ -498,7 +656,7 @@ export function WeightShell({
                     <line x1="3" y1="3" x2="12" y2="12" />
                     <line x1="12" y1="3" x2="3" y2="12" />
                   </svg>
-                </button>
+                </ConfirmDeleteButton>
               </div>
             ))}
           </div>
@@ -519,11 +677,13 @@ function EntryForm({
   formNotes,
   formError,
   isPending,
+  isEditing,
   onDateChange,
   onWeightChange,
   onBodyFatChange,
   onNotesChange,
   onSave,
+  onCancelEdit,
 }: {
   formDate: string;
   formWeight: string;
@@ -531,17 +691,33 @@ function EntryForm({
   formNotes: string;
   formError: string | null;
   isPending: boolean;
+  isEditing: boolean;
   onDateChange: (v: string) => void;
   onWeightChange: (v: string) => void;
   onBodyFatChange: (v: string) => void;
   onNotesChange: (v: string) => void;
   onSave: () => void;
+  onCancelEdit: () => void;
 }) {
   return (
-    <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5">
-      <h2 className="mb-3 text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
-        Log Weight
-      </h2>
+    <section
+      id="weight-entry-form"
+      className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5"
+    >
+      <div className="mb-3 flex items-center justify-between">
+        <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
+          {isEditing ? "Edit Entry" : "Log Weight"}
+        </h2>
+        {isEditing ? (
+          <button
+            type="button"
+            onClick={onCancelEdit}
+            className="text-xs font-semibold text-[var(--color-muted)] transition hover:text-[var(--color-ink)]"
+          >
+            Cancel edit
+          </button>
+        ) : null}
+      </div>
       <div className="space-y-3">
         <div className="grid grid-cols-2 gap-3">
           <label>
@@ -611,7 +787,7 @@ function EntryForm({
           onClick={onSave}
           className="w-full rounded-xl bg-[var(--color-accent)] py-2.5 text-sm font-semibold text-white transition hover:-translate-y-0.5 disabled:opacity-50"
         >
-          {isPending ? "Saving..." : "Save Entry"}
+          {isPending ? "Saving..." : isEditing ? "Update Entry" : "Save Entry"}
         </button>
       </div>
     </section>

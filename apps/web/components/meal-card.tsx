@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 
+import { ConfirmDeleteButton } from "./confirm-delete-button";
+
 type MealDraft = {
   clientId: string;
   id?: string;
@@ -162,21 +164,17 @@ export function MealCard({ draft, busy, error, isCopied = false, onChange, onSav
                 </svg>
               </button>
 
-              <button
-                type="button"
+              <ConfirmDeleteButton
                 disabled={busy}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onDelete(draft.clientId);
-                }}
+                onConfirm={() => onDelete(draft.clientId)}
+                ariaLabel={`Delete ${heading}`}
                 className="shrink-0 rounded-lg p-1 text-[var(--color-muted)] transition hover:text-[var(--color-danger)] disabled:opacity-50"
-                aria-label={`Delete ${heading}`}
               >
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
                   <line x1="4" y1="4" x2="12" y2="12" />
                   <line x1="12" y1="4" x2="4" y2="12" />
                 </svg>
-              </button>
+              </ConfirmDeleteButton>
             </>
           )}
         </div>
@@ -266,21 +264,17 @@ export function MealCard({ draft, busy, error, isCopied = false, onChange, onSav
                 </svg>
               </button>
 
-              <button
-                type="button"
+              <ConfirmDeleteButton
                 disabled={busy}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onDelete(draft.clientId);
-                }}
+                onConfirm={() => onDelete(draft.clientId)}
+                ariaLabel={`Delete ${heading}`}
                 className="shrink-0 rounded-lg p-1 text-[var(--color-muted)] transition hover:text-[var(--color-danger)] disabled:opacity-50"
-                aria-label={`Delete ${heading}`}
               >
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
                   <line x1="4" y1="4" x2="12" y2="12" />
                   <line x1="12" y1="4" x2="4" y2="12" />
                 </svg>
-              </button>
+              </ConfirmDeleteButton>
             </div>
           </div>
         )}

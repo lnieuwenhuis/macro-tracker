@@ -345,6 +345,18 @@ function NotFoundForm({
 // Main component
 // ---------------------------------------------------------------------------
 
+type EditedValues = {
+  name: string;
+  proteinG: string;
+  carbsG: string;
+  fatG: string;
+  caloriesKcal: string;
+};
+
+function emptyEdited(): EditedValues {
+  return { name: "", proteinG: "", carbsG: "", fatG: "", caloriesKcal: "" };
+}
+
 export function BarcodeResult({
   product,
   notFoundBarcode,
@@ -363,6 +375,11 @@ export function BarcodeResult({
   const defaultServing = displayProduct?.servingSizeG ?? 100;
   const [servingG, setServingG] = useState(String(defaultServing));
   const [savedPreset, setSavedPreset] = useState(false);
+  // When isEditing is true, the macro display switches to editable inputs and
+  // scaling is paused. Add-to-log and Save-as-preset send these raw edited
+  // values instead of the scaled ones.
+  const [isEditing, setIsEditing] = useState(false);
+  const [edited, setEdited] = useState<EditedValues>(emptyEdited);
 
   const serving = Number(servingG) || 100;
 
@@ -396,6 +413,41 @@ export function BarcodeResult({
   const displayLabel = displayProduct.brands
     ? `${displayProduct.name} (${displayProduct.brands})`
     : displayProduct.name;
+
+  function startEditing() {
+    setEdited({
+      name: displayLabel,
+      proteinG: String(scaled.proteinG),
+      carbsG: String(scaled.carbsG),
+      fatG: String(scaled.fatG),
+      caloriesKcal: String(scaled.caloriesKcal),
+    });
+    setIsEditing(true);
+  }
+
+  function cancelEditing() {
+    setEdited(emptyEdited());
+    setIsEditing(false);
+  }
+
+  function valuesToSubmit() {
+    if (isEditing) {
+      return {
+        label: edited.name.trim() || displayLabel,
+        proteinG: parsePositiveNumber(edited.proteinG),
+        carbsG: parsePositiveNumber(edited.carbsG),
+        fatG: parsePositiveNumber(edited.fatG),
+        caloriesKcal: Math.round(parsePositiveNumber(edited.caloriesKcal)),
+      };
+    }
+    return { label: displayLabel, ...scaled };
+  }
+
+  function updateEdited(field: keyof EditedValues, value: string) {
+    // Normalize comma decimals to dots so European keyboards work with
+    // numeric inputs; harmless for the name field.
+    setEdited((prev) => ({ ...prev, [field]: value.replace(/,/g, ".") }));
+  }
 
   function sourceLabel(
     source: OpenFoodFactsProduct["source"],
@@ -436,6 +488,30 @@ export function BarcodeResult({
             </div>
             <button
               type="button"
+              onClick={isEditing ? cancelEditing : startEditing}
+              className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition ${
+                isEditing
+                  ? "bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
+                  : "text-[var(--color-muted)] hover:text-[var(--color-accent)]"
+              }`}
+              aria-label={isEditing ? "Discard edits" : "Edit values"}
+              title={isEditing ? "Discard edits" : "Edit values"}
+            >
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 14 14"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d="M9.5 2.5l2 2L4 12H2v-2L9.5 2.5z" />
+              </svg>
+            </button>
+            <button
+              type="button"
               onClick={onClose}
               className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--color-muted)] transition hover:text-[var(--color-ink)]"
               aria-label="Close"
@@ -455,46 +531,75 @@ export function BarcodeResult({
             </button>
           </div>
 
-          {/* Serving size */}
-          <div className="mt-4">
-            <label className="text-xs text-[var(--color-muted)]">
-              Serving size (g)
-            </label>
-            <input
-              type="number"
-              inputMode="decimal"
-              step="1"
-              min="1"
-              value={servingG}
-              onChange={(e) => setServingG(e.target.value)}
-              className="mt-1 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-app-bg)] px-3 py-2.5 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
-            />
-          </div>
+          {/* Serving size — hidden while editing since scaling is paused */}
+          {!isEditing && (
+            <div className="mt-4">
+              <label className="text-xs text-[var(--color-muted)]">
+                Serving size (g)
+              </label>
+              <input
+                type="number"
+                inputMode="decimal"
+                step="1"
+                min="1"
+                value={servingG}
+                onChange={(e) => setServingG(e.target.value)}
+                className="mt-1 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-app-bg)] px-3 py-2.5 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
+              />
+            </div>
+          )}
 
-          {/* Macro display */}
+          {/* Name field — only visible while editing */}
+          {isEditing && (
+            <div className="mt-4">
+              <label className="text-xs text-[var(--color-muted)]">Name</label>
+              <input
+                type="text"
+                value={edited.name}
+                onChange={(e) => updateEdited("name", e.target.value)}
+                className="mt-1 w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-app-bg)] px-3 py-2.5 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
+              />
+            </div>
+          )}
+
+          {/* Macro display / inputs */}
           <div className="mt-4 grid grid-cols-2 gap-2">
-            {[
-              {
-                label: "Calories",
-                value: `${scaled.caloriesKcal} kcal`,
-                color: "var(--color-bar-calories)",
-              },
-              {
-                label: "Protein",
-                value: `${scaled.proteinG}g`,
-                color: "var(--color-bar-protein)",
-              },
-              {
-                label: "Carbs",
-                value: `${scaled.carbsG}g`,
-                color: "var(--color-bar-carbs)",
-              },
-              {
-                label: "Fat",
-                value: `${scaled.fatG}g`,
-                color: "var(--color-bar-fat)",
-              },
-            ].map(({ label, value, color }) => (
+            {(
+              [
+                {
+                  field: "caloriesKcal" as const,
+                  label: "Calories",
+                  unit: "kcal",
+                  color: "var(--color-bar-calories)",
+                  step: "1",
+                  scaledValue: scaled.caloriesKcal,
+                },
+                {
+                  field: "proteinG" as const,
+                  label: "Protein",
+                  unit: "g",
+                  color: "var(--color-bar-protein)",
+                  step: "0.1",
+                  scaledValue: scaled.proteinG,
+                },
+                {
+                  field: "carbsG" as const,
+                  label: "Carbs",
+                  unit: "g",
+                  color: "var(--color-bar-carbs)",
+                  step: "0.1",
+                  scaledValue: scaled.carbsG,
+                },
+                {
+                  field: "fatG" as const,
+                  label: "Fat",
+                  unit: "g",
+                  color: "var(--color-bar-fat)",
+                  step: "0.1",
+                  scaledValue: scaled.fatG,
+                },
+              ] as const
+            ).map(({ field, label, unit, color, step, scaledValue }) => (
               <div
                 key={label}
                 className="rounded-xl border border-[var(--color-border)] px-3 py-2"
@@ -502,38 +607,52 @@ export function BarcodeResult({
                 <span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-[var(--color-muted-strong)]">
                   {label}
                 </span>
-                <p
-                  className="mt-0.5 text-lg font-bold tabular-nums"
-                  style={{ color }}
-                >
-                  {value}
-                </p>
+                {isEditing ? (
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    step={step}
+                    value={edited[field]}
+                    onChange={(e) => updateEdited(field, e.target.value)}
+                    className="mt-0.5 w-full bg-transparent text-lg font-bold tabular-nums outline-none"
+                    style={{ color }}
+                    aria-label={`${label} in ${unit}`}
+                  />
+                ) : (
+                  <p
+                    className="mt-0.5 text-lg font-bold tabular-nums"
+                    style={{ color }}
+                  >
+                    {`${scaledValue}${unit === "kcal" ? " kcal" : "g"}`}
+                  </p>
+                )}
               </div>
             ))}
           </div>
 
-          <p className="mt-2 text-[10px] text-[var(--color-muted)]">
-            Values per {serving}g
-            {serving !== 100
-              ? ` (per 100g: ${displayProduct.caloriesKcal} kcal)`
-              : ""}
-            {displayProduct.source && (
-              <span className="ml-1">
-                &middot; {sourceLabel(displayProduct.source)}
-              </span>
-            )}
-          </p>
+          {isEditing ? (
+            <p className="mt-2 text-[10px] text-[var(--color-muted)]">
+              Editing values directly — serving size scaling paused.
+            </p>
+          ) : (
+            <p className="mt-2 text-[10px] text-[var(--color-muted)]">
+              Values per {serving}g
+              {serving !== 100
+                ? ` (per 100g: ${displayProduct.caloriesKcal} kcal)`
+                : ""}
+              {displayProduct.source && (
+                <span className="ml-1">
+                  &middot; {sourceLabel(displayProduct.source)}
+                </span>
+              )}
+            </p>
+          )}
 
           {/* Actions */}
           <div className="mt-5 space-y-2">
             <button
               type="button"
-              onClick={() =>
-                onAddToLog({
-                  label: displayLabel,
-                  ...scaled,
-                })
-              }
+              onClick={() => onAddToLog(valuesToSubmit())}
               className="w-full rounded-xl bg-[var(--color-accent)] py-2.5 text-sm font-semibold text-white transition hover:-translate-y-0.5"
             >
               Add to log
@@ -543,10 +662,7 @@ export function BarcodeResult({
                 type="button"
                 disabled={savedPreset}
                 onClick={() => {
-                  onSaveAsPreset({
-                    label: displayLabel,
-                    ...scaled,
-                  });
+                  onSaveAsPreset(valuesToSubmit());
                   setSavedPreset(true);
                 }}
                 className="flex-1 rounded-xl border border-[var(--color-accent)] py-2.5 text-sm font-semibold text-[var(--color-accent)] transition hover:-translate-y-0.5 disabled:opacity-50"

@@ -508,14 +508,22 @@ export async function listRecentMealEntries(userId: string, limit = 200, db?: Da
     .limit(limit);
 }
 
+function escapeLikePattern(value: string) {
+  return value.replace(/[%_\\]/g, "\\$&");
+}
+
 export async function searchMealEntries(
   userId: string,
   query: string,
   db?: DatabaseClient,
 ): Promise<MealEntryRecord[]> {
-  if (!query.trim()) return [];
+  const words = query.trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return [];
 
   const database = await resolveDb(db);
+  const wordConditions = words.map((word) =>
+    ilike(mealEntries.label, `%${escapeLikePattern(word)}%`),
+  );
   const rows = await database
     .select({
       id: mealEntries.id,
@@ -529,12 +537,7 @@ export async function searchMealEntries(
       caloriesKcal: mealEntries.caloriesKcal,
     })
     .from(mealEntries)
-    .where(
-      and(
-        eq(mealEntries.userId, userId),
-        ilike(mealEntries.label, `%${query}%`),
-      ),
-    )
+    .where(and(eq(mealEntries.userId, userId), ...wordConditions))
     .orderBy(desc(mealEntries.entryDate), asc(mealEntries.sortOrder))
     .limit(100);
 
@@ -567,7 +570,10 @@ export async function getPresets(userId: string, db?: DatabaseClient): Promise<F
     })
     .from(foodPresets)
     .where(eq(foodPresets.userId, userId))
-    .orderBy(asc(foodPresets.label));
+    .orderBy(
+      sql`${foodPresets.lastUsedAt} DESC NULLS LAST`,
+      asc(foodPresets.label),
+    );
 
   return rows.map((row) => ({
     id: row.id,
@@ -578,6 +584,18 @@ export async function getPresets(userId: string, db?: DatabaseClient): Promise<F
     fatG: roundToSingleDecimal(toNumber(row.fatG)),
     caloriesKcal: toNumber(row.caloriesKcal),
   }));
+}
+
+export async function touchPresetLastUsed(
+  userId: string,
+  presetId: string,
+  db?: DatabaseClient,
+): Promise<void> {
+  const database = await resolveDb(db);
+  await database
+    .update(foodPresets)
+    .set({ lastUsedAt: new Date() })
+    .where(and(eq(foodPresets.id, presetId), eq(foodPresets.userId, userId)));
 }
 
 export async function createPreset(
@@ -817,6 +835,36 @@ export async function createWeightEntry(
     .returning();
 
   return mapWeightRow(created);
+}
+
+export async function updateWeightEntry(
+  userId: string,
+  entryId: string,
+  input: WeightEntryInput,
+  db?: DatabaseClient,
+): Promise<WeightEntryRecord | null> {
+  const database = await resolveDb(db);
+  const normalized = validateWeightEntryInput(input);
+
+  const [updated] = await database
+    .update(weightEntries)
+    .set({
+      entryDate: normalized.date,
+      weightKg: normalized.weightKg.toFixed(2),
+      bodyFatPct:
+        normalized.bodyFatPct != null
+          ? normalized.bodyFatPct.toFixed(1)
+          : null,
+      notes: normalized.notes,
+      updatedAt: new Date(),
+    })
+    .where(
+      and(eq(weightEntries.id, entryId), eq(weightEntries.userId, userId)),
+    )
+    .returning();
+
+  if (!updated) return null;
+  return mapWeightRow(updated);
 }
 
 export async function deleteWeightEntry(

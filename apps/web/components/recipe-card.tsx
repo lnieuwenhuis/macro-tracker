@@ -7,6 +7,8 @@ import { useState, useTransition } from "react";
 import { deleteRecipeAction, logRecipePortionAction, saveRecipeAction } from "@/lib/actions";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
 
+import { ConfirmDeleteButton } from "./confirm-delete-button";
+
 type RecipeCardProps = {
   recipe: RecipeRecord;
   selectedDate: string;
@@ -47,16 +49,20 @@ export function RecipeCard({ recipe, selectedDate }: RecipeCardProps) {
           caloriesKcal: ing.caloriesKcal,
         })),
       });
-      if (!result.ok) {
+      if (!result.ok || !result.recipe) {
         setError(result.error ?? "Unable to duplicate recipe.");
         return;
       }
-      router.refresh();
+      // Send the user straight to the new copy's edit page so they can tweak
+      // the name / portions / ingredients immediately — much better UX than
+      // dropping them back into the list and making them hunt for it.
+      const href = `/recipes/${result.recipe.id}/edit?date=${selectedDate}`;
+      prepareNavigationMotion(href, "screen");
+      router.push(href);
     });
   }
 
   function handleDelete() {
-    if (!confirm(`Delete "${recipe.label}"? This cannot be undone.`)) return;
     setError(null);
     startTransition(async () => {
       const result = await deleteRecipeAction({ id: recipe.id });
@@ -238,18 +244,17 @@ export function RecipeCard({ recipe, selectedDate }: RecipeCardProps) {
                 <path d="M11 2.5l2.5 2.5L5 13.5H2.5V11L11 2.5z" />
               </svg>
             </button>
-            <button
-              type="button"
+            <ConfirmDeleteButton
               disabled={isPending}
-              onClick={handleDelete}
+              onConfirm={handleDelete}
+              ariaLabel={`Delete ${recipe.label}`}
               className="rounded-xl border border-[var(--color-border-strong)] px-3 py-2.5 text-sm font-semibold text-[var(--color-muted)] transition hover:text-[var(--color-danger)]"
-              aria-label={`Delete ${recipe.label}`}
             >
               <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
                 <line x1="4" y1="4" x2="12" y2="12" />
                 <line x1="12" y1="4" x2="4" y2="12" />
               </svg>
-            </button>
+            </ConfirmDeleteButton>
           </div>
         </div>
       )}

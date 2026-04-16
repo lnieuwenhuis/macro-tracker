@@ -4,7 +4,7 @@ import type { DailySummary, FoodPreset, MacroGoals, MealEntryRecord, RecipeRecor
 import { useRouter } from "next/navigation";
 import { useMemo, useState, useTransition } from "react";
 
-import { deletePresetAction, deleteMealEntryAction, savePresetAction, saveMealEntryAction, updatePresetAction } from "@/lib/actions";
+import { deletePresetAction, deleteMealEntryAction, savePresetAction, saveMealEntryAction, touchPresetAction, updatePresetAction } from "@/lib/actions";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
 import type { OpenFoodFactsProduct } from "@/lib/openfoodfacts";
 import { getLocalDateString } from "@/lib/startup-date";
@@ -147,6 +147,10 @@ export function DashboardShell({
       createDraftFromPreset(preset, nextSortOrder()),
     ]);
     setPresetError(null);
+    // Fire-and-forget: mark this preset as most-recently-used so the next time
+    // the modal opens it floats to the top of the list. We don't block the UI
+    // on the result or surface errors — sort order is best-effort.
+    void touchPresetAction({ id: preset.id });
     setShowPresetsModal(false);
   }
 

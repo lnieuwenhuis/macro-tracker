@@ -1,6 +1,7 @@
 "use client";
 
 import type { MacroGoals, StatsPageData } from "@macro-tracker/db";
+import { useState } from "react";
 
 import { AppShell } from "./app-shell";
 import { formatShortDate } from "@/lib/formatting";
@@ -10,6 +11,42 @@ type StatsShellProps = {
   today: string;
   statsData: StatsPageData;
   goals: MacroGoals;
+};
+
+type MacroField = "caloriesKcal" | "proteinG" | "carbsG" | "fatG";
+
+type MacroMeta = {
+  field: MacroField;
+  label: string;
+  unit: string;
+  color: string;
+};
+
+const MACRO_META: Record<MacroField, MacroMeta> = {
+  caloriesKcal: {
+    field: "caloriesKcal",
+    label: "Calories",
+    unit: "kcal",
+    color: "var(--color-bar-calories)",
+  },
+  proteinG: {
+    field: "proteinG",
+    label: "Protein",
+    unit: "g",
+    color: "var(--color-bar-protein)",
+  },
+  carbsG: {
+    field: "carbsG",
+    label: "Carbs",
+    unit: "g",
+    color: "var(--color-bar-carbs)",
+  },
+  fatG: {
+    field: "fatG",
+    label: "Fat",
+    unit: "g",
+    color: "var(--color-bar-fat)",
+  },
 };
 
 function StatCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
@@ -28,12 +65,18 @@ function StatCard({ label, value, sub }: { label: string; value: string; sub?: s
   );
 }
 
-function CalorieTrendChart({
+function MacroTrendChart({
   data,
   goal,
+  field,
+  unit,
+  color,
 }: {
   data: StatsPageData["allDailyTotals"];
   goal: number | null;
+  field: MacroField;
+  unit: string;
+  color: string;
 }) {
   const last30 = data.slice(-30);
   if (last30.length === 0) {
@@ -42,56 +85,76 @@ function CalorieTrendChart({
     );
   }
 
-  const maxCals = Math.max(...last30.map((d) => d.caloriesKcal), goal ?? 0, 100);
+  const values = last30.map((d) => d[field]);
+  const maxVal = Math.max(...values, goal ?? 0, field === "caloriesKcal" ? 100 : 10);
   const barW = 8;
   const gap = 3;
   const chartH = 72;
   const totalW = last30.length * (barW + gap) - gap;
 
   return (
-    <div className="overflow-x-auto">
-      <svg
-        width="100%"
-        height={chartH + 4}
-        viewBox={`0 0 ${totalW} ${chartH + 4}`}
-        preserveAspectRatio="none"
-        className="block h-[76px] w-full"
-        style={{ minWidth: totalW }}
-      >
-        {goal && goal > 0 && (
-          <line
-            x1={0}
-            y1={chartH - (goal / maxCals) * chartH}
-            x2={totalW}
-            y2={chartH - (goal / maxCals) * chartH}
-            stroke="var(--color-accent)"
-            strokeWidth="1.5"
-            strokeDasharray="4 3"
-            opacity="0.7"
-          />
-        )}
-        {last30.map((d, i) => {
-          const barH = Math.max(2, (d.caloriesKcal / maxCals) * chartH);
-          const x = i * (barW + gap);
-          const y = chartH - barH;
-          const hitGoal = goal && goal > 0 && d.caloriesKcal >= goal * 0.9;
-          return (
-            <rect
-              key={d.date}
-              x={x}
-              y={y}
-              width={barW}
-              height={barH}
-              fill={hitGoal ? "var(--color-success)" : "var(--color-bar-calories)"}
-              rx="2"
-              opacity="0.85"
+    <div>
+      <div className="overflow-x-auto">
+        <svg
+          width="100%"
+          height={chartH + 4}
+          viewBox={`0 0 ${totalW} ${chartH + 4}`}
+          preserveAspectRatio="none"
+          className="block h-[76px] w-full"
+          style={{ minWidth: totalW }}
+        >
+          {goal && goal > 0 && (
+            <line
+              x1={0}
+              y1={chartH - (goal / maxVal) * chartH}
+              x2={totalW}
+              y2={chartH - (goal / maxVal) * chartH}
+              stroke="var(--color-accent)"
+              strokeWidth="1.5"
+              strokeDasharray="4 3"
+              opacity="0.7"
             />
-          );
-        })}
-      </svg>
-      <div className="mt-1 flex justify-between text-[10px] text-[var(--color-muted)]">
-        <span>{last30[0] ? formatShortDate(last30[0].date) : ""}</span>
-        <span>{last30[last30.length - 1] ? formatShortDate(last30[last30.length - 1].date) : ""}</span>
+          )}
+          {last30.map((d, i) => {
+            const value = d[field];
+            const barH = Math.max(2, (value / maxVal) * chartH);
+            const x = i * (barW + gap);
+            const y = chartH - barH;
+            const hitGoal = goal && goal > 0 && value >= goal * 0.9;
+            return (
+              <rect
+                key={d.date}
+                x={x}
+                y={y}
+                width={barW}
+                height={barH}
+                fill={hitGoal ? "var(--color-success)" : color}
+                rx="2"
+                opacity="0.85"
+              />
+            );
+          })}
+        </svg>
+        <div className="mt-1 flex justify-between text-[10px] text-[var(--color-muted)]">
+          <span>{last30[0] ? formatShortDate(last30[0].date) : ""}</span>
+          <span>{last30[last30.length - 1] ? formatShortDate(last30[last30.length - 1].date) : ""}</span>
+        </div>
+      </div>
+      {/* Legend */}
+      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-[var(--color-muted)]">
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block h-2 w-2 rounded-sm" style={{ backgroundColor: color, opacity: 0.85 }} />
+          Under goal
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span className="inline-block h-2 w-2 rounded-sm bg-[var(--color-success)] opacity-85" />
+          At/over goal
+        </span>
+        {goal && goal > 0 ? (
+          <span className="ml-auto">
+            Goal: {goal} {unit}
+          </span>
+        ) : null}
       </div>
     </div>
   );
@@ -146,6 +209,10 @@ export function StatsShell({ userEmail, today, statsData, goals }: StatsShellPro
   const { allDailyTotals, totalDaysTracked, currentStreak, longestStreak,
     totalProteinG, totalCarbsG, totalFatG, totalCaloriesKcal,
     bestCalorieDay, topLabels } = statsData;
+
+  const [selectedMacro, setSelectedMacro] = useState<MacroField>("caloriesKcal");
+  const macroMeta = MACRO_META[selectedMacro];
+  const goalForMacro = goals[selectedMacro];
 
   if (totalDaysTracked === 0) {
     return (
@@ -212,15 +279,54 @@ export function StatsShell({ userEmail, today, statsData, goals }: StatsShellPro
           </div>
         </section>
 
-        {/* Calorie trend chart */}
+        {/* Macro trend chart */}
         <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5">
           <div className="mb-4">
             <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
-              Calorie Trend
+              {macroMeta.label} Trend
             </h2>
             <p className="mt-1 text-[11px] text-[var(--color-muted)]">Last 30 logged days</p>
           </div>
-          <CalorieTrendChart data={allDailyTotals} goal={goals.caloriesKcal} />
+
+          {/* Pill tab selector */}
+          <div
+            role="tablist"
+            aria-label="Macro"
+            className="mb-4 flex flex-wrap gap-1.5"
+          >
+            {(Object.keys(MACRO_META) as MacroField[]).map((macro) => {
+              const meta = MACRO_META[macro];
+              const isActive = macro === selectedMacro;
+              return (
+                <button
+                  key={macro}
+                  type="button"
+                  role="tab"
+                  aria-selected={isActive}
+                  onClick={() => setSelectedMacro(macro)}
+                  className="rounded-full px-3 py-1 text-xs font-semibold transition"
+                  style={
+                    isActive
+                      ? { backgroundColor: meta.color, color: "white" }
+                      : {
+                          backgroundColor: "var(--color-card-muted)",
+                          color: "var(--color-muted)",
+                        }
+                  }
+                >
+                  {meta.label}
+                </button>
+              );
+            })}
+          </div>
+
+          <MacroTrendChart
+            data={allDailyTotals}
+            goal={goalForMacro}
+            field={selectedMacro}
+            unit={macroMeta.unit}
+            color={macroMeta.color}
+          />
         </section>
 
         {/* Macro split */}

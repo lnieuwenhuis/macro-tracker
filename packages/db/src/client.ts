@@ -194,9 +194,15 @@ async function bootstrapLocalSchema(db: PgliteDatabase<typeof schema>) {
       "carbs_g" numeric(6, 1) NOT NULL,
       "fat_g" numeric(6, 1) NOT NULL,
       "calories_kcal" integer NOT NULL,
-      "created_at" timestamp with time zone DEFAULT now() NOT NULL
+      "created_at" timestamp with time zone DEFAULT now() NOT NULL,
+      "last_used_at" timestamp with time zone
     )
   `));
+  await db.execute(
+    sql.raw(
+      `ALTER TABLE "food_presets" ADD COLUMN IF NOT EXISTS "last_used_at" timestamp with time zone`,
+    ),
+  );
   await db.execute(
     sql.raw(
       `CREATE INDEX IF NOT EXISTS "food_presets_user_idx" ON "food_presets" USING btree ("user_id")`,

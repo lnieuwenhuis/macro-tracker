@@ -104,6 +104,41 @@ export function AppShell({
     router.prefetch(nextDateHref);
   }, [nextDateHref, previousDateHref, router]);
 
+  useEffect(() => {
+    function handleKey(event: KeyboardEvent) {
+      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
+        return;
+      }
+
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+        return;
+      }
+
+      const target = event.target as HTMLElement | null;
+      if (target) {
+        const tag = target.tagName;
+        if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
+          return;
+        }
+        if (target.isContentEditable) {
+          return;
+        }
+      }
+
+      if (event.key === "ArrowLeft") {
+        navigateToDate(previousDateString(selectedDate), "day-backward");
+      } else {
+        navigateToDate(nextDateString(selectedDate), "day-forward");
+      }
+    }
+
+    document.addEventListener("keydown", handleKey);
+    return () => document.removeEventListener("keydown", handleKey);
+    // navigateToDate is defined inline and captures basePath + router; re-register
+    // whenever any of those change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedDate, basePath]);
+
   function navigateToDate(
     nextDate: string,
     motion: "day-forward" | "day-backward" | "day-jump" = "day-jump",
@@ -224,7 +259,7 @@ export function AppShell({
                   type="button"
                   onClick={() => navigateToDate(todayStr)}
                   disabled={isPending}
-                  className="inline-flex items-center gap-1.5 rounded-full bg-[var(--color-accent)]/10 px-3 py-1 text-xs font-semibold text-[var(--color-accent)] transition hover:bg-[var(--color-accent)]/20 disabled:opacity-50"
+                  className="inline-flex items-center gap-1.5 rounded-full bg-[var(--color-accent)] px-4 py-1.5 text-sm font-semibold text-white shadow-sm transition hover:-translate-y-0.5 hover:bg-[var(--color-accent-strong)] disabled:opacity-50"
                 >
                   <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                     <rect x="1" y="2" width="10" height="9" rx="1.5" />

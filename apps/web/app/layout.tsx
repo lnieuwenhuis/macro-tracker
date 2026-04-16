@@ -2,6 +2,7 @@ import type { Metadata, Viewport } from "next";
 import { Fraunces, Space_Grotesk } from "next/font/google";
 import Script from "next/script";
 
+import { OfflineBanner } from "@/components/offline-banner";
 import { OrientationLock } from "@/components/orientation-lock";
 import { ServiceWorkerRegister } from "@/components/service-worker-register";
 
@@ -66,6 +67,7 @@ export default function RootLayout({
         </Script>
         <OrientationLock />
         <ServiceWorkerRegister />
+        <OfflineBanner />
         {children}
       </body>
     </html>

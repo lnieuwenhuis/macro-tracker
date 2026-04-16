@@ -106,6 +106,7 @@ export const foodPresets = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true })
       .defaultNow()
       .notNull(),
+    lastUsedAt: timestamp("last_used_at", { withTimezone: true }),
   },
   (table) => [
     index("food_presets_user_idx").on(table.userId),

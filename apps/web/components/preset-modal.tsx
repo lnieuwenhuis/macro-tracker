@@ -2,6 +2,8 @@
 
 import type { FoodPreset } from "@macro-tracker/db";
 import { useEffect, useState } from "react";
+
+import { ConfirmDeleteButton } from "./confirm-delete-button";
 import { OverlayPortal, useBodyScrollLock } from "./overlay-portal";
 
 type PresetMutationState =
@@ -301,18 +303,17 @@ export function PresetModal({
                     </svg>
                   </button>
 
-                  <button
-                    type="button"
-                    onClick={() => void onDelete(preset.id)}
+                  <ConfirmDeleteButton
+                    onConfirm={() => void onDelete(preset.id)}
                     disabled={mutationsDisabled}
+                    ariaLabel={`Delete ${preset.label}`}
                     className="shrink-0 rounded-lg p-1.5 text-[var(--color-muted)] transition hover:text-[var(--color-danger)]"
-                    aria-label={`Delete ${preset.label}`}
                   >
                     <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
                       <line x1="3" y1="3" x2="11" y2="11" />
                       <line x1="11" y1="3" x2="3" y2="11" />
                     </svg>
-                  </button>
+                  </ConfirmDeleteButton>
                 </div>
               )
             )}

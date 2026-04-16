@@ -15,9 +15,11 @@ import {
   saveUserGoals,
   saveWeightGoal,
   searchMealEntries,
+  touchPresetLastUsed,
   updateMealEntry,
   updatePreset,
   updateRecipe,
+  updateWeightEntry,
 } from "@macro-tracker/db";
 import type { CustomBarcodeProduct, FoodPreset, LeaderboardStats, MealEntryRecord, RecipeRecord } from "@macro-tracker/db";
 import { revalidatePath } from "next/cache";
@@ -174,6 +176,19 @@ export async function updatePresetAction(input: UpdatePresetInput): Promise<Upda
   }
 }
 
+export async function touchPresetAction(
+  input: { id: string },
+): Promise<ActionResult> {
+  const sessionUser = await requireSessionUser();
+
+  try {
+    await touchPresetLastUsed(sessionUser.userId, input.id);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: toActionError(error) };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Weight tracking
 // ---------------------------------------------------------------------------
@@ -206,6 +221,38 @@ export async function deleteWeightEntryAction(
 
   try {
     await deleteWeightEntry(sessionUser.userId, input.id);
+    revalidatePath("/weight", "page");
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, error: toActionError(error) };
+  }
+}
+
+type UpdateWeightEntryInput = {
+  id: string;
+  date: string;
+  weightKg: number;
+  bodyFatPct: number | null;
+  notes: string | null;
+};
+
+export async function updateWeightEntryAction(
+  input: UpdateWeightEntryInput,
+): Promise<ActionResult> {
+  const sessionUser = await requireSessionUser();
+
+  try {
+    const updated = await updateWeightEntry(sessionUser.userId, input.id, {
+      date: input.date,
+      weightKg: input.weightKg,
+      bodyFatPct: input.bodyFatPct,
+      notes: input.notes,
+    });
+
+    if (!updated) {
+      return { ok: false, error: "Weight entry not found." };
+    }
+
     revalidatePath("/weight", "page");
     return { ok: true };
   } catch (error) {
