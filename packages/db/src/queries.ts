@@ -1,10 +1,21 @@
-import { and, asc, desc, eq, gte, ilike, inArray, lte, max, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, ilike, inArray, isNotNull, isNull, lte, max, ne, or, sql } from "drizzle-orm";
 
 import { computeStreaks, getPeriodRanges } from "./dates";
 import { getDb, type DatabaseClient } from "./client";
-import { barcodeProducts, foodPresets, mealEntries, recipeIngredients, recipes, users, weightEntries } from "./schema";
+import { adminAuditEvents, barcodeProducts, foodPresets, mealEntries, recipeIngredients, recipes, users, weightEntries } from "./schema";
 import { validateMealEntryInput, validateRecipeInput, validateWeightEntryInput } from "./validators";
 import type {
+  AdminAuditListPage,
+  AdminAuditEvent,
+  AdminBarcodeListPage,
+  AdminBarcodeRecord,
+  AdminDashboardData,
+  AdminRole,
+  AdminUserDetail,
+  AdminUserListItem,
+  AdminUserListPage,
+  AdminRecipeSummary,
+  AppUser,
   CustomBarcodeProduct,
   CustomBarcodeProductInput,
   DailyOverview,
@@ -25,6 +36,7 @@ import type {
   WeightEntryRecord,
   WeightPageData,
 } from "./types";
+import { canAccessAdmin, isAdminRole, isOwnerRole } from "./types";
 
 type DailyTotalsRow = {
   entryDate: string;
@@ -41,6 +53,14 @@ type UserSelectRow = {
   shooPairwiseSub: string;
   displayName: string | null;
   pictureUrl: string | null;
+  role: string;
+  createdAt: Date;
+  lastLoginAt: Date;
+  goalCaloriesKcal: number | null;
+  goalProteinG: string | number | null;
+  goalCarbsG: string | number | null;
+  goalFatG: string | number | null;
+  goalWeightKg: string | number | null;
 };
 
 function toNumber(value: string | number | null | undefined) {
@@ -58,6 +78,40 @@ function zeroMacros(): MacroNumbers {
 
 function roundToSingleDecimal(value: number) {
   return Math.round(value * 10) / 10;
+}
+
+function toTimestampString(value: Date | string | null | undefined) {
+  if (!value) {
+    return "";
+  }
+
+  return value instanceof Date ? value.toISOString() : value;
+}
+
+function toAdminRole(value: string): AdminRole {
+  return isAdminRole(value) ? value : "user";
+}
+
+function mapUserRow(row: UserSelectRow): AppUser {
+  return {
+    id: row.id,
+    email: row.email,
+    shooPairwiseSub: row.shooPairwiseSub,
+    displayName: row.displayName,
+    pictureUrl: row.pictureUrl,
+    role: toAdminRole(row.role),
+    createdAt: toTimestampString(row.createdAt),
+    lastLoginAt: toTimestampString(row.lastLoginAt),
+    goalCaloriesKcal: row.goalCaloriesKcal,
+    goalProteinG:
+      row.goalProteinG != null ? roundToSingleDecimal(toNumber(row.goalProteinG)) : null,
+    goalCarbsG:
+      row.goalCarbsG != null ? roundToSingleDecimal(toNumber(row.goalCarbsG)) : null,
+    goalFatG:
+      row.goalFatG != null ? roundToSingleDecimal(toNumber(row.goalFatG)) : null,
+    goalWeightKg:
+      row.goalWeightKg != null ? Math.round(toNumber(row.goalWeightKg) * 100) / 100 : null,
+  };
 }
 
 function mapMealRow(row: {
@@ -173,6 +227,14 @@ export async function upsertUserFromShooProfile(
       shooPairwiseSub: users.shooPairwiseSub,
       displayName: users.displayName,
       pictureUrl: users.pictureUrl,
+      role: users.role,
+      createdAt: users.createdAt,
+      lastLoginAt: users.lastLoginAt,
+      goalCaloriesKcal: users.goalCaloriesKcal,
+      goalProteinG: users.goalProteinG,
+      goalCarbsG: users.goalCarbsG,
+      goalFatG: users.goalFatG,
+      goalWeightKg: users.goalWeightKg,
     })
     .from(users)
     .where(eq(users.shooPairwiseSub, profile.pairwiseSub))
@@ -190,7 +252,7 @@ export async function upsertUserFromShooProfile(
       .where(eq(users.id, existing[0].id))
       .returning();
 
-    return updated as UserSelectRow;
+    return mapUserRow(updated as UserSelectRow);
   }
 
   const [created] = await database
@@ -205,7 +267,7 @@ export async function upsertUserFromShooProfile(
     })
     .returning();
 
-  return created as UserSelectRow;
+  return mapUserRow(created as UserSelectRow);
 }
 
 export async function getUserById(userId: string, db?: DatabaseClient) {
@@ -217,12 +279,20 @@ export async function getUserById(userId: string, db?: DatabaseClient) {
       shooPairwiseSub: users.shooPairwiseSub,
       displayName: users.displayName,
       pictureUrl: users.pictureUrl,
+      role: users.role,
+      createdAt: users.createdAt,
+      lastLoginAt: users.lastLoginAt,
+      goalCaloriesKcal: users.goalCaloriesKcal,
+      goalProteinG: users.goalProteinG,
+      goalCarbsG: users.goalCarbsG,
+      goalFatG: users.goalFatG,
+      goalWeightKg: users.goalWeightKg,
     })
     .from(users)
     .where(eq(users.id, userId))
     .limit(1);
 
-  return (user ?? null) as UserSelectRow | null;
+  return user ? mapUserRow(user as UserSelectRow) : null;
 }
 
 export async function getDailySummary(
@@ -1381,7 +1451,12 @@ export async function lookupCustomBarcodeProduct(
   const [row] = await database
     .select()
     .from(barcodeProducts)
-    .where(eq(barcodeProducts.barcode, barcode))
+    .where(
+      and(
+        eq(barcodeProducts.barcode, barcode),
+        isNull(barcodeProducts.deletedAt),
+      ),
+    )
     .limit(1);
 
   return row ? mapBarcodeProductRow(row) : null;
@@ -1408,6 +1483,9 @@ export async function saveCustomBarcodeProduct(
       servingSizeG:
         input.servingSizeG != null ? input.servingSizeG.toFixed(1) : null,
       addedByUserId,
+      updatedAt: new Date(),
+      deletedAt: null,
+      deletedByUserId: null,
     })
     .returning();
 
@@ -1529,4 +1607,948 @@ export async function getRecentQuickAddCandidates(
   }
 
   return candidates;
+}
+
+// ---------------------------------------------------------------------------
+// Admin
+// ---------------------------------------------------------------------------
+
+type AdminActor = {
+  id: string;
+  email: string;
+  role: AdminRole;
+};
+
+function normalizeAdminRole(role: string): AdminRole {
+  if (!isAdminRole(role)) {
+    throw new Error("Invalid admin role.");
+  }
+
+  return role;
+}
+
+function normalizePageNumber(page: number | undefined) {
+  return typeof page === "number" && Number.isFinite(page) && page > 0
+    ? Math.floor(page)
+    : 1;
+}
+
+function buildPagination(page: number, pageSize: number, totalItems: number) {
+  return {
+    page,
+    pageSize,
+    totalItems,
+    totalPages: Math.max(1, Math.ceil(totalItems / pageSize)),
+  };
+}
+
+function mapAdminBarcodeRow(row: {
+  id: string;
+  barcode: string;
+  name: string;
+  brands: string;
+  proteinG: string | number;
+  carbsG: string | number;
+  fatG: string | number;
+  caloriesKcal: number;
+  servingSizeG: string | number | null;
+  addedByUserId: string | null;
+  addedByEmail?: string | null;
+  deletedByUserId: string | null;
+  deletedByEmail?: string | null;
+  createdAt: Date | string;
+  updatedAt: Date | string;
+  deletedAt: Date | string | null;
+}): AdminBarcodeRecord {
+  return {
+    id: row.id,
+    barcode: row.barcode,
+    name: row.name,
+    brands: row.brands,
+    proteinG: roundToSingleDecimal(toNumber(row.proteinG)),
+    carbsG: roundToSingleDecimal(toNumber(row.carbsG)),
+    fatG: roundToSingleDecimal(toNumber(row.fatG)),
+    caloriesKcal: Math.round(toNumber(row.caloriesKcal)),
+    servingSizeG:
+      row.servingSizeG != null
+        ? roundToSingleDecimal(toNumber(row.servingSizeG))
+        : null,
+    addedByUserId: row.addedByUserId,
+    addedByEmail: row.addedByEmail ?? null,
+    deletedByUserId: row.deletedByUserId,
+    deletedByEmail: row.deletedByEmail ?? null,
+    createdAt: toTimestampString(row.createdAt),
+    updatedAt: toTimestampString(row.updatedAt),
+    deletedAt: row.deletedAt ? toTimestampString(row.deletedAt) : null,
+    status: row.deletedAt ? "deleted" : "active",
+  };
+}
+
+function mapAdminAuditEventRow(row: {
+  id: string;
+  actorUserId: string;
+  actorRole: string;
+  action: string;
+  targetType: string;
+  targetId: string;
+  detailsJson: Record<string, unknown> | null;
+  createdAt: Date | string;
+  actorEmail?: string | null;
+  actorDisplayName?: string | null;
+}): AdminAuditEvent {
+  return {
+    id: row.id,
+    actorUserId: row.actorUserId,
+    actorEmail: row.actorEmail ?? null,
+    actorDisplayName: row.actorDisplayName ?? null,
+    actorRole: normalizeAdminRole(row.actorRole),
+    action: row.action,
+    targetType: row.targetType,
+    targetId: row.targetId,
+    details: row.detailsJson ?? {},
+    createdAt: toTimestampString(row.createdAt),
+  };
+}
+
+async function requireAdminActor(
+  actorUserId: string,
+  requiredRole: "admin" | "owner",
+  db: DatabaseClient,
+): Promise<AdminActor> {
+  const actor = await getUserById(actorUserId, db);
+
+  if (!actor) {
+    throw new Error("Admin actor not found.");
+  }
+
+  if (requiredRole === "owner" && !isOwnerRole(actor.role)) {
+    throw new Error("Owner access is required.");
+  }
+
+  if (requiredRole === "admin" && !canAccessAdmin(actor.role)) {
+    throw new Error("Admin access is required.");
+  }
+
+  return {
+    id: actor.id,
+    email: actor.email,
+    role: actor.role,
+  };
+}
+
+async function insertAdminAuditEvent(
+  tx: any,
+  input: {
+    actorUserId: string;
+    actorRole: AdminRole;
+    action: string;
+    targetType: string;
+    targetId: string;
+    details: Record<string, unknown>;
+  },
+) {
+  await tx.insert(adminAuditEvents).values({
+    id: crypto.randomUUID(),
+    actorUserId: input.actorUserId,
+    actorRole: input.actorRole,
+    action: input.action,
+    targetType: input.targetType,
+    targetId: input.targetId,
+    detailsJson: input.details,
+  });
+}
+
+async function getOwnerCount(db: DatabaseClient | any) {
+  const [row] = await db
+    .select({
+      total: count(),
+    })
+    .from(users)
+    .where(eq(users.role, "owner"));
+
+  return toNumber(row?.total);
+}
+
+export async function ensureUserRole(
+  userId: string,
+  role: AdminRole,
+  db?: DatabaseClient,
+) {
+  const database = await resolveDb(db);
+  const normalizedRole = normalizeAdminRole(role);
+
+  const [updated] = await database
+    .update(users)
+    .set({
+      role: normalizedRole,
+    })
+    .where(eq(users.id, userId))
+    .returning();
+
+  return updated ? mapUserRow(updated as UserSelectRow) : null;
+}
+
+export async function getAdminDashboardData(
+  db?: DatabaseClient,
+): Promise<AdminDashboardData> {
+  const database = await resolveDb(db);
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+  const [
+    totalUsersRow,
+    ownerCountRow,
+    adminCountRow,
+    newUsersRow,
+    activeUsersRow,
+    activeBarcodesRow,
+    deletedBarcodesRow,
+    recentBarcodeRows,
+    recentAuditPage,
+  ] = await Promise.all([
+    database.select({ total: count() }).from(users),
+    database.select({ total: count() }).from(users).where(eq(users.role, "owner")),
+    database.select({ total: count() }).from(users).where(eq(users.role, "admin")),
+    database.select({ total: count() }).from(users).where(gte(users.createdAt, sevenDaysAgo)),
+    database.select({ total: count() }).from(users).where(gte(users.lastLoginAt, sevenDaysAgo)),
+    database.select({ total: count() }).from(barcodeProducts).where(isNull(barcodeProducts.deletedAt)),
+    database.select({ total: count() }).from(barcodeProducts).where(isNotNull(barcodeProducts.deletedAt)),
+    database
+      .select({
+        id: barcodeProducts.id,
+        barcode: barcodeProducts.barcode,
+        name: barcodeProducts.name,
+        brands: barcodeProducts.brands,
+        proteinG: barcodeProducts.proteinG,
+        carbsG: barcodeProducts.carbsG,
+        fatG: barcodeProducts.fatG,
+        caloriesKcal: barcodeProducts.caloriesKcal,
+        servingSizeG: barcodeProducts.servingSizeG,
+        addedByUserId: barcodeProducts.addedByUserId,
+        addedByEmail: users.email,
+        deletedByUserId: barcodeProducts.deletedByUserId,
+        createdAt: barcodeProducts.createdAt,
+        updatedAt: barcodeProducts.updatedAt,
+        deletedAt: barcodeProducts.deletedAt,
+      })
+      .from(barcodeProducts)
+      .leftJoin(users, eq(users.id, barcodeProducts.addedByUserId))
+      .orderBy(desc(barcodeProducts.createdAt))
+      .limit(6),
+    listAdminAuditEvents(
+      {
+        page: 1,
+        pageSize: 6,
+      },
+      database,
+    ),
+  ]);
+
+  return {
+    totalUsers: toNumber(totalUsersRow[0]?.total),
+    ownerCount: toNumber(ownerCountRow[0]?.total),
+    adminCount: toNumber(adminCountRow[0]?.total),
+    newUsersLast7Days: toNumber(newUsersRow[0]?.total),
+    activeUsersLast7Days: toNumber(activeUsersRow[0]?.total),
+    activeBarcodeCount: toNumber(activeBarcodesRow[0]?.total),
+    deletedBarcodeCount: toNumber(deletedBarcodesRow[0]?.total),
+    recentBarcodeAdditions: recentBarcodeRows.map((row) =>
+      mapAdminBarcodeRow({
+        ...row,
+        deletedByEmail: null,
+      }),
+    ),
+    recentAuditEvents: recentAuditPage.items,
+  };
+}
+
+export async function listAdminUsers(
+  input: {
+    q?: string;
+    role?: AdminRole | "all";
+    activity?: "all" | "active7" | "inactive7";
+    page?: number;
+    pageSize?: number;
+  } = {},
+  db?: DatabaseClient,
+): Promise<AdminUserListPage> {
+  const database = await resolveDb(db);
+  const page = normalizePageNumber(input.page);
+  const pageSize = input.pageSize ?? 25;
+  const offset = (page - 1) * pageSize;
+  const conditions = [];
+  const query = input.q?.trim();
+  const activeSince = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+  if (query) {
+    const pattern = `%${escapeLikePattern(query)}%`;
+    conditions.push(
+      or(ilike(users.email, pattern), ilike(users.displayName, pattern)),
+    );
+  }
+
+  if (input.role && input.role !== "all") {
+    conditions.push(eq(users.role, normalizeAdminRole(input.role)));
+  }
+
+  if (input.activity === "active7") {
+    conditions.push(gte(users.lastLoginAt, activeSince));
+  } else if (input.activity === "inactive7") {
+    conditions.push(lte(users.lastLoginAt, activeSince));
+  }
+
+  const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+  const [countRows, rows] = await Promise.all([
+    database
+      .select({
+        total: count(),
+      })
+      .from(users)
+      .where(whereClause),
+    database
+      .select({
+        id: users.id,
+        email: users.email,
+        displayName: users.displayName,
+        pictureUrl: users.pictureUrl,
+        role: users.role,
+        createdAt: users.createdAt,
+        lastLoginAt: users.lastLoginAt,
+      })
+      .from(users)
+      .where(whereClause)
+      .orderBy(desc(users.lastLoginAt), asc(users.email))
+      .limit(pageSize)
+      .offset(offset),
+  ]);
+
+  const items: AdminUserListItem[] = rows.map((row) => ({
+    id: row.id,
+    email: row.email,
+    displayName: row.displayName,
+    pictureUrl: row.pictureUrl,
+    role: normalizeAdminRole(row.role),
+    createdAt: toTimestampString(row.createdAt),
+    lastLoginAt: toTimestampString(row.lastLoginAt),
+  }));
+
+  return {
+    items,
+    pagination: buildPagination(page, pageSize, toNumber(countRows[0]?.total)),
+  };
+}
+
+export async function getAdminUserDetail(
+  userId: string,
+  db?: DatabaseClient,
+): Promise<AdminUserDetail | null> {
+  const database = await resolveDb(db);
+  const user = await getUserById(userId, database);
+
+  if (!user) {
+    return null;
+  }
+
+  const [
+    mealCountRows,
+    weightCountRows,
+    recipeCountRows,
+    presetCountRows,
+    barcodeCountRows,
+    recentMeals,
+    recentWeights,
+    recentRecipes,
+    recentPresets,
+    recentBarcodeRows,
+  ] = await Promise.all([
+    database.select({ total: count() }).from(mealEntries).where(eq(mealEntries.userId, userId)),
+    database.select({ total: count() }).from(weightEntries).where(eq(weightEntries.userId, userId)),
+    database.select({ total: count() }).from(recipes).where(eq(recipes.userId, userId)),
+    database.select({ total: count() }).from(foodPresets).where(eq(foodPresets.userId, userId)),
+    database
+      .select({ total: count() })
+      .from(barcodeProducts)
+      .where(eq(barcodeProducts.addedByUserId, userId)),
+    database
+      .select({
+        id: mealEntries.id,
+        userId: mealEntries.userId,
+        date: mealEntries.entryDate,
+        label: mealEntries.label,
+        sortOrder: mealEntries.sortOrder,
+        proteinG: mealEntries.proteinG,
+        carbsG: mealEntries.carbsG,
+        fatG: mealEntries.fatG,
+        caloriesKcal: mealEntries.caloriesKcal,
+      })
+      .from(mealEntries)
+      .where(eq(mealEntries.userId, userId))
+      .orderBy(desc(mealEntries.entryDate), asc(mealEntries.sortOrder))
+      .limit(10),
+    database
+      .select({
+        id: weightEntries.id,
+        userId: weightEntries.userId,
+        date: weightEntries.entryDate,
+        weightKg: weightEntries.weightKg,
+        bodyFatPct: weightEntries.bodyFatPct,
+        notes: weightEntries.notes,
+      })
+      .from(weightEntries)
+      .where(eq(weightEntries.userId, userId))
+      .orderBy(desc(weightEntries.entryDate))
+      .limit(10),
+    database
+      .select({
+        id: recipes.id,
+        label: recipes.label,
+        portions: recipes.portions,
+        updatedAt: recipes.updatedAt,
+      })
+      .from(recipes)
+      .where(eq(recipes.userId, userId))
+      .orderBy(desc(recipes.updatedAt))
+      .limit(10),
+    database
+      .select({
+        id: foodPresets.id,
+        userId: foodPresets.userId,
+        label: foodPresets.label,
+        proteinG: foodPresets.proteinG,
+        carbsG: foodPresets.carbsG,
+        fatG: foodPresets.fatG,
+        caloriesKcal: foodPresets.caloriesKcal,
+      })
+      .from(foodPresets)
+      .where(eq(foodPresets.userId, userId))
+      .orderBy(sql`${foodPresets.lastUsedAt} DESC NULLS LAST`, asc(foodPresets.label))
+      .limit(10),
+    database
+      .select({
+        id: barcodeProducts.id,
+        barcode: barcodeProducts.barcode,
+        name: barcodeProducts.name,
+        brands: barcodeProducts.brands,
+        proteinG: barcodeProducts.proteinG,
+        carbsG: barcodeProducts.carbsG,
+        fatG: barcodeProducts.fatG,
+        caloriesKcal: barcodeProducts.caloriesKcal,
+        servingSizeG: barcodeProducts.servingSizeG,
+        addedByUserId: barcodeProducts.addedByUserId,
+        deletedByUserId: barcodeProducts.deletedByUserId,
+        createdAt: barcodeProducts.createdAt,
+        updatedAt: barcodeProducts.updatedAt,
+        deletedAt: barcodeProducts.deletedAt,
+      })
+      .from(barcodeProducts)
+      .where(eq(barcodeProducts.addedByUserId, userId))
+      .orderBy(desc(barcodeProducts.createdAt))
+      .limit(10),
+  ]);
+
+  return {
+    user,
+    goals: {
+      caloriesKcal: user.goalCaloriesKcal,
+      proteinG: user.goalProteinG,
+      carbsG: user.goalCarbsG,
+      fatG: user.goalFatG,
+    },
+    counts: {
+      mealEntries: toNumber(mealCountRows[0]?.total),
+      weightEntries: toNumber(weightCountRows[0]?.total),
+      recipes: toNumber(recipeCountRows[0]?.total),
+      presets: toNumber(presetCountRows[0]?.total),
+      barcodeSubmissions: toNumber(barcodeCountRows[0]?.total),
+    },
+    recentMeals: recentMeals.map((row) => mapMealRow(row)),
+    recentWeights: recentWeights.map((row) => ({
+      id: row.id,
+      userId: row.userId,
+      date: row.date,
+      weightKg: Math.round(toNumber(row.weightKg) * 100) / 100,
+      bodyFatPct:
+        row.bodyFatPct != null ? roundToSingleDecimal(toNumber(row.bodyFatPct)) : null,
+      notes: row.notes,
+    })),
+    recentRecipes: recentRecipes.map(
+      (row): AdminRecipeSummary => ({
+        id: row.id,
+        label: row.label,
+        portions: row.portions,
+        updatedAt: toTimestampString(row.updatedAt),
+      }),
+    ),
+    recentPresets: recentPresets.map((row) => ({
+      id: row.id,
+      userId: row.userId,
+      label: row.label,
+      proteinG: roundToSingleDecimal(toNumber(row.proteinG)),
+      carbsG: roundToSingleDecimal(toNumber(row.carbsG)),
+      fatG: roundToSingleDecimal(toNumber(row.fatG)),
+      caloriesKcal: toNumber(row.caloriesKcal),
+    })),
+    recentBarcodeSubmissions: recentBarcodeRows.map((row) =>
+      mapAdminBarcodeRow({
+        ...row,
+        addedByEmail: user.email,
+        deletedByEmail: null,
+      }),
+    ),
+  };
+}
+
+export async function setUserRole(
+  actorUserId: string,
+  targetUserId: string,
+  nextRole: AdminRole,
+  db?: DatabaseClient,
+) {
+  const database = await resolveDb(db);
+  const normalizedRole = normalizeAdminRole(nextRole);
+
+  return (database as any).transaction(async (tx: any) => {
+    const actor = await requireAdminActor(actorUserId, "owner", tx);
+    const target = await getUserById(targetUserId, tx);
+
+    if (!target) {
+      throw new Error("User not found.");
+    }
+
+    if (target.role === normalizedRole) {
+      return target;
+    }
+
+    if (target.role === "owner" && normalizedRole !== "owner") {
+      const ownerCount = await getOwnerCount(tx);
+      if (ownerCount <= 1) {
+        throw new Error("You cannot demote the last owner.");
+      }
+    }
+
+    const [updated] = await tx
+      .update(users)
+      .set({
+        role: normalizedRole,
+      })
+      .where(eq(users.id, targetUserId))
+      .returning();
+
+    if (!updated) {
+      throw new Error("User not found.");
+    }
+
+    await insertAdminAuditEvent(tx, {
+      actorUserId: actor.id,
+      actorRole: actor.role,
+      action: "user.role_changed",
+      targetType: "user",
+      targetId: targetUserId,
+      details: {
+        fromRole: target.role,
+        toRole: normalizedRole,
+        targetEmail: target.email,
+      },
+    });
+
+    return mapUserRow(updated as UserSelectRow);
+  });
+}
+
+export async function listAdminBarcodeProducts(
+  input: {
+    q?: string;
+    status?: "all" | "active" | "deleted";
+    submitter?: string;
+    page?: number;
+    pageSize?: number;
+  } = {},
+  db?: DatabaseClient,
+): Promise<AdminBarcodeListPage> {
+  const database = await resolveDb(db);
+  const page = normalizePageNumber(input.page);
+  const pageSize = input.pageSize ?? 25;
+  const offset = (page - 1) * pageSize;
+  const conditions = [];
+
+  if (input.q?.trim()) {
+    const pattern = `%${escapeLikePattern(input.q.trim())}%`;
+    conditions.push(
+      or(
+        ilike(barcodeProducts.barcode, pattern),
+        ilike(barcodeProducts.name, pattern),
+        ilike(barcodeProducts.brands, pattern),
+      ),
+    );
+  }
+
+  if (input.status === "active") {
+    conditions.push(isNull(barcodeProducts.deletedAt));
+  } else if (input.status === "deleted") {
+    conditions.push(isNotNull(barcodeProducts.deletedAt));
+  }
+
+  if (input.submitter?.trim()) {
+    const submitterPattern = `%${escapeLikePattern(input.submitter.trim())}%`;
+    conditions.push(ilike(users.email, submitterPattern));
+  }
+
+  const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+  const [countRows, rows] = await Promise.all([
+    database
+      .select({
+        total: count(),
+      })
+      .from(barcodeProducts)
+      .leftJoin(users, eq(users.id, barcodeProducts.addedByUserId))
+      .where(whereClause),
+    database
+      .select({
+        id: barcodeProducts.id,
+        barcode: barcodeProducts.barcode,
+        name: barcodeProducts.name,
+        brands: barcodeProducts.brands,
+        proteinG: barcodeProducts.proteinG,
+        carbsG: barcodeProducts.carbsG,
+        fatG: barcodeProducts.fatG,
+        caloriesKcal: barcodeProducts.caloriesKcal,
+        servingSizeG: barcodeProducts.servingSizeG,
+        addedByUserId: barcodeProducts.addedByUserId,
+        addedByEmail: users.email,
+        deletedByUserId: barcodeProducts.deletedByUserId,
+        createdAt: barcodeProducts.createdAt,
+        updatedAt: barcodeProducts.updatedAt,
+        deletedAt: barcodeProducts.deletedAt,
+      })
+      .from(barcodeProducts)
+      .leftJoin(users, eq(users.id, barcodeProducts.addedByUserId))
+      .where(whereClause)
+      .orderBy(desc(barcodeProducts.createdAt))
+      .limit(pageSize)
+      .offset(offset),
+  ]);
+
+  return {
+    items: rows.map((row) =>
+      mapAdminBarcodeRow({
+        ...row,
+        deletedByEmail: null,
+      }),
+    ),
+    pagination: buildPagination(page, pageSize, toNumber(countRows[0]?.total)),
+  };
+}
+
+export async function getAdminBarcodeProductById(
+  barcodeProductId: string,
+  db?: DatabaseClient,
+): Promise<AdminBarcodeRecord | null> {
+  const database = await resolveDb(db);
+  const [row] = await database
+    .select({
+      id: barcodeProducts.id,
+      barcode: barcodeProducts.barcode,
+      name: barcodeProducts.name,
+      brands: barcodeProducts.brands,
+      proteinG: barcodeProducts.proteinG,
+      carbsG: barcodeProducts.carbsG,
+      fatG: barcodeProducts.fatG,
+      caloriesKcal: barcodeProducts.caloriesKcal,
+      servingSizeG: barcodeProducts.servingSizeG,
+      addedByUserId: barcodeProducts.addedByUserId,
+      addedByEmail: users.email,
+      deletedByUserId: barcodeProducts.deletedByUserId,
+      createdAt: barcodeProducts.createdAt,
+      updatedAt: barcodeProducts.updatedAt,
+      deletedAt: barcodeProducts.deletedAt,
+    })
+    .from(barcodeProducts)
+    .leftJoin(users, eq(users.id, barcodeProducts.addedByUserId))
+    .where(eq(barcodeProducts.id, barcodeProductId))
+    .limit(1);
+
+  if (!row) {
+    return null;
+  }
+
+  const deletedByUser =
+    row.deletedByUserId ? await getUserById(row.deletedByUserId, database) : null;
+
+  return mapAdminBarcodeRow({
+    ...row,
+    deletedByEmail: deletedByUser?.email ?? null,
+  });
+}
+
+export async function createAdminBarcodeProduct(
+  actorUserId: string,
+  input: CustomBarcodeProductInput,
+  db?: DatabaseClient,
+) {
+  const database = await resolveDb(db);
+
+  return (database as any).transaction(async (tx: any) => {
+    const actor = await requireAdminActor(actorUserId, "admin", tx);
+    const [created] = await tx
+      .insert(barcodeProducts)
+      .values({
+        id: crypto.randomUUID(),
+        barcode: input.barcode.trim(),
+        name: input.name.trim(),
+        brands: input.brands.trim(),
+        proteinG: input.proteinG.toFixed(1),
+        carbsG: input.carbsG.toFixed(1),
+        fatG: input.fatG.toFixed(1),
+        caloriesKcal: Math.round(input.caloriesKcal),
+        servingSizeG:
+          input.servingSizeG != null ? input.servingSizeG.toFixed(1) : null,
+        addedByUserId: actor.id,
+        updatedAt: new Date(),
+        deletedAt: null,
+        deletedByUserId: null,
+      })
+      .returning();
+
+    await insertAdminAuditEvent(tx, {
+      actorUserId: actor.id,
+      actorRole: actor.role,
+      action: "barcode.created",
+      targetType: "barcode_product",
+      targetId: created.id,
+      details: {
+        barcode: created.barcode,
+        name: created.name,
+      },
+    });
+
+    return mapAdminBarcodeRow({
+      ...created,
+      addedByEmail: actor.email,
+      deletedByEmail: null,
+    });
+  });
+}
+
+export async function updateAdminBarcodeProduct(
+  actorUserId: string,
+  barcodeProductId: string,
+  input: CustomBarcodeProductInput,
+  db?: DatabaseClient,
+) {
+  const database = await resolveDb(db);
+
+  return (database as any).transaction(async (tx: any) => {
+    const actor = await requireAdminActor(actorUserId, "admin", tx);
+    const before = await getAdminBarcodeProductById(barcodeProductId, tx);
+
+    if (!before) {
+      throw new Error("Barcode product not found.");
+    }
+
+    const [updated] = await tx
+      .update(barcodeProducts)
+      .set({
+        barcode: input.barcode.trim(),
+        name: input.name.trim(),
+        brands: input.brands.trim(),
+        proteinG: input.proteinG.toFixed(1),
+        carbsG: input.carbsG.toFixed(1),
+        fatG: input.fatG.toFixed(1),
+        caloriesKcal: Math.round(input.caloriesKcal),
+        servingSizeG:
+          input.servingSizeG != null ? input.servingSizeG.toFixed(1) : null,
+        updatedAt: new Date(),
+      })
+      .where(eq(barcodeProducts.id, barcodeProductId))
+      .returning();
+
+    await insertAdminAuditEvent(tx, {
+      actorUserId: actor.id,
+      actorRole: actor.role,
+      action: "barcode.updated",
+      targetType: "barcode_product",
+      targetId: barcodeProductId,
+      details: {
+        before,
+        after: {
+          barcode: updated.barcode,
+          name: updated.name,
+          brands: updated.brands,
+          caloriesKcal: updated.caloriesKcal,
+        },
+      },
+    });
+
+    const deletedByUser =
+      updated.deletedByUserId
+        ? await getUserById(updated.deletedByUserId, tx)
+        : null;
+
+    return mapAdminBarcodeRow({
+      ...updated,
+      addedByEmail: before.addedByEmail,
+      deletedByEmail: deletedByUser?.email ?? null,
+    });
+  });
+}
+
+export async function softDeleteAdminBarcodeProduct(
+  actorUserId: string,
+  barcodeProductId: string,
+  db?: DatabaseClient,
+) {
+  const database = await resolveDb(db);
+
+  return (database as any).transaction(async (tx: any) => {
+    const actor = await requireAdminActor(actorUserId, "admin", tx);
+    const existing = await getAdminBarcodeProductById(barcodeProductId, tx);
+
+    if (!existing) {
+      throw new Error("Barcode product not found.");
+    }
+
+    if (existing.deletedAt) {
+      return existing;
+    }
+
+    const deletedAt = new Date();
+    const [updated] = await tx
+      .update(barcodeProducts)
+      .set({
+        deletedAt,
+        deletedByUserId: actor.id,
+        updatedAt: deletedAt,
+      })
+      .where(eq(barcodeProducts.id, barcodeProductId))
+      .returning();
+
+    await insertAdminAuditEvent(tx, {
+      actorUserId: actor.id,
+      actorRole: actor.role,
+      action: "barcode.deleted",
+      targetType: "barcode_product",
+      targetId: barcodeProductId,
+      details: {
+        barcode: existing.barcode,
+        name: existing.name,
+      },
+    });
+
+    return mapAdminBarcodeRow({
+      ...updated,
+      addedByEmail: existing.addedByEmail,
+      deletedByEmail: actor.email,
+    });
+  });
+}
+
+export async function restoreAdminBarcodeProduct(
+  actorUserId: string,
+  barcodeProductId: string,
+  db?: DatabaseClient,
+) {
+  const database = await resolveDb(db);
+
+  return (database as any).transaction(async (tx: any) => {
+    const actor = await requireAdminActor(actorUserId, "admin", tx);
+    const existing = await getAdminBarcodeProductById(barcodeProductId, tx);
+
+    if (!existing) {
+      throw new Error("Barcode product not found.");
+    }
+
+    if (!existing.deletedAt) {
+      return existing;
+    }
+
+    const [updated] = await tx
+      .update(barcodeProducts)
+      .set({
+        deletedAt: null,
+        deletedByUserId: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(barcodeProducts.id, barcodeProductId))
+      .returning();
+
+    await insertAdminAuditEvent(tx, {
+      actorUserId: actor.id,
+      actorRole: actor.role,
+      action: "barcode.restored",
+      targetType: "barcode_product",
+      targetId: barcodeProductId,
+      details: {
+        barcode: existing.barcode,
+        name: existing.name,
+      },
+    });
+
+    return mapAdminBarcodeRow({
+      ...updated,
+      addedByEmail: existing.addedByEmail,
+      deletedByEmail: null,
+    });
+  });
+}
+
+export async function listAdminAuditEvents(
+  input: {
+    page?: number;
+    pageSize?: number;
+    targetType?: string;
+    targetId?: string;
+  } = {},
+  db?: DatabaseClient,
+): Promise<AdminAuditListPage> {
+  const database = await resolveDb(db);
+  const page = normalizePageNumber(input.page);
+  const pageSize = input.pageSize ?? 25;
+  const offset = (page - 1) * pageSize;
+  const conditions = [];
+
+  if (input.targetType) {
+    conditions.push(eq(adminAuditEvents.targetType, input.targetType));
+  }
+
+  if (input.targetId) {
+    conditions.push(eq(adminAuditEvents.targetId, input.targetId));
+  }
+
+  const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+  const [countRows, rows] = await Promise.all([
+    database
+      .select({
+        total: count(),
+      })
+      .from(adminAuditEvents)
+      .where(whereClause),
+    database
+      .select({
+        id: adminAuditEvents.id,
+        actorUserId: adminAuditEvents.actorUserId,
+        actorRole: adminAuditEvents.actorRole,
+        action: adminAuditEvents.action,
+        targetType: adminAuditEvents.targetType,
+        targetId: adminAuditEvents.targetId,
+        detailsJson: adminAuditEvents.detailsJson,
+        createdAt: adminAuditEvents.createdAt,
+        actorEmail: users.email,
+        actorDisplayName: users.displayName,
+      })
+      .from(adminAuditEvents)
+      .leftJoin(users, eq(users.id, adminAuditEvents.actorUserId))
+      .where(whereClause)
+      .orderBy(desc(adminAuditEvents.createdAt))
+      .limit(pageSize)
+      .offset(offset),
+  ]);
+
+  return {
+    items: rows.map((row) =>
+      mapAdminAuditEventRow({
+        ...row,
+        detailsJson: row.detailsJson as Record<string, unknown> | null,
+      }),
+    ),
+    pagination: buildPagination(page, pageSize, toNumber(countRows[0]?.total)),
+  };
 }

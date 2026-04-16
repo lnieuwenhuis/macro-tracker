@@ -11,5 +11,5 @@ CREATE TABLE "barcode_products" (
   "added_by_user_id" uuid REFERENCES "users"("id") ON DELETE SET NULL,
   "created_at" timestamp with time zone DEFAULT now() NOT NULL
 );
-
+--> statement-breakpoint
 CREATE UNIQUE INDEX "barcode_products_barcode_key" ON "barcode_products" USING btree ("barcode");

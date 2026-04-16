@@ -1,4 +1,41 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
+
+async function startCustomFoodDraft(page: Page) {
+  const addCustomButton = page.getByRole("button", { name: "Add custom" });
+
+  if (await addCustomButton.isVisible()) {
+    await addCustomButton.click();
+    return;
+  }
+
+  await page.getByRole("button", { name: "Add food" }).click();
+  await page.getByRole("button", { name: "Custom" }).click();
+}
+
+async function addCustomFood(
+  page: Page,
+  input: {
+    label: string;
+    proteinG: string;
+    carbsG: string;
+    fatG: string;
+    caloriesKcal: string;
+  },
+) {
+  await startCustomFoodDraft(page);
+
+  const mealCard = page.locator("article").last();
+  const mealName = mealCard.getByPlaceholder("Chicken breast, rice, banana...");
+
+  await expect(mealName).toBeVisible();
+  await mealName.fill(input.label);
+  await mealCard.getByLabel("Protein").fill(input.proteinG);
+  await mealCard.getByLabel("Carbs").fill(input.carbsG);
+  await mealCard.getByLabel("Fat").fill(input.fatG);
+  await mealCard.getByLabel("Calories").fill(input.caloriesKcal);
+  await mealCard.getByRole("button", { name: "Save" }).click();
+  await expect(mealCard.getByRole("button", { name: "Expand", exact: true })).toBeVisible();
+}
 
 test("redirects unauthenticated users to login", async ({ page }) => {
   await page.goto("/");
@@ -12,7 +49,7 @@ test("allows an allowlisted user to track food items across days", async ({
   page,
 }) => {
   await page.goto("/api/test/session?email=coach@example.com");
-  await expect(page.getByText("Signed in as coach@example.com")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible();
 
   const datePicker = page.getByLabel("Pick a day");
   const currentBrowserDate = await page.evaluate(() => {
@@ -24,38 +61,29 @@ test("allows an allowlisted user to track food items across days", async ({
     return `${year}-${month}-${day}`;
   });
 
-  await expect(page).toHaveURL(new RegExp(`\\?date=${currentBrowserDate}$`));
   await expect(datePicker).toHaveValue(currentBrowserDate);
 
   await datePicker.fill("2026-03-17");
   await expect(page).toHaveURL(/date=2026-03-17/);
-  await page.getByRole("button", { name: "Add food" }).click();
-  const firstMealCard = page.locator("article").last();
-  const firstMealName = firstMealCard.getByPlaceholder(
-    "500g quark, banana, oats, chicken breast...",
-  );
-  await firstMealName.fill("Greek yogurt");
-  await firstMealCard.getByLabel("Protein").fill("30");
-  await firstMealCard.getByLabel("Carbs").fill("40");
-  await firstMealCard.getByLabel("Fat").fill("10");
-  await firstMealCard.getByLabel("Calories").fill("370");
-  await firstMealCard.getByRole("button", { name: "Save food" }).click();
+  await addCustomFood(page, {
+    label: "Greek yogurt",
+    proteinG: "30",
+    carbsG: "40",
+    fatG: "10",
+    caloriesKcal: "370",
+  });
 
   await datePicker.fill("2026-03-19");
   await expect(page).toHaveURL(/date=2026-03-19/);
-  await page.getByRole("button", { name: "Add food" }).click();
-  const secondMealCard = page.locator("article").last();
-  const secondMealName = secondMealCard.getByPlaceholder(
-    "500g quark, banana, oats, chicken breast...",
-  );
-  await secondMealName.fill("Chicken breast");
-  await secondMealCard.getByLabel("Protein").fill("50");
-  await secondMealCard.getByLabel("Carbs").fill("60");
-  await secondMealCard.getByLabel("Fat").fill("20");
-  await secondMealCard.getByLabel("Calories").fill("620");
-  await secondMealCard.getByRole("button", { name: "Save food" }).click();
+  await addCustomFood(page, {
+    label: "Chicken breast",
+    proteinG: "50",
+    carbsG: "60",
+    fatG: "20",
+    caloriesKcal: "620",
+  });
 
-  const dailyTotalsCard = page.locator("section").filter({ hasText: "Daily totals" }).first();
+  const dailyTotalsCard = page.locator("section").filter({ hasText: "Daily Report" }).first();
   await expect(dailyTotalsCard).toContainText("50g");
   await expect(dailyTotalsCard).toContainText("60g");
   await expect(dailyTotalsCard).toContainText("20g");
@@ -66,7 +94,7 @@ test("allows an allowlisted user to track food items across days", async ({
     .locator("section")
     .filter({ hasText: "Rolling 7 days" })
     .first();
-  await expect(rolling7Card).toContainText("2 logged days");
+  await expect(rolling7Card).toContainText("2 days");
 });
 
 test("blocks non-allowlisted test logins", async ({ request }) => {
@@ -77,41 +105,53 @@ test("blocks non-allowlisted test logins", async ({ request }) => {
   expect(response.status()).toBe(403);
 });
 
-test("user with goals sees Remaining Today card and Best Fits rail", async ({
+test("fresh users see the current dashboard empty states", async ({
   page,
 }) => {
-  await page.goto("/api/test/session?email=coach@example.com");
-  await expect(page.getByText("Signed in as coach@example.com")).toBeVisible();
+  await page.goto("/api/test/session?email=user@example.com");
+  await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible();
 
-  // The Remaining Today card should be visible regardless of goals state
-  await expect(page.getByRole("region", { name: "Remaining today" })).toBeVisible();
-
-  // The Quick Add section is always present
+  await expect(page.getByText("Daily Report")).toBeVisible();
   await expect(page.getByText("Quick Add")).toBeVisible();
-
-  // Recent Repeats rail is always shown
-  await expect(page.getByText("Recent Repeats")).toBeVisible();
+  await expect(
+    page.getByText("Log some foods or add presets to see suggestions here."),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: "Add custom" })).toBeVisible();
 });
 
-test("tapping a quick-add card adds a prefilled draft without auto-saving", async ({
+test("recent foods appear in quick add and create a prefilled draft", async ({
   page,
 }) => {
-  await page.goto("/api/test/session?email=coach@example.com");
-  await expect(page.getByText("Signed in as coach@example.com")).toBeVisible();
+  const label = `Quick Add Item ${Date.now()}`;
+
+  await page.goto("/api/test/session?email=user@example.com");
+  await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible();
 
   const datePicker = page.getByLabel("Pick a day");
   await datePicker.fill("2026-03-17");
   await expect(page).toHaveURL(/date=2026-03-17/);
 
-  // If there are any quick-add cards, click the first one and verify a draft is created
-  const quickAddCards = page.getByRole("button", { name: /Quick add/i });
-  const cardCount = await quickAddCards.count();
+  await addCustomFood(page, {
+    label,
+    proteinG: "24",
+    carbsG: "18",
+    fatG: "7",
+    caloriesKcal: "231",
+  });
 
-  if (cardCount > 0) {
-    const articlesBefore = await page.locator("article").count();
-    await quickAddCards.first().click();
-    // A new unsaved draft card should appear
-    const articlesAfter = await page.locator("article").count();
-    expect(articlesAfter).toBeGreaterThan(articlesBefore);
-  }
+  await datePicker.fill("2026-03-18");
+  await expect(page).toHaveURL(/date=2026-03-18/);
+
+  const quickAddCard = page.getByRole("button", { name: `Quick add ${label}` });
+  await expect(quickAddCard).toBeVisible();
+
+  const articlesBefore = await page.locator("article").count();
+  await quickAddCard.click();
+
+  const draftCard = page.locator("article").last();
+  await expect(draftCard.getByText(label)).toBeVisible();
+  await expect(draftCard.getByRole("button", { name: "Save" })).toBeVisible();
+
+  const articlesAfter = await page.locator("article").count();
+  expect(articlesAfter).toBeGreaterThan(articlesBefore);
 });

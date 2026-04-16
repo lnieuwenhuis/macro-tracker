@@ -56,9 +56,41 @@ export type ShooProfile = {
   pictureUrl?: string | null;
 };
 
+export const ADMIN_ROLE_VALUES = ["user", "admin", "owner"] as const;
+
+export type AdminRole = (typeof ADMIN_ROLE_VALUES)[number];
+
+export function isAdminRole(value: string): value is AdminRole {
+  return ADMIN_ROLE_VALUES.includes(value as AdminRole);
+}
+
+export function canAccessAdmin(role: AdminRole) {
+  return role === "admin" || role === "owner";
+}
+
+export function isOwnerRole(role: AdminRole) {
+  return role === "owner";
+}
+
 export type SessionUser = {
   userId: string;
   email: string;
+};
+
+export type AppUser = {
+  id: string;
+  email: string;
+  shooPairwiseSub: string;
+  displayName: string | null;
+  pictureUrl: string | null;
+  role: AdminRole;
+  createdAt: string;
+  lastLoginAt: string;
+  goalCaloriesKcal: number | null;
+  goalProteinG: number | null;
+  goalCarbsG: number | null;
+  goalFatG: number | null;
+  goalWeightKg: number | null;
 };
 
 export type FoodPreset = {
@@ -138,6 +170,107 @@ export type CustomBarcodeProductInput = {
 export type CustomBarcodeProduct = CustomBarcodeProductInput & {
   id: string;
   addedByUserId: string | null;
+};
+
+export type AdminAuditEvent = {
+  id: string;
+  actorUserId: string;
+  actorEmail: string | null;
+  actorDisplayName: string | null;
+  actorRole: AdminRole;
+  action: string;
+  targetType: string;
+  targetId: string;
+  details: Record<string, unknown>;
+  createdAt: string;
+};
+
+export type AdminBarcodeRecord = {
+  id: string;
+  barcode: string;
+  name: string;
+  brands: string;
+  proteinG: number;
+  carbsG: number;
+  fatG: number;
+  caloriesKcal: number;
+  servingSizeG: number | null;
+  addedByUserId: string | null;
+  addedByEmail: string | null;
+  deletedByUserId: string | null;
+  deletedByEmail: string | null;
+  createdAt: string;
+  updatedAt: string;
+  deletedAt: string | null;
+  status: "active" | "deleted";
+};
+
+export type AdminRecipeSummary = {
+  id: string;
+  label: string;
+  portions: number;
+  updatedAt: string;
+};
+
+export type AdminUserListItem = {
+  id: string;
+  email: string;
+  displayName: string | null;
+  pictureUrl: string | null;
+  role: AdminRole;
+  createdAt: string;
+  lastLoginAt: string;
+};
+
+export type AdminUserDetail = {
+  user: AppUser;
+  goals: MacroGoals;
+  counts: {
+    mealEntries: number;
+    weightEntries: number;
+    recipes: number;
+    presets: number;
+    barcodeSubmissions: number;
+  };
+  recentMeals: MealEntryRecord[];
+  recentWeights: WeightEntryRecord[];
+  recentRecipes: AdminRecipeSummary[];
+  recentPresets: FoodPreset[];
+  recentBarcodeSubmissions: AdminBarcodeRecord[];
+};
+
+export type AdminPagination = {
+  page: number;
+  pageSize: number;
+  totalItems: number;
+  totalPages: number;
+};
+
+export type AdminUserListPage = {
+  items: AdminUserListItem[];
+  pagination: AdminPagination;
+};
+
+export type AdminBarcodeListPage = {
+  items: AdminBarcodeRecord[];
+  pagination: AdminPagination;
+};
+
+export type AdminAuditListPage = {
+  items: AdminAuditEvent[];
+  pagination: AdminPagination;
+};
+
+export type AdminDashboardData = {
+  totalUsers: number;
+  ownerCount: number;
+  adminCount: number;
+  newUsersLast7Days: number;
+  activeUsersLast7Days: number;
+  activeBarcodeCount: number;
+  deletedBarcodeCount: number;
+  recentBarcodeAdditions: AdminBarcodeRecord[];
+  recentAuditEvents: AdminAuditEvent[];
 };
 
 export type StatsPageData = {

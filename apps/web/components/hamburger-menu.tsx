@@ -13,6 +13,7 @@ import { TransitionLink } from "./transition-link";
 
 type HamburgerMenuProps = {
   userEmail: string;
+  canAccessAdmin: boolean;
   selectedDate: string;
   activeTab: "log" | "summary" | "recipes" | "goals" | "stats" | "weight";
 };
@@ -67,6 +68,7 @@ function LeaderboardSkeleton() {
 
 export function HamburgerMenu({
   userEmail,
+  canAccessAdmin,
   selectedDate,
   activeTab,
 }: HamburgerMenuProps) {
@@ -151,7 +153,10 @@ export function HamburgerMenu({
     router.prefetch(`/goals?date=${selectedDate}`);
     router.prefetch("/stats");
     router.prefetch("/weight");
-  }, [open, router, selectedDate]);
+    if (canAccessAdmin) {
+      router.prefetch("/admin");
+    }
+  }, [canAccessAdmin, open, router, selectedDate]);
 
   return (
     <>
@@ -324,6 +329,22 @@ export function HamburgerMenu({
                   </svg>
                   Weight
                 </TransitionLink>
+                {canAccessAdmin && (
+                  <TransitionLink
+                    href="/admin"
+                    motion="screen"
+                    onClick={() => setOpen(false)}
+                    className="flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-semibold text-[var(--color-ink)] transition hover:bg-[var(--color-card-muted)]"
+                  >
+                    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M3 5h12" />
+                      <path d="M3 9h12" />
+                      <path d="M3 13h12" />
+                      <path d="M5 3v12" />
+                    </svg>
+                    Admin
+                  </TransitionLink>
+                )}
                 </nav>
 
                 {/* Leaderboard / personal records */}

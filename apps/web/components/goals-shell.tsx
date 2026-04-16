@@ -19,6 +19,7 @@ import { AppShell } from "./app-shell";
 
 type GoalsShellProps = {
   userEmail: string;
+  canAccessAdmin: boolean;
   selectedDate: string;
   goals: MacroGoals;
 };
@@ -178,7 +179,12 @@ function ResultTile({
   );
 }
 
-export function GoalsShell({ userEmail, selectedDate, goals }: GoalsShellProps) {
+export function GoalsShell({
+  userEmail,
+  canAccessAdmin,
+  selectedDate,
+  goals,
+}: GoalsShellProps) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [saved, setSaved] = useState(false);
@@ -288,7 +294,12 @@ export function GoalsShell({ userEmail, selectedDate, goals }: GoalsShellProps) 
   }
 
   return (
-    <AppShell userEmail={userEmail} selectedDate={selectedDate} activeTab="goals">
+    <AppShell
+      userEmail={userEmail}
+      canAccessAdmin={canAccessAdmin}
+      selectedDate={selectedDate}
+      activeTab="goals"
+    >
       <div className="space-y-5">
         {/* Header */}
         <div>

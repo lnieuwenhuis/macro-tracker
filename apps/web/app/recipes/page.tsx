@@ -1,4 +1,4 @@
-import { ensureDateString, getRecipes, getUserById } from "@macro-tracker/db";
+import { canAccessAdmin, ensureDateString, getRecipes, getUserById } from "@macro-tracker/db";
 
 import { RecipesShell } from "@/components/recipes-shell";
 import { requireSessionUser } from "@/lib/auth";
@@ -22,6 +22,7 @@ export default async function RecipesPage({ searchParams }: RecipesPageProps) {
   return (
     <RecipesShell
       userEmail={user?.email ?? sessionUser.email}
+      canAccessAdmin={user ? canAccessAdmin(user.role) : false}
       selectedDate={selectedDate}
       recipes={recipes}
     />

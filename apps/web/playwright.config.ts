@@ -1,6 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
 const appUrl = "http://localhost:3000";
+const e2eDatabaseUrl = `file:.playwright-db-${Date.now()}`;
 
 export default defineConfig({
   testDir: "./tests/e2e",
@@ -15,11 +16,12 @@ export default defineConfig({
     url: appUrl,
     reuseExistingServer: false,
     env: {
-      DATABASE_URL: "memory:",
+      DATABASE_URL: e2eDatabaseUrl,
       APP_URL: appUrl,
       SESSION_SECRET: "test-secret",
       ENABLE_TEST_ROUTES: "true",
       SHOO_BASE_URL: "https://shoo.dev",
+      ADMIN_OWNER_EMAILS: "owner@example.com",
     },
   },
 });

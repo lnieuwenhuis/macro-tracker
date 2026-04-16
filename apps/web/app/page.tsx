@@ -1,4 +1,4 @@
-import { ensureDateString, getDailySummary, getPresets, getRecentQuickAddCandidates, getRecipes, getUserById, getUserGoals } from "@macro-tracker/db";
+import { canAccessAdmin, ensureDateString, getDailySummary, getPresets, getRecentQuickAddCandidates, getRecipes, getUserById, getUserGoals } from "@macro-tracker/db";
 
 import { DashboardShell } from "@/components/dashboard-shell";
 import { requireSessionUser } from "@/lib/auth";
@@ -28,6 +28,7 @@ export default async function HomePage({ searchParams }: HomePageProps) {
     <DashboardShell
       key={dashboardKey}
       userEmail={user?.email ?? sessionUser.email}
+      canAccessAdmin={user ? canAccessAdmin(user.role) : false}
       selectedDate={selectedDate}
       dailySummary={dailySummary}
       goals={goals}
