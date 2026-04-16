@@ -18,7 +18,7 @@ import { FoodSearchModal } from "./food-search-modal";
 import { MacroBarGroup } from "./macro-bar";
 import { MealCard, type MealDraft } from "./meal-card";
 import { PresetModal } from "./preset-modal";
-import { QuickAddRail, GoalsCTARail } from "./quick-add-rail";
+import { QuickAddRail } from "./quick-add-rail";
 import { RecipePickerModal } from "./recipe-picker-modal";
 import { RemainingMacrosCard } from "./remaining-macros-card";
 
@@ -166,14 +166,13 @@ export function DashboardShell({
     return [...presetCandidates, ...recentCandidates];
   }, [localPresets, recentCandidates]);
 
-  const bestFits = useMemo(
-    () => (goalsSet ? rankCandidates(allCandidates, remaining, 10) : []),
+  // Single unified quick-add list: goal-ranked when goals exist, recency-sorted otherwise.
+  const quickAddItems = useMemo(
+    () =>
+      goalsSet
+        ? rankCandidates(allCandidates, remaining, 10)
+        : getRecentRepeats(allCandidates, 10),
     [allCandidates, remaining, goalsSet],
-  );
-
-  const recentRepeats = useMemo(
-    () => getRecentRepeats(allCandidates, 10),
-    [allCandidates],
   );
 
   // ---------------------------------------------------------------------------
@@ -476,34 +475,24 @@ export function DashboardShell({
         {/* Remaining Today card */}
         <RemainingMacrosCard remaining={remaining} hasGoals={goalsSet} />
 
-        {/* Quick Add section */}
-        <section className="space-y-3">
-          <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
-            Quick Add
-          </h2>
-
-          {goalsSet ? (
-            <QuickAddRail
-              title="Best Fits"
-              items={bestFits}
-              onAdd={addDraftFromCandidate}
-              emptyState={
-                <p className="text-sm text-[var(--color-muted)]">
-                  Add some presets or log foods to see suggestions.
-                </p>
-              }
-            />
-          ) : (
-            <GoalsCTARail title="Best Fits" />
-          )}
-
+        {/* Quick Add carousel */}
+        <section>
+          <div className="mb-2.5 flex items-baseline justify-between">
+            <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
+              Quick Add
+            </h2>
+            {goalsSet && (
+              <span className="text-[10px] text-[var(--color-muted)]">
+                ranked by your goals
+              </span>
+            )}
+          </div>
           <QuickAddRail
-            title="Recent Repeats"
-            items={recentRepeats}
+            items={quickAddItems}
             onAdd={addDraftFromCandidate}
             emptyState={
               <p className="text-sm text-[var(--color-muted)]">
-                Your recently logged foods will appear here.
+                Log some foods or add presets to see suggestions here.
               </p>
             }
           />

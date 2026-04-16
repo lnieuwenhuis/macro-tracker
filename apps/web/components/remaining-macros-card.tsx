@@ -44,7 +44,7 @@ function MacroPill({ label, value, unit }: MacroPillProps) {
   const status = getStatus(value);
   const absValue = value !== null ? Math.abs(value) : null;
 
-  const textColor =
+  const valueColor =
     status === "over"
       ? "text-[var(--color-danger)]"
       : status === "hit"
@@ -52,14 +52,14 @@ function MacroPill({ label, value, unit }: MacroPillProps) {
         : "text-[var(--color-ink)]";
 
   return (
-    <div className="flex flex-1 flex-col items-center gap-0.5 rounded-xl bg-[var(--color-shell-panel)] px-2 py-2.5">
+    <div className="flex flex-1 flex-col items-center gap-1 rounded-xl bg-[var(--color-shell-panel)] px-1.5 py-2.5">
       <span className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--color-muted-strong)]">
         {label}
       </span>
-      <span className={`text-lg font-bold tabular-nums leading-none ${textColor}`}>
+      <span className={`text-[15px] font-bold tabular-nums leading-none ${valueColor}`}>
         {absValue !== null ? formatMacroValue(absValue) : "—"}
-        <span className="ml-0.5 text-[11px] font-semibold">{unit}</span>
       </span>
+      <span className="text-[10px] font-semibold text-[var(--color-muted)]">{unit}</span>
       <StatusBadge status={status} />
     </div>
   );
