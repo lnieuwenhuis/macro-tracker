@@ -237,13 +237,19 @@ export async function upsertUserFromShooProfile(
       goalWeightKg: users.goalWeightKg,
     })
     .from(users)
-    .where(eq(users.shooPairwiseSub, profile.pairwiseSub))
+    .where(
+      or(
+        eq(users.shooPairwiseSub, profile.pairwiseSub),
+        eq(users.email, profile.email),
+      ),
+    )
     .limit(1);
 
   if (existing[0]) {
     const [updated] = await database
       .update(users)
       .set({
+        shooPairwiseSub: profile.pairwiseSub,
         email: profile.email,
         displayName: profile.displayName ?? null,
         pictureUrl: profile.pictureUrl ?? null,
