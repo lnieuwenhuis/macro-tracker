@@ -138,6 +138,38 @@ describe("shoo auth helpers", () => {
     expect(sessionUser).toEqual(result.sessionUser);
   });
 
+  it("updates shooPairwiseSub when a user with the same email logs in with a different sub", async () => {
+    // 1. Initial login
+    const firstResult = await authorizeVerifiedShooClaims(
+      {
+        pairwise_sub: "sub_1",
+        email: "user@example.com",
+        name: "User One",
+      },
+      runtime.db,
+    );
+
+    const userId = firstResult.sessionUser.userId;
+
+    // 2. Second login with SAME email but DIFFERENT sub
+    const secondResult = await authorizeVerifiedShooClaims(
+      {
+        pairwise_sub: "sub_2",
+        email: "user@example.com",
+        name: "User Two",
+      },
+      runtime.db,
+    );
+
+    // Should be the same user ID
+    expect(secondResult.sessionUser.userId).toBe(userId);
+
+    // Should have updated the sub in the database
+    const updatedUser = await getUserById(userId, runtime.db);
+    expect(updatedUser?.shooPairwiseSub).toBe("sub_2");
+    expect(updatedUser?.displayName).toBe("User Two");
+  });
+
   it("uses forwarded headers to resolve the public request origin", () => {
     const request = new Request("http://127.0.0.1:3000/api/auth/shoo/verify", {
       headers: {
