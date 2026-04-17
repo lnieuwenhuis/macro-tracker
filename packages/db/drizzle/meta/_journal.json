@@ -50,6 +50,13 @@
       "when": 1776297700000,
       "tag": "0006_preset_last_used_at",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1776400000000,
+      "tag": "0007_admin_panel",
+      "breakpoints": true
     }
   ]
 }

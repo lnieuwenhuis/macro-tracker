@@ -23,6 +23,7 @@ type PresetMutationState =
 
 type RecipeBuilderShellProps = {
   userEmail: string;
+  canAccessAdmin: boolean;
   selectedDate: string;
   presets: FoodPreset[];
   mode: "create" | "edit";
@@ -36,6 +37,7 @@ function toNumber(value: string) {
 
 export function RecipeBuilderShell({
   userEmail,
+  canAccessAdmin,
   selectedDate,
   presets: initialPresets,
   mode,
@@ -225,7 +227,12 @@ export function RecipeBuilderShell({
   }
 
   return (
-    <AppShell userEmail={userEmail} selectedDate={selectedDate} activeTab="recipes">
+    <AppShell
+      userEmail={userEmail}
+      canAccessAdmin={canAccessAdmin}
+      selectedDate={selectedDate}
+      activeTab="recipes"
+    >
       <div className="space-y-5">
         {/* Recipe name + portions */}
         <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5 shadow-[0_12px_32px_rgba(0,0,0,0.06)]">

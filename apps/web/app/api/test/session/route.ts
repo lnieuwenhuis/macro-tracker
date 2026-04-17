@@ -5,6 +5,13 @@ import { NextResponse } from "next/server";
 import { getServerEnv } from "@/lib/env";
 import { applySessionCookie, isSecureRequest } from "@/lib/session";
 
+const TEST_LOGIN_ALLOWLIST = new Set([
+  "coach@example.com",
+  "owner@example.com",
+  "admin@example.com",
+  "user@example.com",
+]);
+
 async function ensureTestSchema() {
   const db = await getDb();
 
@@ -15,6 +22,7 @@ async function ensureTestSchema() {
       "email" text NOT NULL,
       "display_name" text,
       "picture_url" text,
+      "role" text DEFAULT 'user' NOT NULL,
       "created_at" timestamp with time zone DEFAULT now() NOT NULL,
       "last_login_at" timestamp with time zone DEFAULT now() NOT NULL
     )
@@ -27,6 +35,11 @@ async function ensureTestSchema() {
   await db.execute(
     sql.raw(
       `CREATE UNIQUE INDEX IF NOT EXISTS "users_email_key" ON "users" USING btree ("email")`,
+    ),
+  );
+  await db.execute(
+    sql.raw(
+      `ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "role" text DEFAULT 'user' NOT NULL`,
     ),
   );
   await db.execute(sql.raw(`
@@ -69,6 +82,13 @@ async function createTestSessionResponse(
     return NextResponse.json(
       { error: "Email is required." },
       { status: 400 },
+    );
+  }
+
+  if (!TEST_LOGIN_ALLOWLIST.has(email)) {
+    return NextResponse.json(
+      { error: "This test login is not allowlisted." },
+      { status: 403 },
     );
   }
 

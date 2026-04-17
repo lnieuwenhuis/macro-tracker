@@ -1,4 +1,4 @@
-import { ensureDateString, getUserGoals, getUserById } from "@macro-tracker/db";
+import { canAccessAdmin, ensureDateString, getUserGoals, getUserById } from "@macro-tracker/db";
 
 import { GoalsShell } from "@/components/goals-shell";
 import { requireSessionUser } from "@/lib/auth";
@@ -20,6 +20,7 @@ export default async function GoalsPage({ searchParams }: GoalsPageProps) {
   return (
     <GoalsShell
       userEmail={user?.email ?? sessionUser.email}
+      canAccessAdmin={user ? canAccessAdmin(user.role) : false}
       selectedDate={selectedDate}
       goals={goals}
     />

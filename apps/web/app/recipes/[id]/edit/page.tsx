@@ -1,4 +1,4 @@
-import { ensureDateString, getPresets, getRecipeById, getUserById } from "@macro-tracker/db";
+import { canAccessAdmin, ensureDateString, getPresets, getRecipeById, getUserById } from "@macro-tracker/db";
 import { notFound } from "next/navigation";
 
 import { RecipeBuilderShell } from "@/components/recipe-builder-shell";
@@ -33,6 +33,7 @@ export default async function EditRecipePage({
     <RecipeBuilderShell
       key={recipe.id}
       userEmail={user?.email ?? sessionUser.email}
+      canAccessAdmin={user ? canAccessAdmin(user.role) : false}
       selectedDate={selectedDate}
       presets={presets}
       mode="edit"

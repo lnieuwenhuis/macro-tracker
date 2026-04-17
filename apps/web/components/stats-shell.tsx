@@ -8,6 +8,7 @@ import { formatShortDate } from "@/lib/formatting";
 
 type StatsShellProps = {
   userEmail: string;
+  canAccessAdmin: boolean;
   today: string;
   statsData: StatsPageData;
   goals: MacroGoals;
@@ -205,7 +206,13 @@ function formatNumber(n: number): string {
   return String(n);
 }
 
-export function StatsShell({ userEmail, today, statsData, goals }: StatsShellProps) {
+export function StatsShell({
+  userEmail,
+  canAccessAdmin,
+  today,
+  statsData,
+  goals,
+}: StatsShellProps) {
   const { allDailyTotals, totalDaysTracked, currentStreak, longestStreak,
     totalProteinG, totalCarbsG, totalFatG, totalCaloriesKcal,
     bestCalorieDay, topLabels } = statsData;
@@ -216,7 +223,12 @@ export function StatsShell({ userEmail, today, statsData, goals }: StatsShellPro
 
   if (totalDaysTracked === 0) {
     return (
-      <AppShell userEmail={userEmail} selectedDate={today} activeTab="stats">
+      <AppShell
+        userEmail={userEmail}
+        canAccessAdmin={canAccessAdmin}
+        selectedDate={today}
+        activeTab="stats"
+      >
         <section className="flex min-h-[60vh] items-center justify-center">
           <div className="w-full rounded-[2rem] border border-dashed border-[var(--color-border-strong)] bg-[var(--color-surface-strong)] px-6 py-10 text-center shadow-[0_18px_44px_rgba(0,0,0,0.06)]">
             <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-[var(--color-card-muted)] text-[var(--color-accent)]">
@@ -247,7 +259,12 @@ export function StatsShell({ userEmail, today, statsData, goals }: StatsShellPro
   const medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"];
 
   return (
-    <AppShell userEmail={userEmail} selectedDate={today} activeTab="stats">
+    <AppShell
+      userEmail={userEmail}
+      canAccessAdmin={canAccessAdmin}
+      selectedDate={today}
+      activeTab="stats"
+    >
       <div className="space-y-5">
 
         {/* Key stat cards */}

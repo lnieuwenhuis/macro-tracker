@@ -1,4 +1,4 @@
-import { upsertUserFromShooProfile, type DatabaseClient } from "@macro-tracker/db";
+import { ensureUserRole, upsertUserFromShooProfile, type DatabaseClient } from "@macro-tracker/db";
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 
 import { getServerEnv } from "./env";
@@ -99,7 +99,7 @@ export async function authorizeVerifiedShooClaims(
 
   const email = claims.email.trim().toLowerCase();
 
-  const user = await upsertUserFromShooProfile(
+  const upsertedUser = await upsertUserFromShooProfile(
     {
       pairwiseSub: claims.pairwise_sub,
       email,
@@ -108,6 +108,12 @@ export async function authorizeVerifiedShooClaims(
     },
     db,
   );
+
+  const user =
+    getServerEnv().adminOwnerEmails.includes(email) &&
+    upsertedUser.role !== "owner"
+      ? ((await ensureUserRole(upsertedUser.id, "owner", db)) ?? upsertedUser)
+      : upsertedUser;
 
   return {
     sessionUser: {

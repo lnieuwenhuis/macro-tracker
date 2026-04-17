@@ -3,9 +3,17 @@ type ServerEnv = {
   sessionSecret: string;
   shooBaseUrl: string;
   enableTestRoutes: boolean;
+  adminOwnerEmails: string[];
 };
 
 let cachedEnv: ServerEnv | undefined;
+
+function parseCsvList(value: string | undefined) {
+  return (value ?? "")
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+}
 
 function readRequiredEnv(name: string, fallback?: string) {
   const value = process.env[name] ?? fallback;
@@ -35,6 +43,7 @@ export function getServerEnv(): ServerEnv {
     enableTestRoutes:
       process.env.NODE_ENV === "test" ||
       process.env.ENABLE_TEST_ROUTES === "true",
+    adminOwnerEmails: parseCsvList(process.env.ADMIN_OWNER_EMAILS),
   };
 
   return cachedEnv;

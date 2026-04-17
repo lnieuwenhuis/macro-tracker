@@ -1,4 +1,5 @@
 import {
+  canAccessAdmin,
   ensureDateString,
   getDailySummary,
   getPeriodAverages,
@@ -32,6 +33,7 @@ export default async function SummaryPage({ searchParams }: SummaryPageProps) {
   return (
     <SummaryShell
       userEmail={user?.email ?? sessionUser.email}
+      canAccessAdmin={user ? canAccessAdmin(user.role) : false}
       selectedDate={selectedDate}
       dailySummary={dailySummary}
       periodAverages={periodAverages}

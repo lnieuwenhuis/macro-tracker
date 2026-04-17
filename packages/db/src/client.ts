@@ -141,6 +141,7 @@ async function bootstrapLocalSchema(db: PgliteDatabase<typeof schema>) {
       "email" text NOT NULL,
       "display_name" text,
       "picture_url" text,
+      "role" text DEFAULT 'user' NOT NULL,
       "created_at" timestamp with time zone DEFAULT now() NOT NULL,
       "last_login_at" timestamp with time zone DEFAULT now() NOT NULL,
       "goal_calories_kcal" integer,
@@ -158,6 +159,11 @@ async function bootstrapLocalSchema(db: PgliteDatabase<typeof schema>) {
   await db.execute(
     sql.raw(
       `CREATE UNIQUE INDEX IF NOT EXISTS "users_email_key" ON "users" USING btree ("email")`,
+    ),
+  );
+  await db.execute(
+    sql.raw(
+      `ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "role" text DEFAULT 'user' NOT NULL`,
     ),
   );
   await db.execute(sql.raw(`
@@ -275,12 +281,57 @@ async function bootstrapLocalSchema(db: PgliteDatabase<typeof schema>) {
       "calories_kcal" integer NOT NULL,
       "serving_size_g" numeric(6, 1),
       "added_by_user_id" uuid REFERENCES "users"("id") ON DELETE SET NULL,
+      "created_at" timestamp with time zone DEFAULT now() NOT NULL,
+      "updated_at" timestamp with time zone DEFAULT now() NOT NULL,
+      "deleted_at" timestamp with time zone,
+      "deleted_by_user_id" uuid REFERENCES "users"("id") ON DELETE SET NULL
+    )
+  `));
+  await db.execute(
+    sql.raw(
+      `ALTER TABLE "barcode_products" ADD COLUMN IF NOT EXISTS "updated_at" timestamp with time zone DEFAULT now() NOT NULL`,
+    ),
+  );
+  await db.execute(
+    sql.raw(
+      `ALTER TABLE "barcode_products" ADD COLUMN IF NOT EXISTS "deleted_at" timestamp with time zone`,
+    ),
+  );
+  await db.execute(
+    sql.raw(
+      `ALTER TABLE "barcode_products" ADD COLUMN IF NOT EXISTS "deleted_by_user_id" uuid`,
+    ),
+  );
+  await db.execute(
+    sql.raw(
+      `CREATE UNIQUE INDEX IF NOT EXISTS "barcode_products_barcode_key" ON "barcode_products" USING btree ("barcode")`,
+    ),
+  );
+  await db.execute(
+    sql.raw(
+      `CREATE INDEX IF NOT EXISTS "barcode_products_deleted_at_idx" ON "barcode_products" USING btree ("deleted_at")`,
+    ),
+  );
+  await db.execute(sql.raw(`
+    CREATE TABLE IF NOT EXISTS "admin_audit_events" (
+      "id" uuid PRIMARY KEY NOT NULL,
+      "actor_user_id" uuid NOT NULL REFERENCES "users"("id"),
+      "actor_role" text NOT NULL,
+      "action" text NOT NULL,
+      "target_type" text NOT NULL,
+      "target_id" text NOT NULL,
+      "details_json" jsonb DEFAULT '{}'::jsonb NOT NULL,
       "created_at" timestamp with time zone DEFAULT now() NOT NULL
     )
   `));
   await db.execute(
     sql.raw(
-      `CREATE UNIQUE INDEX IF NOT EXISTS "barcode_products_barcode_key" ON "barcode_products" USING btree ("barcode")`,
+      `CREATE INDEX IF NOT EXISTS "admin_audit_events_created_at_idx" ON "admin_audit_events" USING btree ("created_at")`,
+    ),
+  );
+  await db.execute(
+    sql.raw(
+      `CREATE INDEX IF NOT EXISTS "admin_audit_events_target_idx" ON "admin_audit_events" USING btree ("target_type","target_id")`,
     ),
   );
 }
