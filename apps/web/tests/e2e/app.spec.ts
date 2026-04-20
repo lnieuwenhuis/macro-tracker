@@ -155,3 +155,43 @@ test("recent foods appear in quick add and create a prefilled draft", async ({
   const articlesAfter = await page.locator("article").count();
   expect(articlesAfter).toBeGreaterThan(articlesBefore);
 });
+
+test("stats and weight pages load without day navigation chrome", async ({
+  page,
+}) => {
+  await page.goto("/api/test/session?email=coach@example.com");
+  await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible();
+
+  await page.goto("/stats?date=2026-03-19");
+  await expect(
+    page.getByRole("heading", { name: "Stats", exact: true }),
+  ).toBeVisible();
+  await expect(page.locator("body")).toContainText(/No stats yet|Overview/);
+  await expect(page.getByRole("button", { name: "Previous day" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Next day" })).toHaveCount(0);
+  await expect(page.getByLabel("Pick a day")).toHaveCount(0);
+
+  await page.goto("/weight?date=2026-03-19");
+  await expect(page.getByText("Log Weight")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Previous day" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Next day" })).toHaveCount(0);
+  await expect(page.getByLabel("Pick a day")).toHaveCount(0);
+});
+
+test("weight goal validation errors stay visible on the page", async ({
+  page,
+}) => {
+  await page.goto("/api/test/session?email=user@example.com");
+  await page.goto("/weight?date=2026-03-19");
+
+  await page.getByLabel("Weight (kg)").fill("82.5");
+  await page.getByRole("button", { name: "Save Entry" }).click();
+  await expect(page.getByPlaceholder("e.g. 75")).toBeVisible();
+
+  await page.getByPlaceholder("e.g. 75").fill("0");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+
+  await expect(
+    page.getByText("Please enter a valid goal weight."),
+  ).toBeVisible();
+});

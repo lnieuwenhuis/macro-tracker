@@ -2,6 +2,7 @@ import { canAccessAdmin, ensureDateString, getRecipes, getUserById } from "@macr
 
 import { RecipesShell } from "@/components/recipes-shell";
 import { requireSessionUser } from "@/lib/auth";
+import { getServerUiMode } from "@/lib/ui-mode-server";
 
 type RecipesPageProps = {
   searchParams: Promise<{
@@ -13,6 +14,7 @@ export default async function RecipesPage({ searchParams }: RecipesPageProps) {
   const sessionUser = await requireSessionUser();
   const params = await searchParams;
   const selectedDate = ensureDateString(params.date);
+  const uiMode = await getServerUiMode();
 
   const [recipes, user] = await Promise.all([
     getRecipes(sessionUser.userId),
@@ -25,6 +27,7 @@ export default async function RecipesPage({ searchParams }: RecipesPageProps) {
       canAccessAdmin={user ? canAccessAdmin(user.role) : false}
       selectedDate={selectedDate}
       recipes={recipes}
+      uiMode={uiMode}
     />
   );
 }

@@ -1,7 +1,13 @@
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { defineConfig, devices } from "@playwright/test";
 
 const appUrl = "http://localhost:3000";
-const e2eDatabaseUrl = `file:.playwright-db-${Date.now()}`;
+const e2eDatabaseUrl = `file:${join(
+  tmpdir(),
+  `macro-tracker-playwright-db-${Date.now()}`,
+)}`;
 
 export default defineConfig({
   testDir: "./tests/e2e",

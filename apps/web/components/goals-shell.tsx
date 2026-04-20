@@ -185,6 +185,19 @@ export function GoalsShell({
   selectedDate,
   goals,
 }: GoalsShellProps) {
+  return (
+    <AppShell
+      userEmail={userEmail}
+      canAccessAdmin={canAccessAdmin}
+      selectedDate={selectedDate}
+      activeTab="goals"
+    >
+      <GoalsPanel goals={goals} />
+    </AppShell>
+  );
+}
+
+export function GoalsPanel({ goals }: { goals: MacroGoals }) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [saved, setSaved] = useState(false);
@@ -294,13 +307,7 @@ export function GoalsShell({
   }
 
   return (
-    <AppShell
-      userEmail={userEmail}
-      canAccessAdmin={canAccessAdmin}
-      selectedDate={selectedDate}
-      activeTab="goals"
-    >
-      <div className="space-y-5">
+    <div className="space-y-5">
         {/* Header */}
         <div>
           <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
@@ -630,6 +637,5 @@ export function GoalsShell({
           </button>
         </div>
       </div>
-    </AppShell>
   );
 }

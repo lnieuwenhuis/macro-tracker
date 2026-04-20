@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 
 import { RecipeBuilderShell } from "@/components/recipe-builder-shell";
 import { requireSessionUser } from "@/lib/auth";
+import { getServerUiMode } from "@/lib/ui-mode-server";
 
 type EditRecipePageProps = {
   params: Promise<{ id: string }>;
@@ -18,6 +19,7 @@ export default async function EditRecipePage({
   const sessionUser = await requireSessionUser();
   const [routeParams, queryParams] = await Promise.all([params, searchParams]);
   const selectedDate = ensureDateString(queryParams.date);
+  const uiMode = await getServerUiMode();
 
   const [recipe, presets, user] = await Promise.all([
     getRecipeById(sessionUser.userId, routeParams.id),
@@ -38,6 +40,7 @@ export default async function EditRecipePage({
       presets={presets}
       mode="edit"
       recipe={recipe}
+      uiMode={uiMode}
     />
   );
 }

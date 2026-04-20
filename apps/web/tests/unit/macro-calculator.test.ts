@@ -82,4 +82,32 @@ describe("calculateMacroTargets", () => {
       },
     });
   });
+
+  it("clamps the calorie target to the protein floor for very low-TDEE users", () => {
+    const result = calculateMacroTargets({
+      sex: "female",
+      age: 70,
+      heightCm: 140,
+      weightKg: 35,
+      activityLevel: "sedentary",
+      goalPreset: "aggressive_cut",
+    });
+
+    expect(result).toEqual({
+      bmrKcal: 714,
+      tdeeKcal: 857,
+      targetCaloriesKcal: 280,
+      proteinReferenceWeightKg: 35,
+      proteinReferenceType: "actual",
+      proteinTargetGPerKg: 2,
+      weeklyWeightChangeEstimateKg: 0.9,
+      weeklyWeightChangeDirection: "loss",
+      macros: {
+        proteinG: 70,
+        carbsG: 0,
+        fatG: 0,
+        caloriesKcal: 280,
+      },
+    });
+  });
 });

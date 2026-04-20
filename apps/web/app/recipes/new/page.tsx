@@ -2,6 +2,7 @@ import { canAccessAdmin, ensureDateString, getPresets, getUserById } from "@macr
 
 import { RecipeBuilderShell } from "@/components/recipe-builder-shell";
 import { requireSessionUser } from "@/lib/auth";
+import { getServerUiMode } from "@/lib/ui-mode-server";
 
 type NewRecipePageProps = {
   searchParams: Promise<{
@@ -13,6 +14,7 @@ export default async function NewRecipePage({ searchParams }: NewRecipePageProps
   const sessionUser = await requireSessionUser();
   const params = await searchParams;
   const selectedDate = ensureDateString(params.date);
+  const uiMode = await getServerUiMode();
 
   const [presets, user] = await Promise.all([
     getPresets(sessionUser.userId),
@@ -26,6 +28,7 @@ export default async function NewRecipePage({ searchParams }: NewRecipePageProps
       selectedDate={selectedDate}
       presets={presets}
       mode="create"
+      uiMode={uiMode}
     />
   );
 }

@@ -2,6 +2,8 @@ export type ScreenMotion =
   | "none"
   | "intro"
   | "screen"
+  | "screen-forward"
+  | "screen-backward"
   | "day-forward"
   | "day-backward"
   | "day-jump";
