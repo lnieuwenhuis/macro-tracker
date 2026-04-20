@@ -68,11 +68,13 @@ function MacroPill({ label, value, unit }: MacroPillProps) {
 type RemainingMacrosCardProps = {
   remaining: RemainingMacros;
   hasGoals: boolean;
+  goalsHref?: string;
 };
 
 export function RemainingMacrosCard({
   remaining,
   hasGoals,
+  goalsHref = "/goals",
 }: RemainingMacrosCardProps) {
   if (!hasGoals) {
     return (
@@ -90,7 +92,7 @@ export function RemainingMacrosCard({
             </p>
           </div>
           <Link
-            href="/goals"
+            href={goalsHref}
             className="shrink-0 rounded-full border border-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold text-[var(--color-accent)] transition hover:-translate-y-0.5"
           >
             Set goals →

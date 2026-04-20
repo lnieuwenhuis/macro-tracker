@@ -213,6 +213,26 @@ export function StatsShell({
   statsData,
   goals,
 }: StatsShellProps) {
+  return (
+    <AppShell
+      userEmail={userEmail}
+      canAccessAdmin={canAccessAdmin}
+      selectedDate={selectedDate}
+      activeTab="stats"
+      showDateNavigation={false}
+    >
+      <StatsPanels statsData={statsData} goals={goals} />
+    </AppShell>
+  );
+}
+
+export function StatsPanels({
+  statsData,
+  goals,
+}: {
+  statsData: StatsPageData;
+  goals: MacroGoals;
+}) {
   const { allDailyTotals, totalDaysTracked, currentStreak, longestStreak,
     totalProteinG, totalCarbsG, totalFatG, totalCaloriesKcal,
     bestCalorieDay, topLabels } = statsData;
@@ -223,14 +243,7 @@ export function StatsShell({
 
   if (totalDaysTracked === 0) {
     return (
-      <AppShell
-        userEmail={userEmail}
-        canAccessAdmin={canAccessAdmin}
-        selectedDate={selectedDate}
-        activeTab="stats"
-        showDateNavigation={false}
-      >
-        <section className="flex min-h-[60vh] items-center justify-center">
+      <section className="flex min-h-[60vh] items-center justify-center">
           <div className="w-full rounded-[2rem] border border-dashed border-[var(--color-border-strong)] bg-[var(--color-surface-strong)] px-6 py-10 text-center shadow-[0_18px_44px_rgba(0,0,0,0.06)]">
             <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-[var(--color-card-muted)] text-[var(--color-accent)]">
               <svg width="28" height="28" viewBox="0 0 28 28" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -245,7 +258,6 @@ export function StatsShell({
             </p>
           </div>
         </section>
-      </AppShell>
     );
   }
 
@@ -260,14 +272,7 @@ export function StatsShell({
   const medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"];
 
   return (
-    <AppShell
-      userEmail={userEmail}
-      canAccessAdmin={canAccessAdmin}
-      selectedDate={selectedDate}
-      activeTab="stats"
-      showDateNavigation={false}
-    >
-      <div className="space-y-5">
+    <div className="space-y-5">
 
         {/* Key stat cards */}
         <section>
@@ -420,6 +425,5 @@ export function StatsShell({
           </section>
         )}
       </div>
-    </AppShell>
   );
 }

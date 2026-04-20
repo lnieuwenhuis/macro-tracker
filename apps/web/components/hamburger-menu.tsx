@@ -11,6 +11,7 @@ import { getLocalDateString } from "@/lib/startup-date";
 import { OverlayPortal, useBodyScrollLock } from "./overlay-portal";
 import { ThemePicker } from "./theme-toggle";
 import { TransitionLink } from "./transition-link";
+import { UiModeToggle } from "./ui-mode-toggle";
 
 type HamburgerMenuProps = {
   userEmail: string;
@@ -489,6 +490,7 @@ export function HamburgerMenu({
               {/* Footer: theme + user + sign out */}
               <div className="border-t border-[var(--color-border)] px-5 py-4 space-y-4">
                 <ThemePicker />
+                <UiModeToggle onModeChange={() => setOpen(false)} />
 
                 <p className="truncate text-xs text-[var(--color-muted)]">
                   {userEmail}

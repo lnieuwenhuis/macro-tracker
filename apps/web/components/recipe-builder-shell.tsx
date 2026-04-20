@@ -7,11 +7,13 @@ import { useState, useTransition } from "react";
 import { saveRecipeAction } from "@/lib/actions";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
 import type { OpenFoodFactsProduct } from "@/lib/openfoodfacts";
+import type { UiMode } from "@/lib/ui-mode";
 
 import { AddFoodButton } from "./add-food-button";
 import { AppShell } from "./app-shell";
 import { BarcodeResult } from "./barcode-result";
 import { BarcodeScanner } from "./barcode-scanner";
+import { ExperimentalAppShell } from "./experimental-app-shell";
 import { IngredientCard, type IngredientDraft } from "./ingredient-card";
 import { PresetModal } from "./preset-modal";
 import { RecipeTotalsBar } from "./recipe-totals-bar";
@@ -28,6 +30,7 @@ type RecipeBuilderShellProps = {
   presets: FoodPreset[];
   mode: "create" | "edit";
   recipe?: RecipeRecord;
+  uiMode?: UiMode;
 };
 
 function toNumber(value: string) {
@@ -42,6 +45,7 @@ export function RecipeBuilderShell({
   presets: initialPresets,
   mode,
   recipe,
+  uiMode = "legacy",
 }: RecipeBuilderShellProps) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
@@ -226,13 +230,8 @@ export function RecipeBuilderShell({
     }
   }
 
-  return (
-    <AppShell
-      userEmail={userEmail}
-      canAccessAdmin={canAccessAdmin}
-      selectedDate={selectedDate}
-      activeTab="recipes"
-    >
+  const content = (
+    <>
       <div className="space-y-5">
         {/* Recipe name + portions */}
         <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5 shadow-[0_12px_32px_rgba(0,0,0,0.06)]">
@@ -440,6 +439,27 @@ export function RecipeBuilderShell({
           }}
         />
       )}
+    </>
+  );
+
+  return uiMode === "experimental" ? (
+    <ExperimentalAppShell
+      userEmail={userEmail}
+      canAccessAdmin={canAccessAdmin}
+      selectedDate={selectedDate}
+      title={mode === "create" ? "New Recipe" : "Edit Recipe"}
+      activeTab="recipes"
+    >
+      {content}
+    </ExperimentalAppShell>
+  ) : (
+    <AppShell
+      userEmail={userEmail}
+      canAccessAdmin={canAccessAdmin}
+      selectedDate={selectedDate}
+      activeTab="recipes"
+    >
+      {content}
     </AppShell>
   );
 }

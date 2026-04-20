@@ -537,6 +537,14 @@ input::placeholder {
   animation-name: macroScreenSwap;
 }
 
+.macro-screen-stage[data-screen-motion="screen-forward"] {
+  animation-name: macroScreenSwapForward;
+}
+
+.macro-screen-stage[data-screen-motion="screen-backward"] {
+  animation-name: macroScreenSwapBackward;
+}
+
 .macro-screen-stage[data-screen-motion="day-forward"] {
   animation-duration: 320ms;
   animation-name: macroScreenForward;
@@ -616,6 +624,32 @@ input::placeholder {
   to {
     opacity: 1;
     transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
+}
+
+@keyframes macroScreenSwapForward {
+  from {
+    opacity: 0;
+    transform: translateX(60px);
+    filter: blur(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+    filter: blur(0);
+  }
+}
+
+@keyframes macroScreenSwapBackward {
+  from {
+    opacity: 0;
+    transform: translateX(-60px);
+    filter: blur(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
     filter: blur(0);
   }
 }

@@ -1,8 +1,10 @@
 "use client";
 
 import type { RecipeRecord } from "@macro-tracker/db";
+import type { UiMode } from "@/lib/ui-mode";
 
 import { AppShell } from "./app-shell";
+import { ExperimentalAppShell, ExperimentalSettingsButton } from "./experimental-app-shell";
 import { RecipeCard } from "./recipe-card";
 import { TransitionLink } from "./transition-link";
 
@@ -11,6 +13,7 @@ type RecipesShellProps = {
   canAccessAdmin: boolean;
   selectedDate: string;
   recipes: RecipeRecord[];
+  uiMode?: UiMode;
 };
 
 export function RecipesShell({
@@ -18,24 +21,50 @@ export function RecipesShell({
   canAccessAdmin,
   selectedDate,
   recipes,
+  uiMode = "legacy",
 }: RecipesShellProps) {
-  return (
-    <AppShell
-      userEmail={userEmail}
-      canAccessAdmin={canAccessAdmin}
-      selectedDate={selectedDate}
-      activeTab="recipes"
-    >
-      <div className="space-y-5">
-        {/* Header with create button */}
-        <div className="flex items-center justify-between">
-          <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
-            My Recipes
-          </h2>
+  const content = (
+    <div className="space-y-5">
+      {recipes.length === 0 ? (
+        <div className="rounded-2xl border border-dashed border-[var(--color-border-strong)] bg-[var(--color-shell-panel)] px-5 py-8 text-center">
+          <p className="text-sm text-[var(--color-muted)]">
+            No recipes yet — create one to get started.
+          </p>
           <TransitionLink
             href={`/recipes/new?date=${selectedDate}`}
             motion="screen"
-            className="flex h-9 items-center gap-1.5 rounded-full bg-[var(--color-accent)] px-4 text-sm font-semibold text-white shadow-md transition hover:-translate-y-0.5"
+            className="mt-3 inline-flex rounded-full bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-white transition hover:-translate-y-0.5"
+          >
+            Create recipe
+          </TransitionLink>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {recipes.map((recipe) => (
+            <RecipeCard
+              key={recipe.id}
+              recipe={recipe}
+              selectedDate={selectedDate}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
+  return uiMode === "experimental" ? (
+    <ExperimentalAppShell
+      userEmail={userEmail}
+      canAccessAdmin={canAccessAdmin}
+      selectedDate={selectedDate}
+      title="Recipes"
+      activeTab="recipes"
+      topBar={({ openSettings }) => (
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <TransitionLink
+            href={`/recipes/new?date=${selectedDate}`}
+            motion="screen"
+            className="flex h-12 items-center gap-1.5 rounded-full bg-[var(--color-accent)] px-4 text-sm font-semibold text-white shadow-md transition hover:-translate-y-0.5"
           >
             <svg
               width="14"
@@ -51,34 +80,20 @@ export function RecipesShell({
             </svg>
             New Recipe
           </TransitionLink>
+          <ExperimentalSettingsButton onClick={openSettings} />
         </div>
-
-        {/* Recipe list */}
-        {recipes.length === 0 ? (
-          <div className="rounded-2xl border border-dashed border-[var(--color-border-strong)] bg-[var(--color-shell-panel)] px-5 py-8 text-center">
-            <p className="text-sm text-[var(--color-muted)]">
-              No recipes yet — create one to get started.
-            </p>
-            <TransitionLink
-              href={`/recipes/new?date=${selectedDate}`}
-              motion="screen"
-              className="mt-3 inline-flex rounded-full bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-white transition hover:-translate-y-0.5"
-            >
-              Create recipe
-            </TransitionLink>
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {recipes.map((recipe) => (
-              <RecipeCard
-                key={recipe.id}
-                recipe={recipe}
-                selectedDate={selectedDate}
-              />
-            ))}
-          </div>
-        )}
-      </div>
+      )}
+    >
+      {content}
+    </ExperimentalAppShell>
+  ) : (
+    <AppShell
+      userEmail={userEmail}
+      canAccessAdmin={canAccessAdmin}
+      selectedDate={selectedDate}
+      activeTab="recipes"
+    >
+      {content}
     </AppShell>
   );
 }

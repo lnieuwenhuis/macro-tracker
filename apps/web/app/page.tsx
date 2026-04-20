@@ -2,10 +2,13 @@ import { canAccessAdmin, ensureDateString, getDailySummary, getPresets, getRecen
 
 import { DashboardShell } from "@/components/dashboard-shell";
 import { requireSessionUser } from "@/lib/auth";
+import { normalizeComposeAction } from "@/lib/compose";
+import { getServerUiMode } from "@/lib/ui-mode-server";
 
 type HomePageProps = {
   searchParams: Promise<{
     date?: string;
+    compose?: string;
   }>;
 };
 
@@ -13,6 +16,8 @@ export default async function HomePage({ searchParams }: HomePageProps) {
   const sessionUser = await requireSessionUser();
   const params = await searchParams;
   const selectedDate = ensureDateString(params.date);
+  const uiMode = await getServerUiMode();
+  const initialComposeAction = normalizeComposeAction(params.compose);
 
   const [dailySummary, goals, user, presets, recipes, recentCandidates] = await Promise.all([
     getDailySummary(sessionUser.userId, selectedDate),
@@ -35,6 +40,8 @@ export default async function HomePage({ searchParams }: HomePageProps) {
       presets={presets}
       recipes={recipes}
       recentCandidates={recentCandidates}
+      uiMode={uiMode}
+      initialComposeAction={initialComposeAction}
     />
   );
 }

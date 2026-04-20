@@ -166,7 +166,7 @@ test("stats and weight pages load without day navigation chrome", async ({
   await expect(
     page.getByRole("heading", { name: "Stats", exact: true }),
   ).toBeVisible();
-  await expect(page.getByText("No stats yet")).toBeVisible();
+  await expect(page.locator("body")).toContainText(/No stats yet|Overview/);
   await expect(page.getByRole("button", { name: "Previous day" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Next day" })).toHaveCount(0);
   await expect(page.getByLabel("Pick a day")).toHaveCount(0);

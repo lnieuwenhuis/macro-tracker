@@ -289,6 +289,29 @@ export function WeightShell({
   selectedDate,
   weightData,
 }: WeightShellProps) {
+  return (
+    <AppShell
+      userEmail={userEmail}
+      canAccessAdmin={canAccessAdmin}
+      selectedDate={selectedDate}
+      activeTab="weight"
+      showDateNavigation={false}
+    >
+      <WeightPanel
+        selectedDate={selectedDate}
+        weightData={weightData}
+      />
+    </AppShell>
+  );
+}
+
+export function WeightPanel({
+  selectedDate,
+  weightData,
+}: {
+  selectedDate: string;
+  weightData: WeightPageData;
+}) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
 
@@ -440,14 +463,7 @@ export function WeightShell({
   // Empty state
   if (entries.length === 0) {
     return (
-      <AppShell
-        userEmail={userEmail}
-        canAccessAdmin={canAccessAdmin}
-        selectedDate={selectedDate}
-        activeTab="weight"
-        showDateNavigation={false}
-      >
-        <div className="space-y-5">
+      <div className="space-y-5">
           {/* Entry form always visible */}
           <EntryForm
             formDate={formDate}
@@ -495,19 +511,11 @@ export function WeightShell({
             </div>
           </section>
         </div>
-      </AppShell>
     );
   }
 
   return (
-    <AppShell
-      userEmail={userEmail}
-      canAccessAdmin={canAccessAdmin}
-      selectedDate={selectedDate}
-      activeTab="weight"
-      showDateNavigation={false}
-    >
-      <div className="space-y-5">
+    <div className="space-y-5">
         {/* Stat cards */}
         <section>
           <h2 className="mb-3 text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
@@ -697,7 +705,6 @@ export function WeightShell({
           </div>
         </section>
       </div>
-    </AppShell>
   );
 }
 
