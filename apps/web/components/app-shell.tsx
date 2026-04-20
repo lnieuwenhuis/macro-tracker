@@ -23,6 +23,7 @@ type AppShellProps = {
   canAccessAdmin: boolean;
   selectedDate: string;
   activeTab: "log" | "summary" | "recipes" | "goals" | "stats" | "weight";
+  showDateNavigation?: boolean;
   children: ReactNode;
 };
 
@@ -42,6 +43,7 @@ export function AppShell({
   canAccessAdmin,
   selectedDate,
   activeTab,
+  showDateNavigation = true,
   children,
 }: AppShellProps) {
   const pathname = usePathname();
@@ -102,11 +104,19 @@ export function AppShell({
   }, [pathname, selectedDate]);
 
   useEffect(() => {
+    if (!showDateNavigation) {
+      return;
+    }
+
     router.prefetch(previousDateHref);
     router.prefetch(nextDateHref);
-  }, [nextDateHref, previousDateHref, router]);
+  }, [nextDateHref, previousDateHref, router, showDateNavigation]);
 
   useEffect(() => {
+    if (!showDateNavigation) {
+      return;
+    }
+
     function handleKey(event: KeyboardEvent) {
       if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) {
         return;
@@ -139,7 +149,7 @@ export function AppShell({
     // navigateToDate is defined inline and captures basePath + router; re-register
     // whenever any of those change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedDate, basePath]);
+  }, [selectedDate, basePath, showDateNavigation]);
 
   function navigateToDate(
     nextDate: string,
@@ -179,84 +189,86 @@ export function AppShell({
             </div>
 
             {/* Row 2: date navigation */}
-            <div className="mt-3 flex items-center justify-between gap-2 rounded-2xl border border-[var(--color-border)] bg-[var(--color-shell-panel)] px-2 py-1.5">
-              <TransitionLink
-                href={previousDateHref}
-                motion="day-backward"
-                className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--color-ink)] transition hover:bg-[var(--color-card-muted)]"
-                aria-label="Previous day"
-              >
-                <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M11 4l-5 5 5 5" />
-                </svg>
-              </TransitionLink>
-
-              {supportsShowPicker ? (
-                <button
-                  type="button"
-                  className="relative flex-1 text-center"
-                  onClick={() => dateInputRef.current?.showPicker?.()}
+            {showDateNavigation ? (
+              <div className="mt-3 flex items-center justify-between gap-2 rounded-2xl border border-[var(--color-border)] bg-[var(--color-shell-panel)] px-2 py-1.5">
+                <TransitionLink
+                  href={previousDateHref}
+                  motion="day-backward"
+                  className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--color-ink)] transition hover:bg-[var(--color-card-muted)]"
+                  aria-label="Previous day"
                 >
-                  <span className="text-sm font-semibold text-[var(--color-ink)]">
-                    {formatSelectedDate(selectedDate)}
-                  </span>
-                  <input
-                    ref={dateInputRef}
-                    type="date"
-                    value={selectedDate}
-                    disabled={isPending}
-                    onChange={(event) => {
-                      const nextDate = event.target.value;
-                      const motion =
-                        nextDate < selectedDate ? "day-backward"
-                        : nextDate > selectedDate ? "day-forward"
-                        : "day-jump";
+                  <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M11 4l-5 5 5 5" />
+                  </svg>
+                </TransitionLink>
 
-                      navigateToDate(nextDate, motion);
-                    }}
-                    className="absolute inset-0 cursor-pointer opacity-0"
-                    aria-label="Pick a day"
-                  />
-                </button>
-              ) : (
-                <label className="flex flex-1 flex-col items-center gap-1 py-1 text-center">
-                  <span className="text-sm font-semibold text-[var(--color-ink)]">
-                    {formatSelectedDate(selectedDate)}
-                  </span>
-                  <input
-                    ref={dateInputRef}
-                    type="date"
-                    value={selectedDate}
-                    disabled={isPending}
-                    onChange={(event) => {
-                      const nextDate = event.target.value;
-                      const motion =
-                        nextDate < selectedDate ? "day-backward"
-                        : nextDate > selectedDate ? "day-forward"
-                        : "day-jump";
+                {supportsShowPicker ? (
+                  <button
+                    type="button"
+                    className="relative flex-1 text-center"
+                    onClick={() => dateInputRef.current?.showPicker?.()}
+                  >
+                    <span className="text-sm font-semibold text-[var(--color-ink)]">
+                      {formatSelectedDate(selectedDate)}
+                    </span>
+                    <input
+                      ref={dateInputRef}
+                      type="date"
+                      value={selectedDate}
+                      disabled={isPending}
+                      onChange={(event) => {
+                        const nextDate = event.target.value;
+                        const motion =
+                          nextDate < selectedDate ? "day-backward"
+                          : nextDate > selectedDate ? "day-forward"
+                          : "day-jump";
 
-                      navigateToDate(nextDate, motion);
-                    }}
-                    className="w-[9.75rem] rounded-lg border border-[var(--color-border-strong)] bg-[var(--color-surface-strong)] px-2 py-1 text-xs text-[var(--color-ink)] outline-none"
-                    aria-label="Pick a day"
-                  />
-                </label>
-              )}
+                        navigateToDate(nextDate, motion);
+                      }}
+                      className="absolute inset-0 cursor-pointer opacity-0"
+                      aria-label="Pick a day"
+                    />
+                  </button>
+                ) : (
+                  <label className="flex flex-1 flex-col items-center gap-1 py-1 text-center">
+                    <span className="text-sm font-semibold text-[var(--color-ink)]">
+                      {formatSelectedDate(selectedDate)}
+                    </span>
+                    <input
+                      ref={dateInputRef}
+                      type="date"
+                      value={selectedDate}
+                      disabled={isPending}
+                      onChange={(event) => {
+                        const nextDate = event.target.value;
+                        const motion =
+                          nextDate < selectedDate ? "day-backward"
+                          : nextDate > selectedDate ? "day-forward"
+                          : "day-jump";
 
-              <TransitionLink
-                href={nextDateHref}
-                motion="day-forward"
-                className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--color-ink)] transition hover:bg-[var(--color-card-muted)]"
-                aria-label="Next day"
-              >
-                <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M7 4l5 5-5 5" />
-                </svg>
-              </TransitionLink>
-            </div>
+                        navigateToDate(nextDate, motion);
+                      }}
+                      className="w-[9.75rem] rounded-lg border border-[var(--color-border-strong)] bg-[var(--color-surface-strong)] px-2 py-1 text-xs text-[var(--color-ink)] outline-none"
+                      aria-label="Pick a day"
+                    />
+                  </label>
+                )}
+
+                <TransitionLink
+                  href={nextDateHref}
+                  motion="day-forward"
+                  className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--color-ink)] transition hover:bg-[var(--color-card-muted)]"
+                  aria-label="Next day"
+                >
+                  <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M7 4l5 5-5 5" />
+                  </svg>
+                </TransitionLink>
+              </div>
+            ) : null}
 
             {/* Jump to today — only shown when not on today */}
-            {!isToday && (
+            {showDateNavigation && !isToday && (
               <div className="mt-2 flex justify-center">
                 <button
                   type="button"

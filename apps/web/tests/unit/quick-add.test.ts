@@ -205,7 +205,7 @@ describe("deduplicateCandidates", () => {
     expect(result[0]!.sourceDate).toBe("2026-04-15");
   });
 
-  it("prefers preset over equivalent recent history entry", () => {
+  it("merges recent metadata into an equivalent preset candidate", () => {
     const candidates: QuickAddCandidate[] = [
       {
         label: "Greek Yogurt",
@@ -215,6 +215,9 @@ describe("deduplicateCandidates", () => {
         caloriesKcal: 100,
         source: "recent",
         sourceDate: "2026-04-14",
+        peakHourUtc: 7,
+        habitCount: 4,
+        observedUseDays: 5,
       },
       {
         label: "Greek Yogurt",
@@ -229,6 +232,11 @@ describe("deduplicateCandidates", () => {
     const result = deduplicateCandidates(candidates);
     expect(result).toHaveLength(1);
     expect(result[0]!.source).toBe("preset");
+    expect(result[0]!.presetId).toBe("preset-1");
+    expect(result[0]!.sourceDate).toBe("2026-04-14");
+    expect(result[0]!.peakHourUtc).toBe(7);
+    expect(result[0]!.habitCount).toBe(4);
+    expect(result[0]!.observedUseDays).toBe(5);
   });
 
   it("keeps items with different macros even with the same label", () => {
@@ -260,6 +268,11 @@ describe("deduplicateCandidates", () => {
 // ---------------------------------------------------------------------------
 
 describe("rankCandidates", () => {
+  const defaultRankOptions = {
+    currentHourUtc: 12,
+    referenceDate: "2026-04-20",
+  };
+
   const highProteinItem: QuickAddCandidate = {
     label: "Chicken breast",
     proteinG: 40,
@@ -288,8 +301,11 @@ describe("rankCandidates", () => {
   };
 
   it("ranks higher-protein items first when protein is the main deficit", () => {
-    // Pass a fixed hour with no habit signal to isolate macro scoring
-    const ranked = rankCandidates([lowProteinItem, highProteinItem], remaining, 10, 12);
+    const ranked = rankCandidates(
+      [lowProteinItem, highProteinItem],
+      remaining,
+      defaultRankOptions,
+    );
     expect(ranked[0]!.label).toBe("Chicken breast");
   });
 
@@ -303,19 +319,9 @@ describe("rankCandidates", () => {
       source: "recent" as const,
       sourceDate: `2026-04-${String(i + 1).padStart(2, "0")}`,
     }));
-    expect(rankCandidates(many, remaining, 5, 12)).toHaveLength(5);
-  });
-
-  it("works without errors when all goals are null (no-goal mode)", () => {
-    const noGoalRemaining = {
-      proteinG: null,
-      carbsG: null,
-      fatG: null,
-      caloriesKcal: null,
-    };
-    expect(() =>
-      rankCandidates([highProteinItem, lowProteinItem], noGoalRemaining, 10, 12),
-    ).not.toThrow();
+    expect(
+      rankCandidates(many, remaining, { ...defaultRankOptions, limit: 5 }),
+    ).toHaveLength(5);
   });
 
   it("still returns results when the day is already over goal", () => {
@@ -328,8 +334,7 @@ describe("rankCandidates", () => {
     const result = rankCandidates(
       [highProteinItem, lowProteinItem],
       overGoalRemaining,
-      10,
-      12,
+      defaultRankOptions,
     );
     expect(result.length).toBeGreaterThan(0);
   });
@@ -343,18 +348,15 @@ describe("rankCandidates", () => {
       caloriesKcal: 170,
       source: "recent",
       sourceDate: "2026-04-15",
-      peakHourUtc: 7, // consistently eaten at ~7 UTC
+      peakHourUtc: 7,
       habitCount: 5,
+      observedUseDays: 5,
     };
 
-    // highProteinItem has much better macro fit but no habit signal
-    // At hour 7, the habit boost should override
-    const ranked = rankCandidates(
-      [highProteinItem, habitOats],
-      remaining,
-      10,
-      7, // current hour matches habitOats peak
-    );
+    const ranked = rankCandidates([highProteinItem, habitOats], remaining, {
+      ...defaultRankOptions,
+      currentHourUtc: 7,
+    });
     expect(ranked[0]!.label).toBe("Oats");
   });
 
@@ -369,15 +371,13 @@ describe("rankCandidates", () => {
       sourceDate: "2026-04-15",
       peakHourUtc: 7,
       habitCount: 5,
+      observedUseDays: 5,
     };
 
-    // At hour 20 (evening) the habit boost is inactive; macro scoring wins
-    const ranked = rankCandidates(
-      [highProteinItem, habitOats],
-      remaining,
-      10,
-      20,
-    );
+    const ranked = rankCandidates([highProteinItem, habitOats], remaining, {
+      ...defaultRankOptions,
+      currentHourUtc: 20,
+    });
     expect(ranked[0]!.label).toBe("Chicken breast");
   });
 
@@ -390,17 +390,225 @@ describe("rankCandidates", () => {
       caloriesKcal: 80,
       source: "recent",
       peakHourUtc: 8,
-      habitCount: 2, // below the ≥3 threshold
+      habitCount: 2,
+      sourceDate: "2026-04-19",
+      observedUseDays: 2,
+    };
+
+    const ranked = rankCandidates([highProteinItem, weakHabit], remaining, {
+      ...defaultRankOptions,
+      currentHourUtc: 8,
+    });
+    expect(ranked[0]!.label).toBe("Chicken breast");
+  });
+
+  it("lets a merged preset duplicate keep its habit bonus", () => {
+    const presetOats: QuickAddCandidate = {
+      label: "Oats",
+      proteinG: 5,
+      carbsG: 30,
+      fatG: 3,
+      caloriesKcal: 170,
+      source: "preset",
+      presetId: "preset-oats",
+    };
+
+    const recentOats: QuickAddCandidate = {
+      label: "Oats",
+      proteinG: 5,
+      carbsG: 30,
+      fatG: 3,
+      caloriesKcal: 170,
+      source: "recent",
+      sourceDate: "2026-04-19",
+      peakHourUtc: 7,
+      habitCount: 5,
+      observedUseDays: 5,
     };
 
     const ranked = rankCandidates(
-      [highProteinItem, weakHabit],
+      [highProteinItem, presetOats, recentOats],
       remaining,
-      10,
-      8,
+      { ...defaultRankOptions, currentHourUtc: 7 },
     );
-    // highProteinItem wins because weakHabit's habit is not counted
-    expect(ranked[0]!.label).toBe("Chicken breast");
+
+    expect(ranked[0]!.label).toBe("Oats");
+    expect(ranked[0]!.source).toBe("preset");
+    expect(ranked[0]!.presetId).toBe("preset-oats");
+  });
+
+  it("prefers more recently used items when macro fit is equal", () => {
+    const noGoalRemaining = {
+      proteinG: null,
+      carbsG: null,
+      fatG: null,
+      caloriesKcal: null,
+    };
+    const recentItem: QuickAddCandidate = {
+      label: "Wrap",
+      proteinG: 20,
+      carbsG: 20,
+      fatG: 10,
+      caloriesKcal: 250,
+      source: "recent",
+      sourceDate: "2026-04-19",
+      observedUseDays: 1,
+    };
+    const staleItem: QuickAddCandidate = {
+      label: "Toast",
+      proteinG: 20,
+      carbsG: 20,
+      fatG: 10,
+      caloriesKcal: 250,
+      source: "recent",
+      sourceDate: "2026-04-01",
+      observedUseDays: 1,
+    };
+
+    const ranked = rankCandidates(
+      [staleItem, recentItem],
+      noGoalRemaining,
+      defaultRankOptions,
+    );
+    expect(ranked[0]!.label).toBe("Wrap");
+  });
+
+  it("prefers items used on more distinct days when recency is equal", () => {
+    const noGoalRemaining = {
+      proteinG: null,
+      carbsG: null,
+      fatG: null,
+      caloriesKcal: null,
+    };
+    const frequentItem: QuickAddCandidate = {
+      label: "Bagel",
+      proteinG: 20,
+      carbsG: 20,
+      fatG: 10,
+      caloriesKcal: 250,
+      source: "recent",
+      sourceDate: "2026-04-18",
+      observedUseDays: 5,
+    };
+    const infrequentItem: QuickAddCandidate = {
+      label: "Muffin",
+      proteinG: 20,
+      carbsG: 20,
+      fatG: 10,
+      caloriesKcal: 250,
+      source: "recent",
+      sourceDate: "2026-04-18",
+      observedUseDays: 1,
+    };
+
+    const ranked = rankCandidates(
+      [infrequentItem, frequentItem],
+      noGoalRemaining,
+      defaultRankOptions,
+    );
+    expect(ranked[0]!.label).toBe("Bagel");
+  });
+
+  it("demotes items that overshoot carbs and fat heavily", () => {
+    const lowOvershootItem: QuickAddCandidate = {
+      label: "Greek Yogurt",
+      proteinG: 20,
+      carbsG: 5,
+      fatG: 2,
+      caloriesKcal: 120,
+      source: "recent",
+      sourceDate: "2026-04-18",
+      observedUseDays: 2,
+    };
+    const highOvershootItem: QuickAddCandidate = {
+      label: "Pastry",
+      proteinG: 20,
+      carbsG: 40,
+      fatG: 20,
+      caloriesKcal: 320,
+      source: "recent",
+      sourceDate: "2026-04-18",
+      observedUseDays: 2,
+    };
+    const tightRemaining = {
+      proteinG: null,
+      carbsG: 10,
+      fatG: 5,
+      caloriesKcal: null,
+    };
+
+    const ranked = rankCandidates(
+      [highOvershootItem, lowOvershootItem],
+      tightRemaining,
+      defaultRankOptions,
+    );
+    expect(ranked[0]!.label).toBe("Greek Yogurt");
+  });
+
+  it("still ranks no-goal users by usage signals", () => {
+    const noGoalRemaining = {
+      proteinG: null,
+      carbsG: null,
+      fatG: null,
+      caloriesKcal: null,
+    };
+    const likelyNext: QuickAddCandidate = {
+      label: "Apple",
+      proteinG: 1,
+      carbsG: 20,
+      fatG: 0,
+      caloriesKcal: 80,
+      source: "recent",
+      sourceDate: "2026-04-20",
+      observedUseDays: 4,
+    };
+    const lessLikely: QuickAddCandidate = {
+      label: "Peanut Butter",
+      proteinG: 1,
+      carbsG: 20,
+      fatG: 0,
+      caloriesKcal: 80,
+      source: "recent",
+      sourceDate: "2026-04-05",
+      observedUseDays: 1,
+    };
+
+    const ranked = rankCandidates(
+      [lessLikely, likelyNext],
+      noGoalRemaining,
+      defaultRankOptions,
+    );
+    expect(ranked[0]!.label).toBe("Apple");
+  });
+
+  it("keeps original input order when all tie-breakers are equal", () => {
+    const noGoalRemaining = {
+      proteinG: null,
+      carbsG: null,
+      fatG: null,
+      caloriesKcal: null,
+    };
+    const first: QuickAddCandidate = {
+      label: "Food A",
+      proteinG: 10,
+      carbsG: 10,
+      fatG: 10,
+      caloriesKcal: 150,
+      source: "preset",
+      presetId: "preset-a",
+    };
+    const second: QuickAddCandidate = {
+      label: "Food B",
+      proteinG: 10,
+      carbsG: 10,
+      fatG: 10,
+      caloriesKcal: 150,
+      source: "preset",
+      presetId: "preset-b",
+    };
+
+    const ranked = rankCandidates([first, second], noGoalRemaining, defaultRankOptions);
+    expect(ranked.map((item) => item.label)).toEqual(["Food A", "Food B"]);
   });
 });
 

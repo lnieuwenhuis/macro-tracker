@@ -2,18 +2,21 @@
 
 import type { DailySummary, FoodPreset, MacroGoals, MealEntryRecord, QuickAddCandidate, RecipeRecord } from "@macro-tracker/db";
 import { useRouter } from "next/navigation";
-import { useMemo, useState, useTransition } from "react";
+import { useEffect, useEffectEvent, useMemo, useRef, useState, useTransition } from "react";
 
 import { deletePresetAction, deleteMealEntryAction, savePresetAction, saveMealEntryAction, touchPresetAction, updatePresetAction } from "@/lib/actions";
-import { computeLiveTotals, computeRemaining, getRecentRepeats, hasAnyGoal, rankCandidates } from "@/lib/quick-add";
+import type { ComposeAction } from "@/lib/compose";
+import { computeLiveTotals, computeRemaining, rankCandidates } from "@/lib/quick-add";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
 import type { OpenFoodFactsProduct } from "@/lib/openfoodfacts";
 import { getLocalDateString } from "@/lib/startup-date";
+import type { UiMode } from "@/lib/ui-mode";
 
 import { AddFoodButton } from "./add-food-button";
 import { AppShell } from "./app-shell";
 import { BarcodeResult } from "./barcode-result";
 import { BarcodeScanner } from "./barcode-scanner";
+import { ExperimentalAppShell } from "./experimental-app-shell";
 import { FoodSearchModal } from "./food-search-modal";
 import { MacroBarGroup } from "./macro-bar";
 import { MealCard, type MealDraft } from "./meal-card";
@@ -30,6 +33,8 @@ type DashboardShellProps = {
   presets: FoodPreset[];
   recipes: RecipeRecord[];
   recentCandidates: QuickAddCandidate[];
+  uiMode?: UiMode;
+  initialComposeAction?: ComposeAction | null;
 };
 
 type ErrorState = Record<string, string | null>;
@@ -109,8 +114,11 @@ export function DashboardShell({
   presets: initialPresets,
   recipes,
   recentCandidates,
+  uiMode = "legacy",
+  initialComposeAction = null,
 }: DashboardShellProps) {
   const router = useRouter();
+  const composeHandledRef = useRef<string | null>(null);
   const [drafts, setDrafts] = useState<MealDraft[]>(() =>
     dailySummary.meals.map(mealToDraft),
   );
@@ -147,7 +155,7 @@ export function DashboardShell({
     () => computeRemaining(liveTotals, goals),
     [liveTotals, goals],
   );
-  const goalsSet = useMemo(() => hasAnyGoal(goals), [goals]);
+  const todayStr = useMemo(() => getLocalDateString(), []);
 
   // ---------------------------------------------------------------------------
   // Quick-add rails
@@ -167,13 +175,16 @@ export function DashboardShell({
     return [...presetCandidates, ...recentCandidates];
   }, [localPresets, recentCandidates]);
 
-  // Single unified quick-add list: goal-ranked when goals exist, recency-sorted otherwise.
+  // Single unified quick-add list: always ranked, with usage signals carrying
+  // no-goal users and macro fit contributing when goals exist.
   const quickAddItems = useMemo(
     () =>
-      goalsSet
-        ? rankCandidates(allCandidates, remaining, 10)
-        : getRecentRepeats(allCandidates, 10),
-    [allCandidates, remaining, goalsSet],
+      rankCandidates(allCandidates, remaining, {
+        limit: 10,
+        currentHourUtc: new Date().getUTCHours(),
+        referenceDate: todayStr,
+      }),
+    [allCandidates, remaining, todayStr],
   );
 
   // ---------------------------------------------------------------------------
@@ -395,8 +406,11 @@ export function DashboardShell({
     }
   }
 
-  const todayStr = useMemo(() => getLocalDateString(), []);
   const isViewingToday = selectedDate === todayStr;
+  const isExperimental = uiMode === "experimental";
+  const goalsHref = isExperimental
+    ? `/progress?date=${selectedDate}&tab=goals`
+    : `/goals?date=${selectedDate}`;
 
   function handleDuplicate(clientId: string) {
     setDrafts((currentDrafts) => {
@@ -459,26 +473,75 @@ export function DashboardShell({
     });
   }
 
-  return (
-    <AppShell
-      userEmail={userEmail}
-      canAccessAdmin={canAccessAdmin}
-      selectedDate={selectedDate}
-      activeTab="log"
-    >
-      <div className="space-y-5">
-        {/* Daily Report — macro bar charts (live totals) */}
-        <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5 shadow-[0_12px_32px_rgba(0,0,0,0.06)]">
-          <div className="mb-4 flex items-center justify-between">
-            <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
-              Daily Report
-            </h2>
+  function handleComposeAction(action: ComposeAction) {
+    switch (action) {
+      case "custom":
+        addCustomDraft();
+        break;
+      case "preset":
+        setPresetError(null);
+        setShowPresetsModal(true);
+        break;
+      case "scan":
+        setScanResult(null);
+        setNotFoundBarcode(null);
+        setShowScanner(true);
+        break;
+      case "recipe":
+        setShowRecipePickerModal(true);
+        break;
+    }
+  }
+
+  const handleComposeActionEffect = useEffectEvent((action: ComposeAction) => {
+    handleComposeAction(action);
+  });
+
+  useEffect(() => {
+    if (!initialComposeAction) {
+      return;
+    }
+
+    const composeKey = `${selectedDate}:${initialComposeAction}`;
+    if (composeHandledRef.current === composeKey) {
+      return;
+    }
+
+    composeHandledRef.current = composeKey;
+    handleComposeActionEffect(initialComposeAction);
+
+    const params = new URLSearchParams(window.location.search);
+    params.delete("compose");
+    const href = params.toString() ? `/?${params.toString()}` : "/";
+    router.replace(href, { scroll: false });
+  }, [initialComposeAction, router, selectedDate]);
+
+  const content = (
+    <div className={isExperimental ? "space-y-6" : "space-y-5"}>
+      <section className={isExperimental
+        ? "overflow-hidden rounded-[2rem] border border-[var(--color-border)] bg-[var(--color-surface-strong)] shadow-[0_20px_40px_rgba(0,0,0,0.08)]"
+        : "rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5 shadow-[0_12px_32px_rgba(0,0,0,0.06)]"}
+      >
+        <div className={isExperimental ? "border-b border-[var(--color-border)] p-5 pb-4" : "mb-4 flex items-center justify-between"}>
+          <div className={isExperimental ? "flex items-start justify-between gap-4" : "flex items-center justify-between w-full"}>
+            <div>
+              <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
+                Daily Report
+              </h2>
+              {isExperimental ? (
+                <p className="mt-1.5 text-sm text-[var(--color-muted)]">
+                  Your logged intake for {isViewingToday ? "today" : "this selected day"}.
+                </p>
+              ) : null}
+            </div>
             <span className="text-2xl font-bold tabular-nums text-[var(--color-ink)]">
               {liveTotals.caloriesKcal}
               <span className="ml-1 text-xs font-semibold text-[var(--color-muted)]">kcal</span>
             </span>
           </div>
+        </div>
 
+        <div className={isExperimental ? "p-5 pt-4" : ""}>
           <MacroBarGroup
             proteinG={liveTotals.proteinG}
             carbsG={liveTotals.carbsG}
@@ -486,107 +549,149 @@ export function DashboardShell({
             caloriesKcal={liveTotals.caloriesKcal}
             goals={goals}
           />
-        </section>
+        </div>
+      </section>
 
-        {/* Quick Add carousel */}
-        <section>
-          <h2 className="mb-2.5 text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
-            Quick Add
-          </h2>
-          <QuickAddRail
-            items={quickAddItems}
-            onAdd={addDraftFromCandidate}
-            emptyState={
-              <p className="text-sm text-[var(--color-muted)]">
-                Log some foods or add presets to see suggestions here.
+      <section>
+        <div className={isExperimental ? "mb-3 flex items-end justify-between gap-3" : ""}>
+          <div>
+            <h2 className="mb-2.5 text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
+              Quick Add
+            </h2>
+            {isExperimental ? (
+              <p className="mb-2 text-sm text-[var(--color-muted)]">
+                Repeat foods that already fit your routine.
               </p>
-            }
-          />
-        </section>
+            ) : null}
+          </div>
+        </div>
+        <QuickAddRail
+          items={quickAddItems}
+          onAdd={addDraftFromCandidate}
+          emptyState={
+            <p className="text-sm text-[var(--color-muted)]">
+              Log some foods or add presets to see suggestions here.
+            </p>
+          }
+        />
+      </section>
 
-        {/* Food log */}
-        <section>
-          <div className="mb-4 flex items-center justify-between">
+      <section>
+        <div className="mb-4 flex items-center justify-between">
+          <div>
             <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
               Food Items
             </h2>
-            <div className="flex items-center gap-2">
+            {isExperimental ? (
+              <p className="mt-1 text-sm text-[var(--color-muted)]">
+                The main log for the day. Use the center + button to add more.
+              </p>
+            ) : null}
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowSearchModal(true)}
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--color-muted)] transition hover:bg-[var(--color-card-muted)] hover:text-[var(--color-ink)]"
+              aria-label="Search food history"
+            >
+              <svg width="17" height="17" viewBox="0 0 17 17" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="7.5" cy="7.5" r="5" />
+                <line x1="11.5" y1="11.5" x2="15" y2="15" />
+              </svg>
+            </button>
+            {!isExperimental ? (
+              <AddFoodButton
+                onCustom={addCustomDraft}
+                onPreset={() => {
+                  setPresetError(null);
+                  setShowPresetsModal(true);
+                }}
+                onScan={() => {
+                  setScanResult(null);
+                  setNotFoundBarcode(null);
+                  setShowScanner(true);
+                }}
+                onRecipe={() => setShowRecipePickerModal(true)}
+              />
+            ) : null}
+          </div>
+        </div>
+
+        {drafts.length === 0 ? (
+          <div className="rounded-2xl border border-dashed border-[var(--color-border-strong)] bg-[var(--color-shell-panel)] px-5 py-8 text-center">
+            <p className="text-sm text-[var(--color-muted)]">No food items logged yet.</p>
+            <div className="mt-3 flex justify-center gap-2">
               <button
                 type="button"
-                onClick={() => setShowSearchModal(true)}
-                className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--color-muted)] transition hover:bg-[var(--color-card-muted)] hover:text-[var(--color-ink)]"
-                aria-label="Search food history"
+                onClick={() => {
+                  setPresetError(null);
+                  setShowPresetsModal(true);
+                }}
+                className="rounded-full border border-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-[var(--color-accent)] transition hover:-translate-y-0.5"
               >
-                <svg width="17" height="17" viewBox="0 0 17 17" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="7.5" cy="7.5" r="5" />
-                  <line x1="11.5" y1="11.5" x2="15" y2="15" />
-                </svg>
+                From preset
               </button>
-              <AddFoodButton
-              onCustom={addCustomDraft}
-              onPreset={() => {
-                setPresetError(null);
-                setShowPresetsModal(true);
-              }}
-              onScan={() => {
-                setScanResult(null);
-                setNotFoundBarcode(null);
-                setShowScanner(true);
-              }}
-              onRecipe={() => setShowRecipePickerModal(true)}
-            />
+              <button
+                type="button"
+                onClick={addCustomDraft}
+                className="rounded-full bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-white transition hover:-translate-y-0.5"
+              >
+                Add custom
+              </button>
             </div>
           </div>
+        ) : null}
 
-          {drafts.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-[var(--color-border-strong)] bg-[var(--color-shell-panel)] px-5 py-8 text-center">
-              <p className="text-sm text-[var(--color-muted)]">No food items logged yet.</p>
-              <div className="mt-3 flex justify-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setPresetError(null);
-                    setShowPresetsModal(true);
-                  }}
-                  className="rounded-full border border-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-[var(--color-accent)] transition hover:-translate-y-0.5"
-                >
-                  From preset
-                </button>
-                <button
-                  type="button"
-                  onClick={addCustomDraft}
-                  className="rounded-full bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-white transition hover:-translate-y-0.5"
-                >
-                  Add custom
-                </button>
-              </div>
-            </div>
-          ) : null}
+        <div className="space-y-3">
+          {drafts.map((draft) => {
+            const busy = isPending && activeMutation === draft.clientId;
 
-          <div className="space-y-3">
-            {drafts.map((draft) => {
-              const busy = isPending && activeMutation === draft.clientId;
+            return (
+              <MealCard
+                key={draft.clientId}
+                draft={draft}
+                busy={busy}
+                error={errors[draft.clientId]}
+                isCopied={copiedCardIds.has(draft.clientId)}
+                onChange={updateDraft}
+                onSave={handleSave}
+                onDelete={handleDelete}
+                onDuplicate={handleDuplicate}
+                onCopyToToday={isViewingToday ? undefined : handleCopyToToday}
+              />
+            );
+          })}
+        </div>
+      </section>
+    </div>
+  );
 
-              return (
-                <MealCard
-                  key={draft.clientId}
-                  draft={draft}
-                  busy={busy}
-                  error={errors[draft.clientId]}
-                  isCopied={copiedCardIds.has(draft.clientId)}
-                  onChange={updateDraft}
-                  onSave={handleSave}
-                  onDelete={handleDelete}
-                  onDuplicate={handleDuplicate}
-                  onCopyToToday={isViewingToday ? undefined : handleCopyToToday}
-                />
-              );
-            })}
-          </div>
-        </section>
-      </div>
+  return (
+    <>
+      {isExperimental ? (
+        <ExperimentalAppShell
+          userEmail={userEmail}
+          canAccessAdmin={canAccessAdmin}
+          selectedDate={selectedDate}
+          title="Food Log"
+          activeTab="log"
+          showDateNavigation
+          onComposeAction={handleComposeAction}
+        >
+          {content}
+        </ExperimentalAppShell>
+      ) : (
+        <AppShell
+          userEmail={userEmail}
+          canAccessAdmin={canAccessAdmin}
+          selectedDate={selectedDate}
+          activeTab="log"
+        >
+          {content}
+        </AppShell>
+      )}
 
-      {/* Food search modal */}
       {showSearchModal && (
         <FoodSearchModal
           onClose={() => setShowSearchModal(false)}
@@ -599,7 +704,6 @@ export function DashboardShell({
         />
       )}
 
-      {/* Presets modal */}
       {showPresetsModal && (
         <PresetModal
           presets={localPresets}
@@ -616,7 +720,6 @@ export function DashboardShell({
         />
       )}
 
-      {/* Recipe picker modal */}
       {showRecipePickerModal && (
         <RecipePickerModal
           recipes={recipes}
@@ -625,7 +728,6 @@ export function DashboardShell({
         />
       )}
 
-      {/* Barcode scanner modal */}
       {showScanner && (
         <BarcodeScanner
           onScan={(product) => {
@@ -642,7 +744,6 @@ export function DashboardShell({
         />
       )}
 
-      {/* Barcode result modal */}
       {(scanResult || notFoundBarcode) && (
         <BarcodeResult
           product={scanResult}
@@ -677,6 +778,6 @@ export function DashboardShell({
           }}
         />
       )}
-    </AppShell>
+    </>
   );
 }

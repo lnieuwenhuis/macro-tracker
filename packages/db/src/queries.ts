@@ -1235,37 +1235,44 @@ export async function createRecipe(
   const validated = validateRecipeInput(input);
   const recipeId = crypto.randomUUID();
 
-  const [created] = await database
-    .insert(recipes)
-    .values({
-      id: recipeId,
-      userId,
-      label: validated.label,
-      portions: validated.portions,
-      updatedAt: new Date(),
-    })
-    .returning();
-
-  const ingredientRows = [];
-  for (let i = 0; i < validated.ingredients.length; i++) {
-    const ing = validated.ingredients[i]!;
-    const [row] = await database
-      .insert(recipeIngredients)
+  return (database as any).transaction(async (tx: any) => {
+    const [created] = await tx
+      .insert(recipes)
       .values({
-        id: crypto.randomUUID(),
-        recipeId,
-        sortOrder: i,
-        label: ing.label,
-        proteinG: ing.proteinG.toFixed(1),
-        carbsG: ing.carbsG.toFixed(1),
-        fatG: ing.fatG.toFixed(1),
-        caloriesKcal: Math.round(ing.caloriesKcal),
+        id: recipeId,
+        userId,
+        label: validated.label,
+        portions: validated.portions,
+        updatedAt: new Date(),
       })
       .returning();
-    ingredientRows.push(row!);
-  }
 
-  return buildRecipeRecord(created!, ingredientRows);
+    if (!created) {
+      throw new Error("Unable to create recipe.");
+    }
+
+    const ingredientRows = [];
+    for (let i = 0; i < validated.ingredients.length; i++) {
+      const ing = validated.ingredients[i]!;
+      const [row] = await tx
+        .insert(recipeIngredients)
+        .values({
+          id: crypto.randomUUID(),
+          recipeId,
+          sortOrder: i,
+          label: ing.label,
+          proteinG: ing.proteinG.toFixed(1),
+          carbsG: ing.carbsG.toFixed(1),
+          fatG: ing.fatG.toFixed(1),
+          caloriesKcal: Math.round(ing.caloriesKcal),
+        })
+        .returning();
+
+      ingredientRows.push(row!);
+    }
+
+    return buildRecipeRecord(created, ingredientRows);
+  });
 }
 
 export async function updateRecipe(
@@ -1277,55 +1284,62 @@ export async function updateRecipe(
   const database = await resolveDb(db);
   const validated = validateRecipeInput(input);
 
-  // Verify ownership
-  const [existing] = await database
-    .select({ id: recipes.id })
-    .from(recipes)
-    .where(and(eq(recipes.id, recipeId), eq(recipes.userId, userId)))
-    .limit(1);
+  return (database as any).transaction(async (tx: any) => {
+    const [existing] = await tx
+      .select({ id: recipes.id })
+      .from(recipes)
+      .where(and(eq(recipes.id, recipeId), eq(recipes.userId, userId)))
+      .limit(1);
 
-  if (!existing) {
-    throw new Error("Recipe not found.");
-  }
+    if (!existing) {
+      throw new Error("Recipe not found.");
+    }
 
-  // Update recipe row
-  await database
-    .update(recipes)
-    .set({
-      label: validated.label,
-      portions: validated.portions,
-      updatedAt: new Date(),
-    })
-    .where(eq(recipes.id, recipeId));
-
-  // Replace all ingredients
-  await database
-    .delete(recipeIngredients)
-    .where(eq(recipeIngredients.recipeId, recipeId));
-
-  const ingredientRows = [];
-  for (let i = 0; i < validated.ingredients.length; i++) {
-    const ing = validated.ingredients[i]!;
-    const [row] = await database
-      .insert(recipeIngredients)
-      .values({
-        id: crypto.randomUUID(),
-        recipeId,
-        sortOrder: i,
-        label: ing.label,
-        proteinG: ing.proteinG.toFixed(1),
-        carbsG: ing.carbsG.toFixed(1),
-        fatG: ing.fatG.toFixed(1),
-        caloriesKcal: Math.round(ing.caloriesKcal),
+    const [updatedRecipe] = await tx
+      .update(recipes)
+      .set({
+        label: validated.label,
+        portions: validated.portions,
+        updatedAt: new Date(),
       })
-      .returning();
-    ingredientRows.push(row!);
-  }
+      .where(and(eq(recipes.id, recipeId), eq(recipes.userId, userId)))
+      .returning({
+        id: recipes.id,
+        userId: recipes.userId,
+        label: recipes.label,
+        portions: recipes.portions,
+      });
 
-  return buildRecipeRecord(
-    { id: recipeId, userId, label: validated.label, portions: validated.portions },
-    ingredientRows,
-  );
+    if (!updatedRecipe) {
+      throw new Error("Recipe not found.");
+    }
+
+    await tx
+      .delete(recipeIngredients)
+      .where(eq(recipeIngredients.recipeId, recipeId));
+
+    const ingredientRows = [];
+    for (let i = 0; i < validated.ingredients.length; i++) {
+      const ing = validated.ingredients[i]!;
+      const [row] = await tx
+        .insert(recipeIngredients)
+        .values({
+          id: crypto.randomUUID(),
+          recipeId,
+          sortOrder: i,
+          label: ing.label,
+          proteinG: ing.proteinG.toFixed(1),
+          carbsG: ing.carbsG.toFixed(1),
+          fatG: ing.fatG.toFixed(1),
+          caloriesKcal: Math.round(ing.caloriesKcal),
+        })
+        .returning();
+
+      ingredientRows.push(row!);
+    }
+
+    return buildRecipeRecord(updatedRecipe, ingredientRows);
+  });
 }
 
 export async function deleteRecipe(
@@ -1529,7 +1543,8 @@ export async function getRecentQuickAddCandidates(
   // First pass: collect UTC-hour observations per unique food key so we can
   // detect time-of-day habits before we deduplicate down to one row per food.
   const hourObservations = new Map<string, number[]>();
-  const firstSeenDate = new Map<string, string>();
+  const mostRecentDates = new Map<string, string>();
+  const dateObservations = new Map<string, Set<string>>();
 
   for (const row of rows) {
     const protein = roundToSingleDecimal(toNumber(row.proteinG));
@@ -1538,9 +1553,13 @@ export async function getRecentQuickAddCandidates(
     const cals = toNumber(row.caloriesKcal);
     const key = `${row.label.toLowerCase().trim()}|${protein}|${carbs}|${fat}|${cals}`;
 
-    if (!firstSeenDate.has(key)) {
-      firstSeenDate.set(key, row.date);
+    if (!mostRecentDates.has(key)) {
+      mostRecentDates.set(key, row.date);
     }
+
+    const dates = dateObservations.get(key) ?? new Set<string>();
+    dates.add(row.date);
+    dateObservations.set(key, dates);
 
     if (row.createdAt) {
       const hour = new Date(row.createdAt).getUTCHours();
@@ -1602,7 +1621,8 @@ export async function getRecentQuickAddCandidates(
         fatG: fat,
         caloriesKcal: cals,
         source: "recent",
-        sourceDate: firstSeenDate.get(key) ?? row.date,
+        sourceDate: mostRecentDates.get(key) ?? row.date,
+        observedUseDays: dateObservations.get(key)?.size ?? 0,
         ...(habit !== null
           ? { peakHourUtc: habit.peakHourUtc, habitCount: habit.habitCount }
           : {}),

@@ -20,6 +20,7 @@ import {
   updatePreset,
   updateRecipe,
   updateWeightEntry,
+  isValidDateString,
 } from "@macro-tracker/db";
 import type { CustomBarcodeProduct, FoodPreset, LeaderboardStats, MealEntryRecord, RecipeRecord } from "@macro-tracker/db";
 import { revalidatePath } from "next/cache";
@@ -98,7 +99,11 @@ export async function deleteMealEntryAction(
   const sessionUser = await requireSessionUser();
 
   try {
-    await deleteMealEntry(sessionUser.userId, input.id);
+    const deleted = await deleteMealEntry(sessionUser.userId, input.id);
+    if (!deleted) {
+      return { ok: false, error: "Meal entry not found." };
+    }
+
     revalidatePath("/", "page");
     return { ok: true };
   } catch (error) {
@@ -149,7 +154,11 @@ export async function deletePresetAction(input: { id: string }): Promise<ActionR
   const sessionUser = await requireSessionUser();
 
   try {
-    await deletePreset(sessionUser.userId, input.id);
+    const deleted = await deletePreset(sessionUser.userId, input.id);
+    if (!deleted) {
+      return { ok: false, error: "Preset not found." };
+    }
+
     return { ok: true };
   } catch (error) {
     return { ok: false, error: toActionError(error) };
@@ -220,7 +229,11 @@ export async function deleteWeightEntryAction(
   const sessionUser = await requireSessionUser();
 
   try {
-    await deleteWeightEntry(sessionUser.userId, input.id);
+    const deleted = await deleteWeightEntry(sessionUser.userId, input.id);
+    if (!deleted) {
+      return { ok: false, error: "Weight entry not found." };
+    }
+
     revalidatePath("/weight", "page");
     return { ok: true };
   } catch (error) {
@@ -315,7 +328,11 @@ export async function deleteRecipeAction(
   const sessionUser = await requireSessionUser();
 
   try {
-    await deleteRecipe(sessionUser.userId, input.id);
+    const deleted = await deleteRecipe(sessionUser.userId, input.id);
+    if (!deleted) {
+      return { ok: false, error: "Recipe not found." };
+    }
+
     revalidatePath("/recipes", "page");
     return { ok: true };
   } catch (error) {
@@ -410,11 +427,16 @@ type FetchLeaderboardResult =
   | { ok: true; stats: LeaderboardStats }
   | { ok: false; error: string };
 
-export async function fetchLeaderboardStatsAction(): Promise<FetchLeaderboardResult> {
+export async function fetchLeaderboardStatsAction(
+  input: { referenceDate: string },
+): Promise<FetchLeaderboardResult> {
+  if (!isValidDateString(input.referenceDate)) {
+    return { ok: false, error: "Invalid reference date." };
+  }
+
   const sessionUser = await requireSessionUser();
   try {
-    const today = new Date().toISOString().slice(0, 10);
-    const stats = await getLeaderboardStats(sessionUser.userId, today);
+    const stats = await getLeaderboardStats(sessionUser.userId, input.referenceDate);
     return { ok: true, stats };
   } catch (error) {
     return { ok: false, error: toActionError(error) };
