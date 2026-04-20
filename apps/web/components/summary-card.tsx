@@ -11,8 +11,8 @@ type SummaryCardProps = {
 const LABELS: Record<PeriodAverage["label"], string> = {
   week: "ISO Week",
   month: "Calendar Month",
-  rolling7: "Rolling 7 Days",
-  rolling30: "Rolling 30 Days",
+  rolling7: "Last 7 Days",
+  rolling30: "Last 30 Days",
 };
 
 export function SummaryCard({ summary, goals }: SummaryCardProps) {

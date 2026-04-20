@@ -36,7 +36,7 @@ export function SummaryShell({
   const isExperimental = uiMode === "experimental";
   const dailyTotals = dailySummary.totals;
   const experimentalPeriodAverages = periodAverages.filter(
-    (summary) => summary.label === "week" || summary.label === "month",
+    (summary) => summary.label === "rolling7" || summary.label === "rolling30",
   );
   const content = (
     <div className="space-y-5">
