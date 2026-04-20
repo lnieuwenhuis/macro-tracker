@@ -8,7 +8,7 @@ import type { LeaderboardStats } from "@macro-tracker/db";
 import { fetchLeaderboardStatsAction } from "@/lib/actions";
 import { formatShortDate } from "@/lib/formatting";
 import { OverlayPortal, useBodyScrollLock } from "./overlay-portal";
-import { ThemeToggle } from "./theme-toggle";
+import { ThemePicker } from "./theme-toggle";
 import { TransitionLink } from "./transition-link";
 
 type HamburgerMenuProps = {
@@ -485,12 +485,7 @@ export function HamburgerMenu({
 
               {/* Footer: theme + user + sign out */}
               <div className="border-t border-[var(--color-border)] px-5 py-4 space-y-4">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--color-muted-strong)]">
-                    Theme
-                  </span>
-                  <ThemeToggle />
-                </div>
+                <ThemePicker />
 
                 <p className="truncate text-xs text-[var(--color-muted)]">
                   {userEmail}
