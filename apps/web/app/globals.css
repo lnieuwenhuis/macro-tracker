@@ -1,5 +1,6 @@
 @import "tailwindcss";
 
+/* ─── Fallback / Sandstone (default light theme) ────────────────────────── */
 :root {
   --color-paper: #fffaf2;
   --color-paper-soft: #f2e3cd;
@@ -27,9 +28,48 @@
     radial-gradient(circle at top right, rgba(202, 107, 58, 0.1), transparent 20%),
     linear-gradient(180deg, #f6ede2 0%, #fbf5ec 48%, #f4ebde 100%);
   --foreground: var(--color-ink);
+  --overlay-gradient:
+    radial-gradient(circle at top left, rgba(202, 107, 58, 0.18), transparent 24%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 40%);
+  --grid-opacity: 0.18;
 }
 
-.dark {
+/* ─── Sandstone (explicit selector, mirrors :root) ───────────────────────── */
+[data-theme="sandstone"] {
+  --color-paper: #fffaf2;
+  --color-paper-soft: #f2e3cd;
+  --color-app-bg: #efe5d6;
+  --color-shell-panel: rgba(255, 248, 239, 0.38);
+  --color-surface: rgba(255, 247, 236, 0.86);
+  --color-surface-strong: #fffdf9;
+  --color-card-muted: #efe3d0;
+  --color-card-subtle: rgba(255, 251, 245, 0.82);
+  --color-ink: #26160f;
+  --color-muted: #7b6456;
+  --color-muted-strong: #5a4438;
+  --color-border: rgba(92, 65, 47, 0.16);
+  --color-border-strong: rgba(92, 65, 47, 0.24);
+  --color-accent: #ca6b3a;
+  --color-accent-strong: #a85126;
+  --color-danger: #b6453c;
+  --color-success: #5d7a5c;
+  --color-bar-protein: #6a9e68;
+  --color-bar-carbs: #5a8fc2;
+  --color-bar-fat: #d4785a;
+  --color-bar-calories: #ca6b3a;
+  --background:
+    radial-gradient(circle at top left, rgba(226, 152, 108, 0.2), transparent 28%),
+    radial-gradient(circle at top right, rgba(202, 107, 58, 0.1), transparent 20%),
+    linear-gradient(180deg, #f6ede2 0%, #fbf5ec 48%, #f4ebde 100%);
+  --foreground: var(--color-ink);
+  --overlay-gradient:
+    radial-gradient(circle at top left, rgba(202, 107, 58, 0.18), transparent 24%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 40%);
+  --grid-opacity: 0.18;
+}
+
+/* ─── Ember (former dark theme) ──────────────────────────────────────────── */
+[data-theme="ember"] {
   --color-paper: #151211;
   --color-paper-soft: #463733;
   --color-app-bg: #1f1818;
@@ -56,7 +96,354 @@
     radial-gradient(circle at bottom right, rgba(120, 155, 123, 0.12), transparent 22%),
     linear-gradient(180deg, #100d0d 0%, #181313 52%, #120f0f 100%);
   --foreground: var(--color-ink);
+  --overlay-gradient:
+    radial-gradient(circle at top left, rgba(223, 127, 67, 0.14), transparent 24%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.01), transparent 40%);
+  --grid-opacity: 0.12;
 }
+
+/* ─── Ocean ──────────────────────────────────────────────────────────────── */
+[data-theme="ocean"] {
+  --color-paper: #0c1420;
+  --color-paper-soft: #1a2d42;
+  --color-app-bg: #101c2c;
+  --color-shell-panel: rgba(18, 40, 62, 0.66);
+  --color-surface: rgba(14, 26, 42, 0.9);
+  --color-surface-strong: #142234;
+  --color-card-muted: #1a2e44;
+  --color-card-subtle: rgba(18, 32, 50, 0.92);
+  --color-ink: #e0eef8;
+  --color-muted: #7fa3c4;
+  --color-muted-strong: #a8c8e0;
+  --color-border: rgba(120, 180, 220, 0.12);
+  --color-border-strong: rgba(120, 180, 220, 0.2);
+  --color-accent: #38b2c9;
+  --color-accent-strong: #52d0e6;
+  --color-danger: #e06070;
+  --color-success: #4ec9a0;
+  --color-bar-protein: #4ec9a0;
+  --color-bar-carbs: #5ca8e0;
+  --color-bar-fat: #e0a060;
+  --color-bar-calories: #38b2c9;
+  --background:
+    radial-gradient(circle at top left, rgba(56, 178, 201, 0.14), transparent 30%),
+    radial-gradient(circle at bottom right, rgba(78, 201, 160, 0.1), transparent 24%),
+    linear-gradient(180deg, #0a1620 0%, #0e1e30 52%, #0c1822 100%);
+  --foreground: var(--color-ink);
+  --overlay-gradient:
+    radial-gradient(circle at top left, rgba(56, 178, 201, 0.12), transparent 26%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.01), transparent 40%);
+  --grid-opacity: 0.10;
+}
+
+/* ─── Forest ─────────────────────────────────────────────────────────────── */
+[data-theme="forest"] {
+  --color-paper: #0e1510;
+  --color-paper-soft: #263828;
+  --color-app-bg: #131e15;
+  --color-shell-panel: rgba(24, 42, 28, 0.66);
+  --color-surface: rgba(16, 30, 20, 0.9);
+  --color-surface-strong: #182418;
+  --color-card-muted: #223424;
+  --color-card-subtle: rgba(22, 36, 24, 0.92);
+  --color-ink: #dce8dc;
+  --color-muted: #8aaa8c;
+  --color-muted-strong: #b0ccb2;
+  --color-border: rgba(140, 190, 140, 0.12);
+  --color-border-strong: rgba(140, 190, 140, 0.2);
+  --color-accent: #6aae6a;
+  --color-accent-strong: #82c882;
+  --color-danger: #d06858;
+  --color-success: #7ec47e;
+  --color-bar-protein: #7ec47e;
+  --color-bar-carbs: #6aadcc;
+  --color-bar-fat: #c4946a;
+  --color-bar-calories: #6aae6a;
+  --background:
+    radial-gradient(circle at top left, rgba(106, 174, 106, 0.12), transparent 28%),
+    radial-gradient(circle at bottom right, rgba(140, 180, 90, 0.08), transparent 22%),
+    linear-gradient(180deg, #0c160e 0%, #111e14 52%, #0e1810 100%);
+  --foreground: var(--color-ink);
+  --overlay-gradient:
+    radial-gradient(circle at top left, rgba(106, 174, 106, 0.10), transparent 24%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.01), transparent 40%);
+  --grid-opacity: 0.10;
+}
+
+/* ─── Sakura ─────────────────────────────────────────────────────────────── */
+[data-theme="sakura"] {
+  --color-paper: #fef8f8;
+  --color-paper-soft: #f4dce0;
+  --color-app-bg: #f2e4e6;
+  --color-shell-panel: rgba(255, 240, 242, 0.42);
+  --color-surface: rgba(255, 242, 244, 0.88);
+  --color-surface-strong: #fef6f7;
+  --color-card-muted: #f0d8dc;
+  --color-card-subtle: rgba(255, 245, 247, 0.84);
+  --color-ink: #2e1418;
+  --color-muted: #8a5c66;
+  --color-muted-strong: #6e3e4a;
+  --color-border: rgba(140, 60, 80, 0.14);
+  --color-border-strong: rgba(140, 60, 80, 0.22);
+  --color-accent: #d06888;
+  --color-accent-strong: #b84e70;
+  --color-danger: #c44848;
+  --color-success: #5e9e6c;
+  --color-bar-protein: #5ea86c;
+  --color-bar-carbs: #6a92cc;
+  --color-bar-fat: #d88c6a;
+  --color-bar-calories: #d06888;
+  --background:
+    radial-gradient(circle at top left, rgba(208, 104, 136, 0.16), transparent 28%),
+    radial-gradient(circle at top right, rgba(240, 180, 200, 0.12), transparent 22%),
+    linear-gradient(180deg, #f6e8eb 0%, #faf2f4 48%, #f4e6ea 100%);
+  --foreground: var(--color-ink);
+  --overlay-gradient:
+    radial-gradient(circle at top left, rgba(208, 104, 136, 0.14), transparent 24%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 40%);
+  --grid-opacity: 0.14;
+}
+
+/* ─── Lavender ───────────────────────────────────────────────────────────── */
+[data-theme="lavender"] {
+  --color-paper: #f8f6fe;
+  --color-paper-soft: #e2daf0;
+  --color-app-bg: #e8e0f0;
+  --color-shell-panel: rgba(240, 234, 255, 0.40);
+  --color-surface: rgba(244, 238, 255, 0.87);
+  --color-surface-strong: #f6f2fd;
+  --color-card-muted: #ddd4ec;
+  --color-card-subtle: rgba(246, 240, 255, 0.83);
+  --color-ink: #1e1430;
+  --color-muted: #7a6898;
+  --color-muted-strong: #584878;
+  --color-border: rgba(100, 60, 160, 0.13);
+  --color-border-strong: rgba(100, 60, 160, 0.21);
+  --color-accent: #8a5cc6;
+  --color-accent-strong: #7040aa;
+  --color-danger: #c04848;
+  --color-success: #5c9a68;
+  --color-bar-protein: #5ea870;
+  --color-bar-carbs: #6888d0;
+  --color-bar-fat: #d08a5c;
+  --color-bar-calories: #8a5cc6;
+  --background:
+    radial-gradient(circle at top left, rgba(138, 92, 198, 0.15), transparent 28%),
+    radial-gradient(circle at top right, rgba(160, 120, 220, 0.1), transparent 22%),
+    linear-gradient(180deg, #ece4f6 0%, #f4eefa 48%, #e8e0f2 100%);
+  --foreground: var(--color-ink);
+  --overlay-gradient:
+    radial-gradient(circle at top left, rgba(138, 92, 198, 0.12), transparent 24%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 40%);
+  --grid-opacity: 0.14;
+}
+
+/* ─── Midnight ───────────────────────────────────────────────────────────── */
+[data-theme="midnight"] {
+  --color-paper: #08080e;
+  --color-paper-soft: #1a1a30;
+  --color-app-bg: #0c0c18;
+  --color-shell-panel: rgba(16, 16, 40, 0.70);
+  --color-surface: rgba(12, 12, 26, 0.92);
+  --color-surface-strong: #111124;
+  --color-card-muted: #1a1a34;
+  --color-card-subtle: rgba(16, 16, 36, 0.93);
+  --color-ink: #e0e0f0;
+  --color-muted: #8080aa;
+  --color-muted-strong: #a8a8cc;
+  --color-border: rgba(140, 140, 220, 0.10);
+  --color-border-strong: rgba(140, 140, 220, 0.18);
+  --color-accent: #6c6cf0;
+  --color-accent-strong: #8a8aff;
+  --color-danger: #e86070;
+  --color-success: #60c890;
+  --color-bar-protein: #60c890;
+  --color-bar-carbs: #60a0e8;
+  --color-bar-fat: #e8a060;
+  --color-bar-calories: #6c6cf0;
+  --background:
+    radial-gradient(circle at top left, rgba(108, 108, 240, 0.12), transparent 28%),
+    radial-gradient(circle at bottom right, rgba(96, 200, 144, 0.06), transparent 22%),
+    linear-gradient(180deg, #060610 0%, #0a0a1a 52%, #080814 100%);
+  --foreground: var(--color-ink);
+  --overlay-gradient:
+    radial-gradient(circle at top left, rgba(108, 108, 240, 0.10), transparent 24%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.005), transparent 40%);
+  --grid-opacity: 0.08;
+}
+
+/* ─── Arctic ─────────────────────────────────────────────────────────────── */
+[data-theme="arctic"] {
+  --color-paper: #f5fbff;
+  --color-paper-soft: #d6ecf8;
+  --color-app-bg: #e2f0f8;
+  --color-shell-panel: rgba(220, 240, 252, 0.40);
+  --color-surface: rgba(235, 248, 255, 0.87);
+  --color-surface-strong: #f5faff;
+  --color-card-muted: #cce0f0;
+  --color-card-subtle: rgba(235, 245, 255, 0.84);
+  --color-ink: #0d1f2e;
+  --color-muted: #567898;
+  --color-muted-strong: #3a5e78;
+  --color-border: rgba(50, 110, 160, 0.13);
+  --color-border-strong: rgba(50, 110, 160, 0.21);
+  --color-accent: #2e88c0;
+  --color-accent-strong: #1a6aa0;
+  --color-danger: #b84848;
+  --color-success: #3a9060;
+  --color-bar-protein: #3a9060;
+  --color-bar-carbs: #2e88c0;
+  --color-bar-fat: #c87850;
+  --color-bar-calories: #2e88c0;
+  --background:
+    radial-gradient(circle at top left, rgba(46, 136, 192, 0.12), transparent 28%),
+    radial-gradient(circle at top right, rgba(180, 220, 240, 0.14), transparent 22%),
+    linear-gradient(180deg, #d6eaf6 0%, #eaf5fc 48%, #e2f0f8 100%);
+  --foreground: var(--color-ink);
+  --overlay-gradient:
+    radial-gradient(circle at top left, rgba(46, 136, 192, 0.10), transparent 24%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 40%);
+  --grid-opacity: 0.14;
+}
+
+/* ─── Mint ───────────────────────────────────────────────────────────────── */
+[data-theme="mint"] {
+  --color-paper: #f2fdf6;
+  --color-paper-soft: #cceedd;
+  --color-app-bg: #dff5ea;
+  --color-shell-panel: rgba(215, 248, 232, 0.40);
+  --color-surface: rgba(228, 252, 238, 0.87);
+  --color-surface-strong: #f0fdf5;
+  --color-card-muted: #c4e8d8;
+  --color-card-subtle: rgba(230, 252, 240, 0.84);
+  --color-ink: #0c2418;
+  --color-muted: #448866;
+  --color-muted-strong: #2c6648;
+  --color-border: rgba(30, 110, 70, 0.13);
+  --color-border-strong: rgba(30, 110, 70, 0.21);
+  --color-accent: #22a062;
+  --color-accent-strong: #188048;
+  --color-danger: #c04848;
+  --color-success: #22a062;
+  --color-bar-protein: #22a062;
+  --color-bar-carbs: #4888c8;
+  --color-bar-fat: #cc8040;
+  --color-bar-calories: #22a062;
+  --background:
+    radial-gradient(circle at top left, rgba(34, 160, 98, 0.12), transparent 28%),
+    radial-gradient(circle at top right, rgba(130, 210, 170, 0.10), transparent 22%),
+    linear-gradient(180deg, #d0eedd 0%, #e8f9ef 48%, #ddf4e8 100%);
+  --foreground: var(--color-ink);
+  --overlay-gradient:
+    radial-gradient(circle at top left, rgba(34, 160, 98, 0.10), transparent 24%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 40%);
+  --grid-opacity: 0.14;
+}
+
+/* ─── Crimson ────────────────────────────────────────────────────────────── */
+[data-theme="crimson"] {
+  --color-paper: #100808;
+  --color-paper-soft: #381a1a;
+  --color-app-bg: #160c0c;
+  --color-shell-panel: rgba(36, 14, 14, 0.70);
+  --color-surface: rgba(20, 10, 10, 0.92);
+  --color-surface-strong: #1c1010;
+  --color-card-muted: #281414;
+  --color-card-subtle: rgba(24, 10, 10, 0.93);
+  --color-ink: #f2e4e4;
+  --color-muted: #a87070;
+  --color-muted-strong: #cc9090;
+  --color-border: rgba(200, 100, 100, 0.10);
+  --color-border-strong: rgba(200, 100, 100, 0.18);
+  --color-accent: #cc3838;
+  --color-accent-strong: #e84848;
+  --color-danger: #ee7070;
+  --color-success: #60a870;
+  --color-bar-protein: #60a870;
+  --color-bar-carbs: #6898c8;
+  --color-bar-fat: #c88040;
+  --color-bar-calories: #cc3838;
+  --background:
+    radial-gradient(circle at top left, rgba(204, 56, 56, 0.14), transparent 28%),
+    radial-gradient(circle at bottom right, rgba(100, 30, 30, 0.10), transparent 24%),
+    linear-gradient(180deg, #0e0808 0%, #140a0a 52%, #100808 100%);
+  --foreground: var(--color-ink);
+  --overlay-gradient:
+    radial-gradient(circle at top left, rgba(204, 56, 56, 0.12), transparent 26%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.005), transparent 40%);
+  --grid-opacity: 0.08;
+}
+
+/* ─── Nord ───────────────────────────────────────────────────────────────── */
+[data-theme="nord"] {
+  --color-paper: #2e3440;
+  --color-paper-soft: #434c5e;
+  --color-app-bg: #252a34;
+  --color-shell-panel: rgba(46, 52, 64, 0.70);
+  --color-surface: rgba(38, 44, 56, 0.92);
+  --color-surface-strong: #2e3848;
+  --color-card-muted: #3b4252;
+  --color-card-subtle: rgba(44, 50, 64, 0.93);
+  --color-ink: #eceff4;
+  --color-muted: #7a8fa0;
+  --color-muted-strong: #aab8c8;
+  --color-border: rgba(200, 214, 230, 0.10);
+  --color-border-strong: rgba(200, 214, 230, 0.18);
+  --color-accent: #88c0d0;
+  --color-accent-strong: #81a1c1;
+  --color-danger: #bf616a;
+  --color-success: #a3be8c;
+  --color-bar-protein: #a3be8c;
+  --color-bar-carbs: #81a1c1;
+  --color-bar-fat: #d08770;
+  --color-bar-calories: #88c0d0;
+  --background:
+    radial-gradient(circle at top left, rgba(136, 192, 208, 0.12), transparent 28%),
+    radial-gradient(circle at bottom right, rgba(163, 190, 140, 0.08), transparent 24%),
+    linear-gradient(180deg, #1e2430 0%, #252c3a 52%, #202632 100%);
+  --foreground: var(--color-ink);
+  --overlay-gradient:
+    radial-gradient(circle at top left, rgba(136, 192, 208, 0.10), transparent 26%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.01), transparent 40%);
+  --grid-opacity: 0.10;
+}
+
+/* ─── Dusk ───────────────────────────────────────────────────────────────── */
+[data-theme="dusk"] {
+  --color-paper: #120d1e;
+  --color-paper-soft: #2e1e42;
+  --color-app-bg: #180f28;
+  --color-shell-panel: rgba(28, 18, 44, 0.70);
+  --color-surface: rgba(20, 12, 34, 0.92);
+  --color-surface-strong: #1e1432;
+  --color-card-muted: #281a3e;
+  --color-card-subtle: rgba(24, 16, 38, 0.93);
+  --color-ink: #f0e8f8;
+  --color-muted: #9878b8;
+  --color-muted-strong: #b898d8;
+  --color-border: rgba(180, 130, 220, 0.10);
+  --color-border-strong: rgba(180, 130, 220, 0.18);
+  --color-accent: #e07850;
+  --color-accent-strong: #f09060;
+  --color-danger: #e06060;
+  --color-success: #70b880;
+  --color-bar-protein: #70b880;
+  --color-bar-carbs: #7888e0;
+  --color-bar-fat: #e09050;
+  --color-bar-calories: #e07850;
+  --background:
+    radial-gradient(circle at top right, rgba(224, 120, 80, 0.16), transparent 30%),
+    radial-gradient(circle at bottom left, rgba(100, 60, 180, 0.18), transparent 32%),
+    linear-gradient(180deg, #100820 0%, #180d28 52%, #140a22 100%);
+  --foreground: var(--color-ink);
+  --overlay-gradient:
+    radial-gradient(circle at top right, rgba(224, 120, 80, 0.12), transparent 26%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.005), transparent 40%);
+  --grid-opacity: 0.09;
+}
+
+/* Map Tailwind's dark: variant to our dark data-theme values */
+@custom-variant dark (html[data-theme=ember] &, html[data-theme=ocean] &, html[data-theme=forest] &, html[data-theme=midnight] &, html[data-theme=crimson] &, html[data-theme=nord] &, html[data-theme=dusk] &);
 
 @theme inline {
   --color-background: var(--background);
@@ -73,7 +460,13 @@ html {
   color-scheme: light;
 }
 
-html.dark {
+html[data-theme="ember"],
+html[data-theme="ocean"],
+html[data-theme="forest"],
+html[data-theme="midnight"],
+html[data-theme="crimson"],
+html[data-theme="nord"],
+html[data-theme="dusk"] {
   color-scheme: dark;
 }
 
@@ -89,9 +482,7 @@ body::before {
   position: fixed;
   inset: 0;
   pointer-events: none;
-  background:
-    radial-gradient(circle at top left, rgba(202, 107, 58, 0.18), transparent 24%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 40%);
+  background: var(--overlay-gradient);
   opacity: 0.55;
 }
 
@@ -105,7 +496,7 @@ body::after {
     linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
   background-size: 22px 22px;
   mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.18), transparent 72%);
-  opacity: 0.18;
+  opacity: var(--grid-opacity);
 }
 
 a,

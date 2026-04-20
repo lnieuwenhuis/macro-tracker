@@ -42,12 +42,17 @@ export const metadata: Metadata = {
 
 const themeInitScript = `
   try {
-    var storedTheme = window.localStorage.getItem("macro-tracker-theme");
-    var theme = storedTheme === "light" || storedTheme === "dark"
-      ? storedTheme
-      : (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
-    document.documentElement.classList.toggle("dark", theme === "dark");
-  } catch (error) {}
+    var VALID = ["sandstone","ember","ocean","forest","sakura","lavender","midnight","arctic","mint","crimson","nord","dusk"];
+    var DARK = {ember:1,ocean:1,forest:1,midnight:1,crimson:1,nord:1,dusk:1};
+    var stored = window.localStorage.getItem("macro-tracker-theme");
+    if (stored === "light") { stored = "sandstone"; window.localStorage.setItem("macro-tracker-theme", stored); }
+    if (stored === "dark")  { stored = "ember";     window.localStorage.setItem("macro-tracker-theme", stored); }
+    var theme = VALID.indexOf(stored) > -1
+      ? stored
+      : (window.matchMedia("(prefers-color-scheme: dark)").matches ? "ember" : "sandstone");
+    document.documentElement.setAttribute("data-theme", theme);
+    document.documentElement.style.colorScheme = DARK[theme] ? "dark" : "light";
+  } catch (e) {}
 `;
 
 export default function RootLayout({
