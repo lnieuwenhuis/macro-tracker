@@ -301,7 +301,7 @@ export type QuickAddCandidate = {
   fatG: number;
   caloriesKcal: number;
   source: QuickAddSource;
-  /** ISO date string of the most recent log entry for this item (recent items only) */
+  /** ISO date string of the most recent log entry seen in history, if any */
   sourceDate?: string;
   /** Preset ID, used for touch/ranking (preset items only) */
   presetId?: string;
@@ -312,4 +312,6 @@ export type QuickAddCandidate = {
   peakHourUtc?: number;
   /** Number of log entries that fall within the peak time window. */
   habitCount?: number;
+  /** Number of distinct logged dates seen for this food in the history sample. */
+  observedUseDays?: number;
 };

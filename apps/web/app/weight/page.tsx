@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { canAccessAdmin, getWeightPageData, getUserById, todayDateString } from "@macro-tracker/db";
+import { canAccessAdmin, ensureDateString, getWeightPageData, getUserById } from "@macro-tracker/db";
 
 import { WeightShell } from "@/components/weight-shell";
 import { requireSessionUser } from "@/lib/auth";
@@ -8,12 +8,17 @@ export const metadata: Metadata = {
   title: "Weight | Macro Tracker",
 };
 
-export default async function WeightPage() {
+type WeightPageProps = {
+  searchParams: Promise<{ date?: string }>;
+};
+
+export default async function WeightPage({ searchParams }: WeightPageProps) {
   const sessionUser = await requireSessionUser();
-  const today = todayDateString();
+  const params = await searchParams;
+  const selectedDate = ensureDateString(params.date);
 
   const [weightData, user] = await Promise.all([
-    getWeightPageData(sessionUser.userId, today),
+    getWeightPageData(sessionUser.userId, selectedDate),
     getUserById(sessionUser.userId),
   ]);
 
@@ -21,7 +26,7 @@ export default async function WeightPage() {
     <WeightShell
       userEmail={user?.email ?? sessionUser.email}
       canAccessAdmin={user ? canAccessAdmin(user.role) : false}
-      today={today}
+      selectedDate={selectedDate}
       weightData={weightData}
     />
   );

@@ -84,9 +84,73 @@ function candidateKey(c: QuickAddCandidate): string {
   return `${c.label.toLowerCase().trim()}|${c.proteinG}|${c.carbsG}|${c.fatG}|${c.caloriesKcal}`;
 }
 
+function newestDate(a?: string, b?: string): string | undefined {
+  if (!a) return b;
+  if (!b) return a;
+  return a >= b ? a : b;
+}
+
+function mergeHabitData(
+  existing: QuickAddCandidate,
+  incoming: QuickAddCandidate,
+): Pick<QuickAddCandidate, "peakHourUtc" | "habitCount"> {
+  const existingCount = existing.habitCount ?? 0;
+  const incomingCount = incoming.habitCount ?? 0;
+
+  if (incomingCount > existingCount) {
+    return {
+      peakHourUtc: incoming.peakHourUtc,
+      habitCount: incoming.habitCount,
+    };
+  }
+
+  if (existingCount > 0) {
+    return {
+      peakHourUtc: existing.peakHourUtc,
+      habitCount: existing.habitCount,
+    };
+  }
+
+  return {};
+}
+
+function mergeCandidate(
+  existing: QuickAddCandidate,
+  incoming: QuickAddCandidate,
+): QuickAddCandidate {
+  const preferIncomingPreset =
+    incoming.source === "preset" && existing.source !== "preset";
+  const source =
+    existing.source === "preset" || incoming.source === "preset"
+      ? "preset"
+      : "recent";
+  const sourceDate = newestDate(existing.sourceDate, incoming.sourceDate);
+  const observedUseDays = Math.max(
+    existing.observedUseDays ?? 0,
+    incoming.observedUseDays ?? 0,
+  );
+  const habitData = mergeHabitData(existing, incoming);
+
+  return {
+    label: preferIncomingPreset ? incoming.label : existing.label,
+    proteinG: existing.proteinG,
+    carbsG: existing.carbsG,
+    fatG: existing.fatG,
+    caloriesKcal: existing.caloriesKcal,
+    source,
+    ...(sourceDate ? { sourceDate } : {}),
+    ...(source === "preset"
+      ? { presetId: existing.presetId ?? incoming.presetId }
+      : {}),
+    ...(habitData.habitCount !== undefined ? habitData : {}),
+    ...(observedUseDays > 0 ? { observedUseDays } : {}),
+  };
+}
+
 /**
- * Merge preset + recent history candidates, preferring the preset record when
- * label + macros are identical (avoids near-duplicate suggestions).
+ * Merge preset + recent history candidates by normalized label + macros.
+ * Presets retain their source identity while inherited recent-history metadata
+ * keeps time, recency, and frequency bonuses intact.
  */
 export function deduplicateCandidates(
   candidates: QuickAddCandidate[],
@@ -99,11 +163,9 @@ export function deduplicateCandidates(
 
     if (!existing) {
       map.set(key, candidate);
-    } else if (candidate.source === "preset" && existing.source === "recent") {
-      // Prefer the preset entry over the history entry
-      map.set(key, candidate);
+    } else {
+      map.set(key, mergeCandidate(existing, candidate));
     }
-    // If both are the same source type, keep the one already stored (first wins)
   }
 
   return Array.from(map.values());
@@ -122,57 +184,96 @@ function hourDistance(a: number, b: number): number {
   return diff > 12 ? 24 - diff : diff;
 }
 
+const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+function dateStringToUtcDay(value: string): number | null {
+  if (!DATE_PATTERN.test(value)) {
+    return null;
+  }
+
+  const [year, month, day] = value.split("-").map(Number);
+  return Date.UTC(year, month - 1, day);
+}
+
+function daysSinceDate(referenceDate: string, sourceDate?: string): number | null {
+  if (!sourceDate) {
+    return null;
+  }
+
+  const referenceDay = dateStringToUtcDay(referenceDate);
+  const sourceDay = dateStringToUtcDay(sourceDate);
+  if (referenceDay === null || sourceDay === null) {
+    return null;
+  }
+
+  return Math.max(0, Math.floor((referenceDay - sourceDay) / MS_PER_DAY));
+}
+
+export type RankCandidatesOptions = {
+  limit?: number;
+  currentHourUtc?: number;
+  referenceDate?: string;
+};
+
 function scoreCandidate(
   candidate: QuickAddCandidate,
   remaining: RemainingMacros,
   currentHourUtc: number,
+  referenceDate: string,
 ): number {
   let score = 0;
 
-  // 1. Time-of-day habit boost — applied first so it can surface relevant
-  //    foods even when macro goals aren't set.
-  //    Only triggers when we have confirmed a clear habit (habitCount ≥ 3).
   if (
     candidate.habitCount !== undefined &&
     candidate.habitCount >= 3 &&
     candidate.peakHourUtc !== undefined
   ) {
     const dist = hourDistance(currentHourUtc, candidate.peakHourUtc);
-    if (dist <= 1) score += 120; // within ~1 h of usual time → strong boost
-    else if (dist <= 2) score += 60; // within ~2 h → moderate boost
+    if (dist <= 1) score += 80;
+    else if (dist <= 2) score += 40;
   }
 
-  // 2. Protein contribution — highest macro priority (weight ×3)
+  const daysSinceLastUsed = daysSinceDate(referenceDate, candidate.sourceDate);
+  if (daysSinceLastUsed !== null) {
+    score += Math.max(0, 14 - daysSinceLastUsed) * 2;
+  }
+
+  score += Math.min(candidate.observedUseDays ?? 0, 6) * 6;
+
   if (remaining.proteinG !== null) {
-    const remainingClamped = Math.max(0, remaining.proteinG);
-    const contribution = Math.min(candidate.proteinG, remainingClamped);
-    score += contribution * 3;
+    const proteinBudget = Math.max(0, remaining.proteinG);
+    const fill = Math.min(candidate.proteinG, proteinBudget);
+    const overshoot = Math.max(0, candidate.proteinG - proteinBudget);
+    score += fill * 2.5;
+    score -= overshoot * 0.4;
   }
 
-  // 3. Calorie proximity — reward fitting within budget; penalise overshoot
   if (remaining.caloriesKcal !== null) {
     const calBudget = Math.max(0, remaining.caloriesKcal);
     if (candidate.caloriesKcal <= calBudget) {
       const gap = calBudget - candidate.caloriesKcal;
-      score += Math.max(0, 200 - gap) * 0.5;
+      score += Math.max(0, 300 - gap) * 0.2;
     } else {
       const overshoot = candidate.caloriesKcal - calBudget;
-      score -= overshoot * 1.5;
+      score -= Math.min(180, overshoot * 0.6);
     }
   }
 
-  // 4. Carb contribution (weight ×0.5)
   if (remaining.carbsG !== null) {
     const carbBudget = Math.max(0, remaining.carbsG);
-    const contribution = Math.min(candidate.carbsG, carbBudget);
-    score += contribution * 0.5;
+    const fill = Math.min(candidate.carbsG, carbBudget);
+    const overshoot = Math.max(0, candidate.carbsG - carbBudget);
+    score += fill * 0.75;
+    score -= overshoot * 1;
   }
 
-  // 5. Fat contribution (weight ×0.5)
   if (remaining.fatG !== null) {
     const fatBudget = Math.max(0, remaining.fatG);
-    const contribution = Math.min(candidate.fatG, fatBudget);
-    score += contribution * 0.5;
+    const fill = Math.min(candidate.fatG, fatBudget);
+    const overshoot = Math.max(0, candidate.fatG - fatBudget);
+    score += fill * 0.75;
+    score -= overshoot * 1.2;
   }
 
   return score;
@@ -180,31 +281,36 @@ function scoreCandidate(
 
 /**
  * Rank a mixed pool of preset + recent candidates.
- * Scoring layers (highest to lowest priority):
- *   1. Time-of-day habit match — foods the user consistently logs near this hour
- *   2. Protein goal contribution
- *   3. Calorie budget fit / overshoot penalty
- *   4. Carb + fat contribution
- *   5. Recency as tie-breaker
- *
- * @param currentHourUtc  Current UTC hour (0–23). Pass `new Date().getUTCHours()`.
+ * Balances likelihood-to-log and macro fit, then resolves ties with recency,
+ * observed repeat frequency, and original input order.
  */
 export function rankCandidates(
   candidates: QuickAddCandidate[],
   remaining: RemainingMacros,
-  limit = 10,
-  currentHourUtc = new Date().getUTCHours(),
+  options: RankCandidatesOptions = {},
 ): QuickAddCandidate[] {
+  const {
+    limit = 10,
+    currentHourUtc = new Date().getUTCHours(),
+    referenceDate = new Date().toISOString().slice(0, 10),
+  } = options;
   const pool = deduplicateCandidates(candidates);
 
   return pool
-    .map((c) => ({ candidate: c, score: scoreCandidate(c, remaining, currentHourUtc) }))
+    .map((candidate, originalIndex) => ({
+      candidate,
+      originalIndex,
+      score: scoreCandidate(candidate, remaining, currentHourUtc, referenceDate),
+    }))
     .sort((a, b) => {
       if (b.score !== a.score) return b.score - a.score;
-      // Recency tie-breaker: more recent first. Presets with no date sort last.
       const aDate = a.candidate.sourceDate ?? "";
       const bDate = b.candidate.sourceDate ?? "";
-      return bDate.localeCompare(aDate);
+      if (bDate !== aDate) return bDate.localeCompare(aDate);
+      const observedDelta =
+        (b.candidate.observedUseDays ?? 0) - (a.candidate.observedUseDays ?? 0);
+      if (observedDelta !== 0) return observedDelta;
+      return a.originalIndex - b.originalIndex;
     })
     .slice(0, limit)
     .map(({ candidate }) => candidate);

@@ -9,7 +9,7 @@ import { formatShortDate } from "@/lib/formatting";
 type StatsShellProps = {
   userEmail: string;
   canAccessAdmin: boolean;
-  today: string;
+  selectedDate: string;
   statsData: StatsPageData;
   goals: MacroGoals;
 };
@@ -209,7 +209,7 @@ function formatNumber(n: number): string {
 export function StatsShell({
   userEmail,
   canAccessAdmin,
-  today,
+  selectedDate,
   statsData,
   goals,
 }: StatsShellProps) {
@@ -226,8 +226,9 @@ export function StatsShell({
       <AppShell
         userEmail={userEmail}
         canAccessAdmin={canAccessAdmin}
-        selectedDate={today}
+        selectedDate={selectedDate}
         activeTab="stats"
+        showDateNavigation={false}
       >
         <section className="flex min-h-[60vh] items-center justify-center">
           <div className="w-full rounded-[2rem] border border-dashed border-[var(--color-border-strong)] bg-[var(--color-surface-strong)] px-6 py-10 text-center shadow-[0_18px_44px_rgba(0,0,0,0.06)]">
@@ -262,8 +263,9 @@ export function StatsShell({
     <AppShell
       userEmail={userEmail}
       canAccessAdmin={canAccessAdmin}
-      selectedDate={today}
+      selectedDate={selectedDate}
       activeTab="stats"
+      showDateNavigation={false}
     >
       <div className="space-y-5">
 

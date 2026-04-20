@@ -76,6 +76,7 @@ export function FoodSearchModal({ onClose, onViewDate }: FoodSearchModalProps) {
 
   async function handleCopyToToday(entry: MealEntryRecord) {
     setCopyingId(entry.id);
+    setError(null);
     try {
       const result = await saveMealEntryAction({
         date: todayStr,
@@ -95,7 +96,10 @@ export function FoodSearchModal({ onClose, onViewDate }: FoodSearchModalProps) {
             return next;
           });
         }, 2500);
+        return;
       }
+
+      setError(result.error ?? "Unable to add this food to today.");
     } finally {
       setCopyingId(null);
     }

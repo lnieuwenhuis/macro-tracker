@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useMemo, useState, useTransition } from "react";
 
 import { deletePresetAction, deleteMealEntryAction, savePresetAction, saveMealEntryAction, touchPresetAction, updatePresetAction } from "@/lib/actions";
-import { computeLiveTotals, computeRemaining, getRecentRepeats, hasAnyGoal, rankCandidates } from "@/lib/quick-add";
+import { computeLiveTotals, computeRemaining, rankCandidates } from "@/lib/quick-add";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
 import type { OpenFoodFactsProduct } from "@/lib/openfoodfacts";
 import { getLocalDateString } from "@/lib/startup-date";
@@ -147,7 +147,7 @@ export function DashboardShell({
     () => computeRemaining(liveTotals, goals),
     [liveTotals, goals],
   );
-  const goalsSet = useMemo(() => hasAnyGoal(goals), [goals]);
+  const todayStr = useMemo(() => getLocalDateString(), []);
 
   // ---------------------------------------------------------------------------
   // Quick-add rails
@@ -167,13 +167,16 @@ export function DashboardShell({
     return [...presetCandidates, ...recentCandidates];
   }, [localPresets, recentCandidates]);
 
-  // Single unified quick-add list: goal-ranked when goals exist, recency-sorted otherwise.
+  // Single unified quick-add list: always ranked, with usage signals carrying
+  // no-goal users and macro fit contributing when goals exist.
   const quickAddItems = useMemo(
     () =>
-      goalsSet
-        ? rankCandidates(allCandidates, remaining, 10)
-        : getRecentRepeats(allCandidates, 10),
-    [allCandidates, remaining, goalsSet],
+      rankCandidates(allCandidates, remaining, {
+        limit: 10,
+        currentHourUtc: new Date().getUTCHours(),
+        referenceDate: todayStr,
+      }),
+    [allCandidates, remaining, todayStr],
   );
 
   // ---------------------------------------------------------------------------
@@ -395,7 +398,6 @@ export function DashboardShell({
     }
   }
 
-  const todayStr = useMemo(() => getLocalDateString(), []);
   const isViewingToday = selectedDate === todayStr;
 
   function handleDuplicate(clientId: string) {

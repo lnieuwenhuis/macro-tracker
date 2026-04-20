@@ -170,7 +170,7 @@ export function calculateMacroTargets(
 
   const bmrKcal = Math.round(bmr);
   const tdeeKcal = Math.round(bmr * activity.multiplier);
-  const targetCaloriesKcal = tdeeKcal + preset.calorieAdjustmentKcal;
+  const rawTargetCaloriesKcal = tdeeKcal + preset.calorieAdjustmentKcal;
 
   const proteinReference = getProteinReferenceWeight(
     input.weightKg,
@@ -180,6 +180,10 @@ export function calculateMacroTargets(
     proteinReference.weightKg * preset.proteinTargetGPerKg,
   );
   const proteinCalories = proteinG * 4;
+  const targetCaloriesKcal = Math.max(
+    rawTargetCaloriesKcal,
+    Math.ceil(proteinCalories),
+  );
   const remainingCalories = Math.max(targetCaloriesKcal - proteinCalories, 0);
 
   const carbsCalories = remainingCalories * preset.macroSplit.carbs;

@@ -18,7 +18,7 @@ import { ConfirmDeleteButton } from "./confirm-delete-button";
 type WeightShellProps = {
   userEmail: string;
   canAccessAdmin: boolean;
-  today: string;
+  selectedDate: string;
   weightData: WeightPageData;
 };
 
@@ -286,14 +286,14 @@ function trendLabel(
 export function WeightShell({
   userEmail,
   canAccessAdmin,
-  today,
+  selectedDate,
   weightData,
 }: WeightShellProps) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
 
   // Form state
-  const [formDate, setFormDate] = useState(today);
+  const [formDate, setFormDate] = useState(selectedDate);
   const [formWeight, setFormWeight] = useState("");
   const [formBodyFat, setFormBodyFat] = useState("");
   const [formNotes, setFormNotes] = useState("");
@@ -304,6 +304,7 @@ export function WeightShell({
     weightData.goalWeightKg != null ? String(weightData.goalWeightKg) : "",
   );
   const [goalSaved, setGoalSaved] = useState(false);
+  const [goalError, setGoalError] = useState<string | null>(null);
 
   // Delete state
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -313,8 +314,12 @@ export function WeightShell({
 
   const { entries, stats } = weightData;
 
+  useEffect(() => {
+    setFormDate(selectedDate);
+  }, [selectedDate]);
+
   function resetForm() {
-    setFormDate(today);
+    setFormDate(selectedDate);
     setFormWeight("");
     setFormBodyFat("");
     setFormNotes("");
@@ -407,9 +412,12 @@ export function WeightShell({
   }
 
   function handleSaveGoal() {
+    setGoalError(null);
     const value = goalInput.trim() ? Number(goalInput) : null;
 
     if (value != null && (!Number.isFinite(value) || value <= 0)) {
+      setGoalSaved(false);
+      setGoalError("Please enter a valid goal weight.");
       return;
     }
 
@@ -417,10 +425,14 @@ export function WeightShell({
       const result = await saveWeightGoalAction({
         goalWeightKg: value,
       });
-      if (result.ok) {
-        setGoalSaved(true);
-        setTimeout(() => setGoalSaved(false), 2000);
+      if (!result.ok) {
+        setGoalSaved(false);
+        setGoalError(result.error ?? "Unable to save goal weight.");
+        return;
       }
+
+      setGoalSaved(true);
+      setTimeout(() => setGoalSaved(false), 2000);
       router.refresh();
     });
   }
@@ -431,8 +443,9 @@ export function WeightShell({
       <AppShell
         userEmail={userEmail}
         canAccessAdmin={canAccessAdmin}
-        selectedDate={today}
+        selectedDate={selectedDate}
         activeTab="weight"
+        showDateNavigation={false}
       >
         <div className="space-y-5">
           {/* Entry form always visible */}
@@ -490,8 +503,9 @@ export function WeightShell({
     <AppShell
       userEmail={userEmail}
       canAccessAdmin={canAccessAdmin}
-      selectedDate={today}
+      selectedDate={selectedDate}
       activeTab="weight"
+      showDateNavigation={false}
     >
       <div className="space-y-5">
         {/* Stat cards */}
@@ -586,6 +600,7 @@ export function WeightShell({
                 onChange={(e) => {
                   setGoalInput(e.target.value);
                   setGoalSaved(false);
+                  setGoalError(null);
                 }}
                 placeholder="e.g. 75"
                 className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-app-bg)] px-3 py-2.5 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
@@ -600,6 +615,11 @@ export function WeightShell({
               {goalSaved ? "Saved!" : "Save"}
             </button>
           </div>
+          {goalError ? (
+            <p className="mt-3 text-xs font-medium text-[var(--color-danger)]">
+              {goalError}
+            </p>
+          ) : null}
         </section>
 
         {/* History */}
