@@ -35,7 +35,8 @@ export function SummaryShell({
 }: SummaryShellProps) {
   const isExperimental = uiMode === "experimental";
   const dailyTotals = dailySummary.totals;
-  const experimentalPeriodAverages = periodAverages.filter(
+  const nonEmptyAverages = periodAverages.filter((summary) => summary.loggedDays > 0);
+  const experimentalPeriodAverages = nonEmptyAverages.filter(
     (summary) => summary.label === "rolling7" || summary.label === "rolling30",
   );
   const content = (
@@ -74,7 +75,7 @@ export function SummaryShell({
           </div>
         ) : null}
         <div className="space-y-3">
-          {(isExperimental ? experimentalPeriodAverages : periodAverages).map((summary) => (
+          {(isExperimental ? experimentalPeriodAverages : nonEmptyAverages).map((summary) => (
             <SummaryCard key={summary.label} summary={summary} goals={goals} />
           ))}
         </div>
