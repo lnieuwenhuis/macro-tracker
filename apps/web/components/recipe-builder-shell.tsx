@@ -4,12 +4,22 @@ import type { FoodPreset, RecipeRecord } from "@macro-tracker/db";
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 
-import { saveRecipeAction } from "@/lib/actions";
+import {
+  deletePresetAction,
+  savePresetAction,
+  saveRecipeAction,
+  updatePresetAction,
+} from "@/lib/actions";
+import {
+  getPresetMutationCacheKeys,
+  getRecipeMutationCacheKeys,
+} from "@/lib/app-warmup";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
 import type { OpenFoodFactsProduct } from "@/lib/openfoodfacts";
 import type { UiMode } from "@/lib/ui-mode";
 
 import { AddFoodButton } from "./add-food-button";
+import { invalidateAppDataCache } from "./app-data-cache";
 import { AppShell } from "./app-shell";
 import { BarcodeResult } from "./barcode-result";
 import { BarcodeScanner } from "./barcode-scanner";
@@ -17,7 +27,6 @@ import { ExperimentalAppShell } from "./experimental-app-shell";
 import { IngredientCard, type IngredientDraft } from "./ingredient-card";
 import { PresetModal } from "./preset-modal";
 import { RecipeTotalsBar } from "./recipe-totals-bar";
-import { savePresetAction, deletePresetAction, updatePresetAction } from "@/lib/actions";
 
 type PresetMutationState =
   | { type: "save" }
@@ -165,6 +174,7 @@ export function RecipeBuilderShell({
       }
 
       const href = `/recipes?date=${selectedDate}`;
+      invalidateAppDataCache(getRecipeMutationCacheKeys());
       prepareNavigationMotion(href, "screen");
       router.push(href);
       router.refresh();
@@ -185,6 +195,7 @@ export function RecipeBuilderShell({
       setLocalPresets((prev) =>
         [...prev, savedPreset].sort((a, b) => a.label.localeCompare(b.label)),
       );
+      invalidateAppDataCache(getPresetMutationCacheKeys());
       return true;
     } finally {
       setPresetMutation(null);
@@ -203,6 +214,7 @@ export function RecipeBuilderShell({
         setPresetError(result.error ?? "Unable to delete preset.");
         return false;
       }
+      invalidateAppDataCache(getPresetMutationCacheKeys());
       return true;
     } finally {
       setPresetMutation(null);
@@ -224,6 +236,7 @@ export function RecipeBuilderShell({
           .map((preset) => (preset.id === id ? updatedPreset : preset))
           .sort((a, b) => a.label.localeCompare(b.label)),
       );
+      invalidateAppDataCache(getPresetMutationCacheKeys());
       return true;
     } finally {
       setPresetMutation(null);

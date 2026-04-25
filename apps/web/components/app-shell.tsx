@@ -13,6 +13,7 @@ import {
   prepareNavigationMotion,
   resolveNavigationMotion,
 } from "@/lib/navigation-motion";
+import { prefetchFullRoute } from "@/lib/full-prefetch";
 import { getLocalDateString, getStartupDateRedirect } from "@/lib/startup-date";
 
 import { HamburgerMenu } from "./hamburger-menu";
@@ -108,8 +109,8 @@ export function AppShell({
       return;
     }
 
-    router.prefetch(previousDateHref);
-    router.prefetch(nextDateHref);
+    prefetchFullRoute(router, previousDateHref);
+    prefetchFullRoute(router, nextDateHref);
   }, [nextDateHref, previousDateHref, router, showDateNavigation]);
 
   useEffect(() => {

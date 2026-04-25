@@ -86,7 +86,7 @@ export function ProgressShell({
       )}
     >
       {activeTab === "goals" ? (
-        <GoalsPanel goals={goals} />
+        <GoalsPanel goals={goals} selectedDate={selectedDate} />
       ) : (
         <WeightPanel selectedDate={selectedDate} weightData={weightData} />
       )}

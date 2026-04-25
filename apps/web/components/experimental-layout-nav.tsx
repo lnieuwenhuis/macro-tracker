@@ -1,13 +1,16 @@
 "use client";
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useState, useTransition } from "react";
+import { useEffect, useState, useTransition } from "react";
 
 import type { ComposeAction } from "@/lib/compose";
 import { getLocalDateString } from "@/lib/startup-date";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
+import { getWarmupRoutes } from "@/lib/app-warmup";
+import { prefetchFullRoute } from "@/lib/full-prefetch";
 import { useUiMode } from "@/lib/ui-mode-client";
 
+import { useWarmAppData } from "./app-data-cache";
 import { ExperimentalAddSheet } from "./experimental-add-sheet";
 import { ExperimentalBottomNav } from "./experimental-bottom-nav";
 
@@ -35,12 +38,24 @@ export function ExperimentalLayoutNav() {
   const router = useRouter();
   const [, startNavigation] = useTransition();
   const [addSheetOpen, setAddSheetOpen] = useState(false);
+  const selectedDate = searchParams.get("date") ?? getLocalDateString();
+  const warmupEnabled = uiMode === "experimental" && isAppPathname(pathname);
+  useWarmAppData(selectedDate, warmupEnabled);
 
-  if (uiMode !== "experimental" || !isAppPathname(pathname)) {
+  useEffect(() => {
+    if (!warmupEnabled) {
+      return;
+    }
+
+    for (const href of getWarmupRoutes(selectedDate)) {
+      prefetchFullRoute(router, href);
+    }
+  }, [router, selectedDate, warmupEnabled]);
+
+  if (!warmupEnabled) {
     return null;
   }
 
-  const selectedDate = searchParams.get("date") ?? getLocalDateString();
   const activeTab = pathnameToActiveTab(pathname);
 
   function handleAddSelection(action: ComposeAction) {
