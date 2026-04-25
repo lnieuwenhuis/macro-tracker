@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 
 import { saveGoalsAction } from "@/lib/actions";
+import { getGoalsMutationCacheKeys } from "@/lib/app-warmup";
 import {
   ACTIVITY_LEVEL_OPTIONS,
   GOAL_PRESET_OPTIONS,
@@ -15,6 +16,7 @@ import {
   type MacroCalculatorSex,
 } from "@/lib/macro-calculator";
 
+import { invalidateAppDataCache } from "./app-data-cache";
 import { AppShell } from "./app-shell";
 
 type GoalsShellProps = {
@@ -192,12 +194,18 @@ export function GoalsShell({
       selectedDate={selectedDate}
       activeTab="goals"
     >
-      <GoalsPanel goals={goals} />
+      <GoalsPanel goals={goals} selectedDate={selectedDate} />
     </AppShell>
   );
 }
 
-export function GoalsPanel({ goals }: { goals: MacroGoals }) {
+export function GoalsPanel({
+  goals,
+  selectedDate,
+}: {
+  goals: MacroGoals;
+  selectedDate?: string;
+}) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [saved, setSaved] = useState(false);
@@ -278,6 +286,7 @@ export function GoalsPanel({ goals }: { goals: MacroGoals }) {
       }
 
       setSaved(true);
+      invalidateAppDataCache(getGoalsMutationCacheKeys(selectedDate));
       router.refresh();
     });
   }

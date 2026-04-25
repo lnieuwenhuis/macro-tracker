@@ -5,6 +5,10 @@ import { useRouter } from "next/navigation";
 import { useEffect, useEffectEvent, useMemo, useRef, useState, useTransition } from "react";
 
 import { deletePresetAction, deleteMealEntryAction, savePresetAction, saveMealEntryAction, touchPresetAction, updatePresetAction } from "@/lib/actions";
+import {
+  getDailyMutationCacheKeys,
+  getPresetMutationCacheKeys,
+} from "@/lib/app-warmup";
 import type { ComposeAction } from "@/lib/compose";
 import { computeLiveTotals, computeRemaining, rankCandidates } from "@/lib/quick-add";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
@@ -13,6 +17,7 @@ import { getLocalDateString } from "@/lib/startup-date";
 import type { UiMode } from "@/lib/ui-mode";
 
 import { AddFoodButton } from "./add-food-button";
+import { invalidateAppDataCache } from "./app-data-cache";
 import { AppShell } from "./app-shell";
 import { BarcodeResult } from "./barcode-result";
 import { BarcodeScanner } from "./barcode-scanner";
@@ -307,6 +312,7 @@ export function DashboardShell({
         );
       }
 
+      invalidateAppDataCache(getDailyMutationCacheKeys(selectedDate));
       router.refresh();
     });
   }
@@ -337,6 +343,7 @@ export function DashboardShell({
         return;
       }
 
+      invalidateAppDataCache(getDailyMutationCacheKeys(selectedDate));
       router.refresh();
     });
   }
@@ -356,6 +363,7 @@ export function DashboardShell({
       setLocalPresets((prev) =>
         [...prev, savedPreset].sort((a, b) => a.label.localeCompare(b.label)),
       );
+      invalidateAppDataCache(getPresetMutationCacheKeys());
       return true;
     } finally {
       setPresetMutation(null);
@@ -377,6 +385,7 @@ export function DashboardShell({
         return false;
       }
 
+      invalidateAppDataCache(getPresetMutationCacheKeys());
       return true;
     } finally {
       setPresetMutation(null);
@@ -400,6 +409,7 @@ export function DashboardShell({
           .map((preset) => (preset.id === id ? updatedPreset : preset))
           .sort((a, b) => a.label.localeCompare(b.label)),
       );
+      invalidateAppDataCache(getPresetMutationCacheKeys());
       return true;
     } finally {
       setPresetMutation(null);
@@ -408,9 +418,6 @@ export function DashboardShell({
 
   const isViewingToday = selectedDate === todayStr;
   const isExperimental = uiMode === "experimental";
-  const goalsHref = isExperimental
-    ? `/progress?date=${selectedDate}&tab=goals`
-    : `/goals?date=${selectedDate}`;
 
   function handleDuplicate(clientId: string) {
     setDrafts((currentDrafts) => {
@@ -458,6 +465,7 @@ export function DashboardShell({
           [clientId]: result.error ?? "Unable to copy entry to today.",
         }));
       } else {
+        invalidateAppDataCache(getDailyMutationCacheKeys(todayStr));
         // Show a brief "copied" confirmation on the button, then clear it.
         setCopiedCardIds((prev) => new Set([...prev, clientId]));
         setTimeout(() => {
@@ -758,11 +766,12 @@ export function DashboardShell({
                 carbsG: String(macros.carbsG),
                 fatG: String(macros.fatG),
                 caloriesKcal: String(macros.caloriesKcal),
-                sortOrder: nextSortOrder(),
-              },
-            ]);
-            setScanResult(null);
-            setNotFoundBarcode(null);
+            sortOrder: nextSortOrder(),
+          },
+        ]);
+        invalidateAppDataCache(getDailyMutationCacheKeys(selectedDate));
+        setScanResult(null);
+        setNotFoundBarcode(null);
           }}
           onSaveAsPreset={(input) => {
             handleSavePreset(input);

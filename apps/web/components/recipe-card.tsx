@@ -5,8 +5,13 @@ import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 
 import { deleteRecipeAction, logRecipePortionAction, saveRecipeAction } from "@/lib/actions";
+import {
+  getDailyMutationCacheKeys,
+  getRecipeMutationCacheKeys,
+} from "@/lib/app-warmup";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
 
+import { invalidateAppDataCache } from "./app-data-cache";
 import { ConfirmDeleteButton } from "./confirm-delete-button";
 
 type RecipeCardProps = {
@@ -31,6 +36,7 @@ export function RecipeCard({ recipe, selectedDate }: RecipeCardProps) {
         setError(result.error ?? "Unable to log portion.");
         return;
       }
+      invalidateAppDataCache(getDailyMutationCacheKeys(selectedDate));
       router.refresh();
     });
   }
@@ -56,6 +62,7 @@ export function RecipeCard({ recipe, selectedDate }: RecipeCardProps) {
       // Send the user straight to the new copy's edit page so they can tweak
       // the name / portions / ingredients immediately — much better UX than
       // dropping them back into the list and making them hunt for it.
+      invalidateAppDataCache(getRecipeMutationCacheKeys());
       const href = `/recipes/${result.recipe.id}/edit?date=${selectedDate}`;
       prepareNavigationMotion(href, "screen");
       router.push(href);
@@ -70,6 +77,7 @@ export function RecipeCard({ recipe, selectedDate }: RecipeCardProps) {
         setError(result.error ?? "Unable to delete recipe.");
         return;
       }
+      invalidateAppDataCache(getRecipeMutationCacheKeys());
       router.refresh();
     });
   }

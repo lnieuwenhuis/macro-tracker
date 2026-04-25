@@ -1,8 +1,10 @@
 "use client";
 
 import Link, { type LinkProps } from "next/link";
+import { useRouter } from "next/navigation";
 import type { AnchorHTMLAttributes, MouseEvent } from "react";
 
+import { prefetchFullRoute } from "@/lib/full-prefetch";
 import {
   prepareNavigationMotion,
   type ScreenMotion,
@@ -22,14 +24,40 @@ export function TransitionLink({
   href,
   motion = "screen",
   onClick,
+  onFocus,
+  onMouseEnter,
+  onTouchStart,
   target,
   children,
   ...props
 }: TransitionLinkProps) {
+  const router = useRouter();
+
+  function prefetchHref() {
+    if (target === "_blank") {
+      return;
+    }
+
+    prefetchFullRoute(router, href);
+  }
+
   return (
     <Link
       href={href}
       target={target}
+      prefetch
+      onFocus={(event) => {
+        onFocus?.(event);
+        prefetchHref();
+      }}
+      onMouseEnter={(event) => {
+        onMouseEnter?.(event);
+        prefetchHref();
+      }}
+      onTouchStart={(event) => {
+        onTouchStart?.(event);
+        prefetchHref();
+      }}
       onClick={(event) => {
         onClick?.(event);
 
