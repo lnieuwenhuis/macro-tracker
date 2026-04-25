@@ -4,6 +4,7 @@ import Script from "next/script";
 import { Suspense } from "react";
 
 import { ExperimentalLayoutNav } from "@/components/experimental-layout-nav";
+import { AppDataCacheProvider } from "@/components/app-data-cache";
 import { OfflineBanner } from "@/components/offline-banner";
 import { OrientationLock } from "@/components/orientation-lock";
 import { ServiceWorkerRegister } from "@/components/service-worker-register";
@@ -75,10 +76,12 @@ export default function RootLayout({
         <OrientationLock />
         <ServiceWorkerRegister />
         <OfflineBanner />
-        <Suspense fallback={null}>
-          <ExperimentalLayoutNav />
-        </Suspense>
-        {children}
+        <AppDataCacheProvider>
+          <Suspense fallback={null}>
+            <ExperimentalLayoutNav />
+          </Suspense>
+          {children}
+        </AppDataCacheProvider>
       </body>
     </html>
   );

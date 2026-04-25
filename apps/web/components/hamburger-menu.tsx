@@ -7,6 +7,7 @@ import type { LeaderboardStats } from "@macro-tracker/db";
 
 import { fetchLeaderboardStatsAction } from "@/lib/actions";
 import { formatShortDate } from "@/lib/formatting";
+import { prefetchFullRoute } from "@/lib/full-prefetch";
 import { getLocalDateString } from "@/lib/startup-date";
 import { OverlayPortal, useBodyScrollLock } from "./overlay-portal";
 import { ThemePicker } from "./theme-toggle";
@@ -151,14 +152,14 @@ export function HamburgerMenu({
       return;
     }
 
-    router.prefetch(`/?date=${selectedDate}`);
-    router.prefetch(`/summary?date=${selectedDate}`);
-    router.prefetch(`/recipes?date=${selectedDate}`);
-    router.prefetch(`/goals?date=${selectedDate}`);
-    router.prefetch("/stats");
-    router.prefetch("/weight");
+    prefetchFullRoute(router, `/?date=${selectedDate}`);
+    prefetchFullRoute(router, `/summary?date=${selectedDate}`);
+    prefetchFullRoute(router, `/recipes?date=${selectedDate}`);
+    prefetchFullRoute(router, `/goals?date=${selectedDate}`);
+    prefetchFullRoute(router, "/stats");
+    prefetchFullRoute(router, "/weight");
     if (canAccessAdmin) {
-      router.prefetch("/admin");
+      prefetchFullRoute(router, "/admin");
     }
   }, [canAccessAdmin, open, router, selectedDate]);
 

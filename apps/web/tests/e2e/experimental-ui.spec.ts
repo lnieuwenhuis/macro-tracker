@@ -40,7 +40,7 @@ test("experimental mode supports the bottom add flow and merged progress routes"
   );
   await expect(page.getByLabel("Pick a day")).toHaveCount(0);
   await expect(page.getByText("Daily Snapshot")).toHaveCount(0);
-  await expect(page.getByText("ISO Week")).toBeVisible();
+  await expect(page.getByText("Last 7 Days")).toBeVisible();
 
   await page.getByRole("button", { name: "Add food" }).click();
   await expect(page.getByRole("button", { name: "Custom" })).toBeVisible();

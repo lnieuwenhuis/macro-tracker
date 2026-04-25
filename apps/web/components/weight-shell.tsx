@@ -10,8 +10,12 @@ import {
   saveWeightGoalAction,
   updateWeightEntryAction,
 } from "@/lib/actions";
+import {
+  getWeightMutationCacheKeys,
+} from "@/lib/app-warmup";
 import { formatShortDate } from "@/lib/formatting";
 
+import { invalidateAppDataCache } from "./app-data-cache";
 import { AppShell } from "./app-shell";
 import { ConfirmDeleteButton } from "./confirm-delete-button";
 
@@ -411,11 +415,13 @@ export function WeightPanel({
       }
 
       resetForm();
+      invalidateAppDataCache(getWeightMutationCacheKeys(formDate));
       router.refresh();
     });
   }
 
   function handleDeleteEntry(entryId: string) {
+    const entryDate = entries.find((entry) => entry.id === entryId)?.date ?? formDate;
     setDeletingId(entryId);
     startTransition(async () => {
       const result = await deleteWeightEntryAction({ id: entryId });
@@ -430,6 +436,7 @@ export function WeightPanel({
       if (editingId === entryId) {
         resetForm();
       }
+      invalidateAppDataCache(getWeightMutationCacheKeys(entryDate));
       router.refresh();
     });
   }
@@ -456,6 +463,7 @@ export function WeightPanel({
 
       setGoalSaved(true);
       setTimeout(() => setGoalSaved(false), 2000);
+      invalidateAppDataCache(getWeightMutationCacheKeys(selectedDate));
       router.refresh();
     });
   }
