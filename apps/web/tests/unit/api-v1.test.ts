@@ -675,6 +675,149 @@ describe("Macro Tracker API v1", () => {
     });
   });
 
+  it("requires read:foods to create product-backed meal entries", async () => {
+    const food = await createPersonalFoodProduct(
+      userId,
+      {
+        name: "Scoped cottage cheese",
+        brand: "Macro Dairy",
+        source: "manual",
+        proteinPer100: 12,
+        carbsPer100: 3,
+        fatPer100: 4,
+        caloriesPer100: 96,
+      },
+      runtime.db,
+    );
+    const writeDailyOnly = await createApiToken(
+      userId,
+      {
+        name: "Write daily only",
+        scopes: ["write:daily"],
+      },
+      runtime.db,
+    );
+    const writeDailyAndReadFoods = await createApiToken(
+      userId,
+      {
+        name: "Write daily and read foods",
+        scopes: ["write:daily", "read:foods"],
+      },
+      runtime.db,
+    );
+
+    const rejected = await apiRequest("POST", "/days/2026-03-19/entries", {
+      token: writeDailyOnly.token,
+      body: {
+        productId: food.id,
+        quantity: 100,
+        unit: "g",
+      },
+    });
+
+    expect(rejected.status).toBe(403);
+    await expect(rejected.json()).resolves.toMatchObject({
+      ok: false,
+      error: { code: "insufficient_scope" },
+    });
+
+    const accepted = await apiRequest("POST", "/days/2026-03-19/entries", {
+      token: writeDailyAndReadFoods.token,
+      body: {
+        productId: food.id,
+        quantity: 100,
+        unit: "g",
+      },
+    });
+
+    expect(accepted.status).toBe(201);
+    await expect(accepted.json()).resolves.toMatchObject({
+      ok: true,
+      data: {
+        productId: food.id,
+        label: "Scoped cottage cheese (Macro Dairy)",
+        proteinG: 12,
+        carbsG: 3,
+        fatG: 4,
+        caloriesKcal: 96,
+      },
+    });
+  });
+
+  it("requires read:foods to patch meal entries onto products", async () => {
+    const food = await createPersonalFoodProduct(
+      userId,
+      {
+        name: "Scoped protein pudding",
+        brand: "Macro Dairy",
+        source: "manual",
+        proteinPer100: 10,
+        carbsPer100: 8,
+        fatPer100: 2,
+        caloriesPer100: 90,
+      },
+      runtime.db,
+    );
+    const entryResponse = await apiRequest("POST", "/days/2026-03-19/entries", {
+      token: fullToken,
+      body: {
+        label: "Manual snack",
+        proteinG: 1,
+        carbsG: 2,
+        fatG: 3,
+        caloriesKcal: 40,
+      },
+    });
+    expect(entryResponse.status).toBe(201);
+    const entry = (await entryResponse.json()).data;
+    const readWriteDaily = await createApiToken(
+      userId,
+      {
+        name: "Read/write daily without foods",
+        scopes: ["write:daily", "read:daily"],
+      },
+      runtime.db,
+    );
+    const readWriteDailyAndFoods = await createApiToken(
+      userId,
+      {
+        name: "Read/write daily and foods",
+        scopes: ["write:daily", "read:daily", "read:foods"],
+      },
+      runtime.db,
+    );
+
+    const rejected = await apiRequest("PATCH", `/meal-entries/${entry.id}`, {
+      token: readWriteDaily.token,
+      body: { productId: food.id, quantity: 100, unit: "g" },
+    });
+
+    expect(rejected.status).toBe(403);
+    await expect(rejected.json()).resolves.toMatchObject({
+      ok: false,
+      error: { code: "insufficient_scope" },
+    });
+
+    const accepted = await apiRequest("PATCH", `/meal-entries/${entry.id}`, {
+      token: readWriteDailyAndFoods.token,
+      body: { productId: food.id, quantity: 100, unit: "g" },
+    });
+
+    expect(accepted.status).toBe(200);
+    await expect(accepted.json()).resolves.toMatchObject({
+      ok: true,
+      data: {
+        id: entry.id,
+        productId: food.id,
+        label: "Manual snack",
+        proteinG: 10,
+        carbsG: 8,
+        fatG: 2,
+        caloriesKcal: 90,
+      },
+    });
+  });
+
   it("preserves product-backed meal entry macros when patching only the label", async () => {
     const foodResponse = await apiRequest("POST", "/foods", {
       token: fullToken,

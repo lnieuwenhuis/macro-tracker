@@ -77,6 +77,7 @@ type ApiContext = {
   path: string[];
   url: URL;
   userId: string;
+  scopes: readonly ApiScope[];
 };
 
 function jsonWithCors(body: unknown, init?: ResponseInit) {
@@ -120,6 +121,14 @@ function notFound(message = "API endpoint not found.") {
 
 function badRequest(message: string) {
   return error(400, "bad_request", message);
+}
+
+function insufficientScope(scope: ApiScope) {
+  return error(
+    403,
+    "insufficient_scope",
+    `API token is missing required scope: ${scope}.`,
+  );
 }
 
 const UUID_PATH_PARAM_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -191,15 +200,11 @@ async function authenticateRequest(request: Request, scopes: ApiScope[]) {
   if (missingScope) {
     return {
       ok: false as const,
-      response: error(
-        403,
-        "insufficient_scope",
-        `API token is missing required scope: ${missingScope}.`,
-      ),
+      response: insufficientScope(missingScope),
     };
   }
 
-  return { ok: true as const, userId: auth.token.userId };
+  return { ok: true as const, userId: auth.token.userId, scopes: auth.token.scopes };
 }
 
 async function readJson(request: Request) {
@@ -566,6 +571,9 @@ async function dispatchApiRequest(ctx: ApiContext) {
     }
     if (action === "entries" && ctx.method === "POST") {
       const body = requireMealEntryBody(await readJson(ctx.request));
+      if ("productId" in body && body.productId && !ctx.scopes.includes("read:foods")) {
+        return insufficientScope("read:foods");
+      }
       return ok(await createMealEntry(ctx.userId, { ...(body as object), date } as never), 201);
     }
     return methodNotAllowed(ctx.path);
@@ -574,10 +582,15 @@ async function dispatchApiRequest(ctx: ApiContext) {
   if (resource === "meal-entries" && id) {
     const entryId = requireUuidPathParam(id);
     if (!action && ctx.method === "PATCH") {
+      const rawBody = await readJson(ctx.request);
+      const patch = requireMealEntryBody(rawBody);
+      if ("productId" in patch && patch.productId && !ctx.scopes.includes("read:foods")) {
+        return insufficientScope("read:foods");
+      }
       const { body, recalculateProductMacros } = await mergeMealEntryPatchBody(
         ctx.userId,
         entryId,
-        await readJson(ctx.request),
+        patch,
       );
       return ok(
         await updateMealEntry(ctx.userId, entryId, body as never, undefined, {
@@ -904,6 +917,7 @@ export async function handleApiV1Request(
       path: normalizedPath,
       url: new URL(request.url),
       userId: auth.userId,
+      scopes: auth.scopes,
     });
   } catch (caught) {
     return responseForUnknownError(caught);

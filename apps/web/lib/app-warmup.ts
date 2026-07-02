@@ -49,15 +49,6 @@ export function getNearbyDateStrings(selectedDate: string) {
   };
 }
 
-export function getWarmupRoutes(selectedDate: string) {
-  return [
-    `/?date=${selectedDate}`,
-    `/progress?date=${selectedDate}&tab=goals`,
-    `/library?date=${selectedDate}`,
-    `/summary?date=${selectedDate}`,
-  ];
-}
-
 export function normalizeAppWarmupScope(
   value: string | null | undefined,
 ): AppWarmupScope | undefined {

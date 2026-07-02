@@ -6,7 +6,6 @@ import {
   getNearbyDateStrings,
   getRecipeMutationCacheKeys,
   getTemplateMutationCacheKeys,
-  getWarmupRoutes,
   getWeightMutationCacheKeys,
   normalizeAppWarmupScope,
 } from "@/lib/app-warmup";
@@ -18,15 +17,6 @@ describe("app warmup helpers", () => {
       selectedDate: "2026-03-01",
       nextDate: "2026-03-02",
     });
-  });
-
-  it("builds the conservative route list for intent-based prefetching", () => {
-    expect(getWarmupRoutes("2026-03-19")).toEqual([
-      "/?date=2026-03-19",
-      "/progress?date=2026-03-19&tab=goals",
-      "/library?date=2026-03-19",
-      "/summary?date=2026-03-19",
-    ]);
   });
 
   it("parses supported warmup request scopes", () => {
