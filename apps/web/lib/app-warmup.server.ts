@@ -16,6 +16,7 @@ import type { SessionUser } from "@macro-tracker/db";
 
 import {
   type AppWarmupPayload,
+  type AppWarmupScope,
   getNearbyDateStrings,
 } from "./app-warmup";
 
@@ -48,41 +49,66 @@ const defaultDeps: AppWarmupBuilderDeps = {
 export async function buildAppWarmupPayload({
   sessionUser,
   selectedDate,
+  scope = "core",
   deps = defaultDeps,
 }: {
   sessionUser: SessionUser;
   selectedDate: string;
+  scope?: AppWarmupScope;
   deps?: AppWarmupBuilderDeps;
 }): Promise<AppWarmupPayload> {
-  const { previousDate, nextDate } = getNearbyDateStrings(selectedDate);
-
   const [
     user,
     goals,
     templates,
     recipes,
     recentCandidates,
-    previousSummary,
     selectedSummary,
-    nextSummary,
-    periodAverages,
-    recentOverviews,
-    statsData,
-    weight,
   ] = await Promise.all([
     deps.getUserById(sessionUser.userId),
     deps.getUserGoals(sessionUser.userId),
     deps.getTemplates(sessionUser.userId),
     deps.getRecipes(sessionUser.userId),
     deps.getRecentQuickAddCandidates(sessionUser.userId),
-    deps.getDailySummary(sessionUser.userId, previousDate),
     deps.getDailySummary(sessionUser.userId, selectedDate),
-    deps.getDailySummary(sessionUser.userId, nextDate),
-    deps.getPeriodAverages(sessionUser.userId, selectedDate),
-    deps.getRecentDailyOverviews(sessionUser.userId, selectedDate),
-    deps.getStatsPageData(sessionUser.userId, selectedDate),
-    deps.getWeightPageData(sessionUser.userId, selectedDate),
   ]);
+
+  let days: AppWarmupPayload["days"] = {
+    [selectedDate]: selectedSummary,
+  };
+  let summary: AppWarmupPayload["summary"];
+  let weight: AppWarmupPayload["weight"];
+
+  if (scope === "extended") {
+    const { previousDate, nextDate } = getNearbyDateStrings(selectedDate);
+    const [
+      previousSummary,
+      nextSummary,
+      periodAverages,
+      recentOverviews,
+      statsData,
+      weightData,
+    ] = await Promise.all([
+      deps.getDailySummary(sessionUser.userId, previousDate),
+      deps.getDailySummary(sessionUser.userId, nextDate),
+      deps.getPeriodAverages(sessionUser.userId, selectedDate),
+      deps.getRecentDailyOverviews(sessionUser.userId, selectedDate),
+      deps.getStatsPageData(sessionUser.userId, selectedDate),
+      deps.getWeightPageData(sessionUser.userId, selectedDate),
+    ]);
+
+    days = {
+      [previousDate]: previousSummary,
+      [selectedDate]: selectedSummary,
+      [nextDate]: nextSummary,
+    };
+    summary = {
+      periodAverages,
+      recentOverviews,
+      statsData,
+    };
+    weight = weightData;
+  }
 
   return {
     user: {
@@ -93,16 +119,8 @@ export async function buildAppWarmupPayload({
     templates,
     recipes,
     recentCandidates,
-    days: {
-      [previousDate]: previousSummary,
-      [selectedDate]: selectedSummary,
-      [nextDate]: nextSummary,
-    },
-    summary: {
-      periodAverages,
-      recentOverviews,
-      statsData,
-    },
+    days,
+    summary,
     weight,
   };
 }

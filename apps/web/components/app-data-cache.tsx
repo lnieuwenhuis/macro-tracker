@@ -71,7 +71,7 @@ export function AppDataCacheProvider({ children }: { children: ReactNode }) {
 
       try {
         const response = await fetch(
-          `/api/app/warmup?date=${encodeURIComponent(selectedDate)}`,
+          `/api/app/warmup?date=${encodeURIComponent(selectedDate)}&scope=core`,
           {
             credentials: "same-origin",
             headers: {

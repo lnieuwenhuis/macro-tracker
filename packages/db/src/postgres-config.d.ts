@@ -4,7 +4,21 @@ export function getSslConfig(
   connectionString: string,
 ): false | { rejectUnauthorized: boolean };
 
-export function getPostgresConnectionConfig(connectionString: string): {
+export type PostgresConnectionConfigOverrides = Partial<{
+  max: number;
+  idleTimeoutMillis: number;
+  connectionTimeoutMillis: number;
+  allowExitOnIdle: boolean;
+}>;
+
+export function getPostgresConnectionConfig(
+  connectionString: string,
+  overrides?: PostgresConnectionConfigOverrides,
+): {
   connectionString: string;
   ssl: false | { rejectUnauthorized: boolean };
+  max: number;
+  idleTimeoutMillis: number;
+  connectionTimeoutMillis: number;
+  allowExitOnIdle: boolean;
 };
