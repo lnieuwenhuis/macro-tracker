@@ -145,4 +145,59 @@ describe("buildWeightGoalProjection", () => {
       estimatedGoalDate: null,
     });
   });
+
+  it("uses recent sorted entries when long-term and recent trends disagree", () => {
+    const projection = buildWeightGoalProjection(
+      buildWeightData({
+        entries: [
+          {
+            id: "w2",
+            userId: "user",
+            date: "2026-05-01",
+            weightKg: 82,
+            bodyFatPct: null,
+            notes: null,
+          },
+          {
+            id: "w4",
+            userId: "user",
+            date: "2026-06-15",
+            weightKg: 83,
+            bodyFatPct: null,
+            notes: null,
+          },
+          {
+            id: "w1",
+            userId: "user",
+            date: "2026-01-01",
+            weightKg: 90,
+            bodyFatPct: null,
+            notes: null,
+          },
+          {
+            id: "w3",
+            userId: "user",
+            date: "2026-06-01",
+            weightKg: 81,
+            bodyFatPct: null,
+            notes: null,
+          },
+        ],
+        stats: {
+          currentWeight: 83,
+          weekChange: 1,
+          monthChange: 1,
+          trendDirection: "up",
+        },
+      }),
+      "2026-06-15",
+    );
+
+    expect(projection).toMatchObject({
+      status: "moving_away",
+      goalDeltaKg: -3,
+      weeklyRateKg: 1,
+      estimatedGoalDate: null,
+    });
+  });
 });

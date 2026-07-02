@@ -790,13 +790,14 @@ export async function createApiToken(
 
   const scopes = normalizeApiTokenScopes(input.scopes);
   const token = generateApiTokenSecret();
+  const tokenHash = hashApiToken(token);
   const [created] = await database
     .insert(apiTokens)
     .values({
       id: crypto.randomUUID(),
       userId,
-      tokenHash: hashApiToken(token),
-      tokenPrefix: token.slice(0, API_TOKEN_PREFIX_LENGTH),
+      tokenHash,
+      tokenPrefix: buildApiTokenDisplayPrefix(tokenHash),
       name,
       scopes,
       expiresAt: normalizeApiTokenExpiry(input.expiresAt),
@@ -2836,7 +2837,7 @@ export async function getRecipes(
 }
 
 const API_TOKEN_PREFIX = "mtk_v1_";
-const API_TOKEN_PREFIX_LENGTH = 19;
+const API_TOKEN_FINGERPRINT_LENGTH = 12;
 const API_TOKEN_DEFAULT_EXPIRY_DAYS = 90;
 const API_TOKEN_LAST_USED_THROTTLE_MS = 5 * 60 * 1000;
 
@@ -2894,6 +2895,10 @@ function mapApiTokenRow(row: ApiTokenSelectRow): ApiTokenRecord {
 
 function hashApiToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
+}
+
+function buildApiTokenDisplayPrefix(tokenHash: string) {
+  return `${API_TOKEN_PREFIX}${tokenHash.slice(0, API_TOKEN_FINGERPRINT_LENGTH)}`;
 }
 
 function generateApiTokenSecret() {

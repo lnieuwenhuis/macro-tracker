@@ -76,17 +76,24 @@ describe("API token settings actions", () => {
     const created = await createApiTokenAction({}, formData);
 
     expect(created.ok).toBe(true);
+    if (!created.token || !created.record) {
+      throw new Error("Expected API token creation to succeed.");
+    }
     expect(created.token).toMatch(/^mtk_v1_/);
+    const rawTokenSecretPrefix = created.token.slice("mtk_v1_".length, 19);
     expect(created.record).toMatchObject({
       userId: mocked.userId,
       name: "Shortcut",
+      tokenPrefix: expect.stringMatching(/^mtk_v1_[a-f0-9]{12}$/),
       scopes: ["read:daily", "write:daily"],
       expiresAt: null,
     });
+    expect(created.record.tokenPrefix).not.toContain(rawTokenSecretPrefix);
     expect(mocked.revalidatePath).toHaveBeenCalledWith("/settings/api");
 
     const listed = await listApiTokens(mocked.userId, runtime.db);
     expect(listed).toHaveLength(1);
+    expect(listed[0]?.tokenPrefix).not.toContain(rawTokenSecretPrefix);
     expect(JSON.stringify(listed)).not.toContain(created.token);
 
     const revokeData = new FormData();

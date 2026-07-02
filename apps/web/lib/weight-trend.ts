@@ -21,6 +21,7 @@ export type WeightGoalProjection = {
 
 const GOAL_EPSILON_KG = 0.1;
 const RATE_EPSILON_KG_PER_WEEK = 0.05;
+const RECENT_TREND_WINDOW_DAYS = 30;
 
 function roundToSingleDecimal(value: number) {
   return Math.round(value * 10) / 10;
@@ -35,6 +36,22 @@ function daysBetween(startDate: string, endDate: string) {
   const end = parseISO(endDate).getTime();
   const diff = Math.round((end - start) / (24 * 60 * 60 * 1000));
   return Math.max(0, diff);
+}
+
+function getRecentTrendEntries(entries: WeightPageData["entries"]) {
+  const sortedEntries = [...entries].sort((a, b) => a.date.localeCompare(b.date));
+  const latest = sortedEntries[sortedEntries.length - 1];
+  if (!latest) {
+    return [];
+  }
+
+  const latestTime = parseISO(latest.date).getTime();
+  const windowStartTime = latestTime - RECENT_TREND_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+  const recentEntries = sortedEntries.filter(
+    (entry) => parseISO(entry.date).getTime() >= windowStartTime,
+  );
+
+  return recentEntries.length >= 2 ? recentEntries : sortedEntries.slice(-2);
 }
 
 export function buildWeightGoalProjection(
@@ -72,8 +89,9 @@ export function buildWeightGoalProjection(
     };
   }
 
-  const latest = weightData.entries[weightData.entries.length - 1]!;
-  const earliest = weightData.entries[0]!;
+  const recentEntries = getRecentTrendEntries(weightData.entries);
+  const latest = recentEntries[recentEntries.length - 1]!;
+  const earliest = recentEntries[0]!;
   const elapsedDays = daysBetween(earliest.date, latest.date);
   const goalDeltaKg = roundToSingleDecimal(goalWeightKg - latest.weightKg);
   const absGoalDelta = Math.abs(goalDeltaKg);

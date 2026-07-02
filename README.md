@@ -72,7 +72,7 @@ For a deployed instance, set `APP_URL` to the public URL and use a real `SESSION
 
 ## API Access
 
-Macro Tracker API v1 is available under `/api/v1/*`. Create personal access tokens from `/settings/api`, then send them as `Authorization: Bearer ***`. Tokens start with `mtk_v1_`, are shown only once, store only a hash in the database, and can be scoped to read or write daily logs, foods, templates, recipes, weight, goals, and stats.
+Macro Tracker API v1 is available under `/api/v1/*`. Create personal access tokens from `/settings/api`, then send them as `Authorization: Bearer <token>`. Tokens start with `mtk_v1_`, are shown only once, store only a hash in the database, and can be scoped to read or write daily logs, foods, templates, recipes, weight, goals, and stats.
 
 OpenAPI JSON is available at `/api/v1/openapi.json`, and the readable docs page is `/docs/api`. API responses use `{ "ok": true, "data": ... }` for success and `{ "ok": false, "error": { "code": "...", "message": "..." } }` for failures. Public API dates use `YYYY-MM-DD`.
 
