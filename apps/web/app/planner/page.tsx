@@ -18,14 +18,14 @@ export default async function PlannerPage({ searchParams }: PlannerPageProps) {
     ],
     [],
   );
-  const [templates, recipeCount, dailySummary, shoppingSummaries] = await Promise.all([
+  const [templates, recipeCount, shoppingSummaries] = await Promise.all([
     getTemplates(sessionUser.userId),
     getRecipeCount(sessionUser.userId),
-    getDailySummary(sessionUser.userId, selectedDate),
     Promise.all(
       shoppingDates.map((date) => getDailySummary(sessionUser.userId, date)),
     ),
   ]);
+  const dailySummary = shoppingSummaries[0]!;
 
   return (
     <PlannerShell
