@@ -58,8 +58,14 @@ export function getWarmupRoutes(selectedDate: string) {
   ];
 }
 
-export function normalizeAppWarmupScope(value: string | null | undefined): AppWarmupScope {
-  return value === "extended" ? "extended" : "core";
+export function normalizeAppWarmupScope(
+  value: string | null | undefined,
+): AppWarmupScope | undefined {
+  if (!value || value === "core") {
+    return "core";
+  }
+
+  return value === "extended" ? "extended" : undefined;
 }
 
 export function getDailyMutationCacheKeys(date: string): AppWarmupCacheKey[] {

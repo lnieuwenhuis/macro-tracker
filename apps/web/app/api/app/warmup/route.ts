@@ -6,10 +6,21 @@ import { normalizeAppWarmupScope } from "@/lib/app-warmup";
 import { buildAppWarmupPayload } from "@/lib/app-warmup.server";
 
 export async function GET(request: Request) {
-  const sessionUser = await requireOnboardedSessionUser();
   const url = new URL(request.url);
+  const requestedScope = url.searchParams.get("scope");
+  const scope = normalizeAppWarmupScope(requestedScope);
+
+  if (!scope) {
+    return NextResponse.json(
+      {
+        error: `Unsupported warmup scope "${requestedScope}". Expected "core" or "extended".`,
+      },
+      { status: 400 },
+    );
+  }
+
+  const sessionUser = await requireOnboardedSessionUser();
   const selectedDate = ensureDateString(url.searchParams.get("date") ?? undefined);
-  const scope = normalizeAppWarmupScope(url.searchParams.get("scope"));
   const payload = await buildAppWarmupPayload({ sessionUser, selectedDate, scope });
 
   return NextResponse.json(payload);

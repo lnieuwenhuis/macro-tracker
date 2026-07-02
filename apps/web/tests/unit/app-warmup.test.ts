@@ -29,11 +29,16 @@ describe("app warmup helpers", () => {
     ]);
   });
 
-  it("defaults warmup requests to the core payload", () => {
+  it("parses supported warmup request scopes", () => {
     expect(normalizeAppWarmupScope(undefined)).toBe("core");
+    expect(normalizeAppWarmupScope(null)).toBe("core");
+    expect(normalizeAppWarmupScope("")).toBe("core");
     expect(normalizeAppWarmupScope("core")).toBe("core");
     expect(normalizeAppWarmupScope("extended")).toBe("extended");
-    expect(normalizeAppWarmupScope("everything")).toBe("core");
+  });
+
+  it("rejects unsupported non-empty warmup request scopes", () => {
+    expect(normalizeAppWarmupScope("everything")).toBeUndefined();
   });
 
   it("keeps cache invalidation scoped to affected data", () => {
