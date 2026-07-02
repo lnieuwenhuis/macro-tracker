@@ -18,7 +18,7 @@ import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { handleApiV1Request } from "@/lib/api-v1";
-import { API_V1_ENDPOINTS, getApiV1OpenApi } from "@/lib/api-v1-openapi";
+import { API_V1_ENDPOINTS, formatApiV1ScopeSummary, getApiV1OpenApi } from "@/lib/api-v1-openapi";
 import * as apiV1Route from "@/app/api/v1/[[...path]]/route";
 
 describe("Macro Tracker API v1", () => {
@@ -2005,6 +2005,36 @@ describe("Macro Tracker API v1", () => {
       security: [{ bearerAuth: [] }],
       "x-required-scopes": ["read:stats", "read:weight", "read:goals"],
     });
+    expect(payload.paths["/days/{date}/entries"]?.post).toMatchObject({
+      "x-required-scopes": ["write:daily"],
+      "x-conditional-required-scopes": [
+        {
+          scopes: ["read:foods"],
+          when: "productId is supplied",
+        },
+      ],
+    });
+    expect(payload.paths["/meal-entries/{id}"]?.patch).toMatchObject({
+      "x-required-scopes": ["write:daily", "read:daily"],
+      "x-conditional-required-scopes": [
+        {
+          scopes: ["read:foods"],
+          when: "productId is supplied",
+        },
+      ],
+    });
+    const mealEntryCreateEndpoint = API_V1_ENDPOINTS.find(
+      (endpoint) => endpoint.path === "/days/{date}/entries",
+    );
+    const mealEntryPatchEndpoint = API_V1_ENDPOINTS.find(
+      (endpoint) => endpoint.path === "/meal-entries/{id}",
+    );
+    expect(formatApiV1ScopeSummary(mealEntryCreateEndpoint!.methods[0]!)).toContain(
+      "Additionally requires read:foods when productId is supplied.",
+    );
+    expect(formatApiV1ScopeSummary(mealEntryPatchEndpoint!.methods[0]!)).toContain(
+      "Additionally requires read:foods when productId is supplied.",
+    );
     expect(payload.paths["/foods"]?.post.responses).toHaveProperty("201");
     expect(payload.paths["/foods"]?.post.responses).toHaveProperty("405");
     expect(payload.paths["/weight/entries"]?.post.responses).toHaveProperty("409");
