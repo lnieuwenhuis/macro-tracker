@@ -147,6 +147,20 @@ describe("API token settings actions", () => {
     });
   });
 
+  it("rejects invalid API token expiry values without creating a token", async () => {
+    const formData = new FormData();
+    formData.set("name", "Shortcut");
+    formData.set("expires", "forever");
+    formData.append("scopes", "read:daily");
+
+    await expect(createApiTokenAction({}, formData)).resolves.toEqual({
+      ok: false,
+      error: "API token expiry is invalid.",
+    });
+    await expect(listApiTokens(mocked.userId, runtime.db)).resolves.toHaveLength(0);
+    expect(mocked.revalidatePath).not.toHaveBeenCalled();
+  });
+
   it("hides unexpected API token creation failures from the client", async () => {
     const rawMessage = "database password leaked in driver error";
     const failingDb = new Proxy(runtime.db, {
