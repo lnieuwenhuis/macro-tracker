@@ -1,15 +1,12 @@
 "use client";
 
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
-import { useEffect, useState, useTransition } from "react";
+import { useState, useTransition } from "react";
 
 import type { ComposeAction } from "@/lib/compose";
 import { getLocalDateString } from "@/lib/startup-date";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
-import { getWarmupRoutes } from "@/lib/app-warmup";
-import { prefetchFullRoute } from "@/lib/full-prefetch";
 
-import { useWarmAppData } from "./app-data-cache";
 import { ExperimentalAddSheet } from "./experimental-add-sheet";
 import { ExperimentalBottomNav } from "./experimental-bottom-nav";
 
@@ -52,17 +49,6 @@ export function ExperimentalLayoutNav() {
   const [addSheetOpen, setAddSheetOpen] = useState(false);
   const selectedDate = searchParams.get("date") ?? getLocalDateString();
   const warmupEnabled = isAppPathname(pathname);
-  useWarmAppData(selectedDate, warmupEnabled);
-
-  useEffect(() => {
-    if (!warmupEnabled) {
-      return;
-    }
-
-    for (const href of getWarmupRoutes(selectedDate)) {
-      prefetchFullRoute(router, href);
-    }
-  }, [router, selectedDate, warmupEnabled]);
 
   if (!warmupEnabled) {
     return null;

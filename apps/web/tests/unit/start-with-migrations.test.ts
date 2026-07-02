@@ -1,10 +1,41 @@
-import { describe, expect, it } from "vitest";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 type StartupMigrationModule = {
   getPostgresConnectionConfig: (connectionString: string) => {
     connectionString: string;
     ssl: false | { rejectUnauthorized: boolean };
+    max: number;
+    idleTimeoutMillis: number;
+    connectionTimeoutMillis: number;
+    allowExitOnIdle: boolean;
   };
+  getStartupMigrationConnectionConfig: (connectionString: string) => {
+    connectionString: string;
+    ssl: false | { rejectUnauthorized: boolean };
+    max: number;
+    idleTimeoutMillis: number;
+    connectionTimeoutMillis: number;
+    allowExitOnIdle: boolean;
+  };
+  getStandaloneServerPath: (appDir?: string) => string | undefined;
+};
+
+const poolDefaults = {
+  max: 3,
+  idleTimeoutMillis: 10_000,
+  connectionTimeoutMillis: 5_000,
+  allowExitOnIdle: true,
+};
+
+const originalPoolEnv = {
+  POSTGRES_POOL_MAX: process.env.POSTGRES_POOL_MAX,
+  POSTGRES_POOL_IDLE_TIMEOUT_MS: process.env.POSTGRES_POOL_IDLE_TIMEOUT_MS,
+  POSTGRES_POOL_CONNECTION_TIMEOUT_MS:
+    process.env.POSTGRES_POOL_CONNECTION_TIMEOUT_MS,
 };
 
 async function getStartupMigrationModule() {
@@ -17,6 +48,22 @@ async function getStartupMigrationModule() {
 }
 
 describe("startup migration database SSL config", () => {
+  beforeEach(() => {
+    delete process.env.POSTGRES_POOL_MAX;
+    delete process.env.POSTGRES_POOL_IDLE_TIMEOUT_MS;
+    delete process.env.POSTGRES_POOL_CONNECTION_TIMEOUT_MS;
+  });
+
+  afterEach(() => {
+    for (const [key, value] of Object.entries(originalPoolEnv)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
+  });
+
   it("uses TLS with chain verification when remote sslmode is omitted", async () => {
     const { getPostgresConnectionConfig } = await getStartupMigrationModule();
 
@@ -25,6 +72,7 @@ describe("startup migration database SSL config", () => {
     ).toEqual({
       connectionString: "postgres://user:pass@db.example.com:5432/macro",
       ssl: { rejectUnauthorized: true },
+      ...poolDefaults,
     });
   });
 
@@ -48,6 +96,7 @@ describe("startup migration database SSL config", () => {
     ).toEqual({
       connectionString: "postgres://user:pass@db.example.com:5432/macro",
       ssl: { rejectUnauthorized: false },
+      ...poolDefaults,
     });
   });
 
@@ -59,6 +108,7 @@ describe("startup migration database SSL config", () => {
     ).toEqual({
       connectionString: "postgres://user:pass@localhost:5432/macro",
       ssl: false,
+      ...poolDefaults,
     });
   });
 
@@ -82,6 +132,60 @@ describe("startup migration database SSL config", () => {
     ).toEqual({
       connectionString: "postgres://user:pass@db.example.com:5432/macro",
       ssl: { rejectUnauthorized: true },
+      ...poolDefaults,
     });
+  });
+
+  it("caps startup migrations at one database connection", async () => {
+    const { getStartupMigrationConnectionConfig } =
+      await getStartupMigrationModule();
+
+    expect(
+      getStartupMigrationConnectionConfig(
+        "postgres://user:pass@db.example.com:5432/macro",
+      ),
+    ).toEqual({
+      connectionString: "postgres://user:pass@db.example.com:5432/macro",
+      ssl: { rejectUnauthorized: true },
+      ...poolDefaults,
+      max: 1,
+    });
+  });
+
+  it("prefers the traced standalone app server when present", async () => {
+    const { getStandaloneServerPath } = await getStartupMigrationModule();
+    const appDir = await mkdtemp(join(tmpdir(), "macro-standalone-"));
+    const serverPath = join(
+      appDir,
+      ".next",
+      "standalone",
+      "apps",
+      "web",
+      "server.js",
+    );
+
+    try {
+      await mkdir(dirname(serverPath), { recursive: true });
+      await writeFile(serverPath, "");
+
+      expect(getStandaloneServerPath(appDir)).toBe(serverPath);
+    } finally {
+      await rm(appDir, { force: true, recursive: true });
+    }
+  });
+
+  it("falls back to the root standalone server when needed", async () => {
+    const { getStandaloneServerPath } = await getStartupMigrationModule();
+    const appDir = await mkdtemp(join(tmpdir(), "macro-standalone-"));
+    const serverPath = join(appDir, ".next", "standalone", "server.js");
+
+    try {
+      await mkdir(dirname(serverPath), { recursive: true });
+      await writeFile(serverPath, "");
+
+      expect(getStandaloneServerPath(appDir)).toBe(serverPath);
+    } finally {
+      await rm(appDir, { force: true, recursive: true });
+    }
   });
 });

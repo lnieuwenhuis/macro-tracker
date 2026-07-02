@@ -11,7 +11,7 @@
 
 Macro Tracker is a phone-first macro tracking app for the day-to-day work of eating like you meant to. It is built around the stuff I actually want when I am logging food: fast daily entries, planned meals, reusable meals and days, barcode scanning, recipes, weight tracking, and enough stats to see patterns without turning breakfast into a spreadsheet ceremony.
 
-Current app version: `v2.10`
+Current app version: `v2.11`
 
 ## Try It
 
@@ -70,6 +70,8 @@ pnpm --filter @macro-tracker/web start
 
 For a deployed instance, set `APP_URL` to the public URL and use a real `SESSION_SECRET`. If you use remote PostgreSQL, `DATABASE_URL` uses TLS with certificate verification by default when `sslmode` is omitted or set to `verify-full`; use `sslmode=require` only when your provider requires encrypted TLS without certificate verification.
 
+The production build uses Next.js standalone output and starts that smaller server automatically when it is present. PostgreSQL pools default to a small personal-instance footprint of 3 connections; set `POSTGRES_POOL_MAX` if you need a different cap.
+
 ## API Access
 
 Macro Tracker API v1 is available under `/api/v1/*`. Create personal access tokens from `/settings/api`, then send them as `Authorization: Bearer <token>`. Tokens start with `mtk_v1_`, are shown only once, store only a hash in the database, and can be scoped to read or write daily logs, foods, templates, recipes, weight, goals, and stats.
@@ -85,6 +87,10 @@ Useful optional environment variables:
 | `APP_TRUSTED_ORIGINS` | Extra comma-separated origins that are allowed during auth flows. |
 | `SHOO_BASE_URL` | Alternate Shoo base URL. Defaults to `https://shoo.dev`. |
 | `ADMIN_OWNER_EMAILS` | Comma-separated emails that should get owner-level admin access. |
+| `POSTGRES_POOL_MAX` | Optional PostgreSQL pool cap. Defaults to `3` for small deployments. |
+| `POSTGRES_POOL_IDLE_TIMEOUT_MS` | Optional idle timeout for pooled PostgreSQL clients. Defaults to `10000`. |
+| `POSTGRES_POOL_CONNECTION_TIMEOUT_MS` | Optional PostgreSQL connection timeout. Defaults to `5000`. |
+| `NEXT_CACHE_MAX_MEMORY_MB` | Optional Next.js in-memory cache cap in MB. Defaults to `8`; set `0` to disable it. |
 | `OPENROUTER_API_KEY` | Enables food-photo estimates. |
 | `OPENROUTER_MODEL` | Optional primary OpenRouter model. Must be free, for example `google/gemma-4-26b-a4b-it:free`. |
 | `OPENROUTER_FALLBACK_MODELS` | Optional comma-separated free fallback models. |

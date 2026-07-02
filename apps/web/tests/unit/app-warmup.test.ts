@@ -8,6 +8,7 @@ import {
   getTemplateMutationCacheKeys,
   getWarmupRoutes,
   getWeightMutationCacheKeys,
+  normalizeAppWarmupScope,
 } from "@/lib/app-warmup";
 
 describe("app warmup helpers", () => {
@@ -19,18 +20,20 @@ describe("app warmup helpers", () => {
     });
   });
 
-  it("builds the hot route list for instant navigation", () => {
+  it("builds the conservative route list for intent-based prefetching", () => {
     expect(getWarmupRoutes("2026-03-19")).toEqual([
       "/?date=2026-03-19",
-      "/?date=2026-03-18",
-      "/?date=2026-03-20",
       "/progress?date=2026-03-19&tab=goals",
-      "/progress?date=2026-03-19&tab=weight",
-      "/recipes?date=2026-03-19",
-      "/planner?date=2026-03-19",
       "/library?date=2026-03-19",
       "/summary?date=2026-03-19",
     ]);
+  });
+
+  it("defaults warmup requests to the core payload", () => {
+    expect(normalizeAppWarmupScope(undefined)).toBe("core");
+    expect(normalizeAppWarmupScope("core")).toBe("core");
+    expect(normalizeAppWarmupScope("extended")).toBe("extended");
+    expect(normalizeAppWarmupScope("everything")).toBe("core");
   });
 
   it("keeps cache invalidation scoped to affected data", () => {
