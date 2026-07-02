@@ -4199,17 +4199,115 @@ export async function listAdminBarcodeProducts(
   };
 }
 
-function normalizeReviewName(value: string) {
-  return value.trim().toLowerCase().replace(/\s+/g, " ");
+type AdminBarcodeReviewQueueRow = {
+  id: string;
+  owner_user_id: string | null;
+  scope: string;
+  source: string;
+  barcode: string | null;
+  name: string;
+  brand: string;
+  default_serving_quantity: string | number;
+  default_serving_unit: string;
+  protein_per_100: string | number;
+  carbs_per_100: string | number;
+  fat_per_100: string | number;
+  calories_per_100: number;
+  serving_weight_g: string | number | null;
+  serving_volume_ml: string | number | null;
+  submitted_by_user_id: string | null;
+  deleted_by_user_id: string | null;
+  source_provider: string | null;
+  source_confidence: string | number | null;
+  source_metadata: unknown;
+  corrected_from_product_id: string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
+  deleted_at: Date | string | null;
+  revision_count_30_days: string | number;
+  duplicate_name_count: string | number;
+  latest_audit_action: string | null;
+  latest_audit_at: Date | string | null;
+  recently_deleted: boolean;
+  recently_restored: boolean;
+};
+
+function rawRows<T>(result: unknown): T[] {
+  if (Array.isArray(result)) {
+    return result as T[];
+  }
+  if (
+    result &&
+    typeof result === "object" &&
+    Array.isArray((result as { rows?: unknown[] }).rows)
+  ) {
+    return (result as { rows: T[] }).rows;
+  }
+  return [];
 }
 
-function isRecentTimestamp(value: string | null, cutoff: Date) {
-  if (!value) {
-    return false;
+function mapAdminBarcodeReviewQueueRow(
+  row: AdminBarcodeReviewQueueRow,
+): AdminBarcodeReviewQueueItem {
+  const product = mapFoodProductRow({
+    id: row.id,
+    ownerUserId: row.owner_user_id,
+    scope: row.scope,
+    source: row.source,
+    barcode: row.barcode,
+    name: row.name,
+    brand: row.brand,
+    defaultServingQuantity: row.default_serving_quantity,
+    defaultServingUnit: row.default_serving_unit,
+    proteinPer100: row.protein_per_100,
+    carbsPer100: row.carbs_per_100,
+    fatPer100: row.fat_per_100,
+    caloriesPer100: row.calories_per_100,
+    servingWeightG: row.serving_weight_g,
+    servingVolumeMl: row.serving_volume_ml,
+    submittedByUserId: row.submitted_by_user_id,
+    deletedByUserId: row.deleted_by_user_id,
+    sourceProvider: row.source_provider,
+    sourceConfidence: row.source_confidence,
+    sourceMetadata: row.source_metadata,
+    correctedFromProductId: row.corrected_from_product_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    deletedAt: row.deleted_at,
+  });
+  const revisionCount30Days = toNumber(row.revision_count_30_days);
+  const duplicateNameCount = toNumber(row.duplicate_name_count);
+  const reviewReasons: AdminBarcodeReviewQueueItem["reviewReasons"] = [];
+
+  if (product.sourceConfidence != null && product.sourceConfidence < 0.75) {
+    reviewReasons.push("low_confidence");
+  }
+  if (product.servingWeightG == null && product.servingVolumeMl == null) {
+    reviewReasons.push("missing_serving_size");
+  }
+  if (row.recently_deleted) {
+    reviewReasons.push("recently_deleted");
+  }
+  if (row.recently_restored) {
+    reviewReasons.push("recently_restored");
+  }
+  if (duplicateNameCount > 1) {
+    reviewReasons.push("duplicate_name");
+  }
+  if (revisionCount30Days >= 3) {
+    reviewReasons.push("frequent_revisions");
   }
 
-  const timestamp = new Date(value).getTime();
-  return Number.isFinite(timestamp) && timestamp >= cutoff.getTime();
+  return {
+    ...product,
+    reviewReasons,
+    revisionCount30Days,
+    duplicateNameCount,
+    latestAuditAction: row.latest_audit_action,
+    latestAuditAt: row.latest_audit_at
+      ? toTimestampString(row.latest_audit_at)
+      : null,
+  };
 }
 
 export async function listAdminBarcodeReviewQueue(
@@ -4224,111 +4322,84 @@ export async function listAdminBarcodeReviewQueue(
   const pageSize = input.pageSize ?? 25;
   const offset = (page - 1) * pageSize;
   const reviewCutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const candidateCtes = sql`
+    with barcode_products as (
+      select
+        *,
+        nullif(regexp_replace(lower(trim(name)), '\\s+', ' ', 'g'), '') as review_name
+      from food_products
+      where owner_user_id is null and source = 'barcode'
+    ),
+    duplicate_names as (
+      select review_name, count(*) as duplicate_name_count
+      from barcode_products
+      where review_name is not null
+      group by review_name
+    ),
+    revision_counts as (
+      select product_id, count(*) as revision_count_30_days
+      from food_product_revisions
+      where created_at >= ${reviewCutoff}
+      group by product_id
+    ),
+    latest_audit as (
+      select distinct on (target_id) target_id, action, created_at
+      from admin_audit_events
+      where target_type = 'food_product' and created_at >= ${reviewCutoff}
+      order by target_id, created_at desc
+    ),
+    recently_restored as (
+      select target_id
+      from admin_audit_events
+      where
+        target_type = 'food_product'
+        and action = 'barcode.restored'
+        and created_at >= ${reviewCutoff}
+      group by target_id
+    ),
+    review_candidates as (
+      select
+        bp.*,
+        coalesce(rc.revision_count_30_days, 0) as revision_count_30_days,
+        coalesce(dn.duplicate_name_count, 0) as duplicate_name_count,
+        la.action as latest_audit_action,
+        la.created_at as latest_audit_at,
+        bp.deleted_at is not null and bp.deleted_at >= ${reviewCutoff} as recently_deleted,
+        rr.target_id is not null as recently_restored
+      from barcode_products bp
+      left join duplicate_names dn on dn.review_name = bp.review_name
+      left join revision_counts rc on rc.product_id = bp.id
+      left join latest_audit la on la.target_id = bp.id::text
+      left join recently_restored rr on rr.target_id = bp.id::text
+      where
+        (bp.source_confidence is not null and bp.source_confidence < 0.75)
+        or (bp.serving_weight_g is null and bp.serving_volume_ml is null)
+        or (bp.deleted_at is not null and bp.deleted_at >= ${reviewCutoff})
+        or rr.target_id is not null
+        or coalesce(dn.duplicate_name_count, 0) > 1
+        or coalesce(rc.revision_count_30_days, 0) >= 3
+    )`;
 
-  const [productRows, revisionRows, auditRows] = await Promise.all([
-    database
-      .select(foodProductSelectColumns)
-      .from(foodProducts)
-      .where(
-        and(
-          isNull(foodProducts.ownerUserId),
-          eq(foodProducts.source, "barcode"),
-        ),
-      )
-      .orderBy(desc(foodProducts.updatedAt)),
-    database
-      .select({
-        productId: foodProductRevisions.productId,
-        total: count(),
-      })
-      .from(foodProductRevisions)
-      .where(gte(foodProductRevisions.createdAt, reviewCutoff))
-      .groupBy(foodProductRevisions.productId),
-    database
-      .select({
-        targetId: adminAuditEvents.targetId,
-        action: adminAuditEvents.action,
-        createdAt: adminAuditEvents.createdAt,
-      })
-      .from(adminAuditEvents)
-      .where(
-        and(
-          eq(adminAuditEvents.targetType, "food_product"),
-          gte(adminAuditEvents.createdAt, reviewCutoff),
-        ),
-      )
-      .orderBy(desc(adminAuditEvents.createdAt)),
+  const [countResult, pageResult] = await Promise.all([
+    database.execute(sql`${candidateCtes}
+      select count(*) as total_count from review_candidates`),
+    database.execute(sql<AdminBarcodeReviewQueueRow>`${candidateCtes}
+      select *
+      from review_candidates
+      order by updated_at desc
+      limit ${pageSize}
+      offset ${offset}`),
   ]);
-
-  const products = productRows.map(mapFoodProductRow);
-  const nameCounts = new Map<string, number>();
-  for (const product of products) {
-    const name = normalizeReviewName(product.name);
-    if (name) {
-      nameCounts.set(name, (nameCounts.get(name) ?? 0) + 1);
-    }
-  }
-
-  const revisionCounts = new Map(
-    revisionRows.map((row) => [row.productId, toNumber(row.total)]),
+  const totalCount = toNumber(
+    rawRows<{ total_count: string | number }>(countResult)[0]?.total_count,
   );
-  const latestAuditByTarget = new Map<
-    string,
-    { action: string; createdAt: string }
-  >();
-  for (const row of auditRows) {
-    if (!latestAuditByTarget.has(row.targetId)) {
-      latestAuditByTarget.set(row.targetId, {
-        action: row.action,
-        createdAt: toTimestampString(row.createdAt),
-      });
-    }
-  }
-
-  const queueItems: AdminBarcodeReviewQueueItem[] = products
-    .map((product) => {
-      const latestAudit = latestAuditByTarget.get(product.id) ?? null;
-      const revisionCount30Days = revisionCounts.get(product.id) ?? 0;
-      const duplicateNameCount =
-        nameCounts.get(normalizeReviewName(product.name)) ?? 0;
-      const reviewReasons: AdminBarcodeReviewQueueItem["reviewReasons"] = [];
-
-      if (product.sourceConfidence != null && product.sourceConfidence < 0.75) {
-        reviewReasons.push("low_confidence");
-      }
-      if (product.servingWeightG == null && product.servingVolumeMl == null) {
-        reviewReasons.push("missing_serving_size");
-      }
-      if (isRecentTimestamp(product.deletedAt, reviewCutoff)) {
-        reviewReasons.push("recently_deleted");
-      }
-      if (
-        latestAudit?.action === "barcode.restored" &&
-        isRecentTimestamp(latestAudit.createdAt, reviewCutoff)
-      ) {
-        reviewReasons.push("recently_restored");
-      }
-      if (duplicateNameCount > 1) {
-        reviewReasons.push("duplicate_name");
-      }
-      if (revisionCount30Days >= 3) {
-        reviewReasons.push("frequent_revisions");
-      }
-
-      return {
-        ...product,
-        reviewReasons,
-        revisionCount30Days,
-        duplicateNameCount,
-        latestAuditAction: latestAudit?.action ?? null,
-        latestAuditAt: latestAudit?.createdAt ?? null,
-      };
-    })
-    .filter((product) => product.reviewReasons.length > 0);
+  const queueItems = rawRows<AdminBarcodeReviewQueueRow>(pageResult).map(
+    mapAdminBarcodeReviewQueueRow,
+  );
 
   return {
-    items: queueItems.slice(offset, offset + pageSize),
-    pagination: buildPagination(page, pageSize, queueItems.length),
+    items: queueItems,
+    pagination: buildPagination(page, pageSize, totalCount),
   };
 }
 

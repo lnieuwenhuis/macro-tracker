@@ -378,6 +378,21 @@ describe("admin queries", () => {
     );
     await softDeleteAdminBarcodeProduct(adminId, restored.id, runtime.db);
     await restoreAdminBarcodeProduct(adminId, restored.id, runtime.db);
+    await updateAdminBarcodeProduct(
+      adminId,
+      restored.id,
+      {
+        barcode: "9900000000504",
+        name: "Recently Restored Food Updated",
+        brands: "Macro Lab",
+        proteinG: 11,
+        carbsG: 20,
+        fatG: 5,
+        caloriesKcal: 169,
+        servingSizeG: 100,
+      },
+      runtime.db,
+    );
     const frequent = await createAdminBarcodeProduct(
       adminId,
       {
@@ -441,6 +456,7 @@ describe("admin queries", () => {
     expect(byId.get(duplicateName.id)?.reviewReasons).toContain("duplicate_name");
     expect(byId.get(deleted.id)?.reviewReasons).toContain("recently_deleted");
     expect(byId.get(restored.id)?.reviewReasons).toContain("recently_restored");
+    expect(byId.get(restored.id)?.latestAuditAction).toBe("barcode.updated");
     expect(byId.get(frequent.id)?.reviewReasons).toContain("frequent_revisions");
   });
 

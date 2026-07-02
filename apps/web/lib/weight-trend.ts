@@ -140,7 +140,7 @@ export function buildWeightGoalProjection(
   }
 
   const daysToGoal = Math.ceil(absGoalDelta / Math.abs(dailyRateKg));
-  const estimatedGoalDate = format(addDays(parseISO(referenceDate), daysToGoal), "yyyy-MM-dd");
+  const estimatedGoalDate = format(addDays(parseISO(latest.date), daysToGoal), "yyyy-MM-dd");
 
   return {
     status: "moving_toward",

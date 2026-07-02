@@ -99,6 +99,16 @@ describe("buildWeightGoalProjection", () => {
     });
   });
 
+  it("projects from the latest entry date instead of the selected reference date", () => {
+    const projection = buildWeightGoalProjection(buildWeightData(), "2026-07-01");
+
+    expect(projection).toMatchObject({
+      status: "moving_toward",
+      estimatedGoalDate: "2026-06-29",
+      daysToGoal: 14,
+    });
+  });
+
   it("detects moving away from goal", () => {
     expect(
       buildWeightGoalProjection(
