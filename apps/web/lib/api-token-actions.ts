@@ -60,6 +60,13 @@ export async function createApiTokenAction(
   const scopes = getSelectedScopes(formData);
   const expires = getStringValue(formData, "expires");
 
+  if (expires !== "90" && expires !== "never") {
+    return {
+      ok: false,
+      error: "API token expiry is invalid.",
+    };
+  }
+
   try {
     const created = await createApiToken(sessionUser.userId, {
       name,

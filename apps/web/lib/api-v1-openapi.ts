@@ -24,6 +24,7 @@ type ApiEndpointMethod = {
   scopes: ApiScope[];
   successStatus?: 200 | 201;
   requestBody?: ApiRequestBodyKey;
+  hasConflictResponse?: boolean;
 };
 
 type ApiEndpoint = {
@@ -146,13 +147,13 @@ export const API_V1_ENDPOINTS: ApiEndpoint[] = [
     path: "/weight/entries",
     methods: [
       { method: "get", summary: "List weight entries", scopes: ["read:weight"] },
-      { method: "post", summary: "Create a weight entry", scopes: ["write:weight"], successStatus: 201, requestBody: "weightEntry" },
+      { method: "post", summary: "Create a weight entry", scopes: ["write:weight"], successStatus: 201, requestBody: "weightEntry", hasConflictResponse: true },
     ],
   },
   {
     path: "/weight/entries/{id}",
     methods: [
-      { method: "patch", summary: "Update a weight entry", scopes: ["write:weight", "read:weight"], requestBody: "weightEntryPatch" },
+      { method: "patch", summary: "Update a weight entry", scopes: ["write:weight", "read:weight"], requestBody: "weightEntryPatch", hasConflictResponse: true },
       { method: "delete", summary: "Delete a weight entry", scopes: ["write:weight"] },
     ],
   },
@@ -605,6 +606,14 @@ export function getApiV1OpenApi() {
               description: "Method not allowed",
               content: responseSchema(),
             },
+            ...(method.hasConflictResponse
+              ? {
+                  "409": {
+                    description: "Resource conflict",
+                    content: responseSchema(),
+                  },
+                }
+              : {}),
             "500": {
               description: "Internal server error",
               content: responseSchema(),

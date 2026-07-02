@@ -301,6 +301,54 @@ test("applies a saved day template as collapsed planned entries", async ({
   await expect(dailyReport.getByTestId("macro-bar-fat-planned-fill")).toHaveCSS("opacity", "0.28");
 });
 
+test("planner shopping mode copies planned items for the selected range", async ({
+  page,
+}, testInfo) => {
+  const suffix = Date.now();
+  const firstItem = `Shopping oats ${suffix}`;
+  const secondItem = `Shopping yogurt ${suffix}`;
+  const templateLabel = `Shopping day ${suffix}`;
+  const plannedDate = "2026-04-09";
+
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
+  await createTestSession(page, uniqueTestEmail("user", testInfo));
+  await expect(page.getByRole("button", { name: "Open settings" })).toBeVisible();
+  await seedDayTemplate(page, {
+    label: templateLabel,
+    items: [
+      {
+        label: firstItem,
+        mealGroupLabel: "Breakfast",
+        proteinG: 20,
+        carbsG: 40,
+        fatG: 8,
+        caloriesKcal: 312,
+      },
+      {
+        label: secondItem,
+        mealGroupLabel: "Lunch",
+        proteinG: 25,
+        carbsG: 12,
+        fatG: 2,
+        caloriesKcal: 166,
+      },
+    ],
+  });
+  await applyDayTemplate(page, { date: plannedDate, label: templateLabel });
+
+  await page.goto(`/planner?date=${plannedDate}`);
+  await page.getByRole("tab", { name: "Shopping" }).click();
+  await expect(page.getByRole("heading", { name: "Shopping List" })).toBeVisible();
+  await expect(page.getByText(firstItem)).toBeVisible();
+  await expect(page.getByText(secondItem)).toBeVisible();
+
+  await page.getByRole("button", { name: "Copy list" }).click();
+  await expect(page.getByRole("button", { name: "Copied" })).toBeVisible();
+  const clipboardText = await page.evaluate(() => navigator.clipboard.readText());
+  expect(clipboardText).toContain(firstItem);
+  expect(clipboardText).toContain(secondItem);
+});
+
 test("stats and weight pages load without day navigation chrome", async ({
   page,
 }, testInfo) => {

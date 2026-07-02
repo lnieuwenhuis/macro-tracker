@@ -1864,6 +1864,8 @@ describe("Macro Tracker API v1", () => {
     });
     expect(payload.paths["/foods"]?.post.responses).toHaveProperty("201");
     expect(payload.paths["/foods"]?.post.responses).toHaveProperty("405");
+    expect(payload.paths["/weight/entries"]?.post.responses).toHaveProperty("409");
+    expect(payload.paths["/weight/entries/{id}"]?.patch.responses).toHaveProperty("409");
     expect(payload.paths["/foods"]?.post.requestBody).toBeTruthy();
     expect(payload.paths["/foods/{id}"]?.patch.parameters).toEqual([
       expect.objectContaining({ name: "id", in: "path", required: true }),

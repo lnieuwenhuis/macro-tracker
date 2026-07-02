@@ -17,6 +17,7 @@ import {
 } from "@/lib/app-warmup";
 import { formatShortDate } from "@/lib/formatting";
 import type { ProgressTab } from "@/lib/ui-mode";
+import { buildWeightGoalProjection } from "@/lib/weight-trend";
 
 import { invalidateAppDataCache } from "./app-data-cache";
 import { ConfirmDeleteButton } from "./confirm-delete-button";
@@ -173,6 +174,127 @@ function GoalsPanel({
   );
 }
 
+function formatWeightChange(value: number | null) {
+  if (value == null) return "-";
+  return `${value > 0 ? "+" : ""}${value.toFixed(1)} kg`;
+}
+
+function formatTrendLabel(value: WeightPageData["stats"]["trendDirection"]) {
+  if (value === "up") return "Trending up";
+  if (value === "down") return "Trending down";
+  if (value === "stable") return "Stable";
+  return "No trend yet";
+}
+
+function WeightTrendChart({ weightData }: { weightData: WeightPageData }) {
+  const entries = [...weightData.entries].sort((a, b) =>
+    a.date.localeCompare(b.date),
+  );
+
+  if (entries.length < 2) {
+    return (
+      <div className="flex aspect-[2.7/1] items-center justify-center rounded-2xl border border-dashed border-[var(--color-border-strong)] bg-[var(--color-shell-panel)] text-sm text-[var(--color-muted)]">
+        Log two entries to draw a trend.
+      </div>
+    );
+  }
+
+  const width = 320;
+  const height = 128;
+  const paddingX = 18;
+  const paddingY = 14;
+  const minTime = new Date(entries[0]!.date).getTime();
+  const maxTime = new Date(entries[entries.length - 1]!.date).getTime();
+  const weights = [
+    ...entries.map((entry) => entry.weightKg),
+    ...(weightData.goalWeightKg != null ? [weightData.goalWeightKg] : []),
+  ];
+  let minWeight = Math.min(...weights);
+  let maxWeight = Math.max(...weights);
+  if (minWeight === maxWeight) {
+    minWeight -= 0.5;
+    maxWeight += 0.5;
+  }
+  const timeSpan = Math.max(1, maxTime - minTime);
+  const weightSpan = Math.max(0.1, maxWeight - minWeight);
+  const plotWidth = width - paddingX * 2;
+  const plotHeight = height - paddingY * 2;
+  const points = entries
+    .map((entry) => {
+      const x =
+        paddingX +
+        ((new Date(entry.date).getTime() - minTime) / timeSpan) * plotWidth;
+      const y =
+        paddingY + ((maxWeight - entry.weightKg) / weightSpan) * plotHeight;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  const goalY =
+    weightData.goalWeightKg != null
+      ? paddingY +
+        ((maxWeight - weightData.goalWeightKg) / weightSpan) * plotHeight
+      : null;
+
+  return (
+    <svg
+      viewBox={`0 0 ${width} ${height}`}
+      role="img"
+      aria-label="Weight trend chart"
+      className="aspect-[2.7/1] w-full rounded-2xl border border-[var(--color-border)] bg-[var(--color-app-bg)]"
+    >
+      {[0, 1, 2].map((line) => {
+        const y = paddingY + (plotHeight / 2) * line;
+        return (
+          <line
+            key={line}
+            x1={paddingX}
+            y1={y}
+            x2={width - paddingX}
+            y2={y}
+            stroke="var(--color-border)"
+            strokeWidth="1"
+          />
+        );
+      })}
+      {goalY != null ? (
+        <line
+          x1={paddingX}
+          y1={goalY}
+          x2={width - paddingX}
+          y2={goalY}
+          stroke="var(--color-success)"
+          strokeDasharray="4 4"
+          strokeWidth="1.5"
+        />
+      ) : null}
+      <polyline
+        points={points}
+        fill="none"
+        stroke="var(--color-accent)"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="3"
+      />
+      {entries.map((entry) => {
+        const x =
+          paddingX +
+          ((new Date(entry.date).getTime() - minTime) / timeSpan) * plotWidth;
+        const y =
+          paddingY + ((maxWeight - entry.weightKg) / weightSpan) * plotHeight;
+        return (
+          <circle
+            key={entry.id}
+            cx={x}
+            cy={y}
+            r="3"
+            fill="var(--color-accent)"
+          />
+        );
+      })}
+    </svg>
+  );
+}
+
 function WeightPanel({
   selectedDate,
   weightData,
@@ -308,6 +430,10 @@ function WeightPanel({
   }
 
   const { stats, entries } = weightData;
+  const projection = buildWeightGoalProjection(weightData, selectedDate);
+  const estimatedGoalLabel = projection.estimatedGoalDate
+    ? formatShortDate(projection.estimatedGoalDate)
+    : "-";
 
   return (
     <div className="space-y-5">
@@ -320,7 +446,7 @@ function WeightPanel({
         </p>
       </section>
 
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-4">
           <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--color-muted-strong)]">Current</p>
           <p className="mt-1.5 text-2xl font-bold text-[var(--color-ink)]">
@@ -328,12 +454,77 @@ function WeightPanel({
           </p>
         </div>
         <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-4">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--color-muted-strong)]">7-day</p>
+          <p className="mt-1.5 text-2xl font-bold text-[var(--color-ink)]">
+            {formatWeightChange(stats.weekChange)}
+          </p>
+        </div>
+        <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-4">
           <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--color-muted-strong)]">30-day</p>
           <p className="mt-1.5 text-2xl font-bold text-[var(--color-ink)]">
-            {stats.monthChange != null ? `${stats.monthChange > 0 ? "+" : ""}${stats.monthChange.toFixed(1)} kg` : "-"}
+            {formatWeightChange(stats.monthChange)}
+          </p>
+        </div>
+        <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-4">
+          <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--color-muted-strong)]">Goal delta</p>
+          <p className="mt-1.5 text-2xl font-bold text-[var(--color-ink)]">
+            {formatWeightChange(projection.goalDeltaKg)}
           </p>
         </div>
       </div>
+
+      <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start">
+          <div className="min-w-0 flex-1">
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
+                  Trend
+                </h3>
+                <p className="mt-1 text-sm text-[var(--color-muted)]">
+                  {formatTrendLabel(stats.trendDirection)}
+                </p>
+              </div>
+              {weightData.goalWeightKg != null ? (
+                <span className="rounded-full bg-[var(--color-success)]/10 px-3 py-1 text-xs font-semibold text-[var(--color-success)]">
+                  Goal {weightData.goalWeightKg} kg
+                </span>
+              ) : null}
+            </div>
+            <WeightTrendChart weightData={weightData} />
+          </div>
+          <div className="grid gap-3 lg:w-64">
+            <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-app-bg)] p-4">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--color-muted-strong)]">
+                Projection
+              </p>
+              <p className="mt-2 text-sm font-semibold text-[var(--color-ink)]">
+                {projection.message}
+              </p>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-app-bg)] p-4">
+                <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--color-muted-strong)]">
+                  Rate
+                </p>
+                <p className="mt-2 text-sm font-bold text-[var(--color-ink)]">
+                  {projection.weeklyRateKg != null
+                    ? `${projection.weeklyRateKg > 0 ? "+" : ""}${projection.weeklyRateKg} kg/wk`
+                    : "-"}
+                </p>
+              </div>
+              <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-app-bg)] p-4">
+                <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--color-muted-strong)]">
+                  ETA
+                </p>
+                <p className="mt-2 text-sm font-bold text-[var(--color-ink)]">
+                  {estimatedGoalLabel}
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
 
       <section
         id="weight-entry-form"

@@ -17,6 +17,7 @@ type AdminUsersPageProps = {
     q?: string;
     role?: string;
     activity?: string;
+    health?: string;
     page?: string;
   }>;
 };
@@ -28,12 +29,24 @@ export default async function AdminUsersPage({
   const page = Number(params.page ?? "1");
   const role = params.role ?? "all";
   const activity = params.activity ?? "all";
+  const health = params.health ?? "all";
   const q = params.q ?? "";
   const result = await listAdminUsers({
     q,
     role: role === "user" || role === "admin" || role === "owner" ? role : "all",
     activity:
-      activity === "active7" || activity === "inactive7" ? activity : "all",
+      activity === "active7" ||
+      activity === "inactive7" ||
+      activity === "inactive30"
+        ? activity
+        : "all",
+    health:
+      health === "onboarded_no_logs" ||
+      health === "no_goals" ||
+      health === "no_weight_entries" ||
+      health === "heavy_barcode_submitters"
+        ? health
+        : "all",
     page: Number.isFinite(page) ? page : 1,
   });
 
@@ -43,7 +56,7 @@ export default async function AdminUsersPage({
         title="Users"
         description="Inspect accounts, login activity, and role assignments."
       >
-        <form className="grid gap-3 md:grid-cols-[1.8fr_0.8fr_0.8fr_auto]">
+        <form className="grid gap-3 md:grid-cols-[1.5fr_0.7fr_0.8fr_1fr_auto]">
           <AdminFilterInput
             type="search"
             name="q"
@@ -66,6 +79,17 @@ export default async function AdminUsersPage({
             <option value="all">All activity</option>
             <option value="active7">Active in 7 days</option>
             <option value="inactive7">Inactive in 7 days</option>
+            <option value="inactive30">Inactive in 30 days</option>
+          </AdminFilterSelect>
+          <AdminFilterSelect
+            name="health"
+            defaultValue={health}
+          >
+            <option value="all">All health signals</option>
+            <option value="onboarded_no_logs">Onboarded, no logs</option>
+            <option value="no_goals">No goals set</option>
+            <option value="no_weight_entries">No weight entries</option>
+            <option value="heavy_barcode_submitters">Heavy barcode submitters</option>
           </AdminFilterSelect>
           <AdminFilterSubmitButton />
         </form>
@@ -117,6 +141,7 @@ export default async function AdminUsersPage({
             q: q || undefined,
             role: role !== "all" ? role : undefined,
             activity: activity !== "all" ? activity : undefined,
+            health: health !== "all" ? health : undefined,
           }}
           pagination={result.pagination}
         />

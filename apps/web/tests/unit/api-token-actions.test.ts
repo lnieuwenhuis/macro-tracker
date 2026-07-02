@@ -33,7 +33,10 @@ import {
   createApiTokenAction,
   revokeApiTokenAction,
 } from "@/lib/api-token-actions";
-import { getVisibleApiTokens } from "@/components/api-settings-client";
+import {
+  API_TOKEN_PRESETS,
+  getVisibleApiTokens,
+} from "@/components/api-settings-client";
 import ApiSettingsPage from "@/app/settings/api/page";
 
 describe("API token settings actions", () => {
@@ -73,17 +76,24 @@ describe("API token settings actions", () => {
     const created = await createApiTokenAction({}, formData);
 
     expect(created.ok).toBe(true);
+    if (!created.token || !created.record) {
+      throw new Error("Expected API token creation to succeed.");
+    }
     expect(created.token).toMatch(/^mtk_v1_/);
+    const rawTokenSecretPrefix = created.token.slice("mtk_v1_".length, 19);
     expect(created.record).toMatchObject({
       userId: mocked.userId,
       name: "Shortcut",
+      tokenPrefix: expect.stringMatching(/^mtk_v1_[a-f0-9]{12}$/),
       scopes: ["read:daily", "write:daily"],
       expiresAt: null,
     });
+    expect(created.record.tokenPrefix).not.toContain(rawTokenSecretPrefix);
     expect(mocked.revalidatePath).toHaveBeenCalledWith("/settings/api");
 
     const listed = await listApiTokens(mocked.userId, runtime.db);
     expect(listed).toHaveLength(1);
+    expect(listed[0]?.tokenPrefix).not.toContain(rawTokenSecretPrefix);
     expect(JSON.stringify(listed)).not.toContain(created.token);
 
     const revokeData = new FormData();
@@ -144,6 +154,20 @@ describe("API token settings actions", () => {
     });
   });
 
+  it("rejects invalid API token expiry values without creating a token", async () => {
+    const formData = new FormData();
+    formData.set("name", "Shortcut");
+    formData.set("expires", "forever");
+    formData.append("scopes", "read:daily");
+
+    await expect(createApiTokenAction({}, formData)).resolves.toEqual({
+      ok: false,
+      error: "API token expiry is invalid.",
+    });
+    await expect(listApiTokens(mocked.userId, runtime.db)).resolves.toHaveLength(0);
+    expect(mocked.revalidatePath).not.toHaveBeenCalled();
+  });
+
   it("hides unexpected API token creation failures from the client", async () => {
     const rawMessage = "database password leaked in driver error";
     const failingDb = new Proxy(runtime.db, {
@@ -200,5 +224,33 @@ describe("API token settings actions", () => {
     };
 
     expect(getVisibleApiTokens([serverRecord], staleRecord)).toEqual([serverRecord]);
+  });
+
+  it("defines API token presets with expected expiry and scopes", () => {
+    const readOnly = API_TOKEN_PRESETS.find(
+      (preset) => preset.id === "read_only_dashboard",
+    );
+    const shortcut = API_TOKEN_PRESETS.find(
+      (preset) => preset.id === "shortcut_logger",
+    );
+    const full = API_TOKEN_PRESETS.find(
+      (preset) => preset.id === "full_automation",
+    );
+
+    expect(readOnly).toMatchObject({
+      name: "Read-only dashboard",
+      expires: "90",
+    });
+    expect(readOnly?.scopes.every((scope) => scope.startsWith("read:"))).toBe(true);
+    expect(shortcut?.scopes).toEqual(
+      expect.arrayContaining(["read:daily", "write:daily", "read:foods"]),
+    );
+    expect(full).toMatchObject({
+      name: "Full automation",
+      expires: "never",
+    });
+    expect(full?.scopes).toEqual(
+      expect.arrayContaining(["write:foods", "write:templates", "write:goals"]),
+    );
   });
 });

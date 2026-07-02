@@ -21,6 +21,7 @@ export function AdminShell({ userEmail, role, children }: AdminShellProps) {
     { href: "/admin", label: "Dashboard" },
     { href: "/admin/users", label: "Users" },
     { href: "/admin/barcodes", label: "Barcodes" },
+    { href: "/admin/barcodes/review", label: "Review Queue" },
     { href: "/admin/ai-benchmark", label: "AI Benchmark" },
     ...(role === "owner" ? [{ href: "/admin/audit", label: "Audit" }] : []),
   ];

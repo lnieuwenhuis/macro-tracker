@@ -49,6 +49,28 @@ export default async function AdminDashboardPage() {
         />
       </div>
 
+      <AdminSection
+        title="User Health"
+        description="Operational friction signals that link into filtered user lists."
+      >
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          {dashboard.health.segments.map((segment) => (
+            <Link
+              key={segment.id}
+              href={segment.href}
+              className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-app-bg)] p-4 transition hover:-translate-y-0.5 hover:bg-[var(--color-card-muted)]"
+            >
+              <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--color-muted-strong)]">
+                {segment.label}
+              </p>
+              <p className="mt-2 text-3xl font-bold text-[var(--color-ink)]">
+                {segment.count}
+              </p>
+            </Link>
+          ))}
+        </div>
+      </AdminSection>
+
       <div className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
         <AdminSection
           title="Recent Barcode Additions"

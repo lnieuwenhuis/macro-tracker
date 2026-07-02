@@ -2,7 +2,12 @@
 
 import type { DailySummary, MealTemplate } from "@macro-tracker/db";
 import { useRouter } from "next/navigation";
-import { useDeferredValue, useMemo, useState, useTransition } from "react";
+import {
+  useDeferredValue,
+  useMemo,
+  useState,
+  useTransition,
+} from "react";
 
 import {
   applyTemplateAction,
@@ -17,6 +22,11 @@ import {
   isDayTemplate,
   isFoodItemTemplate,
 } from "@/lib/template-macros";
+import { formatShortDate } from "@/lib/formatting";
+import {
+  buildShoppingList,
+  formatShoppingListText,
+} from "@/lib/shopping-list";
 
 import { invalidateAppDataCache } from "./app-data-cache";
 import { ExperimentalAppShell, ExperimentalSettingsButton } from "./experimental-app-shell";
@@ -30,7 +40,16 @@ type PlannerShellProps = {
   templates: MealTemplate[];
   recipeCount: number;
   dailySummary: DailySummary;
+  shoppingSummaries: DailySummary[];
 };
+
+type PlannerMode = "templates" | "shopping";
+
+function formatShoppingQuantity(value: number) {
+  return Number.isInteger(value)
+    ? String(value)
+    : value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+}
 
 export function PlannerShell({
   userEmail,
@@ -39,12 +58,22 @@ export function PlannerShell({
   templates,
   recipeCount,
   dailySummary,
+  shoppingSummaries,
 }: PlannerShellProps) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [templateLabel, setTemplateLabel] = useState("");
   const [templateSearch, setTemplateSearch] = useState("");
+  const [activeMode, setActiveMode] = useState<PlannerMode>("templates");
+  const [copyStatus, setCopyStatus] = useState<string | null>(null);
+  const defaultShoppingStartDate = shoppingSummaries[0]?.date ?? selectedDate;
+  const defaultShoppingEndDate =
+    shoppingSummaries[shoppingSummaries.length - 1]?.date ?? selectedDate;
+  const [shoppingStartDate, setShoppingStartDate] = useState(
+    defaultShoppingStartDate,
+  );
+  const [shoppingEndDate, setShoppingEndDate] = useState(defaultShoppingEndDate);
   const deferredTemplateSearch = useDeferredValue(templateSearch);
   const normalizedTemplateSearch = deferredTemplateSearch.trim().toLowerCase();
   const foodItemTemplates = useMemo(
@@ -65,6 +94,25 @@ export function PlannerShell({
     [dayTemplates, normalizedTemplateSearch],
   );
   const selectedDaySummary = `${dailySummary.meals.length} entries, ${dailySummary.plannedTotals.caloriesKcal} planned kcal`;
+  const filteredShoppingSummaries = useMemo(
+    () =>
+      shoppingSummaries.filter(
+        (summary) =>
+          summary.date >= shoppingStartDate && summary.date <= shoppingEndDate,
+      ),
+    [shoppingEndDate, shoppingStartDate, shoppingSummaries],
+  );
+  const shoppingItems = useMemo(
+    () => buildShoppingList(filteredShoppingSummaries),
+    [filteredShoppingSummaries],
+  );
+  const shoppingText = useMemo(
+    () => formatShoppingListText(shoppingItems),
+    [shoppingItems],
+  );
+  const shoppingRangeLabel = `${formatShortDate(shoppingStartDate)} to ${formatShortDate(
+    shoppingEndDate,
+  )}`;
   const templateTiles = [
     {
       label: "Food items",
@@ -131,6 +179,32 @@ export function PlannerShell({
     });
   }
 
+  function updateShoppingStartDate(value: string) {
+    setShoppingStartDate(value);
+    if (value > shoppingEndDate) {
+      setShoppingEndDate(value);
+    }
+    setCopyStatus(null);
+  }
+
+  function updateShoppingEndDate(value: string) {
+    setShoppingEndDate(value);
+    if (value < shoppingStartDate) {
+      setShoppingStartDate(value);
+    }
+    setCopyStatus(null);
+  }
+
+  async function copyShoppingList() {
+    setCopyStatus(null);
+    try {
+      await navigator.clipboard.writeText(shoppingText);
+      setCopyStatus("Copied");
+    } catch {
+      setCopyStatus("Unable to copy");
+    }
+  }
+
   return (
     <ExperimentalAppShell
       userEmail={userEmail}
@@ -155,6 +229,43 @@ export function PlannerShell({
       <div className="space-y-5">
         <LibraryHubNav active="planner" selectedDate={selectedDate} />
 
+        <section className="rounded-[1.45rem] border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-1">
+          <div
+            role="tablist"
+            aria-label="Planner modes"
+            className="grid h-12 grid-cols-2 gap-2"
+          >
+            {([
+              { id: "templates", label: "Templates" },
+              { id: "shopping", label: "Shopping" },
+            ] as const).map((mode) => {
+              const isActive = activeMode === mode.id;
+              return (
+                <button
+                  key={mode.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={isActive}
+                  onClick={() => {
+                    setActiveMode(mode.id);
+                    setCopyStatus(null);
+                  }}
+                  className={[
+                    "h-full rounded-[1.05rem] px-4 text-sm font-semibold transition",
+                    isActive
+                      ? "bg-[var(--color-accent)] text-white shadow-[0_10px_24px_rgba(0,0,0,0.14)]"
+                      : "text-[var(--color-muted-strong)] hover:bg-[var(--color-card-muted)]",
+                  ].join(" ")}
+                >
+                  {mode.label}
+                </button>
+              );
+            })}
+          </div>
+        </section>
+
+        {activeMode === "templates" ? (
+          <>
         <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5">
           <h3 className="text-sm font-bold text-[var(--color-ink)]">Save currently selected day</h3>
           <p className="mt-1 text-xs text-[var(--color-muted)]">{selectedDaySummary}</p>
@@ -262,6 +373,99 @@ export function PlannerShell({
             </div>
           )}
         </section>
+          </>
+        ) : (
+          <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
+                  Shopping List
+                </h3>
+                <p className="mt-1 text-sm text-[var(--color-muted)]">
+                  Planned entries from {shoppingRangeLabel}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={copyShoppingList}
+                className="rounded-xl bg-[var(--color-accent)] px-4 py-2.5 text-sm font-semibold text-white transition hover:opacity-90"
+              >
+                {copyStatus === "Copied" ? "Copied" : "Copy list"}
+              </button>
+            </div>
+
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              <label>
+                <span className="mb-1 block text-xs text-[var(--color-muted)]">
+                  Start
+                </span>
+                <input
+                  type="date"
+                  min={defaultShoppingStartDate}
+                  max={defaultShoppingEndDate}
+                  value={shoppingStartDate}
+                  onChange={(event) => updateShoppingStartDate(event.target.value)}
+                  className="w-full rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-3 py-2.5 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
+                />
+              </label>
+              <label>
+                <span className="mb-1 block text-xs text-[var(--color-muted)]">
+                  End
+                </span>
+                <input
+                  type="date"
+                  min={defaultShoppingStartDate}
+                  max={defaultShoppingEndDate}
+                  value={shoppingEndDate}
+                  onChange={(event) => updateShoppingEndDate(event.target.value)}
+                  className="w-full rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-3 py-2.5 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
+                />
+              </label>
+            </div>
+
+            {copyStatus === "Unable to copy" ? (
+              <p className="mt-3 text-sm text-[var(--color-danger)]">
+                Clipboard access is unavailable in this browser.
+              </p>
+            ) : null}
+
+            {shoppingItems.length === 0 ? (
+              <div className="mt-5 rounded-2xl border border-dashed border-[var(--color-border-strong)] bg-[var(--color-shell-panel)] px-5 py-8 text-center">
+                <p className="text-sm text-[var(--color-muted)]">
+                  No planned items in this range.
+                </p>
+              </div>
+            ) : (
+              <div className="mt-5 space-y-3">
+                {shoppingItems.map((item) => (
+                  <article
+                    key={`${item.label}-${item.unit}`}
+                    className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-app-bg)] p-4"
+                  >
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="min-w-0">
+                        <h4 className="font-semibold text-[var(--color-ink)]">
+                          {item.label}
+                        </h4>
+                        <p className="mt-1 text-xs text-[var(--color-muted)]">
+                          {item.dates.map(formatShortDate).join(", ")}
+                        </p>
+                        {item.notes.length > 0 ? (
+                          <p className="mt-2 text-xs font-semibold text-[var(--color-muted-strong)]">
+                            {item.notes.join(" | ")}
+                          </p>
+                        ) : null}
+                      </div>
+                      <p className="shrink-0 rounded-full bg-[var(--color-card-muted)] px-3 py-1.5 text-sm font-bold text-[var(--color-ink)]">
+                        {formatShoppingQuantity(item.quantity)} {item.unit}
+                      </p>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
       </div>
     </ExperimentalAppShell>
   );

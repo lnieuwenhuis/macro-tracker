@@ -191,22 +191,26 @@ describe("database queries", () => {
     );
 
     expect(created.token).toMatch(/^mtk_v1_/);
+    const rawTokenSecretPrefix = created.token.slice("mtk_v1_".length, 19);
     expect(created.record).toMatchObject({
       userId,
-      tokenPrefix: created.token.slice(0, 19),
+      tokenPrefix: expect.stringMatching(/^mtk_v1_[a-f0-9]{12}$/),
       name: "Mobile app",
       scopes: ["read:daily", "write:daily"],
       lastUsedAt: null,
       revokedAt: null,
     });
+    expect(created.record.tokenPrefix).not.toContain(rawTokenSecretPrefix);
     expect(created.record.expiresAt).toBeTruthy();
 
     const [stored] = await runtime.db.select().from(apiTokens);
     expect(stored?.tokenHash).toMatch(/^[a-f0-9]{64}$/);
     expect(stored?.tokenHash).not.toBe(created.token);
+    expect(stored?.tokenPrefix).not.toContain(rawTokenSecretPrefix);
 
     const listed = await listApiTokens(userId, runtime.db);
     expect(listed).toHaveLength(1);
+    expect(listed[0]?.tokenPrefix).not.toContain(rawTokenSecretPrefix);
     expect(JSON.stringify(listed)).not.toContain(stored!.tokenHash);
     expect(JSON.stringify(listed)).not.toContain(created.token);
   });

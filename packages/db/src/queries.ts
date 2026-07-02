@@ -8,11 +8,16 @@ import { validateFoodProductInput, validateMealEntryInput, validateRecipeInput, 
 import type {
   AdminAuditListPage,
   AdminAuditEvent,
+  AdminAuditEventDetail,
   AdminBarcodeListPage,
   AdminBarcodeRecord,
+  AdminBarcodeReviewQueueItem,
+  AdminBarcodeReviewQueuePage,
   AdminDashboardData,
   AdminRole,
   AdminUserDetail,
+  AdminUserHealthFilter,
+  AdminUserHealthSummary,
   AdminUserListItem,
   AdminUserListPage,
   AdminRecipeSummary,
@@ -785,13 +790,14 @@ export async function createApiToken(
 
   const scopes = normalizeApiTokenScopes(input.scopes);
   const token = generateApiTokenSecret();
+  const tokenHash = hashApiToken(token);
   const [created] = await database
     .insert(apiTokens)
     .values({
       id: crypto.randomUUID(),
       userId,
-      tokenHash: hashApiToken(token),
-      tokenPrefix: token.slice(0, API_TOKEN_PREFIX_LENGTH),
+      tokenHash,
+      tokenPrefix: buildApiTokenDisplayPrefix(tokenHash),
       name,
       scopes,
       expiresAt: normalizeApiTokenExpiry(input.expiresAt),
@@ -2831,7 +2837,7 @@ export async function getRecipes(
 }
 
 const API_TOKEN_PREFIX = "mtk_v1_";
-const API_TOKEN_PREFIX_LENGTH = 19;
+const API_TOKEN_FINGERPRINT_LENGTH = 12;
 const API_TOKEN_DEFAULT_EXPIRY_DAYS = 90;
 const API_TOKEN_LAST_USED_THROTTLE_MS = 5 * 60 * 1000;
 
@@ -2889,6 +2895,10 @@ function mapApiTokenRow(row: ApiTokenSelectRow): ApiTokenRecord {
 
 function hashApiToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
+}
+
+function buildApiTokenDisplayPrefix(tokenHash: string) {
+  return `${API_TOKEN_PREFIX}${tokenHash.slice(0, API_TOKEN_FINGERPRINT_LENGTH)}`;
 }
 
 function generateApiTokenSecret() {
@@ -3589,6 +3599,131 @@ async function getOwnerCount(db: DatabaseClient | any) {
   return toNumber(row?.total);
 }
 
+function noMealEntriesCondition() {
+  return sql`not exists (select 1 from ${mealEntries} where ${mealEntries.userId} = ${users.id})`;
+}
+
+function noWeightEntriesCondition() {
+  return sql`not exists (select 1 from ${weightEntries} where ${weightEntries.userId} = ${users.id})`;
+}
+
+function heavyBarcodeSubmitterCondition() {
+  return sql`(select count(*) from ${foodProducts} where ${foodProducts.submittedByUserId} = ${users.id} and ${foodProducts.source} = 'barcode') >= 5`;
+}
+
+function noGoalsCondition() {
+  return and(
+    isNull(users.goalCaloriesKcal),
+    isNull(users.goalProteinG),
+    isNull(users.goalCarbsG),
+    isNull(users.goalFatG),
+    isNull(users.goalWeightKg),
+  );
+}
+
+function getAdminUserHealthCondition(health?: AdminUserHealthFilter | "all") {
+  if (!health || health === "all") {
+    return undefined;
+  }
+
+  if (health === "onboarded_no_logs") {
+    return and(isNotNull(users.onboardingCompletedAt), noMealEntriesCondition());
+  }
+
+  if (health === "no_goals") {
+    return noGoalsCondition();
+  }
+
+  if (health === "no_weight_entries") {
+    return noWeightEntriesCondition();
+  }
+
+  if (health === "heavy_barcode_submitters") {
+    return heavyBarcodeSubmitterCondition();
+  }
+
+  return undefined;
+}
+
+async function countUsersWhere(db: DatabaseClient | any, whereClause: any) {
+  const [row] = await db
+    .select({
+      total: count(),
+    })
+    .from(users)
+    .where(whereClause);
+
+  return toNumber(row?.total);
+}
+
+export async function getAdminUserHealthSummary(
+  db?: DatabaseClient,
+): Promise<AdminUserHealthSummary> {
+  const database = await resolveDb(db);
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+  const [
+    onboardedNoLogs,
+    noGoals,
+    inactive7,
+    inactive30,
+    noWeightEntries,
+    heavyBarcodeSubmitters,
+  ] = await Promise.all([
+    countUsersWhere(
+      database,
+      and(isNotNull(users.onboardingCompletedAt), noMealEntriesCondition()),
+    ),
+    countUsersWhere(database, noGoalsCondition()),
+    countUsersWhere(database, lte(users.lastLoginAt, sevenDaysAgo)),
+    countUsersWhere(database, lte(users.lastLoginAt, thirtyDaysAgo)),
+    countUsersWhere(database, noWeightEntriesCondition()),
+    countUsersWhere(database, heavyBarcodeSubmitterCondition()),
+  ]);
+
+  return {
+    segments: [
+      {
+        id: "onboarded_no_logs",
+        label: "Onboarded but no logs",
+        count: onboardedNoLogs,
+        href: "/admin/users?health=onboarded_no_logs",
+      },
+      {
+        id: "no_goals",
+        label: "No goals set",
+        count: noGoals,
+        href: "/admin/users?health=no_goals",
+      },
+      {
+        id: "inactive7",
+        label: "Inactive 7+ days",
+        count: inactive7,
+        href: "/admin/users?activity=inactive7",
+      },
+      {
+        id: "inactive30",
+        label: "Inactive 30+ days",
+        count: inactive30,
+        href: "/admin/users?activity=inactive30",
+      },
+      {
+        id: "no_weight_entries",
+        label: "No weight entries",
+        count: noWeightEntries,
+        href: "/admin/users?health=no_weight_entries",
+      },
+      {
+        id: "heavy_barcode_submitters",
+        label: "Heavy barcode submitters",
+        count: heavyBarcodeSubmitters,
+        href: "/admin/users?health=heavy_barcode_submitters",
+      },
+    ],
+  };
+}
+
 export async function ensureUserRole(
   userId: string,
   role: AdminRole,
@@ -3624,6 +3759,7 @@ export async function getAdminDashboardData(
     deletedBarcodesRow,
     recentBarcodeRows,
     recentAuditPage,
+    health,
   ] = await Promise.all([
     database.select({ total: count() }).from(users),
     database.select({ total: count() }).from(users).where(eq(users.role, "owner")),
@@ -3662,6 +3798,7 @@ export async function getAdminDashboardData(
       },
       database,
     ),
+    getAdminUserHealthSummary(database),
   ]);
 
   return {
@@ -3674,6 +3811,7 @@ export async function getAdminDashboardData(
     deletedBarcodeCount: toNumber(deletedBarcodesRow[0]?.total),
     recentBarcodeAdditions: recentBarcodeRows.map(mapFoodProductRow),
     recentAuditEvents: recentAuditPage.items,
+    health,
   };
 }
 
@@ -3681,7 +3819,8 @@ export async function listAdminUsers(
   input: {
     q?: string;
     role?: AdminRole | "all";
-    activity?: "all" | "active7" | "inactive7";
+    activity?: "all" | "active7" | "inactive7" | "inactive30";
+    health?: AdminUserHealthFilter | "all";
     page?: number;
     pageSize?: number;
   } = {},
@@ -3694,6 +3833,7 @@ export async function listAdminUsers(
   const conditions = [];
   const query = input.q?.trim();
   const activeSince = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  const inactiveSince30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
 
   if (query) {
     const pattern = `%${escapeLikePattern(query)}%`;
@@ -3710,6 +3850,13 @@ export async function listAdminUsers(
     conditions.push(gte(users.lastLoginAt, activeSince));
   } else if (input.activity === "inactive7") {
     conditions.push(lte(users.lastLoginAt, activeSince));
+  } else if (input.activity === "inactive30") {
+    conditions.push(lte(users.lastLoginAt, inactiveSince30));
+  }
+
+  const healthCondition = getAdminUserHealthCondition(input.health);
+  if (healthCondition) {
+    conditions.push(healthCondition);
   }
 
   const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
@@ -4057,6 +4204,210 @@ export async function listAdminBarcodeProducts(
   };
 }
 
+type AdminBarcodeReviewQueueRow = {
+  id: string;
+  owner_user_id: string | null;
+  scope: string;
+  source: string;
+  barcode: string | null;
+  name: string;
+  brand: string;
+  default_serving_quantity: string | number;
+  default_serving_unit: string;
+  protein_per_100: string | number;
+  carbs_per_100: string | number;
+  fat_per_100: string | number;
+  calories_per_100: number;
+  serving_weight_g: string | number | null;
+  serving_volume_ml: string | number | null;
+  submitted_by_user_id: string | null;
+  deleted_by_user_id: string | null;
+  source_provider: string | null;
+  source_confidence: string | number | null;
+  source_metadata: unknown;
+  corrected_from_product_id: string | null;
+  created_at: Date | string;
+  updated_at: Date | string;
+  deleted_at: Date | string | null;
+  revision_count_30_days: string | number;
+  duplicate_name_count: string | number;
+  latest_audit_action: string | null;
+  latest_audit_at: Date | string | null;
+  recently_deleted: boolean;
+  recently_restored: boolean;
+};
+
+function rawRows<T>(result: unknown): T[] {
+  if (Array.isArray(result)) {
+    return result as T[];
+  }
+  if (
+    result &&
+    typeof result === "object" &&
+    Array.isArray((result as { rows?: unknown[] }).rows)
+  ) {
+    return (result as { rows: T[] }).rows;
+  }
+  return [];
+}
+
+function mapAdminBarcodeReviewQueueRow(
+  row: AdminBarcodeReviewQueueRow,
+): AdminBarcodeReviewQueueItem {
+  const product = mapFoodProductRow({
+    id: row.id,
+    ownerUserId: row.owner_user_id,
+    scope: row.scope,
+    source: row.source,
+    barcode: row.barcode,
+    name: row.name,
+    brand: row.brand,
+    defaultServingQuantity: row.default_serving_quantity,
+    defaultServingUnit: row.default_serving_unit,
+    proteinPer100: row.protein_per_100,
+    carbsPer100: row.carbs_per_100,
+    fatPer100: row.fat_per_100,
+    caloriesPer100: row.calories_per_100,
+    servingWeightG: row.serving_weight_g,
+    servingVolumeMl: row.serving_volume_ml,
+    submittedByUserId: row.submitted_by_user_id,
+    deletedByUserId: row.deleted_by_user_id,
+    sourceProvider: row.source_provider,
+    sourceConfidence: row.source_confidence,
+    sourceMetadata: row.source_metadata,
+    correctedFromProductId: row.corrected_from_product_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    deletedAt: row.deleted_at,
+  });
+  const revisionCount30Days = toNumber(row.revision_count_30_days);
+  const duplicateNameCount = toNumber(row.duplicate_name_count);
+  const reviewReasons: AdminBarcodeReviewQueueItem["reviewReasons"] = [];
+
+  if (product.sourceConfidence != null && product.sourceConfidence < 0.75) {
+    reviewReasons.push("low_confidence");
+  }
+  if (product.servingWeightG == null && product.servingVolumeMl == null) {
+    reviewReasons.push("missing_serving_size");
+  }
+  if (row.recently_deleted) {
+    reviewReasons.push("recently_deleted");
+  }
+  if (row.recently_restored) {
+    reviewReasons.push("recently_restored");
+  }
+  if (duplicateNameCount > 1) {
+    reviewReasons.push("duplicate_name");
+  }
+  if (revisionCount30Days >= 3) {
+    reviewReasons.push("frequent_revisions");
+  }
+
+  return {
+    ...product,
+    reviewReasons,
+    revisionCount30Days,
+    duplicateNameCount,
+    latestAuditAction: row.latest_audit_action,
+    latestAuditAt: row.latest_audit_at
+      ? toTimestampString(row.latest_audit_at)
+      : null,
+  };
+}
+
+export async function listAdminBarcodeReviewQueue(
+  input: {
+    page?: number;
+    pageSize?: number;
+  } = {},
+  db?: DatabaseClient,
+): Promise<AdminBarcodeReviewQueuePage> {
+  const database = await resolveDb(db);
+  const page = normalizePageNumber(input.page);
+  const pageSize = input.pageSize ?? 25;
+  const offset = (page - 1) * pageSize;
+  const reviewCutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const candidateCtes = sql`
+    with barcode_products as (
+      select
+        *,
+        nullif(regexp_replace(lower(trim(name)), '\\s+', ' ', 'g'), '') as review_name
+      from food_products
+      where owner_user_id is null and source = 'barcode'
+    ),
+    duplicate_names as (
+      select review_name, count(*) as duplicate_name_count
+      from barcode_products
+      where review_name is not null
+      group by review_name
+    ),
+    revision_counts as (
+      select product_id, count(*) as revision_count_30_days
+      from food_product_revisions
+      where created_at >= ${reviewCutoff}
+      group by product_id
+    ),
+    latest_audit as (
+      select distinct on (target_id) target_id, action, created_at
+      from admin_audit_events
+      where target_type = 'food_product' and created_at >= ${reviewCutoff}
+      order by target_id, created_at desc
+    ),
+    recently_restored as (
+      select target_id
+      from admin_audit_events
+      where
+        target_type = 'food_product'
+        and action = 'barcode.restored'
+        and created_at >= ${reviewCutoff}
+      group by target_id
+    ),
+    review_candidates as (
+      select
+        bp.*,
+        coalesce(rc.revision_count_30_days, 0) as revision_count_30_days,
+        coalesce(dn.duplicate_name_count, 0) as duplicate_name_count,
+        la.action as latest_audit_action,
+        la.created_at as latest_audit_at,
+        bp.deleted_at is not null and bp.deleted_at >= ${reviewCutoff} as recently_deleted,
+        rr.target_id is not null as recently_restored
+      from barcode_products bp
+      left join duplicate_names dn on dn.review_name = bp.review_name
+      left join revision_counts rc on rc.product_id = bp.id
+      left join latest_audit la on la.target_id = bp.id::text
+      left join recently_restored rr on rr.target_id = bp.id::text
+      where
+        (bp.source_confidence is not null and bp.source_confidence < 0.75)
+        or (bp.serving_weight_g is null and bp.serving_volume_ml is null)
+        or (bp.deleted_at is not null and bp.deleted_at >= ${reviewCutoff})
+        or rr.target_id is not null
+        or coalesce(dn.duplicate_name_count, 0) > 1
+        or coalesce(rc.revision_count_30_days, 0) >= 3
+    )`;
+
+  const [countResult, pageResult] = await Promise.all([
+    database.execute(sql`${candidateCtes}
+      select count(*) as total_count from review_candidates`),
+    database.execute(sql<AdminBarcodeReviewQueueRow>`${candidateCtes}
+      select *
+      from review_candidates
+      order by updated_at desc
+      limit ${pageSize}
+      offset ${offset}`),
+  ]);
+  const totalCount = toNumber(
+    rawRows<{ total_count: string | number }>(countResult)[0]?.total_count,
+  );
+  const queueItems = rawRows<AdminBarcodeReviewQueueRow>(pageResult).map(
+    mapAdminBarcodeReviewQueueRow,
+  );
+
+  return {
+    items: queueItems,
+    pagination: buildPagination(page, pageSize, totalCount),
+  };
+}
+
 export async function getAdminBarcodeProductById(
   barcodeProductId: string,
   db?: DatabaseClient,
@@ -4314,4 +4665,35 @@ export async function listAdminAuditEvents(
     ),
     pagination: buildPagination(page, pageSize, toNumber(countRows[0]?.total)),
   };
+}
+
+export async function getAdminAuditEventById(
+  eventId: string,
+  db?: DatabaseClient,
+): Promise<AdminAuditEventDetail | null> {
+  const database = await resolveDb(db);
+  const [row] = await database
+    .select({
+      id: adminAuditEvents.id,
+      actorUserId: adminAuditEvents.actorUserId,
+      actorRole: adminAuditEvents.actorRole,
+      action: adminAuditEvents.action,
+      targetType: adminAuditEvents.targetType,
+      targetId: adminAuditEvents.targetId,
+      detailsJson: adminAuditEvents.detailsJson,
+      createdAt: adminAuditEvents.createdAt,
+      actorEmail: users.email,
+      actorDisplayName: users.displayName,
+    })
+    .from(adminAuditEvents)
+    .leftJoin(users, eq(users.id, adminAuditEvents.actorUserId))
+    .where(eq(adminAuditEvents.id, eventId))
+    .limit(1);
+
+  return row
+    ? mapAdminAuditEventRow({
+        ...row,
+        detailsJson: row.detailsJson as Record<string, unknown> | null,
+      })
+    : null;
 }

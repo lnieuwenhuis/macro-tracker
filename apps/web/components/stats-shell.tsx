@@ -4,6 +4,7 @@ import type { MacroGoals, StatsPageData } from "@macro-tracker/db";
 import { useState } from "react";
 
 import { formatShortDate } from "@/lib/formatting";
+import { buildWeeklyInsights, type WeeklyInsightTone } from "@/lib/weekly-insights";
 
 type MacroField = "caloriesKcal" | "proteinG" | "carbsG" | "fatG";
 
@@ -55,6 +56,22 @@ function StatCard({ label, value, sub }: { label: string; value: string; sub?: s
       )}
     </div>
   );
+}
+
+function insightToneClass(tone: WeeklyInsightTone) {
+  if (tone === "good") {
+    return "border-[var(--color-success)]/30 bg-[var(--color-success)]/10";
+  }
+  if (tone === "warning") {
+    return "border-[var(--color-danger)]/30 bg-[var(--color-danger)]/10";
+  }
+  return "border-[var(--color-border)] bg-[var(--color-surface-strong)]";
+}
+
+function insightValueClass(tone: WeeklyInsightTone) {
+  if (tone === "good") return "text-[var(--color-success)]";
+  if (tone === "warning") return "text-[var(--color-danger)]";
+  return "text-[var(--color-accent)]";
 }
 
 function MacroTrendChart({
@@ -260,6 +277,7 @@ export function StatsPanels({
   const [selectedMacro, setSelectedMacro] = useState<MacroField>("caloriesKcal");
   const macroMeta = MACRO_META[selectedMacro];
   const goalForMacro = goals[selectedMacro];
+  const weeklyInsights = buildWeeklyInsights(statsData, goals);
 
   if (totalDaysTracked === 0 && allDailyTotals.length === 0) {
     return (
@@ -320,6 +338,35 @@ export function StatsPanels({
               value={`${avgProtein}g`}
               sub="per day"
             />
+          </div>
+        </section>
+
+        <section>
+          <div className="mb-3">
+            <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
+              This Week
+            </h2>
+            <p className="mt-1 text-[11px] text-[var(--color-muted)]">
+              Rule-based signals from your recent logs
+            </p>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {weeklyInsights.map((insight) => (
+              <article
+                key={insight.id}
+                className={`rounded-2xl border p-4 ${insightToneClass(insight.tone)}`}
+              >
+                <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--color-muted-strong)]">
+                  {insight.title}
+                </p>
+                <p className={`mt-1.5 text-xl font-bold ${insightValueClass(insight.tone)}`}>
+                  {insight.value}
+                </p>
+                <p className="mt-1.5 text-xs leading-relaxed text-[var(--color-muted)]">
+                  {insight.body}
+                </p>
+              </article>
+            ))}
           </div>
         </section>
 

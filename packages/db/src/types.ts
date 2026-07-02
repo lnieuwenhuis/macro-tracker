@@ -394,6 +394,24 @@ export type AdminAuditEvent = {
   createdAt: string;
 };
 
+export type AdminAuditEventDetail = AdminAuditEvent;
+
+export type AdminBarcodeReviewReason =
+  | "low_confidence"
+  | "missing_serving_size"
+  | "recently_deleted"
+  | "recently_restored"
+  | "duplicate_name"
+  | "frequent_revisions";
+
+export type AdminBarcodeReviewQueueItem = FoodProduct & {
+  reviewReasons: AdminBarcodeReviewReason[];
+  revisionCount30Days: number;
+  duplicateNameCount: number;
+  latestAuditAction: string | null;
+  latestAuditAt: string | null;
+};
+
 export type AdminBarcodeRecord = {
   id: string;
   barcode: string;
@@ -465,10 +483,40 @@ export type AdminBarcodeListPage = {
   pagination: AdminPagination;
 };
 
+export type AdminBarcodeReviewQueuePage = {
+  items: AdminBarcodeReviewQueueItem[];
+  pagination: AdminPagination;
+};
+
 export type AdminAuditListPage = {
   items: AdminAuditEvent[];
   pagination: AdminPagination;
 };
+
+export type AdminUserHealthSegmentId =
+  | "onboarded_no_logs"
+  | "no_goals"
+  | "inactive7"
+  | "inactive30"
+  | "no_weight_entries"
+  | "heavy_barcode_submitters";
+
+export type AdminUserHealthSegment = {
+  id: AdminUserHealthSegmentId;
+  label: string;
+  count: number;
+  href: string;
+};
+
+export type AdminUserHealthSummary = {
+  segments: AdminUserHealthSegment[];
+};
+
+export type AdminUserHealthFilter =
+  | "onboarded_no_logs"
+  | "no_goals"
+  | "no_weight_entries"
+  | "heavy_barcode_submitters";
 
 export type AdminDashboardData = {
   totalUsers: number;
@@ -480,6 +528,7 @@ export type AdminDashboardData = {
   deletedBarcodeCount: number;
   recentBarcodeAdditions: FoodProduct[];
   recentAuditEvents: AdminAuditEvent[];
+  health: AdminUserHealthSummary;
 };
 
 export type StatsPageData = {

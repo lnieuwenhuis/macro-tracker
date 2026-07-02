@@ -131,7 +131,12 @@ export function AdminAuditEventCard({
     <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-app-bg)] px-4 py-3">
       <div className={contentClass}>
         <div>
-          <p className="font-semibold text-[var(--color-ink)]">{event.action}</p>
+          <Link
+            href={`/admin/audit/${event.id}`}
+            className="font-semibold text-[var(--color-ink)] underline-offset-4 hover:underline"
+          >
+            {event.action}
+          </Link>
           <p className="mt-1 text-sm text-[var(--color-muted)]">
             {event.actorEmail ?? "Unknown user"} on {event.targetType}{" "}
             <span className="font-mono text-xs">{event.targetId}</span>
