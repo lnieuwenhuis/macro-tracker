@@ -30,6 +30,8 @@ export type AppWarmupPayload = {
   weight?: WeightPageData;
 };
 
+export type AppWarmupScope = "core" | "extended";
+
 export type AppWarmupCacheKey =
   | "goals"
   | "templates"
@@ -47,20 +49,14 @@ export function getNearbyDateStrings(selectedDate: string) {
   };
 }
 
-export function getWarmupRoutes(selectedDate: string) {
-  const { previousDate, nextDate } = getNearbyDateStrings(selectedDate);
+export function normalizeAppWarmupScope(
+  value: string | null | undefined,
+): AppWarmupScope | undefined {
+  if (!value || value === "core") {
+    return "core";
+  }
 
-  return [
-    `/?date=${selectedDate}`,
-    `/?date=${previousDate}`,
-    `/?date=${nextDate}`,
-    `/progress?date=${selectedDate}&tab=goals`,
-    `/progress?date=${selectedDate}&tab=weight`,
-    `/recipes?date=${selectedDate}`,
-    `/planner?date=${selectedDate}`,
-    `/library?date=${selectedDate}`,
-    `/summary?date=${selectedDate}`,
-  ];
+  return value === "extended" ? "extended" : undefined;
 }
 
 export function getDailyMutationCacheKeys(date: string): AppWarmupCacheKey[] {

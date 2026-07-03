@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -13,6 +14,10 @@ import {
 
 export { getPostgresConnectionConfig };
 
+export function getStartupMigrationConnectionConfig(connectionString) {
+  return getPostgresConnectionConfig(connectionString, { max: 1 });
+}
+
 async function runMigrationsIfNeeded() {
   const connectionString = process.env.DATABASE_URL;
 
@@ -22,7 +27,7 @@ async function runMigrationsIfNeeded() {
 
   const scriptDir = dirname(fileURLToPath(import.meta.url));
   const migrationsFolder = resolve(scriptDir, "../../../packages/db/drizzle");
-  const pool = new Pool(getPostgresConnectionConfig(connectionString));
+  const pool = new Pool(getStartupMigrationConnectionConfig(connectionString));
 
   try {
     console.info("Running database migrations before Next.js startup");
@@ -33,10 +38,29 @@ async function runMigrationsIfNeeded() {
   }
 }
 
+function getAppDir() {
+  return resolve(dirname(fileURLToPath(import.meta.url)), "..");
+}
+
+export function getStandaloneServerPath(appDir = getAppDir()) {
+  const candidates = [
+    resolve(appDir, ".next/standalone/apps/web/server.js"),
+    resolve(appDir, ".next/standalone/server.js"),
+  ];
+
+  return candidates.find((candidate) => existsSync(candidate));
+}
+
 function startNext() {
-  const child = spawn("next", ["start"], {
+  const standaloneServerPath = getStandaloneServerPath();
+  const command = standaloneServerPath ? process.execPath : "next";
+  const args = standaloneServerPath ? [standaloneServerPath] : ["start"];
+  const child = spawn(command, args, {
     stdio: "inherit",
-    env: process.env,
+    env: {
+      ...process.env,
+      HOSTNAME: process.env.HOSTNAME ?? "0.0.0.0",
+    },
   });
 
   child.on("exit", (code, signal) => {

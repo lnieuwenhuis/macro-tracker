@@ -7,6 +7,9 @@ const INSECURE_REMOTE_SSL_MODES = new Set([
 ]);
 const REMOTE_SSL_MODES = new Set(["require", "verify-full"]);
 const VERIFY_REMOTE_SSL_MODES = new Set(["verify-full"]);
+const DEFAULT_POSTGRES_POOL_MAX = 3;
+const DEFAULT_POSTGRES_IDLE_TIMEOUT_MS = 10_000;
+const DEFAULT_POSTGRES_CONNECTION_TIMEOUT_MS = 5_000;
 
 export function isPgliteConnectionString(connectionString) {
   return connectionString === "memory:" || connectionString.startsWith("file:");
@@ -36,6 +39,17 @@ function validateRemoteSslMode(url) {
   }
 }
 
+function readPositiveIntegerEnv(name, fallback) {
+  const value = process.env[name];
+
+  if (!value) {
+    return fallback;
+  }
+
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 export function getSslConfig(connectionString) {
   const url = new URL(connectionString);
 
@@ -52,7 +66,7 @@ export function getSslConfig(connectionString) {
   return { rejectUnauthorized: shouldVerifyRemoteCertificate };
 }
 
-export function getPostgresConnectionConfig(connectionString) {
+export function getPostgresConnectionConfig(connectionString, overrides = {}) {
   const url = new URL(connectionString);
   const ssl = getSslConfig(connectionString);
 
@@ -61,5 +75,16 @@ export function getPostgresConnectionConfig(connectionString) {
   return {
     connectionString: url.toString(),
     ssl,
+    max: readPositiveIntegerEnv("POSTGRES_POOL_MAX", DEFAULT_POSTGRES_POOL_MAX),
+    idleTimeoutMillis: readPositiveIntegerEnv(
+      "POSTGRES_POOL_IDLE_TIMEOUT_MS",
+      DEFAULT_POSTGRES_IDLE_TIMEOUT_MS,
+    ),
+    connectionTimeoutMillis: readPositiveIntegerEnv(
+      "POSTGRES_POOL_CONNECTION_TIMEOUT_MS",
+      DEFAULT_POSTGRES_CONNECTION_TIMEOUT_MS,
+    ),
+    allowExitOnIdle: true,
+    ...overrides,
   };
 }

@@ -141,7 +141,7 @@ function buildDeps(overrides?: Partial<AppWarmupBuilderDeps>): AppWarmupBuilderD
 }
 
 describe("buildAppWarmupPayload", () => {
-  it("loads reusable app data and the nearby day window", async () => {
+  it("loads the core app data by default", async () => {
     const deps = buildDeps();
 
     const payload = await buildAppWarmupPayload({
@@ -157,12 +157,37 @@ describe("buildAppWarmupPayload", () => {
       email: "coach@example.com",
       canAccessAdmin: true,
     });
+    expect(Object.keys(payload.days)).toEqual(["2026-03-19"]);
+    expect(payload.days["2026-03-19"]?.date).toBe("2026-03-19");
+    expect(payload.summary).toBeUndefined();
+    expect(payload.weight).toBeUndefined();
+    expect(deps.getDailySummary).toHaveBeenCalledTimes(1);
+    expect(deps.getDailySummary).toHaveBeenCalledWith(
+      "user-1",
+      "2026-03-19",
+    );
+    expect(deps.getStatsPageData).not.toHaveBeenCalled();
+    expect(deps.getWeightPageData).not.toHaveBeenCalled();
+  });
+
+  it("loads summary, weight, and nearby days for explicit extended warmup", async () => {
+    const deps = buildDeps();
+
+    const payload = await buildAppWarmupPayload({
+      sessionUser: {
+        userId: "user-1",
+        email: "session@example.com",
+      },
+      selectedDate: "2026-03-19",
+      scope: "extended",
+      deps,
+    });
+
     expect(Object.keys(payload.days)).toEqual([
       "2026-03-18",
       "2026-03-19",
       "2026-03-20",
     ]);
-    expect(payload.days["2026-03-19"]?.date).toBe("2026-03-19");
     expect(payload.summary?.periodAverages).toBe(periodAverages);
     expect(payload.summary?.statsData).toBe(statsData);
     expect(payload.weight).toBe(weight);
@@ -170,12 +195,12 @@ describe("buildAppWarmupPayload", () => {
     expect(deps.getDailySummary).toHaveBeenNthCalledWith(
       1,
       "user-1",
-      "2026-03-18",
+      "2026-03-19",
     );
     expect(deps.getDailySummary).toHaveBeenNthCalledWith(
       2,
       "user-1",
-      "2026-03-19",
+      "2026-03-18",
     );
     expect(deps.getDailySummary).toHaveBeenNthCalledWith(
       3,

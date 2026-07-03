@@ -22,6 +22,10 @@ type ApiEndpointMethod = {
   method: "get" | "post" | "patch" | "delete";
   summary: string;
   scopes: ApiScope[];
+  conditionalRequiredScopes?: {
+    scopes: ApiScope[];
+    when: string;
+  }[];
   successStatus?: 200 | 201;
   requestBody?: ApiRequestBodyKey;
   hasConflictResponse?: boolean;
@@ -50,12 +54,27 @@ export const API_V1_ENDPOINTS: ApiEndpoint[] = [
   },
   {
     path: "/days/{date}/entries",
-    methods: [{ method: "post", summary: "Create a meal entry on a date", scopes: ["write:daily"], successStatus: 201, requestBody: "mealEntryCreate" }],
+    methods: [
+      {
+        method: "post",
+        summary: "Create a meal entry on a date",
+        scopes: ["write:daily"],
+        conditionalRequiredScopes: [{ scopes: ["read:foods"], when: "non-null productId is supplied" }],
+        successStatus: 201,
+        requestBody: "mealEntryCreate",
+      },
+    ],
   },
   {
     path: "/meal-entries/{id}",
     methods: [
-      { method: "patch", summary: "Update a meal entry", scopes: ["write:daily", "read:daily"], requestBody: "mealEntryPatch" },
+      {
+        method: "patch",
+        summary: "Update a meal entry",
+        scopes: ["write:daily", "read:daily"],
+        conditionalRequiredScopes: [{ scopes: ["read:foods"], when: "non-null productId is supplied" }],
+        requestBody: "mealEntryPatch",
+      },
       { method: "delete", summary: "Delete a meal entry", scopes: ["write:daily"] },
     ],
   },
@@ -257,6 +276,15 @@ export function getApiV1AllowedMethods(path: string[]): ApiV1RouterMethod[] {
 
 export function isKnownApiV1Path(path: string[]) {
   return API_V1_ENDPOINTS.some((endpoint) => endpointPathMatches(endpoint.path, path));
+}
+
+export function formatApiV1ScopeSummary(method: ApiEndpointMethod) {
+  const baseScopes = method.scopes.length ? method.scopes.join(", ") : "Public";
+  const conditionalScopes = method.conditionalRequiredScopes?.map(
+    (requirement) =>
+      `Additionally requires ${requirement.scopes.join(", ")} when ${requirement.when}.`,
+  );
+  return [baseScopes, ...(conditionalScopes ?? [])].join(" ");
 }
 
 function responseSchema() {
@@ -575,10 +603,15 @@ export function getApiV1OpenApi() {
       endpoint.methods.map((method) => {
         const operation: Record<string, unknown> = {
           summary: method.summary,
+          description: method.conditionalRequiredScopes?.map(
+            (requirement) =>
+              `Additionally requires ${requirement.scopes.join(", ")} when ${requirement.when}.`,
+          ).join("\n"),
           security: method.scopes.length
             ? [{ bearerAuth: [] }]
             : [],
           "x-required-scopes": method.scopes.length ? method.scopes : undefined,
+          "x-conditional-required-scopes": method.conditionalRequiredScopes,
           parameters: parametersFor(endpoint.path),
           requestBody: requestBodyFor(method.requestBody),
           responses: {
@@ -624,6 +657,8 @@ export function getApiV1OpenApi() {
         if (!operation.parameters) delete operation.parameters;
         if (!operation.requestBody) delete operation.requestBody;
         if (!operation["x-required-scopes"]) delete operation["x-required-scopes"];
+        if (!operation["x-conditional-required-scopes"]) delete operation["x-conditional-required-scopes"];
+        if (!operation.description) delete operation.description;
 
         return [method.method, operation];
       }),

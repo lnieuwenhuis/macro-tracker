@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { API_SCOPE_VALUES } from "@macro-tracker/db";
 
-import { API_V1_ENDPOINTS } from "@/lib/api-v1-openapi";
+import { API_V1_ENDPOINTS, formatApiV1ScopeSummary } from "@/lib/api-v1-openapi";
 
 export const metadata: Metadata = {
   title: "API Docs | Macro Tracker",
@@ -93,7 +93,7 @@ export default function ApiDocsPage() {
                     </td>
                     <td className="px-4 py-3 font-mono">{endpoint.path}</td>
                     <td className="px-4 py-3 text-[var(--color-muted)]">
-                      {method.scopes.length ? method.scopes.join(", ") : "Public"}
+                      {formatApiV1ScopeSummary(method)}
                     </td>
                   </tr>
                 )),

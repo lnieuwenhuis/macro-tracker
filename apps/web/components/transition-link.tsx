@@ -45,7 +45,7 @@ export function TransitionLink({
     <Link
       href={href}
       target={target}
-      prefetch
+      prefetch={false}
       onFocus={(event) => {
         onFocus?.(event);
         prefetchHref();
