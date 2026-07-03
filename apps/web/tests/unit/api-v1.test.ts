@@ -2010,7 +2010,7 @@ describe("Macro Tracker API v1", () => {
       "x-conditional-required-scopes": [
         {
           scopes: ["read:foods"],
-          when: "productId is supplied",
+          when: "non-null productId is supplied",
         },
       ],
     });
@@ -2019,7 +2019,7 @@ describe("Macro Tracker API v1", () => {
       "x-conditional-required-scopes": [
         {
           scopes: ["read:foods"],
-          when: "productId is supplied",
+          when: "non-null productId is supplied",
         },
       ],
     });
@@ -2030,10 +2030,10 @@ describe("Macro Tracker API v1", () => {
       (endpoint) => endpoint.path === "/meal-entries/{id}",
     );
     expect(formatApiV1ScopeSummary(mealEntryCreateEndpoint!.methods[0]!)).toContain(
-      "Additionally requires read:foods when productId is supplied.",
+      "Additionally requires read:foods when non-null productId is supplied.",
     );
     expect(formatApiV1ScopeSummary(mealEntryPatchEndpoint!.methods[0]!)).toContain(
-      "Additionally requires read:foods when productId is supplied.",
+      "Additionally requires read:foods when non-null productId is supplied.",
     );
     expect(payload.paths["/foods"]?.post.responses).toHaveProperty("201");
     expect(payload.paths["/foods"]?.post.responses).toHaveProperty("405");
