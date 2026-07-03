@@ -22,6 +22,9 @@ type StartupMigrationModule = {
     allowExitOnIdle: boolean;
   };
   getStandaloneServerPath: (appDir?: string) => string | undefined;
+  getNextServerEnv: (
+    env?: Record<string, string | undefined>,
+  ) => Record<string, string | undefined>;
 };
 
 const poolDefaults = {
@@ -187,5 +190,30 @@ describe("startup migration database SSL config", () => {
     } finally {
       await rm(appDir, { force: true, recursive: true });
     }
+  });
+
+  it("binds the Next server to all interfaces by default", async () => {
+    const { getNextServerEnv } = await getStartupMigrationModule();
+
+    expect(
+      getNextServerEnv({
+        HOSTNAME: "railway-container-hostname",
+        PORT: "3000",
+      }),
+    ).toEqual({
+      HOSTNAME: "0.0.0.0",
+      PORT: "3000",
+    });
+  });
+
+  it("allows an explicit Next server hostname override", async () => {
+    const { getNextServerEnv } = await getStartupMigrationModule();
+
+    expect(
+      getNextServerEnv({
+        HOSTNAME: "railway-container-hostname",
+        NEXT_SERVER_HOSTNAME: "127.0.0.1",
+      }).HOSTNAME,
+    ).toBe("127.0.0.1");
   });
 });

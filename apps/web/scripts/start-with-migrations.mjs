@@ -51,16 +51,20 @@ export function getStandaloneServerPath(appDir = getAppDir()) {
   return candidates.find((candidate) => existsSync(candidate));
 }
 
+export function getNextServerEnv(env = process.env) {
+  return {
+    ...env,
+    HOSTNAME: env.NEXT_SERVER_HOSTNAME ?? "0.0.0.0",
+  };
+}
+
 function startNext() {
   const standaloneServerPath = getStandaloneServerPath();
   const command = standaloneServerPath ? process.execPath : "next";
   const args = standaloneServerPath ? [standaloneServerPath] : ["start"];
   const child = spawn(command, args, {
     stdio: "inherit",
-    env: {
-      ...process.env,
-      HOSTNAME: process.env.HOSTNAME ?? "0.0.0.0",
-    },
+    env: getNextServerEnv(),
   });
 
   child.on("exit", (code, signal) => {
