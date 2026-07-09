@@ -21,6 +21,9 @@ pub struct Config {
     pub openrouter_model: Option<String>,
     pub openrouter_fallback_models: Option<String>,
     pub openrouter_model_timeout_ms: Option<u64>,
+    pub open_food_facts_base_url: String,
+    pub albert_heijn_base_url: String,
+    pub jumbo_base_url: String,
 }
 
 impl Config {
@@ -87,6 +90,12 @@ impl Config {
             openrouter_fallback_models: read_value(&mut read, "OPENROUTER_FALLBACK_MODELS"),
             openrouter_model_timeout_ms: read_value(&mut read, "OPENROUTER_MODEL_TIMEOUT_MS")
                 .and_then(|value| value.parse().ok()),
+            open_food_facts_base_url: read_value(&mut read, "OPEN_FOOD_FACTS_BASE_URL")
+                .unwrap_or_else(|| "https://world.openfoodfacts.org".to_string()),
+            albert_heijn_base_url: read_value(&mut read, "ALBERT_HEIJN_BASE_URL")
+                .unwrap_or_else(|| "https://api.ah.nl".to_string()),
+            jumbo_base_url: read_value(&mut read, "JUMBO_BASE_URL")
+                .unwrap_or_else(|| "https://mobileapi.jumbo.com".to_string()),
         })
     }
 

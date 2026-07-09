@@ -119,6 +119,9 @@ mod tests {
             openrouter_model: None,
             openrouter_fallback_models: None,
             openrouter_model_timeout_ms: None,
+            open_food_facts_base_url: "https://world.openfoodfacts.org".to_string(),
+            albert_heijn_base_url: "https://api.ah.nl".to_string(),
+            jumbo_base_url: "https://mobileapi.jumbo.com".to_string(),
         }
     }
 

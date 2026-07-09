@@ -1,7 +1,7 @@
 use crate::{AppState, auth, db};
 use axum::{
     Json, Router,
-    extract::{Multipart, Path, State},
+    extract::{DefaultBodyLimit, Multipart, Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -19,6 +19,7 @@ const DEFAULT_FOOD_PHOTO_FALLBACK_MODELS: &[&str] = &[
     "openrouter/free",
 ];
 const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+const FOOD_PHOTO_BODY_LIMIT_BYTES: usize = MAX_IMAGE_BYTES + 1024 * 1024;
 const BENCHMARK_ROUTE_RUNTIME_BUDGET_MS: u64 = 270_000;
 const BENCHMARK_RUN_LOCK_TTL: Duration = Duration::from_secs(300);
 
@@ -27,7 +28,10 @@ static BENCHMARK_LOCK: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/barcode/{barcode}", get(lookup_barcode))
-        .route("/api/ai/food-photo", post(food_photo))
+        .route(
+            "/api/ai/food-photo",
+            post(food_photo).layer(DefaultBodyLimit::max(FOOD_PHOTO_BODY_LIMIT_BYTES)),
+        )
         .route("/api/admin/ai-model-benchmark", post(admin_benchmark))
 }
 
@@ -69,7 +73,7 @@ async fn lookup_barcode(State(state): State<AppState>, Path(barcode): Path<Strin
         }
     }
 
-    match lookup_open_food_facts(&state, &barcode).await {
+    match lookup_barcode_provider_chain(&state, &barcode).await {
         Some(product) => legacy_json(StatusCode::OK, json!({ "found": true, "product": product })),
         None => legacy_json(
             StatusCode::OK,
@@ -235,7 +239,8 @@ async fn admin_benchmark(
 
 async fn lookup_open_food_facts(state: &AppState, barcode: &str) -> Option<Value> {
     let url = format!(
-        "https://world.openfoodfacts.org/api/v2/product/{}.json",
+        "{}/api/v2/product/{}.json",
+        state.config.open_food_facts_base_url.trim_end_matches('/'),
         url::form_urlencoded::byte_serialize(barcode.as_bytes()).collect::<String>()
     );
     let response = tokio::time::timeout(Duration::from_secs(5), state.http.get(url).send())
@@ -277,6 +282,363 @@ async fn lookup_open_food_facts(state: &AppState, barcode: &str) -> Option<Value
         "imageUrl": product.get("image_front_small_url").or_else(|| product.get("image_url")).and_then(Value::as_str),
         "source": "openfoodfacts"
     }))
+}
+
+async fn lookup_barcode_provider_chain(state: &AppState, barcode: &str) -> Option<Value> {
+    if let Some(product) = lookup_open_food_facts(state, barcode).await {
+        return Some(product);
+    }
+    if let Some(product) = lookup_albert_heijn(state, barcode).await {
+        return Some(product);
+    }
+    lookup_jumbo(state, barcode).await
+}
+
+async fn lookup_albert_heijn(state: &AppState, barcode: &str) -> Option<Value> {
+    let token = get_albert_heijn_token(state).await?;
+    let headers = |request: reqwest::RequestBuilder| {
+        request
+            .header("User-Agent", "Appie/8.8.2 Model/phone Android/7.0-API24")
+            .header("x-application", "AHWEBSHOP")
+            .bearer_auth(&token)
+    };
+    let base_url = state.config.albert_heijn_base_url.trim_end_matches('/');
+    let search_url = format!(
+        "{base_url}/mobile-services/product/search/v2?query={}&size=1",
+        url::form_urlencoded::byte_serialize(barcode.as_bytes()).collect::<String>()
+    );
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        headers(state.http.get(search_url)).send(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let search_data: Value = response.json().await.ok()?;
+    let product = first_albert_heijn_product(&search_data)?;
+
+    let name = string_field(product, &["title", "description"]).unwrap_or("Unknown product");
+    let brands = string_field(product, &["brand"]).unwrap_or("Albert Heijn");
+    let image_url = product
+        .get("images")
+        .and_then(Value::as_array)
+        .and_then(|images| images.first())
+        .and_then(|image| image.get("url"))
+        .and_then(Value::as_str)
+        .or_else(|| product.get("image").and_then(Value::as_str));
+
+    let mut calories_kcal = 0.0;
+    let mut protein_g = 0.0;
+    let mut carbs_g = 0.0;
+    let mut fat_g = 0.0;
+
+    if let Some(product_id) = string_field(product, &["webshopId", "hqId", "id", "productId"]) {
+        let detail_url = format!(
+            "{base_url}/mobile-services/product/detail/v4/fir/{}",
+            url::form_urlencoded::byte_serialize(product_id.as_bytes()).collect::<String>()
+        );
+        if let Ok(Ok(response)) = tokio::time::timeout(
+            Duration::from_secs(5),
+            headers(state.http.get(detail_url)).send(),
+        )
+        .await
+            && response.status().is_success()
+            && let Ok(detail) = response.json::<Value>().await
+            && let Some(macros) = parse_albert_heijn_nutrients(
+                detail
+                    .get("nutritionInfo")
+                    .or_else(|| detail.get("nutritionTable"))
+                    .or_else(|| detail.get("nutrients"))
+                    .or_else(|| detail.get("nix")),
+            )
+        {
+            calories_kcal = macros.calories_kcal;
+            protein_g = macros.protein_g;
+            carbs_g = macros.carbs_g;
+            fat_g = macros.fat_g;
+        }
+    }
+
+    Some(json!({
+        "name": name,
+        "brands": brands,
+        "barcode": barcode,
+        "proteinG": protein_g,
+        "carbsG": carbs_g,
+        "fatG": fat_g,
+        "caloriesKcal": calories_kcal,
+        "servingSizeG": Value::Null,
+        "imageUrl": image_url,
+        "source": "albert_heijn"
+    }))
+}
+
+async fn get_albert_heijn_token(state: &AppState) -> Option<String> {
+    let url = format!(
+        "{}/mobile-auth/v1/auth/token/anonymous",
+        state.config.albert_heijn_base_url.trim_end_matches('/')
+    );
+    let response = tokio::time::timeout(
+        Duration::from_secs(4),
+        state
+            .http
+            .post(url)
+            .header("Content-Type", "application/json")
+            .header("User-Agent", "Appie/8.8.2 Model/phone Android/7.0-API24")
+            .header("x-application", "AHWEBSHOP")
+            .json(&json!({ "clientId": "appie" }))
+            .send(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    response
+        .json::<Value>()
+        .await
+        .ok()?
+        .get("access_token")
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
+}
+
+async fn lookup_jumbo(state: &AppState, barcode: &str) -> Option<Value> {
+    let base_url = state.config.jumbo_base_url.trim_end_matches('/');
+    let search_url = format!(
+        "{base_url}/v17/search?q={}&offset=0&limit=1",
+        url::form_urlencoded::byte_serialize(barcode.as_bytes()).collect::<String>()
+    );
+    let user_agent = "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.120 Mobile Safari/537.36";
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        state
+            .http
+            .get(search_url)
+            .header("User-Agent", user_agent)
+            .send(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let search_data: Value = response.json().await.ok()?;
+    let product = search_data
+        .get("products")
+        .and_then(|products| products.get("data"))
+        .and_then(Value::as_array)
+        .and_then(|products| products.first())?;
+    let name = product
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("Unknown product");
+    let image_url = get_path(product, &["imageInfo", "primaryView"])
+        .and_then(Value::as_array)
+        .and_then(|images| images.first())
+        .and_then(|image| image.get("url"))
+        .and_then(Value::as_str);
+
+    let mut calories_kcal = 0.0;
+    let mut protein_g = 0.0;
+    let mut carbs_g = 0.0;
+    let mut fat_g = 0.0;
+    if let Some(product_id) = product.get("id").and_then(Value::as_str) {
+        let detail_url = format!(
+            "{base_url}/v17/products/{}",
+            url::form_urlencoded::byte_serialize(product_id.as_bytes()).collect::<String>()
+        );
+        if let Ok(Ok(response)) = tokio::time::timeout(
+            Duration::from_secs(5),
+            state
+                .http
+                .get(detail_url)
+                .header("User-Agent", user_agent)
+                .send(),
+        )
+        .await
+            && response.status().is_success()
+            && let Ok(detail) = response.json::<Value>().await
+            && let Some(macros) = parse_jumbo_nutrients(
+                get_path(&detail, &["product", "data", "nutritionInfo"])
+                    .or_else(|| get_path(&detail, &["product", "data", "nutrients"]))
+                    .or_else(|| get_path(&detail, &["data", "nutritionInfo"]))
+                    .or_else(|| get_path(&detail, &["data", "nutrients"]))
+                    .or_else(|| detail.get("nutritionInfo"))
+                    .or_else(|| detail.get("nutrients")),
+            )
+        {
+            calories_kcal = macros.calories_kcal;
+            protein_g = macros.protein_g;
+            carbs_g = macros.carbs_g;
+            fat_g = macros.fat_g;
+        }
+    }
+
+    Some(json!({
+        "name": name,
+        "brands": "Jumbo",
+        "barcode": barcode,
+        "proteinG": protein_g,
+        "carbsG": carbs_g,
+        "fatG": fat_g,
+        "caloriesKcal": calories_kcal,
+        "servingSizeG": Value::Null,
+        "imageUrl": image_url,
+        "source": "jumbo"
+    }))
+}
+
+#[derive(Default)]
+struct ParsedMacros {
+    calories_kcal: f64,
+    protein_g: f64,
+    carbs_g: f64,
+    fat_g: f64,
+}
+
+fn first_albert_heijn_product(data: &Value) -> Option<&Value> {
+    let cards = data
+        .get("cards")
+        .or_else(|| data.get("products"))
+        .and_then(Value::as_array)
+        .or_else(|| data.as_array())?;
+    let first = cards.first()?;
+    first
+        .get("products")
+        .and_then(Value::as_array)
+        .and_then(|products| products.first())
+        .or(Some(first))
+}
+
+fn string_field<'a>(value: &'a Value, names: &[&str]) -> Option<&'a str> {
+    names
+        .iter()
+        .find_map(|name| value.get(*name).and_then(Value::as_str))
+}
+
+fn get_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    path.iter()
+        .try_fold(value, |current, key| current.get(*key))
+}
+
+fn parse_albert_heijn_nutrients(raw: Option<&Value>) -> Option<ParsedMacros> {
+    let mut macros = ParsedMacros::default();
+    let mut found = false;
+    fn walk(items: &[Value], macros: &mut ParsedMacros, found: &mut bool) {
+        for item in items {
+            let name = string_field(item, &["name", "title", "key"])
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let value = item
+                .get("value")
+                .or_else(|| item.get("valuePer100g"))
+                .or_else(|| item.get("per100g"))
+                .and_then(number_from_value)
+                .unwrap_or(0.0);
+            let unit = item
+                .get("unit")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            assign_nutrient(&name, &unit, value, macros, found);
+            if let Some(children) = item
+                .get("nutrients")
+                .or_else(|| item.get("children"))
+                .or_else(|| item.get("subNutrients"))
+                .and_then(Value::as_array)
+            {
+                walk(children, macros, found);
+            }
+        }
+    }
+
+    match raw? {
+        Value::Array(items) => walk(items, &mut macros, &mut found),
+        Value::Object(object) => {
+            for key in ["nutrients", "nutritionTable", "values"] {
+                if let Some(items) = object.get(key).and_then(Value::as_array) {
+                    walk(items, &mut macros, &mut found);
+                }
+            }
+        }
+        _ => {}
+    }
+    found.then_some(macros)
+}
+
+fn parse_jumbo_nutrients(raw: Option<&Value>) -> Option<ParsedMacros> {
+    let mut macros = ParsedMacros::default();
+    let mut found = false;
+    match raw? {
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                let name = string_field(item, &["name", "key"])
+                    .map(str::to_string)
+                    .unwrap_or_else(|| index.to_string())
+                    .to_ascii_lowercase();
+                let value = item
+                    .get("value")
+                    .or_else(|| item.get("per100g"))
+                    .and_then(number_from_value)
+                    .unwrap_or_else(|| number_from_value(item).unwrap_or(0.0));
+                assign_nutrient(&name, "", value, &mut macros, &mut found);
+            }
+        }
+        Value::Object(object) => {
+            for (key, value) in object {
+                let nutrient_value = value
+                    .get("value")
+                    .or_else(|| value.get("per100g"))
+                    .and_then(number_from_value)
+                    .unwrap_or_else(|| number_from_value(value).unwrap_or(0.0));
+                assign_nutrient(
+                    &key.to_ascii_lowercase(),
+                    "",
+                    nutrient_value,
+                    &mut macros,
+                    &mut found,
+                );
+            }
+        }
+        _ => {}
+    }
+    found.then_some(macros)
+}
+
+fn assign_nutrient(
+    name: &str,
+    unit: &str,
+    value: f64,
+    macros: &mut ParsedMacros,
+    found: &mut bool,
+) {
+    if name.contains("energie") || name.contains("energy") || name.contains("calor") {
+        if unit.contains("kcal") || name.contains("kcal") {
+            macros.calories_kcal = value.round();
+            *found = true;
+        }
+    } else if name.contains("eiwit") || name.contains("protein") {
+        macros.protein_g = round1(value);
+        *found = true;
+    } else if name.contains("koolhydra") || name.contains("carb") {
+        if !name.contains("suiker") && !name.contains("sugar") {
+            macros.carbs_g = round1(value);
+            *found = true;
+        }
+    } else if name.contains("vet") || name.contains("fat") {
+        if !name.contains("verzadigd") && !name.contains("saturat") && !name.contains("onverzadigd")
+        {
+            macros.fat_g = round1(value);
+            *found = true;
+        }
+    }
 }
 
 async fn analyze_food_photo_bytes(
@@ -1170,6 +1532,207 @@ fn empty_failure_breakdown() -> Map<String, Value> {
 fn increment_breakdown(map: &mut Map<String, Value>, kind: &str) {
     let current = map.get(kind).and_then(Value::as_i64).unwrap_or(0);
     map.insert(kind.to_string(), json!(current + 1));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use axum::{
+        body::Body,
+        extract::Path as AxumPath,
+        http::{Request, StatusCode},
+    };
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    fn test_config(provider_base_url: Option<&str>) -> Config {
+        let provider_base_url = provider_base_url.unwrap_or("http://127.0.0.1:1");
+        Config {
+            allow_insecure_internal_auth: true,
+            app_url: "http://localhost:3000".to_string(),
+            backend_internal_secret: None,
+            database_url: "postgres://postgres:***@127.0.0.1:1/macro_tracker".to_string(),
+            port: 4000,
+            postgres_pool_max: 1,
+            session_secret: "local-test-secret".to_string(),
+            shoo_base_url: "https://shoo.dev".to_string(),
+            trusted_origins: vec!["http://localhost:3000".to_string()],
+            admin_owner_emails: vec![],
+            openrouter_api_key: None,
+            openrouter_model: None,
+            openrouter_fallback_models: None,
+            openrouter_model_timeout_ms: None,
+            open_food_facts_base_url: provider_base_url.to_string(),
+            albert_heijn_base_url: provider_base_url.to_string(),
+            jumbo_base_url: provider_base_url.to_string(),
+        }
+    }
+
+    fn test_state(provider_base_url: Option<&str>) -> AppState {
+        AppState {
+            config: test_config(provider_base_url),
+            db: sqlx::postgres::PgPoolOptions::new()
+                .acquire_timeout(Duration::from_millis(50))
+                .connect_lazy("postgres://postgres:***@127.0.0.1:1/macro_tracker")
+                .expect("test pool should be created lazily"),
+            http: reqwest::Client::new(),
+        }
+    }
+
+    async fn spawn_barcode_provider_stub() -> String {
+        async fn off_miss() -> Json<Value> {
+            Json(json!({ "status": 0 }))
+        }
+        async fn ah_token() -> Json<Value> {
+            Json(json!({ "access_token": "test-token" }))
+        }
+        async fn ah_search() -> Json<Value> {
+            Json(json!({
+                "cards": [{
+                    "products": [{
+                        "webshopId": "ah-product-1",
+                        "title": "AH Test Product",
+                        "brand": "AH Brand",
+                        "images": [{ "url": "https://example.com/ah.png" }]
+                    }]
+                }]
+            }))
+        }
+        async fn ah_detail(AxumPath(_id): AxumPath<String>) -> Json<Value> {
+            Json(json!({
+                "nutritionInfo": [
+                    { "name": "Energie kcal", "value": 123, "unit": "kcal" },
+                    { "name": "Eiwitten", "value": 4.2, "unit": "g" },
+                    { "name": "Koolhydraten", "value": 12.3, "unit": "g" },
+                    { "name": "Vet", "value": 5.6, "unit": "g" }
+                ]
+            }))
+        }
+
+        let app = Router::new()
+            .route("/api/v2/product/{*path}", get(off_miss))
+            .route("/mobile-auth/v1/auth/token/anonymous", post(ah_token))
+            .route("/mobile-services/product/search/v2", get(ah_search))
+            .route(
+                "/mobile-services/product/detail/v4/fir/{id}",
+                get(ah_detail),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("stub listener should bind");
+        let addr = listener.local_addr().expect("stub address should exist");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("stub server should run");
+        });
+        format!("http://{addr}")
+    }
+
+    async fn food_photo_test_handler(
+        State(state): State<AppState>,
+        mut multipart: Multipart,
+    ) -> Response {
+        let mut image = None;
+        while let Ok(Some(field)) = multipart.next_field().await {
+            if field.name() == Some("image") {
+                let content_type = field
+                    .content_type()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "application/octet-stream".to_string());
+                let bytes = field.bytes().await.expect("test multipart should parse");
+                image = Some((bytes.to_vec(), content_type));
+            }
+        }
+        let (bytes, content_type) = image.expect("test image should be present");
+        let result = analyze_food_photo_bytes(
+            &state,
+            bytes,
+            &content_type,
+            "",
+            None,
+            "00000000-0000-0000-0000-000000000001",
+            false,
+        )
+        .await;
+        legacy_json(StatusCode::BAD_REQUEST, result)
+    }
+
+    #[tokio::test]
+    async fn food_photo_body_limit_allows_images_above_axum_default_to_reach_processing() {
+        let boundary = "boundary-food-photo-regression";
+        let mut body = Vec::new();
+        body.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"image\"; filename=\"photo.png\"\r\nContent-Type: image/png\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        body.extend(std::iter::repeat_n(0x89, 3 * 1024 * 1024));
+        body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+        let app = Router::new()
+            .route(
+                "/api/ai/food-photo",
+                post(food_photo_test_handler)
+                    .layer(DefaultBodyLimit::max(FOOD_PHOTO_BODY_LIMIT_BYTES)),
+            )
+            .with_state(test_state(None));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/ai/food-photo")
+                    .header(
+                        "content-type",
+                        format!("multipart/form-data; boundary={boundary}"),
+                    )
+                    .body(Body::from(body))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_ne!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: Value = serde_json::from_slice(&body).expect("response should be json");
+        assert_eq!(payload["kind"], json!("missing_api_key"));
+    }
+
+    #[tokio::test]
+    async fn barcode_route_falls_back_to_albert_heijn_after_open_food_facts_miss() {
+        let base_url = spawn_barcode_provider_stub().await;
+        let app = router().with_state(test_state(Some(&base_url)));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/barcode/8712345678901")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("response body should collect")
+            .to_bytes();
+        let payload: Value = serde_json::from_slice(&body).expect("response should be json");
+        assert_eq!(payload["found"], json!(true));
+        assert_eq!(payload["product"]["source"], json!("albert_heijn"));
+        assert_eq!(payload["product"]["name"], json!("AH Test Product"));
+        assert_eq!(payload["product"]["proteinG"], json!(4.2));
+    }
 }
 
 fn empty_category_averages() -> Map<String, Value> {
