@@ -5,7 +5,7 @@ use crate::{
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row, postgres::PgRow};
+use sqlx::{PgPool, Postgres, Row, postgres::PgRow};
 use std::collections::HashSet;
 use uuid::Uuid;
 
@@ -1554,7 +1554,9 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
             let user_id = uuid_arg(&args, "userId")?;
             let input = object_arg(&args, "input")?;
             maybe_trigger_test_fault(test_fault_arg(&args, "barcode_food_product_insert"), 1)?;
-            save_barcode_food_product_json(pool, user_id, input).await
+            let revision_test_fault =
+                test_fault_arg(&args, "barcode_food_product_revision").cloned();
+            save_barcode_food_product_json(pool, user_id, input, revision_test_fault.as_ref()).await
         }
         "getAdminDashboardData" => admin_dashboard_json(pool).await,
         "getAdminUserHealthSummary" => admin_user_health_summary_json(pool).await,
@@ -1948,6 +1950,17 @@ async fn food_product_json_by_id(
     user_id: Uuid,
     product_id: Uuid,
 ) -> AppResult<Option<Value>> {
+    food_product_json_by_id_with_executor(pool, user_id, product_id).await
+}
+
+async fn food_product_json_by_id_with_executor<'e, E>(
+    executor: E,
+    user_id: Uuid,
+    product_id: Uuid,
+) -> AppResult<Option<Value>>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     let row = sqlx::query(
         r#"
         SELECT jsonb_build_object(
@@ -1984,7 +1997,7 @@ async fn food_product_json_by_id(
     )
     .bind(user_id)
     .bind(product_id)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
 
     row.map(|row| row.try_get("data"))
@@ -2865,6 +2878,17 @@ async fn active_global_barcode_exists(
     barcode: &str,
     exclude_product_id: Option<Uuid>,
 ) -> AppResult<bool> {
+    active_global_barcode_exists_with_executor(pool, barcode, exclude_product_id).await
+}
+
+async fn active_global_barcode_exists_with_executor<'e, E>(
+    executor: E,
+    barcode: &str,
+    exclude_product_id: Option<Uuid>,
+) -> AppResult<bool>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     let exists = sqlx::query(
         r#"
         SELECT id
@@ -2879,7 +2903,7 @@ async fn active_global_barcode_exists(
     )
     .bind(barcode.trim())
     .bind(exclude_product_id)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?
     .is_some();
     Ok(exists)
@@ -3002,9 +3026,75 @@ async fn save_barcode_food_product_json(
     pool: &PgPool,
     user_id: Uuid,
     input: &serde_json::Map<String, Value>,
+    test_fault: Option<&serde_json::Map<String, Value>>,
 ) -> AppResult<Value> {
     let product_input = normalize_barcode_food_product_input(input)?;
-    create_food_product_json(pool, user_id, &product_input, false).await
+    let product_id = Uuid::new_v4();
+    let mut normalized = normalize_food_product_input(&product_input, "global")?;
+    normalized.scope = "global".to_string();
+    let mut tx = pool.begin().await?;
+
+    if normalized.source == "barcode"
+        && let Some(barcode) = normalized.barcode.as_deref()
+        && active_global_barcode_exists_with_executor(&mut *tx, barcode, None).await?
+    {
+        return Err(AppError::BadRequest(
+            "That barcode already exists.".to_string(),
+        ));
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO food_products (
+          id, owner_user_id, scope, source, barcode, name, brand,
+          default_serving_quantity, default_serving_unit, protein_per_100,
+          carbs_per_100, fat_per_100, calories_per_100, serving_weight_g,
+          serving_volume_ml, submitted_by_user_id, source_provider,
+          source_confidence, source_metadata, corrected_from_product_id,
+          updated_at
+        )
+        VALUES (
+          $1, NULL, $2, $3, $4, $5, $6, $7, $8, $9,
+          $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, now()
+        )
+        "#,
+    )
+    .bind(product_id)
+    .bind(normalized.scope)
+    .bind(normalized.source)
+    .bind(normalized.barcode.as_deref())
+    .bind(normalized.name)
+    .bind(normalized.brand)
+    .bind(normalized.default_serving_quantity)
+    .bind(normalized.default_serving_unit)
+    .bind(normalized.macros.protein)
+    .bind(normalized.macros.carbs)
+    .bind(normalized.macros.fat)
+    .bind(normalized.macros.calories)
+    .bind(normalized.serving_weight_g)
+    .bind(normalized.serving_volume_ml)
+    .bind(Some(user_id))
+    .bind(normalized.source_provider.as_deref())
+    .bind(normalized.source_confidence)
+    .bind(normalized.source_metadata)
+    .bind(normalized.corrected_from_product_id)
+    .execute(&mut *tx)
+    .await?;
+
+    let product = food_product_json_by_id_with_executor(&mut *tx, user_id, product_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Food product not found.".to_string()))?;
+    maybe_trigger_test_fault(test_fault, 1)?;
+    insert_food_product_revision_with_executor(
+        &mut *tx,
+        product_id,
+        Some(user_id),
+        "created",
+        product.clone(),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(product)
 }
 
 async fn admin_dashboard_json(pool: &PgPool) -> AppResult<Value> {
@@ -3573,14 +3663,12 @@ async fn create_admin_barcode_product_json(
     input: &serde_json::Map<String, Value>,
 ) -> AppResult<Value> {
     let actor = require_admin_actor(pool, actor_user_id).await?;
-    let product = save_barcode_food_product_json(pool, actor.id, input).await?;
+    let product = save_barcode_food_product_json(pool, actor.id, input, None).await?;
     let product_id = product
         .get("id")
         .and_then(Value::as_str)
         .and_then(|value| Uuid::parse_str(value).ok())
         .ok_or_else(|| AppError::BadRequest("Created product id is invalid.".to_string()))?;
-    insert_food_product_revision(pool, product_id, Some(actor.id), "created", product.clone())
-        .await?;
     insert_admin_audit_event(
         pool,
         actor.id,
@@ -3768,6 +3856,20 @@ async fn insert_food_product_revision(
     action: &str,
     snapshot: Value,
 ) -> AppResult<()> {
+    insert_food_product_revision_with_executor(pool, product_id, actor_user_id, action, snapshot)
+        .await
+}
+
+async fn insert_food_product_revision_with_executor<'e, E>(
+    executor: E,
+    product_id: Uuid,
+    actor_user_id: Option<Uuid>,
+    action: &str,
+    snapshot: Value,
+) -> AppResult<()>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     sqlx::query(
         r#"
         INSERT INTO food_product_revisions (
@@ -3781,7 +3883,7 @@ async fn insert_food_product_revision(
     .bind(actor_user_id)
     .bind(action)
     .bind(snapshot)
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(())
 }
@@ -5570,7 +5672,8 @@ fn round2(value: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{collections::HashSet, fs, path::PathBuf};
+    use sqlx::postgres::PgPoolOptions;
+    use std::{collections::HashSet, env, fs, path::PathBuf};
 
     fn bad_request_message(result: AppResult<impl Sized>) -> String {
         match result {
@@ -5613,6 +5716,170 @@ mod tests {
             payload.insert((*key).to_string(), value.clone());
         }
         payload
+    }
+
+    fn barcode_payload(barcode: &str) -> serde_json::Map<String, Value> {
+        serde_json::Map::from_iter([
+            ("barcode".to_string(), json!(barcode)),
+            ("name".to_string(), json!("Community Bar")),
+            ("brands".to_string(), json!("Macro Test")),
+            ("servingSizeG".to_string(), json!(42.0)),
+            ("proteinG".to_string(), json!(10.0)),
+            ("carbsG".to_string(), json!(20.0)),
+            ("fatG".to_string(), json!(5.0)),
+            ("caloriesKcal".to_string(), json!(165)),
+        ])
+    }
+
+    struct TestDb {
+        pool: PgPool,
+        schema: String,
+    }
+
+    impl TestDb {
+        async fn cleanup(&self) {
+            let _ = sqlx::query(&format!(
+                r#"DROP SCHEMA IF EXISTS "{}" CASCADE"#,
+                self.schema
+            ))
+            .execute(&self.pool)
+            .await;
+        }
+    }
+
+    async fn test_db() -> Option<TestDb> {
+        let database_url = env::var("TEST_DATABASE_URL")
+            .or_else(|_| env::var("DATABASE_URL"))
+            .ok()?;
+        let schema = format!("backend_test_{}", Uuid::new_v4().simple());
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .ok()?;
+        sqlx::query(&format!(r#"CREATE SCHEMA "{}""#, schema))
+            .execute(&pool)
+            .await
+            .ok()?;
+        sqlx::query(&format!(r#"SET search_path TO "{}""#, schema))
+            .execute(&pool)
+            .await
+            .ok()?;
+        sqlx::raw_sql(SCHEMA_SQL).execute(&pool).await.ok()?;
+        Some(TestDb { pool, schema })
+    }
+
+    async fn insert_test_user(pool: &PgPool) -> Uuid {
+        let user_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO users (id, shoo_pairwise_sub, email, display_name)
+            VALUES ($1, $2, $3, 'Test User')
+            "#,
+        )
+        .bind(user_id)
+        .bind(format!("test-sub-{user_id}"))
+        .bind(format!("{user_id}@example.test"))
+        .execute(pool)
+        .await
+        .expect("test user should insert");
+        user_id
+    }
+
+    #[tokio::test]
+    async fn save_barcode_food_product_rpc_creates_created_revision() {
+        let Some(test_db) = test_db().await else {
+            eprintln!(
+                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
+            );
+            return;
+        };
+        let user_id = insert_test_user(&test_db.pool).await;
+        let barcode = format!("test-{}", Uuid::new_v4());
+
+        let product = rpc_json(
+            &test_db.pool,
+            "saveBarcodeFoodProduct",
+            json!({
+                "userId": user_id,
+                "input": barcode_payload(&barcode)
+            }),
+        )
+        .await
+        .expect("barcode product should save");
+        let product_id = Uuid::parse_str(product.get("id").and_then(Value::as_str).unwrap())
+            .expect("product id should be a uuid");
+
+        let revision = sqlx::query(
+            r#"
+            SELECT actor_user_id, action, snapshot_json
+            FROM food_product_revisions
+            WHERE product_id = $1
+            "#,
+        )
+        .bind(product_id)
+        .fetch_one(&test_db.pool)
+        .await
+        .expect("created revision should exist");
+
+        assert_eq!(
+            revision.try_get::<Uuid, _>("actor_user_id").unwrap(),
+            user_id
+        );
+        assert_eq!(revision.try_get::<String, _>("action").unwrap(), "created");
+        let snapshot: Value = revision.try_get("snapshot_json").unwrap();
+        assert_eq!(snapshot.get("id"), product.get("id"));
+        assert_eq!(snapshot.get("barcode"), product.get("barcode"));
+
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn save_barcode_food_product_rolls_back_product_when_created_revision_fails() {
+        let Some(test_db) = test_db().await else {
+            eprintln!(
+                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
+            );
+            return;
+        };
+        let user_id = insert_test_user(&test_db.pool).await;
+        let barcode = format!("test-{}", Uuid::new_v4());
+
+        let result = rpc_json(
+            &test_db.pool,
+            "saveBarcodeFoodProduct",
+            json!({
+                "userId": user_id,
+                "input": barcode_payload(&barcode),
+                "testFault": {
+                    "kind": "barcode_food_product_revision",
+                    "message": "forced revision failure"
+                }
+            }),
+        )
+        .await;
+
+        assert_eq!(bad_request_message(result), "forced revision failure");
+        let product_count: i64 =
+            sqlx::query("SELECT count(*)::bigint AS count FROM food_products WHERE barcode = $1")
+                .bind(&barcode)
+                .fetch_one(&test_db.pool)
+                .await
+                .expect("product count should query")
+                .try_get("count")
+                .unwrap();
+        let revision_count: i64 =
+            sqlx::query("SELECT count(*)::bigint AS count FROM food_product_revisions")
+                .fetch_one(&test_db.pool)
+                .await
+                .expect("revision count should query")
+                .try_get("count")
+                .unwrap();
+
+        assert_eq!(product_count, 0);
+        assert_eq!(revision_count, 0);
+
+        test_db.cleanup().await;
     }
 
     #[test]
