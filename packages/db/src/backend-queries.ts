@@ -97,7 +97,7 @@ export async function ensureUserRole(userId: string, role: AdminRole, ..._ignore
 
 export async function createApiToken(
   userId: string,
-  input: { name: string; scopes: readonly ApiScope[]; expiresAt?: Date | string | null },
+  input: { name: string; scopes: readonly string[]; expiresAt?: Date | string | null },
   ..._ignored: unknown[]
 ): Promise<CreatedApiToken> {
   return backendRpc("createApiToken", {

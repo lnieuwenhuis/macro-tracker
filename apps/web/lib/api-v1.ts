@@ -15,6 +15,10 @@ export async function handleApiV1Request(
   path: string[] | undefined,
   method = request.method,
 ) {
+  if (method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: CORS_HEADERS });
+  }
+
   if (method === "GET" && path?.length === 1 && path[0] === "openapi.json") {
     return Response.json(getApiV1OpenApi(), { headers: CORS_HEADERS });
   }

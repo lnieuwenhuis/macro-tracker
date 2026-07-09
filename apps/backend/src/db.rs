@@ -59,6 +59,23 @@ struct WeightEntryValues {
     notes: Option<String>,
 }
 
+const API_SCOPE_VALUES: &[&str] = &[
+    "read:account",
+    "read:daily",
+    "write:daily",
+    "read:foods",
+    "write:foods",
+    "read:templates",
+    "write:templates",
+    "read:recipes",
+    "write:recipes",
+    "read:weight",
+    "write:weight",
+    "read:goals",
+    "write:goals",
+    "read:stats",
+];
+
 // Retained only as a temporary parity reference during the Rust port. Startup
 // must rely on Drizzle migrations, not this ad-hoc schema bootstrap.
 #[allow(dead_code)]
@@ -3891,20 +3908,12 @@ async fn create_api_token_json(
     input: &serde_json::Map<String, Value>,
 ) -> AppResult<Value> {
     let name = required_string(input, "name")?;
-    let scopes = input
-        .get("scopes")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
+    let scopes = normalize_api_token_scopes(input.get("scopes"))?;
     let token_secret = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let token = format!("mtk_v1_{token_secret}");
     let token_hash = hash_token(&token);
     let token_prefix = format!("mtk_v1_{}", &token_hash[..12]);
-    let expires_at = match input.get("expiresAt") {
-        Some(Value::Null) => None,
-        Some(Value::String(value)) if !value.is_empty() => Some(value.clone()),
-        _ => Some((Utc::now() + chrono::Duration::days(90)).to_rfc3339()),
-    };
+    let expires_at = normalize_api_token_expiry(input.get("expiresAt"))?;
     let row = sqlx::query(
         r#"
         INSERT INTO api_tokens (
@@ -3928,7 +3937,9 @@ async fn create_api_token_json(
     .bind(token_hash)
     .bind(token_prefix)
     .bind(name)
-    .bind(Value::Array(scopes))
+    .bind(Value::Array(
+        scopes.into_iter().map(Value::String).collect(),
+    ))
     .bind(expires_at)
     .fetch_one(pool)
     .await?;
@@ -3936,6 +3947,51 @@ async fn create_api_token_json(
         "token": token,
         "record": api_token_row_json(&row)?
     }))
+}
+
+fn normalize_api_token_scopes(scopes: Option<&Value>) -> AppResult<Vec<String>> {
+    let scopes = scopes
+        .and_then(Value::as_array)
+        .ok_or_else(|| AppError::BadRequest("API token scopes are required.".to_string()))?;
+    if scopes.is_empty() {
+        return Err(AppError::BadRequest(
+            "API token must include at least one scope.".to_string(),
+        ));
+    }
+
+    let allowed = API_SCOPE_VALUES.iter().copied().collect::<HashSet<_>>();
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+    for scope in scopes {
+        let Some(scope) = scope.as_str() else {
+            return Err(AppError::BadRequest(
+                "API token scope is invalid.".to_string(),
+            ));
+        };
+        if !allowed.contains(scope) {
+            return Err(AppError::BadRequest(
+                "API token scope is invalid.".to_string(),
+            ));
+        }
+        if seen.insert(scope.to_string()) {
+            normalized.push(scope.to_string());
+        }
+    }
+
+    Ok(normalized)
+}
+
+fn normalize_api_token_expiry(expires_at: Option<&Value>) -> AppResult<Option<DateTime<Utc>>> {
+    match expires_at {
+        Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => DateTime::parse_from_rfc3339(value)
+            .map(|date| Some(date.with_timezone(&Utc)))
+            .map_err(|_| AppError::BadRequest("API token expiry is invalid.".to_string())),
+        None => Ok(Some(Utc::now() + Duration::days(90))),
+        Some(_) => Err(AppError::BadRequest(
+            "API token expiry is invalid.".to_string(),
+        )),
+    }
 }
 
 async fn list_api_tokens_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
@@ -5686,6 +5742,57 @@ mod tests {
         assert!(is_admin_actor_role("owner"));
         assert!(!is_admin_actor_role("user"));
         assert!(!is_admin_actor_role(""));
+    }
+
+    #[test]
+    fn api_token_scope_validation_rejects_empty_unknown_and_non_string_scopes() {
+        assert_eq!(
+            bad_request_message(normalize_api_token_scopes(Some(&json!([])))),
+            "API token must include at least one scope."
+        );
+        assert_eq!(
+            bad_request_message(normalize_api_token_scopes(Some(&json!([
+                "read:daily",
+                "admin:*"
+            ])))),
+            "API token scope is invalid."
+        );
+        assert_eq!(
+            bad_request_message(normalize_api_token_scopes(Some(&json!(["read:daily", 42])))),
+            "API token scope is invalid."
+        );
+    }
+
+    #[test]
+    fn api_token_scope_validation_dedupes_valid_scopes_in_order() {
+        let scopes =
+            normalize_api_token_scopes(Some(&json!(["read:daily", "write:daily", "read:daily"])))
+                .expect("valid scopes should normalize");
+
+        assert_eq!(scopes, vec!["read:daily", "write:daily"]);
+    }
+
+    #[test]
+    fn api_token_expiry_validation_preserves_defaults_and_nulls() {
+        let default = normalize_api_token_expiry(None)
+            .expect("missing expiry should default")
+            .expect("default expiry should be set");
+        let days = default.signed_duration_since(Utc::now()).num_days();
+        assert!((89..=90).contains(&days));
+
+        assert!(
+            normalize_api_token_expiry(Some(&Value::Null))
+                .expect("null expiry should be accepted")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn api_token_expiry_validation_rejects_invalid_strings() {
+        assert_eq!(
+            bad_request_message(normalize_api_token_expiry(Some(&json!("not-a-date")))),
+            "API token expiry is invalid."
+        );
     }
 
     #[test]

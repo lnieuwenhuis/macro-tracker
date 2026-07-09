@@ -162,6 +162,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn internal_rpc_rejects_insecure_mode_when_app_url_is_public() {
+        let mut config = test_config();
+        config.allow_insecure_internal_auth = true;
+        config.app_url = "https://macro.example.com".to_string();
+        config.backend_internal_secret = None;
+
+        let response = build_router(test_state(config))
+            .oneshot(internal_rpc_request(None))
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn internal_rpc_rejects_incorrect_backend_secret() {
         let response = build_router(test_state(test_config()))
             .oneshot(internal_rpc_request(Some("wrong-secret")))

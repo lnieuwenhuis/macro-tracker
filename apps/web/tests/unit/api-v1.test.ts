@@ -2064,6 +2064,17 @@ describe("Macro Tracker API v1", () => {
     }
   });
 
+  it("handles OpenAPI CORS preflight without proxying to the backend", async () => {
+    await withBackendUrl("http://127.0.0.1:1", async () => {
+      const response = await apiRequest("OPTIONS", "/openapi.json");
+
+      expect(response.status).toBe(204);
+      expect(response.headers.get("access-control-allow-origin")).toBe("*");
+      expect(response.headers.get("access-control-allow-methods")).toContain("OPTIONS");
+      expect(response.headers.get("access-control-allow-headers")).toContain("Authorization");
+    });
+  });
+
   it("passes leaderboard reference dates through the API", async () => {
     for (const [date, label] of [
       ["2026-03-18", "Protein bowl"],

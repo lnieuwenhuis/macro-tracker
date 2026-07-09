@@ -258,6 +258,57 @@ describe("database queries", () => {
     expect(created.record.expiresAt).toBeNull();
   });
 
+  it("validates and dedupes API token scopes", async () => {
+    await expect(
+      createApiToken(userId, { name: "Empty", scopes: [] }, runtime.db),
+    ).rejects.toThrow("API token must include at least one scope.");
+    await expect(
+      createApiToken(userId, { name: "Bad", scopes: ["read:daily", "admin:*"] }, runtime.db),
+    ).rejects.toThrow("API token scope is invalid.");
+
+    const created = await createApiToken(
+      userId,
+      {
+        name: "Duplicates",
+        scopes: ["read:daily", "write:daily", "read:daily"],
+      },
+      runtime.db,
+    );
+
+    expect(created.record.scopes).toEqual(["read:daily", "write:daily"]);
+  });
+
+  it("rejects invalid API token expiry strings with validation errors", async () => {
+    await expect(
+      createApiToken(
+        userId,
+        {
+          name: "Bad expiry",
+          scopes: ["read:daily"],
+          expiresAt: "not-a-date",
+        },
+        runtime.db,
+      ),
+    ).rejects.toThrow("API token expiry is invalid.");
+  });
+
+  it("defaults API token expiry to about ninety days", async () => {
+    const before = Date.now();
+    const created = await createApiToken(
+      userId,
+      {
+        name: "Default expiry",
+        scopes: ["read:daily"],
+      },
+      runtime.db,
+    );
+    const after = Date.now();
+    const expiresAt = new Date(created.record.expiresAt!).getTime();
+
+    expect(expiresAt).toBeGreaterThanOrEqual(before + 89 * 24 * 60 * 60 * 1000);
+    expect(expiresAt).toBeLessThanOrEqual(after + 91 * 24 * 60 * 60 * 1000);
+  });
+
   it("authenticates valid API tokens and updates last-used time", async () => {
     const created = await createApiToken(
       userId,

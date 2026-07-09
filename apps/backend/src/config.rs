@@ -38,6 +38,7 @@ impl Config {
         let allow_insecure_local =
             parse_env_bool(read_value(&mut read, ALLOW_INSECURE_LOCAL_BACKEND_ENV).as_deref());
         let app_url = read_required(&mut read, "APP_URL", Some("http://localhost:3000"))?;
+        validate_insecure_local_backend_mode(allow_insecure_local, &app_url)?;
         let session_secret = read_secret(
             &mut read,
             "SESSION_SECRET",
@@ -101,6 +102,34 @@ impl Config {
 
     pub fn is_trusted_origin(&self, origin: &str) -> bool {
         self.trusted_origins.iter().any(|trusted| trusted == origin)
+    }
+
+    pub fn allows_insecure_internal_auth_for_app_url(&self) -> bool {
+        self.allow_insecure_internal_auth && is_local_app_url(&self.app_url)
+    }
+}
+
+fn validate_insecure_local_backend_mode(
+    allow_insecure_local: bool,
+    app_url: &str,
+) -> anyhow::Result<()> {
+    if allow_insecure_local && !is_local_app_url(app_url) {
+        bail!(
+            "{ALLOW_INSECURE_LOCAL_BACKEND_ENV}=true is only allowed when APP_URL points to localhost or a loopback address."
+        );
+    }
+    Ok(())
+}
+
+fn is_local_app_url(app_url: &str) -> bool {
+    let Ok(url) = url::Url::parse(app_url) else {
+        return false;
+    };
+    match url.host() {
+        Some(url::Host::Domain(host)) => host == "localhost" || host.ends_with(".localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
     }
 }
 
@@ -262,7 +291,49 @@ mod tests {
         .expect("local mode should allow explicit dev defaults");
 
         assert!(config.allow_insecure_internal_auth);
+        assert!(config.allows_insecure_internal_auth_for_app_url());
         assert_eq!(config.session_secret, LOCAL_SESSION_SECRET);
         assert!(config.backend_internal_secret.is_none());
+    }
+
+    #[test]
+    fn explicit_local_mode_rejects_public_app_url_without_internal_secret() {
+        let error = config_from(&[
+            ("APP_URL", "https://macro.example.com"),
+            (
+                "DATABASE_URL",
+                "postgres://postgres:***@127.0.0.1:5432/macro_tracker",
+            ),
+            (ALLOW_INSECURE_LOCAL_BACKEND_ENV, "true"),
+        ])
+        .expect_err("insecure local mode must not be allowed for public deployments");
+
+        assert!(
+            error
+                .to_string()
+                .contains("only allowed when APP_URL points to localhost")
+        );
+    }
+
+    #[test]
+    fn local_mode_accepts_loopback_app_urls() {
+        for app_url in [
+            "http://localhost:3000",
+            "http://dev.localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://[::1]:3000",
+        ] {
+            let config = config_from(&[
+                ("APP_URL", app_url),
+                (
+                    "DATABASE_URL",
+                    "postgres://postgres:***@127.0.0.1:5432/macro_tracker",
+                ),
+                (ALLOW_INSECURE_LOCAL_BACKEND_ENV, "true"),
+            ])
+            .expect("loopback app urls should allow local insecure mode");
+
+            assert!(config.allows_insecure_internal_auth_for_app_url());
+        }
     }
 }
