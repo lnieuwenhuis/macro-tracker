@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { backendFetch } from "../src/backend-client";
+import { backendFetch, getBackendUrl } from "../src/backend-client";
 
 const originalNodeEnv = process.env.NODE_ENV;
 const originalBackendUrl = process.env.BACKEND_URL;
@@ -26,6 +26,7 @@ describe("backend client", () => {
 
   it("fails closed in production when BACKEND_INTERNAL_SECRET is missing", async () => {
     process.env.NODE_ENV = "production";
+    process.env.BACKEND_URL = "https://backend.example.com";
     delete process.env.BACKEND_INTERNAL_SECRET;
     const fetchMock = vi.fn();
     globalThis.fetch = fetchMock as unknown as typeof fetch;
@@ -34,6 +35,20 @@ describe("backend client", () => {
       "BACKEND_INTERNAL_SECRET is required",
     );
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("requires BACKEND_URL in production", () => {
+    process.env.NODE_ENV = "production";
+    delete process.env.BACKEND_URL;
+
+    expect(() => getBackendUrl()).toThrow("BACKEND_URL is required");
+  });
+
+  it("keeps the localhost backend URL default outside production", () => {
+    process.env.NODE_ENV = "test";
+    delete process.env.BACKEND_URL;
+
+    expect(getBackendUrl()).toBe("http://127.0.0.1:4000");
   });
 
   it("sends the configured backend internal secret", async () => {

@@ -1,8 +1,14 @@
 export function getBackendUrl() {
-  return (process.env.BACKEND_URL ?? "http://127.0.0.1:4000").replace(/\/$/, "");
+  const backendUrl = process.env.BACKEND_URL;
+  if (!backendUrl && process.env.NODE_ENV === "production") {
+    throw new Error("BACKEND_URL is required to call the Rust backend in production.");
+  }
+
+  return (backendUrl ?? "http://127.0.0.1:4000").replace(/\/$/, "");
 }
 
 export async function backendFetch(path: string, init: RequestInit = {}) {
+  const backendUrl = getBackendUrl();
   const headers = new Headers(init.headers);
   if (!headers.has("Content-Type") && typeof init.body === "string") {
     headers.set("Content-Type", "application/json");
@@ -14,7 +20,7 @@ export async function backendFetch(path: string, init: RequestInit = {}) {
     throw new Error("BACKEND_INTERNAL_SECRET is required to call the Rust backend.");
   }
 
-  return fetch(`${getBackendUrl()}${path}`, {
+  return fetch(`${backendUrl}${path}`, {
     ...init,
     headers,
   });

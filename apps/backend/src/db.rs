@@ -225,7 +225,8 @@ CREATE INDEX IF NOT EXISTS meal_template_items_template_idx ON meal_template_ite
 CREATE INDEX IF NOT EXISTS meal_template_items_product_idx ON meal_template_items USING btree (product_id);
 "#;
 
-const REQUIRED_DRIZZLE_MIGRATION_COUNT: i64 = 13;
+const DRIZZLE_MIGRATION_JOURNAL: &str =
+    include_str!("../../../packages/db/drizzle/meta/_journal.json");
 const REQUIRED_TABLES: &[&str] = &[
     "users",
     "api_tokens",
@@ -240,6 +241,43 @@ const REQUIRED_TABLES: &[&str] = &[
     "meal_templates",
     "meal_template_items",
 ];
+
+fn expected_drizzle_migrations() -> AppResult<Vec<(String, i64)>> {
+    let journal: Value = serde_json::from_str(DRIZZLE_MIGRATION_JOURNAL).map_err(|error| {
+        AppError::Anyhow(anyhow::anyhow!(
+            "failed to parse Drizzle migration journal: {error}"
+        ))
+    })?;
+    let entries = journal
+        .get("entries")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            AppError::Anyhow(anyhow::anyhow!(
+                "Drizzle migration journal is missing entries"
+            ))
+        })?;
+
+    entries
+        .iter()
+        .map(|entry| {
+            let tag = entry
+                .get("tag")
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    AppError::Anyhow(anyhow::anyhow!(
+                        "Drizzle migration journal entry is missing tag"
+                    ))
+                })?
+                .to_string();
+            let created_at = entry.get("when").and_then(Value::as_i64).ok_or_else(|| {
+                AppError::Anyhow(anyhow::anyhow!(
+                    "Drizzle migration journal entry {tag} is missing timestamp"
+                ))
+            })?;
+            Ok((tag, created_at))
+        })
+        .collect()
+}
 
 pub async fn verify_schema_ready(pool: &PgPool) -> AppResult<()> {
     let migration_table_exists: bool = sqlx::query(
@@ -262,14 +300,27 @@ pub async fn verify_schema_ready(pool: &PgPool) -> AppResult<()> {
         )));
     }
 
-    let migration_count: i64 =
-        sqlx::query("SELECT COUNT(*)::bigint AS count FROM drizzle.__drizzle_migrations")
-            .fetch_one(pool)
-            .await?
-            .try_get("count")?;
-    if migration_count < REQUIRED_DRIZZLE_MIGRATION_COUNT {
+    let expected_migrations = expected_drizzle_migrations()?;
+    let expected_migration_count = expected_migrations.len() as i64;
+    let (latest_migration_tag, latest_migration_created_at) = expected_migrations
+        .last()
+        .ok_or_else(|| AppError::Anyhow(anyhow::anyhow!("no Drizzle migrations are expected")))?;
+    let migration_row = sqlx::query(
+        r#"
+        SELECT
+          COUNT(*)::bigint AS count,
+          COALESCE(bool_or(created_at = $1), false) AS has_latest
+        FROM drizzle.__drizzle_migrations
+        "#,
+    )
+    .bind(*latest_migration_created_at)
+    .fetch_one(pool)
+    .await?;
+    let migration_count: i64 = migration_row.try_get("count")?;
+    let has_latest_migration: bool = migration_row.try_get("has_latest")?;
+    if migration_count < expected_migration_count || !has_latest_migration {
         return Err(AppError::Anyhow(anyhow::anyhow!(
-            "database migrations are incomplete ({migration_count}/{REQUIRED_DRIZZLE_MIGRATION_COUNT}); run `pnpm --filter @macro-tracker/db db:migrate` before starting the Rust backend"
+            "database migrations are incomplete ({migration_count}/{expected_migration_count}; missing latest {latest_migration_tag}); run `pnpm --filter @macro-tracker/db db:migrate` before starting the Rust backend"
         )));
     }
 
@@ -1379,12 +1430,15 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
         }
         "getRecentDailyOverviews" => {
             let user_id = uuid_arg(&args, "userId")?;
+            let selected_date = string_arg(&args, "selectedDate")
+                .or_else(|_| string_arg(&args, "date"))
+                .unwrap_or_else(|_| Utc::now().date_naive().to_string());
             let days = args
                 .get("days")
                 .and_then(Value::as_i64)
                 .unwrap_or(7)
                 .clamp(1, 90) as i32;
-            recent_daily_overviews_json(pool, user_id, days).await
+            recent_daily_overviews_json(pool, user_id, &selected_date, days).await
         }
         "searchMealEntries" => {
             let user_id = uuid_arg(&args, "userId")?;
@@ -4489,7 +4543,12 @@ async fn list_recent_meal_entries_json(
     Ok(row.try_get("data")?)
 }
 
-async fn recent_daily_overviews_json(pool: &PgPool, user_id: Uuid, days: i32) -> AppResult<Value> {
+async fn recent_daily_overviews_json(
+    pool: &PgPool,
+    user_id: Uuid,
+    selected_date: &str,
+    days: i32,
+) -> AppResult<Value> {
     let row = sqlx::query(
         r#"
         SELECT coalesce(jsonb_agg(
@@ -4514,14 +4573,15 @@ async fn recent_daily_overviews_json(pool: &PgPool, user_id: Uuid, days: i32) ->
             sum(calories_kcal)::int AS calories_kcal,
             count(*)::int AS item_count
           FROM meal_entries
-          WHERE user_id = $1 AND status = 'eaten'
+          WHERE user_id = $1 AND status = 'eaten' AND entry_date <= $2::date
           GROUP BY entry_date
           ORDER BY entry_date DESC
-          LIMIT $2
+          LIMIT $3
         ) daily
         "#,
     )
     .bind(user_id)
+    .bind(selected_date)
     .bind(days)
     .fetch_one(pool)
     .await?;
@@ -4690,6 +4750,78 @@ async fn stats_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppR
             count(*) FILTER (WHERE entry_date >= $2::date - interval '89 days' AND entry_date <= $2::date AND user_goals.goal_fat_g IS NOT NULL AND fat_g <= user_goals.goal_fat_g)::int AS days90_fat
           FROM eaten_days, user_goals
         ),
+        best_calorie_day AS (
+          SELECT jsonb_build_object('date', entry_date, 'caloriesKcal', calories_kcal) AS value
+          FROM eaten_days
+          ORDER BY calories_kcal DESC, entry_date ASC
+          LIMIT 1
+        ),
+        top_labels AS (
+          SELECT coalesce(jsonb_agg(jsonb_build_object('label', label, 'count', count) ORDER BY count DESC, label), '[]'::jsonb) AS value
+          FROM (
+            SELECT label, count(*)::int AS count
+            FROM meal_entries
+            WHERE user_id = $1 AND status = 'eaten'
+            GROUP BY label
+            ORDER BY count(*) DESC, label
+            LIMIT 5
+          ) labels
+        ),
+        macro_consistency AS (
+          SELECT
+            CASE
+              WHEN user_goals.goal_calories_kcal IS NULL OR count(eaten_days.*) = 0 THEN NULL
+              ELSE round(avg(abs(eaten_days.calories_kcal - user_goals.goal_calories_kcal)))::int
+            END AS calorie_avg_absolute_deviation,
+            CASE
+              WHEN user_goals.goal_calories_kcal IS NULL OR user_goals.goal_calories_kcal <= 0 OR count(eaten_days.*) = 0 THEN NULL
+              ELSE greatest(0, round(100 - (avg(abs(eaten_days.calories_kcal - user_goals.goal_calories_kcal)) / user_goals.goal_calories_kcal) * 100))::int
+            END AS score
+          FROM user_goals
+          LEFT JOIN eaten_days ON true
+          GROUP BY user_goals.goal_calories_kcal
+        ),
+        energy_balance AS (
+          SELECT
+            CASE
+              WHEN user_goals.goal_calories_kcal IS NULL OR totals.total_days_tracked = 0 THEN NULL
+              ELSE round((totals.total_calories_kcal::float8 / totals.total_days_tracked) - user_goals.goal_calories_kcal)::int
+            END AS average_daily_delta_kcal
+          FROM totals, user_goals
+        ),
+        latest_weight AS (
+          SELECT weight_kg::float8 AS weight_kg
+          FROM weight_entries
+          WHERE user_id = $1
+          ORDER BY entry_date DESC
+          LIMIT 1
+        ),
+        smoothed_weight_trend AS (
+          SELECT coalesce(jsonb_agg(
+            jsonb_build_object(
+              'date', entry_date,
+              'weightKg', weight_kg,
+              'smoothedWeightKg', smoothed_weight_kg
+            ) ORDER BY entry_date
+          ), '[]'::jsonb) AS value
+          FROM (
+            SELECT
+              entry_date,
+              round(weight_kg::numeric, 2)::float8 AS weight_kg,
+              round(avg(weight_kg) OVER (ORDER BY entry_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)::numeric, 2)::float8 AS smoothed_weight_kg
+            FROM weight_entries
+            WHERE user_id = $1
+          ) weights
+        ),
+        planned_adherence AS (
+          SELECT
+            count(*) FILTER (WHERE status = 'planned')::int AS planned_count,
+            count(*) FILTER (WHERE status = 'eaten')::int AS eaten_count,
+            count(*) FILTER (WHERE status = 'skipped')::int AS skipped_count,
+            count(*) FILTER (WHERE status IN ('planned', 'eaten', 'skipped'))::int AS base_count
+          FROM meal_entries
+          WHERE user_id = $1
+        ),
         daily_totals AS (
           SELECT coalesce(jsonb_agg(
             jsonb_build_object(
@@ -4718,8 +4850,8 @@ async fn stats_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppR
           'totalCarbsG', totals.total_carbs_g,
           'totalFatG', totals.total_fat_g,
           'totalCaloriesKcal', totals.total_calories_kcal,
-          'bestCalorieDay', NULL,
-          'topLabels', '[]'::jsonb,
+          'bestCalorieDay', coalesce(best_calorie_day.value, 'null'::jsonb),
+          'topLabels', top_labels.value,
           'goalHitRates', jsonb_build_object(
             'days7', jsonb_build_object(
               'caloriesKcal', CASE WHEN goal_hits.days7_count = 0 OR user_goals.goal_calories_kcal IS NULL THEN NULL ELSE round(goal_hits.days7_calories * 100.0 / goal_hits.days7_count)::int END,
@@ -4740,17 +4872,36 @@ async fn stats_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppR
               'fatG', CASE WHEN goal_hits.days90_count = 0 OR user_goals.goal_fat_g IS NULL THEN NULL ELSE round(goal_hits.days90_fat * 100.0 / goal_hits.days90_count)::int END
             )
           ),
-          'macroConsistency', jsonb_build_object('calorieAvgAbsoluteDeviation', NULL, 'score', NULL),
+          'macroConsistency', jsonb_build_object('calorieAvgAbsoluteDeviation', macro_consistency.calorie_avg_absolute_deviation, 'score', macro_consistency.score),
           'rollingAverages', jsonb_build_object(
             'days7', jsonb_build_object('proteinG', rolling.protein_g, 'carbsG', rolling.carbs_g, 'fatG', rolling.fat_g, 'caloriesKcal', rolling.calories_kcal),
             'days30', jsonb_build_object('proteinG', rolling.protein_g, 'carbsG', rolling.carbs_g, 'fatG', rolling.fat_g, 'caloriesKcal', rolling.calories_kcal)
           ),
-          'estimatedEnergyBalance', jsonb_build_object('averageDailyDeltaKcal', NULL, 'estimatedWeeklyWeightChangeKg', NULL),
-          'proteinPerKg', NULL,
-          'smoothedWeightTrend', '[]'::jsonb,
-          'plannedAdherence', jsonb_build_object('plannedCount', 0, 'eatenCount', 0, 'skippedCount', 0, 'adherencePct', NULL)
+          'estimatedEnergyBalance', jsonb_build_object(
+            'averageDailyDeltaKcal', energy_balance.average_daily_delta_kcal,
+            'estimatedWeeklyWeightChangeKg', CASE WHEN energy_balance.average_daily_delta_kcal IS NULL THEN NULL ELSE round(((energy_balance.average_daily_delta_kcal * 7.0) / 7700.0)::numeric, 2)::float8 END
+          ),
+          'proteinPerKg', CASE WHEN latest_weight.weight_kg IS NULL OR latest_weight.weight_kg <= 0 OR totals.total_days_tracked = 0 THEN NULL ELSE round(((totals.total_protein_g / totals.total_days_tracked) / latest_weight.weight_kg)::numeric, 2)::float8 END,
+          'smoothedWeightTrend', smoothed_weight_trend.value,
+          'plannedAdherence', jsonb_build_object(
+            'plannedCount', planned_adherence.planned_count,
+            'eatenCount', planned_adherence.eaten_count,
+            'skippedCount', planned_adherence.skipped_count,
+            'adherencePct', CASE WHEN planned_adherence.base_count = 0 THEN NULL ELSE round(planned_adherence.eaten_count * 100.0 / planned_adherence.base_count)::int END
+          )
         ) AS data
-        FROM totals, rolling, goal_hits, user_goals, daily_totals
+        FROM totals
+        CROSS JOIN rolling
+        CROSS JOIN goal_hits
+        CROSS JOIN user_goals
+        CROSS JOIN daily_totals
+        CROSS JOIN top_labels
+        CROSS JOIN macro_consistency
+        CROSS JOIN energy_balance
+        CROSS JOIN smoothed_weight_trend
+        CROSS JOIN planned_adherence
+        LEFT JOIN best_calorie_day ON true
+        LEFT JOIN latest_weight ON true
         "#,
     )
     .bind(user_id)
@@ -5037,4 +5188,43 @@ fn round1(value: f64) -> f64 {
 
 fn round2(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{collections::HashSet, fs, path::PathBuf};
+
+    #[test]
+    fn expected_drizzle_migrations_match_repo_sql_files() {
+        let expected = expected_drizzle_migrations().expect("journal should parse");
+        let expected_tags = expected
+            .iter()
+            .map(|(tag, _)| tag.as_str())
+            .collect::<HashSet<_>>();
+        let drizzle_dir =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/db/drizzle");
+        let sql_tags = fs::read_dir(&drizzle_dir)
+            .expect("drizzle migrations dir should exist")
+            .filter_map(|entry| {
+                let entry = entry.expect("migration dir entry should be readable");
+                let path = entry.path();
+                (path.extension().and_then(|ext| ext.to_str()) == Some("sql"))
+                    .then(|| path.file_stem().unwrap().to_string_lossy().into_owned())
+            })
+            .collect::<HashSet<_>>();
+
+        assert_eq!(expected_tags.len(), sql_tags.len());
+        for tag in &sql_tags {
+            assert!(
+                expected_tags.contains(tag.as_str()),
+                "migration journal is missing SQL migration {tag}"
+            );
+        }
+        let latest = expected.last().expect("at least one migration is expected");
+        assert!(
+            sql_tags.contains(latest.0.as_str()),
+            "latest expected migration must have a SQL file"
+        );
+    }
 }

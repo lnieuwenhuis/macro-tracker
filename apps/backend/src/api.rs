@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, State},
     http::{HeaderMap, Method, StatusCode, Uri, header},
     response::{IntoResponse, Response},
-    routing::{any, get},
+    routing::any,
 };
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
@@ -49,7 +49,6 @@ struct Endpoint {
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/openapi.json", get(openapi))
         .route("/", any(api_v1_root))
         .route("/{*path}", any(api_v1_request))
 }
@@ -78,10 +77,6 @@ async fn api_v1_request(
         .map(str::to_string)
         .collect();
     handle_api_v1(state, method, uri, headers, path, body).await
-}
-
-async fn openapi() -> Response {
-    json_response(StatusCode::OK, openapi_document(), None)
 }
 
 async fn handle_api_v1(
@@ -940,7 +935,6 @@ fn endpoint_for(path: &[String]) -> Option<Endpoint> {
         (Some("leaderboard"), None, None, 1) => {
             Some(endpoint(&["GET"], &[("GET", &["read:stats"])]))
         }
-        (Some("openapi.json"), None, None, 1) => Some(endpoint(&["GET"], &[("GET", &[])])),
         _ => None,
     }
 }
@@ -1419,57 +1413,6 @@ fn cors_headers() -> HeaderMap {
         CORS_MAX_AGE.parse().unwrap(),
     );
     headers
-}
-
-fn openapi_document() -> Value {
-    json!({
-        "openapi": "3.1.0",
-        "info": {
-            "title": "Macro Tracker API",
-            "version": "1.0.0",
-            "description": "User-scoped API for normal Macro Tracker objects."
-        },
-        "servers": [{ "url": "/api/v1" }],
-        "paths": {
-            "/me": {},
-            "/goals": {},
-            "/days/{date}": {},
-            "/days/{date}/entries": {},
-            "/meal-entries/{id}": {},
-            "/meal-entries/{id}/status": {},
-            "/meal-groups": {},
-            "/meal-groups/{id}": {},
-            "/meal-groups/reorder": {},
-            "/foods/search": {},
-            "/foods": {},
-            "/foods/{id}": {},
-            "/barcodes/{barcode}": {},
-            "/templates": {},
-            "/templates/{id}": {},
-            "/templates/{id}/apply": {},
-            "/templates/from-day": {},
-            "/recipes": {},
-            "/recipes/{id}": {},
-            "/recipes/{id}/log": {},
-            "/weight": {},
-            "/weight/entries": {},
-            "/weight/entries/{id}": {},
-            "/weight/goal": {},
-            "/stats": {},
-            "/summary": {},
-            "/leaderboard": {},
-            "/openapi.json": {}
-        },
-        "components": {
-            "securitySchemes": {
-                "bearerAuth": {
-                    "type": "http",
-                    "scheme": "bearer",
-                    "bearerFormat": "mtk_v1 token"
-                }
-            }
-        }
-    })
 }
 
 fn round1(value: f64) -> f64 {

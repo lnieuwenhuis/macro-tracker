@@ -301,13 +301,14 @@ export async function getRecentDailyOverviews(
   daysOrDb?: number | unknown,
   ..._ignored: unknown[]
 ): Promise<DailyOverview[]> {
+  const selectedDate = typeof dateOrDays === "string" ? dateOrDays : undefined;
   const days =
     typeof dateOrDays === "number"
       ? dateOrDays
       : typeof daysOrDb === "number"
         ? daysOrDb
         : 7;
-  return backendRpc("getRecentDailyOverviews", { userId, days });
+  return backendRpc("getRecentDailyOverviews", { userId, selectedDate, days });
 }
 
 export async function getTemplates(userId: string, ..._ignored: unknown[]) {
