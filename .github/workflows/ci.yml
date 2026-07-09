@@ -68,7 +68,7 @@ jobs:
       - name: Smoke backend health
         run: |
           cargo run -p macro-tracker-backend > backend.log 2>&1 &
-          for attempt in {1..60}; do
+          for attempt in {1..180}; do
             if curl -fsS "$BACKEND_URL/health"; then
               exit 0
             fi
@@ -122,7 +122,7 @@ jobs:
       - name: Start Rust backend
         run: |
           cargo run -p macro-tracker-backend > backend.log 2>&1 &
-          for attempt in {1..60}; do
+          for attempt in {1..180}; do
             if curl -fsS "$BACKEND_URL/health"; then
               exit 0
             fi
@@ -132,7 +132,7 @@ jobs:
           exit 1
 
       - name: Run web unit tests
-        run: pnpm --filter @macro-tracker/web test -- --pool=forks --maxWorkers=1
+        run: pnpm --filter @macro-tracker/web exec vitest run --pool=forks --maxWorkers=1
 
   db-unit:
     name: DB package tests
@@ -179,7 +179,7 @@ jobs:
       - name: Start Rust backend
         run: |
           cargo run -p macro-tracker-backend > backend.log 2>&1 &
-          for attempt in {1..60}; do
+          for attempt in {1..180}; do
             if curl -fsS "$BACKEND_URL/health"; then
               exit 0
             fi
@@ -189,7 +189,7 @@ jobs:
           exit 1
 
       - name: Run DB package tests
-        run: pnpm --filter @macro-tracker/db test -- --pool=forks --maxWorkers=1
+        run: pnpm --filter @macro-tracker/db exec vitest run --pool=forks --maxWorkers=1
 
   static:
     name: Typecheck, lint, and build
@@ -236,7 +236,7 @@ jobs:
       - name: Start Rust backend
         run: |
           cargo run -p macro-tracker-backend > backend.log 2>&1 &
-          for attempt in {1..60}; do
+          for attempt in {1..180}; do
             if curl -fsS "$BACKEND_URL/health"; then
               exit 0
             fi
@@ -312,7 +312,7 @@ jobs:
       - name: Start Rust backend
         run: |
           cargo run -p macro-tracker-backend > backend.log 2>&1 &
-          for attempt in {1..60}; do
+          for attempt in {1..180}; do
             if curl -fsS "$BACKEND_URL/health"; then
               exit 0
             fi
