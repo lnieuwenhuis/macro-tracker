@@ -6,8 +6,12 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row, postgres::PgRow};
+use std::collections::HashSet;
 use uuid::Uuid;
 
+// Retained only as a temporary parity reference during the Rust port. Startup
+// must rely on Drizzle migrations, not this ad-hoc schema bootstrap.
+#[allow(dead_code)]
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS users (
   id uuid PRIMARY KEY NOT NULL,
@@ -221,8 +225,80 @@ CREATE INDEX IF NOT EXISTS meal_template_items_template_idx ON meal_template_ite
 CREATE INDEX IF NOT EXISTS meal_template_items_product_idx ON meal_template_items USING btree (product_id);
 "#;
 
-pub async fn bootstrap_schema(pool: &PgPool) -> AppResult<()> {
-    sqlx::raw_sql(SCHEMA_SQL).execute(pool).await?;
+const REQUIRED_DRIZZLE_MIGRATION_COUNT: i64 = 13;
+const REQUIRED_TABLES: &[&str] = &[
+    "users",
+    "api_tokens",
+    "admin_audit_events",
+    "food_products",
+    "food_product_revisions",
+    "meal_groups",
+    "meal_entries",
+    "weight_entries",
+    "recipes",
+    "recipe_ingredients",
+    "meal_templates",
+    "meal_template_items",
+];
+
+pub async fn verify_schema_ready(pool: &PgPool) -> AppResult<()> {
+    let migration_table_exists: bool = sqlx::query(
+        r#"
+        SELECT EXISTS (
+          SELECT 1
+          FROM information_schema.tables
+          WHERE table_schema = 'drizzle'
+            AND table_name = '__drizzle_migrations'
+        ) AS exists
+        "#,
+    )
+    .fetch_one(pool)
+    .await?
+    .try_get("exists")?;
+
+    if !migration_table_exists {
+        return Err(AppError::Anyhow(anyhow::anyhow!(
+            "database migrations have not been applied; run `pnpm --filter @macro-tracker/db db:migrate` before starting the Rust backend"
+        )));
+    }
+
+    let migration_count: i64 =
+        sqlx::query("SELECT COUNT(*)::bigint AS count FROM drizzle.__drizzle_migrations")
+            .fetch_one(pool)
+            .await?
+            .try_get("count")?;
+    if migration_count < REQUIRED_DRIZZLE_MIGRATION_COUNT {
+        return Err(AppError::Anyhow(anyhow::anyhow!(
+            "database migrations are incomplete ({migration_count}/{REQUIRED_DRIZZLE_MIGRATION_COUNT}); run `pnpm --filter @macro-tracker/db db:migrate` before starting the Rust backend"
+        )));
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = 'public'
+          AND table_type = 'BASE TABLE'
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    let existing = rows
+        .iter()
+        .filter_map(|row| row.try_get::<String, _>("table_name").ok())
+        .collect::<HashSet<_>>();
+    let missing = REQUIRED_TABLES
+        .iter()
+        .copied()
+        .filter(|table| !existing.contains(*table))
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(AppError::Anyhow(anyhow::anyhow!(
+            "database schema is missing required tables: {}; run `pnpm --filter @macro-tracker/db db:migrate` before starting the Rust backend",
+            missing.join(", ")
+        )));
+    }
+
     Ok(())
 }
 
@@ -1330,7 +1406,10 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
         }
         "getLeaderboardStats" => {
             let user_id = uuid_arg(&args, "userId")?;
-            leaderboard_json(pool, user_id).await
+            let reference_date = string_arg(&args, "referenceDate")
+                .or_else(|_| string_arg(&args, "today"))
+                .unwrap_or_else(|_| Utc::now().date_naive().to_string());
+            leaderboard_json(pool, user_id, &reference_date).await
         }
         "searchFoodProducts" => {
             let user_id = uuid_arg(&args, "userId")?;
@@ -4681,14 +4760,109 @@ async fn stats_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppR
     Ok(row.try_get("data")?)
 }
 
-async fn leaderboard_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
-    let today = Utc::now().date_naive().to_string();
-    let stats = stats_page_data_json(pool, user_id, &today).await?;
+fn compute_streaks(sorted_dates: &[NaiveDate], today: NaiveDate) -> (usize, usize) {
+    if sorted_dates.is_empty() {
+        return (0, 0);
+    }
+
+    let date_set = sorted_dates.iter().copied().collect::<HashSet<_>>();
+    let mut current_streak = 0;
+    let mut check_date = today;
+    while date_set.contains(&check_date) {
+        current_streak += 1;
+        check_date -= Duration::days(1);
+    }
+    if current_streak == 0 {
+        check_date = today - Duration::days(1);
+        while date_set.contains(&check_date) {
+            current_streak += 1;
+            check_date -= Duration::days(1);
+        }
+    }
+
+    let mut longest_streak = 1;
+    let mut streak = 1;
+    for pair in sorted_dates.windows(2) {
+        if pair[1] - Duration::days(1) == pair[0] {
+            streak += 1;
+        } else {
+            longest_streak = longest_streak.max(streak);
+            streak = 1;
+        }
+    }
+
+    (current_streak, longest_streak.max(streak))
+}
+
+async fn leaderboard_json(pool: &PgPool, user_id: Uuid, reference_date: &str) -> AppResult<Value> {
+    let today = NaiveDate::parse_from_str(reference_date, "%Y-%m-%d")
+        .map_err(|_| AppError::BadRequest("referenceDate must be YYYY-MM-DD.".to_string()))?;
+    let rows = sqlx::query(
+        r#"
+        SELECT
+          entry_date,
+          round(sum(calories_kcal)::numeric)::int AS calories_kcal,
+          round(sum(protein_g)::numeric, 1)::float8 AS protein_g,
+          round(sum(carbs_g)::numeric, 1)::float8 AS carbs_g,
+          count(*)::int AS entry_count
+        FROM meal_entries
+        WHERE user_id = $1 AND status = 'eaten'
+        GROUP BY entry_date
+        ORDER BY entry_date
+        "#,
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    let sorted_dates = rows
+        .iter()
+        .map(|row| row.try_get::<NaiveDate, _>("entry_date"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let (current_streak, longest_streak) = compute_streaks(&sorted_dates, today);
+
+    let mut best_calorie_day = Value::Null;
+    let mut best_protein_day = Value::Null;
+    let mut best_carbs_day = Value::Null;
+    let mut most_active_day = Value::Null;
+    let mut best_calories = i32::MIN;
+    let mut best_protein = f64::NEG_INFINITY;
+    let mut best_carbs = f64::NEG_INFINITY;
+    let mut most_entries = i32::MIN;
+
+    for row in rows {
+        let date: NaiveDate = row.try_get("entry_date")?;
+        let date = date.to_string();
+        let calories: i32 = row.try_get("calories_kcal")?;
+        let protein: f64 = row.try_get("protein_g")?;
+        let carbs: f64 = row.try_get("carbs_g")?;
+        let entry_count: i32 = row.try_get("entry_count")?;
+
+        if calories > best_calories {
+            best_calories = calories;
+            best_calorie_day = json!({ "date": date, "caloriesKcal": calories });
+        }
+        if protein > best_protein {
+            best_protein = protein;
+            best_protein_day = json!({ "date": date, "proteinG": protein });
+        }
+        if carbs > best_carbs {
+            best_carbs = carbs;
+            best_carbs_day = json!({ "date": date, "carbsG": carbs });
+        }
+        if entry_count > most_entries {
+            most_entries = entry_count;
+            most_active_day = json!({ "date": date, "entryCount": entry_count });
+        }
+    }
+
     Ok(json!({
-        "bestCalorieDay": stats.get("bestCalorieDay").cloned().unwrap_or(Value::Null),
-        "currentStreak": stats.get("currentStreak").cloned().unwrap_or(json!(0)),
-        "longestStreak": stats.get("longestStreak").cloned().unwrap_or(json!(0)),
-        "topLabels": stats.get("topLabels").cloned().unwrap_or_else(|| json!([]))
+        "currentStreak": current_streak,
+        "longestStreak": longest_streak,
+        "totalDaysTracked": sorted_dates.len(),
+        "bestCalorieDay": best_calorie_day,
+        "bestProteinDay": best_protein_day,
+        "bestCarbsDay": best_carbs_day,
+        "mostActiveDay": most_active_day
     }))
 }
 

@@ -13,6 +13,7 @@ import {
   deleteMealEntry,
   ensureDefaultMealGroups,
   getDailySummary,
+  getLeaderboardStats,
   getMealGroups,
   getPeriodAverages,
   getRecipeById,
@@ -1981,6 +1982,48 @@ describe("database queries", () => {
     await expect(getUserById(userId, runtime.db)).resolves.toMatchObject({
       onboardingCompletedAt: null,
       preferredWeightUnit: "kg",
+    });
+  });
+
+  it("uses the requested leaderboard reference date for streaks", async () => {
+    await createMealEntry(userId, {
+      date: "2026-03-18",
+      mealGroupId: null,
+      status: "eaten",
+      label: "Protein bowl",
+      proteinG: 35,
+      carbsG: 45,
+      fatG: 12,
+      caloriesKcal: 430,
+    }, runtime.db);
+    await createMealEntry(userId, {
+      date: "2026-03-19",
+      mealGroupId: null,
+      status: "eaten",
+      label: "Rice bowl",
+      proteinG: 25,
+      carbsG: 60,
+      fatG: 8,
+      caloriesKcal: 500,
+    }, runtime.db);
+    await createMealEntry(userId, {
+      date: "2026-03-20",
+      mealGroupId: null,
+      status: "eaten",
+      label: "Yogurt",
+      proteinG: 20,
+      carbsG: 25,
+      fatG: 4,
+      caloriesKcal: 240,
+    }, runtime.db);
+
+    await expect(getLeaderboardStats(userId, "2026-03-20", runtime.db)).resolves.toMatchObject({
+      currentStreak: 3,
+      longestStreak: 3,
+    });
+    await expect(getLeaderboardStats(userId, "2026-03-22", runtime.db)).resolves.toMatchObject({
+      currentStreak: 0,
+      longestStreak: 3,
     });
   });
 

@@ -1,6 +1,7 @@
 import {
   completeUserOnboarding,
   createApiToken,
+  createMealEntry,
   createPersonalFoodProduct,
   foodProducts,
   getApiScopes,
@@ -2061,5 +2062,46 @@ describe("Macro Tracker API v1", () => {
         }
       }
     }
+  });
+
+  it("passes leaderboard reference dates through the API", async () => {
+    for (const [date, label] of [
+      ["2026-03-18", "Protein bowl"],
+      ["2026-03-19", "Rice bowl"],
+      ["2026-03-20", "Yogurt"],
+    ] as const) {
+      await createMealEntry(
+        userId,
+        {
+          date,
+          mealGroupId: null,
+          status: "eaten",
+          label,
+          proteinG: 25,
+          carbsG: 45,
+          fatG: 10,
+          caloriesKcal: 420,
+        },
+        runtime.db,
+      );
+    }
+
+    const current = await apiRequest("GET", "/leaderboard?date=2026-03-20", { token: fullToken });
+    await expect(current.json()).resolves.toMatchObject({
+      ok: true,
+      data: {
+        currentStreak: 3,
+        longestStreak: 3,
+      },
+    });
+
+    const missed = await apiRequest("GET", "/leaderboard?date=2026-03-22", { token: fullToken });
+    await expect(missed.json()).resolves.toMatchObject({
+      ok: true,
+      data: {
+        currentStreak: 0,
+        longestStreak: 3,
+      },
+    });
   });
 });

@@ -59,6 +59,21 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10.28.2
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
       - name: Check formatting
         run: cargo fmt --all --check
 
@@ -67,6 +82,42 @@ jobs:
 
       - name: Test backend
         run: cargo test -p macro-tracker-backend
+
+      - name: Verify backend waits for migrations
+        run: |
+          set +e
+          timeout 120s cargo run -p macro-tracker-backend > backend-before-migrations.log 2>&1
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ] || [ "$status" -eq 124 ]; then
+            cat backend-before-migrations.log
+            echo "Backend should fail quickly before migrations are applied."
+            exit 1
+          fi
+          grep -q "database migrations have not been applied" backend-before-migrations.log
+          node <<'NODE'
+          const { Pool } = require("pg");
+          const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+          (async () => {
+            try {
+              const result = await pool.query(
+                "SELECT COUNT(*)::int AS count FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'",
+              );
+              const tableCount = Number(result.rows[0].count);
+              if (tableCount !== 0) {
+                throw new Error(`Backend created ${tableCount} public tables before migrations.`);
+              }
+            } finally {
+              await pool.end();
+            }
+          })().catch((error) => {
+            console.error(error);
+            process.exit(1);
+          });
+          NODE
+
+      - name: Run database migrations
+        run: pnpm --filter @macro-tracker/db db:migrate
 
       - name: Smoke backend health
         run: |
@@ -121,6 +172,9 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Run database migrations
+        run: pnpm --filter @macro-tracker/db db:migrate
 
       - name: Start Rust backend
         run: |
@@ -179,6 +233,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Run database migrations
+        run: pnpm --filter @macro-tracker/db db:migrate
+
       - name: Start Rust backend
         run: |
           cargo run -p macro-tracker-backend > backend.log 2>&1 &
@@ -235,6 +292,9 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Run database migrations
+        run: pnpm --filter @macro-tracker/db db:migrate
 
       - name: Start Rust backend
         run: |
@@ -311,6 +371,9 @@ jobs:
 
       - name: Install Playwright browser
         run: pnpm --filter @macro-tracker/web exec playwright install --with-deps chromium
+
+      - name: Run database migrations
+        run: pnpm --filter @macro-tracker/db db:migrate
 
       - name: Start Rust backend
         run: |

@@ -49,9 +49,9 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("failed to connect to PostgreSQL")?;
 
-    db::bootstrap_schema(&db)
+    db::verify_schema_ready(&db)
         .await
-        .context("failed to bootstrap database schema")?;
+        .context("failed to verify database migrations")?;
 
     let state = AppState {
         config: config.clone(),

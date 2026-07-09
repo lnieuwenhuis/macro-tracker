@@ -9,6 +9,8 @@ import { createDatabaseRuntime, getDatabaseRuntime, type DatabaseRuntime } from 
 import * as schema from "./schema";
 import { resolveDestructiveTestDatabaseUrl } from "./test-database-safety";
 
+const migratedPostgresTestDatabaseUrls = new Set<string>();
+
 function getMigrationsFolder() {
   return fileURLToPath(new URL("../drizzle", import.meta.url));
 }
@@ -31,6 +33,27 @@ export async function migrateCurrentDatabase() {
   await migrateDatabase(runtime);
 }
 
+export async function migrateDatabaseUrl(connectionString: string) {
+  const runtime = await createDatabaseRuntime(connectionString);
+  try {
+    await migrateDatabase(runtime);
+  } finally {
+    await runtime.close();
+  }
+}
+
+async function migratePostgresTestDatabaseOnce(
+  runtime: DatabaseRuntime,
+  databaseUrl: string,
+) {
+  if (migratedPostgresTestDatabaseUrls.has(databaseUrl)) {
+    return;
+  }
+
+  await migrateDatabase(runtime);
+  migratedPostgresTestDatabaseUrls.add(databaseUrl);
+}
+
 export async function createMigratedTestDatabase() {
   const databaseUrl = resolveDestructiveTestDatabaseUrl(process.env, {
     explicitEnvNames: ["TEST_DATABASE_URL"],
@@ -42,6 +65,7 @@ export async function createMigratedTestDatabase() {
     databaseUrl !== "memory:"
   ) {
     const runtime = await createDatabaseRuntime(databaseUrl);
+    await migratePostgresTestDatabaseOnce(runtime, databaseUrl);
     await runtime.db.execute(sql.raw(`
       TRUNCATE TABLE
         admin_audit_events,

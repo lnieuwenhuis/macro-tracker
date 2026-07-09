@@ -1,6 +1,7 @@
 import { Pool } from "pg";
 import {
   assertSafeDestructiveTestDatabaseUrl,
+  migrateTestDatabase,
   resolveDestructiveTestDatabaseUrl,
 } from "@macro-tracker/db/testing";
 
@@ -25,6 +26,7 @@ export function resolveE2eDatabaseUrl(
 export default async function globalSetup() {
   const connectionString = resolveE2eDatabaseUrl();
 
+  await migrateTestDatabase(connectionString);
   const pool = new Pool({ connectionString });
   try {
     await pool.query(`
