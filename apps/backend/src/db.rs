@@ -9,6 +9,56 @@ use sqlx::{PgPool, Row, postgres::PgRow};
 use std::collections::HashSet;
 use uuid::Uuid;
 
+#[derive(Clone, Debug)]
+struct AdminActor {
+    id: Uuid,
+    role: String,
+}
+
+#[derive(Clone, Debug)]
+struct MacroValues {
+    protein: f64,
+    carbs: f64,
+    fat: f64,
+    calories: i32,
+}
+
+#[derive(Clone, Debug)]
+struct FoodProductValues {
+    scope: String,
+    source: String,
+    barcode: Option<String>,
+    name: String,
+    brand: String,
+    default_serving_quantity: f64,
+    default_serving_unit: String,
+    macros: MacroValues,
+    serving_weight_g: Option<f64>,
+    serving_volume_ml: Option<f64>,
+    source_provider: Option<String>,
+    source_confidence: Option<f64>,
+    source_metadata: Value,
+    corrected_from_product_id: Option<Uuid>,
+}
+
+#[derive(Clone, Debug)]
+struct MealFoodValues {
+    product_id: Option<Uuid>,
+    label: String,
+    quantity: f64,
+    unit: String,
+    serving_multiplier: f64,
+    macros: MacroValues,
+}
+
+#[derive(Clone, Debug)]
+struct WeightEntryValues {
+    date: String,
+    weight_kg: f64,
+    body_fat_pct: Option<f64>,
+    notes: Option<String>,
+}
+
 // Retained only as a temporary parity reference during the Rust port. Startup
 // must rely on Drizzle migrations, not this ad-hoc schema bootstrap.
 #[allow(dead_code)]
@@ -2083,6 +2133,11 @@ async fn normalize_meal_input(
     assert_meal_group_access(pool, user_id, meal_group_id).await?;
     let product_id = optional_uuid(input, "productId")?;
     let sort_order = optional_i32(input, "sortOrder").unwrap_or(default_sort_order);
+    if sort_order < 0 {
+        return Err(AppError::BadRequest(
+            "Sort order must be a non-negative integer.".to_string(),
+        ));
+    }
     let status = input
         .get("status")
         .and_then(Value::as_str)
@@ -2105,9 +2160,25 @@ async fn normalize_meal_input(
         let label = input
             .get("label")
             .and_then(Value::as_str)
+            .map(str::trim)
             .filter(|label| !label.trim().is_empty())
             .map(str::to_string)
             .unwrap_or(product_label);
+        let macros = MacroValues {
+            protein: round1(protein),
+            carbs: round1(carbs),
+            fat: round1(fat),
+            calories,
+        };
+        validate_meal_components(
+            &label,
+            sort_order,
+            quantity,
+            &unit,
+            serving_multiplier,
+            &macros,
+            "Meal name is required.",
+        )?;
         return Ok((
             date,
             meal_group_id,
@@ -2118,32 +2189,30 @@ async fn normalize_meal_input(
             quantity,
             unit,
             serving_multiplier,
-            protein,
-            carbs,
-            fat,
+            macros.protein,
+            macros.carbs,
+            macros.fat,
             calories,
             client_mutation_id,
         ));
     }
 
+    let values = normalize_meal_food_values(input, sort_order, "Meal name is required.")?;
+
     Ok((
         date,
         meal_group_id,
         status,
-        product_id,
-        required_string(input, "label")?,
+        values.product_id,
+        values.label,
         sort_order,
-        optional_f64(input, "quantity").unwrap_or(1.0),
-        input
-            .get("unit")
-            .and_then(Value::as_str)
-            .unwrap_or("serving")
-            .to_string(),
-        optional_f64(input, "servingMultiplier").unwrap_or(1.0),
-        required_f64(input, "proteinG")?,
-        required_f64(input, "carbsG")?,
-        required_f64(input, "fatG")?,
-        required_i32(input, "caloriesKcal")?,
+        values.quantity,
+        values.unit,
+        values.serving_multiplier,
+        values.macros.protein,
+        values.macros.carbs,
+        values.macros.fat,
+        values.macros.calories,
         client_mutation_id,
     ))
 }
@@ -2472,6 +2541,7 @@ async fn insert_template_items(
         let item = item
             .as_object()
             .ok_or_else(|| AppError::BadRequest("Template item must be an object.".to_string()))?;
+        let values = normalize_meal_food_values(item, index as i32, "Meal name is required.")?;
         sqlx::query(
             r#"
             INSERT INTO meal_template_items (
@@ -2483,21 +2553,17 @@ async fn insert_template_items(
         )
         .bind(Uuid::new_v4())
         .bind(template_id)
-        .bind(optional_uuid(item, "productId")?)
-        .bind(item.get("mealGroupLabel").and_then(Value::as_str))
+        .bind(values.product_id)
+        .bind(trim_optional_string(item, "mealGroupLabel").as_deref())
         .bind(index as i32)
-        .bind(required_string(item, "label")?)
-        .bind(optional_f64(item, "quantity").unwrap_or(1.0))
-        .bind(
-            item.get("unit")
-                .and_then(Value::as_str)
-                .unwrap_or("serving"),
-        )
-        .bind(optional_f64(item, "servingMultiplier").unwrap_or(1.0))
-        .bind(required_f64(item, "proteinG")?)
-        .bind(required_f64(item, "carbsG")?)
-        .bind(required_f64(item, "fatG")?)
-        .bind(required_i32(item, "caloriesKcal")?)
+        .bind(values.label)
+        .bind(values.quantity)
+        .bind(values.unit)
+        .bind(values.serving_multiplier)
+        .bind(values.macros.protein)
+        .bind(values.macros.carbs)
+        .bind(values.macros.fat)
+        .bind(values.macros.calories)
         .execute(&mut **tx)
         .await?;
     }
@@ -2721,46 +2787,12 @@ async fn create_food_product_json(
     personal: bool,
 ) -> AppResult<Value> {
     let product_id = Uuid::new_v4();
-    let requested_scope = input
-        .get("scope")
-        .and_then(Value::as_str)
-        .unwrap_or(if personal { "personal" } else { "global" });
-    if !matches!(requested_scope, "global" | "personal" | "legacy") {
-        return Err(AppError::BadRequest(
-            "Product scope is invalid.".to_string(),
-        ));
-    }
-    let scope = if personal { "personal" } else { "global" };
-    let source = input
-        .get("source")
-        .and_then(Value::as_str)
-        .unwrap_or("manual");
-    if !matches!(
-        source,
-        "manual" | "barcode" | "ai_photo" | "legacy" | "recipe"
-    ) {
-        return Err(AppError::BadRequest(
-            "Product source is invalid.".to_string(),
-        ));
-    }
-    let default_serving_unit = input
-        .get("defaultServingUnit")
-        .and_then(Value::as_str)
-        .unwrap_or("serving");
-    if !matches!(default_serving_unit, "g" | "ml" | "serving" | "count") {
-        return Err(AppError::BadRequest(
-            "Quantity unit is invalid.".to_string(),
-        ));
-    }
-    let barcode = input
-        .get("barcode")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
+    let mut normalized =
+        normalize_food_product_input(input, if personal { "personal" } else { "global" })?;
+    normalized.scope = if personal { "personal" } else { "global" }.to_string();
     if !personal
-        && source == "barcode"
-        && let Some(barcode) = barcode.as_deref()
+        && normalized.source == "barcode"
+        && let Some(barcode) = normalized.barcode.as_deref()
         && active_global_barcode_exists(pool, barcode, None).await?
     {
         return Err(AppError::BadRequest(
@@ -2785,29 +2817,24 @@ async fn create_food_product_json(
     )
     .bind(product_id)
     .bind(if personal { Some(user_id) } else { None })
-    .bind(scope)
-    .bind(source)
-    .bind(barcode.as_deref())
-    .bind(required_string(input, "name")?)
-    .bind(input.get("brand").and_then(Value::as_str).unwrap_or(""))
-    .bind(optional_f64(input, "defaultServingQuantity").unwrap_or(1.0))
-    .bind(default_serving_unit)
-    .bind(required_f64(input, "proteinPer100")?)
-    .bind(required_f64(input, "carbsPer100")?)
-    .bind(required_f64(input, "fatPer100")?)
-    .bind(required_i32(input, "caloriesPer100")?)
-    .bind(optional_f64(input, "servingWeightG"))
-    .bind(optional_f64(input, "servingVolumeMl"))
+    .bind(normalized.scope)
+    .bind(normalized.source)
+    .bind(normalized.barcode.as_deref())
+    .bind(normalized.name)
+    .bind(normalized.brand)
+    .bind(normalized.default_serving_quantity)
+    .bind(normalized.default_serving_unit)
+    .bind(normalized.macros.protein)
+    .bind(normalized.macros.carbs)
+    .bind(normalized.macros.fat)
+    .bind(normalized.macros.calories)
+    .bind(normalized.serving_weight_g)
+    .bind(normalized.serving_volume_ml)
     .bind(Some(user_id))
-    .bind(input.get("sourceProvider").and_then(Value::as_str))
-    .bind(optional_f64(input, "sourceConfidence"))
-    .bind(
-        input
-            .get("sourceMetadata")
-            .cloned()
-            .unwrap_or_else(|| json!({})),
-    )
-    .bind(optional_uuid(input, "correctedFromProductId")?)
+    .bind(normalized.source_provider.as_deref())
+    .bind(normalized.source_confidence)
+    .bind(normalized.source_metadata)
+    .bind(normalized.corrected_from_product_id)
     .execute(pool)
     .await?;
     let product = food_product_json_by_id(pool, user_id, product_id)
@@ -2891,26 +2918,37 @@ async fn lookup_barcode_food_product_json(
         .map_err(Into::into)
 }
 
-async fn save_barcode_food_product_json(
-    pool: &PgPool,
-    user_id: Uuid,
+fn normalize_barcode_food_product_input(
     input: &serde_json::Map<String, Value>,
-) -> AppResult<Value> {
-    let barcode = required_string(input, "barcode")?;
-    let name = required_string(input, "name")?;
-    let brands = input.get("brands").and_then(Value::as_str).unwrap_or("");
-    let serving_size_g = optional_f64(input, "servingSizeG");
+) -> AppResult<serde_json::Map<String, Value>> {
+    let serving_size_g = optional_positive_number(input, "servingSizeG", "Serving weight")?;
     let product_input = serde_json::Map::from_iter([
-        ("barcode".to_string(), Value::String(barcode)),
-        ("name".to_string(), Value::String(name)),
-        ("brand".to_string(), Value::String(brands.to_string())),
+        ("scope".to_string(), Value::String("global".to_string())),
+        ("source".to_string(), Value::String("barcode".to_string())),
         (
-            "defaultServingQuantity".to_string(),
-            json!(serving_size_g.unwrap_or(100.0)),
+            "barcode".to_string(),
+            Value::String(required_string_with_message(
+                input,
+                "barcode",
+                "Barcode is required.",
+            )?),
         ),
         (
+            "name".to_string(),
+            Value::String(required_string_with_message(
+                input,
+                "name",
+                "Product name is required.",
+            )?),
+        ),
+        (
+            "brand".to_string(),
+            Value::String(trim_optional_string(input, "brands").unwrap_or_default()),
+        ),
+        ("defaultServingQuantity".to_string(), json!(1.0)),
+        (
             "defaultServingUnit".to_string(),
-            Value::String("g".to_string()),
+            Value::String("serving".to_string()),
         ),
         (
             "proteinPer100".to_string(),
@@ -2927,10 +2965,9 @@ async fn save_barcode_food_product_json(
         ),
         (
             "servingWeightG".to_string(),
-            serving_size_g.map_or(Value::Null, |value| json!(value)),
+            json!(serving_size_g.unwrap_or(100.0)),
         ),
         ("servingVolumeMl".to_string(), Value::Null),
-        ("source".to_string(), Value::String("barcode".to_string())),
         (
             "sourceProvider".to_string(),
             Value::String("community".to_string()),
@@ -2940,6 +2977,16 @@ async fn save_barcode_food_product_json(
             json!({ "servingSizeG": serving_size_g }),
         ),
     ]);
+    normalize_food_product_input(&product_input, "global")?;
+    Ok(product_input)
+}
+
+async fn save_barcode_food_product_json(
+    pool: &PgPool,
+    user_id: Uuid,
+    input: &serde_json::Map<String, Value>,
+) -> AppResult<Value> {
+    let product_input = normalize_barcode_food_product_input(input)?;
     create_food_product_json(pool, user_id, &product_input, false).await
 }
 
@@ -3483,29 +3530,44 @@ async fn admin_food_product_by_id_json(
         .map_err(Into::into)
 }
 
+async fn require_admin_actor(pool: &PgPool, actor_user_id: Uuid) -> AppResult<AdminActor> {
+    let row = sqlx::query("SELECT id, role FROM users WHERE id = $1")
+        .bind(actor_user_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| AppError::Forbidden("Admin actor not found.".to_string()))?;
+    let role: String = row.try_get("role")?;
+    if !is_admin_actor_role(&role) {
+        return Err(AppError::Forbidden("Admin access is required.".to_string()));
+    }
+    Ok(AdminActor {
+        id: row.try_get("id")?,
+        role,
+    })
+}
+
+fn is_admin_actor_role(role: &str) -> bool {
+    matches!(role, "admin" | "owner")
+}
+
 async fn create_admin_barcode_product_json(
     pool: &PgPool,
     actor_user_id: Uuid,
     input: &serde_json::Map<String, Value>,
 ) -> AppResult<Value> {
-    let product = save_barcode_food_product_json(pool, actor_user_id, input).await?;
+    let actor = require_admin_actor(pool, actor_user_id).await?;
+    let product = save_barcode_food_product_json(pool, actor.id, input).await?;
     let product_id = product
         .get("id")
         .and_then(Value::as_str)
         .and_then(|value| Uuid::parse_str(value).ok())
         .ok_or_else(|| AppError::BadRequest("Created product id is invalid.".to_string()))?;
-    insert_food_product_revision(
-        pool,
-        product_id,
-        Some(actor_user_id),
-        "created",
-        product.clone(),
-    )
-    .await?;
+    insert_food_product_revision(pool, product_id, Some(actor.id), "created", product.clone())
+        .await?;
     insert_admin_audit_event(
         pool,
-        actor_user_id,
-        "admin",
+        actor.id,
+        &actor.role,
         "barcode.created",
         "food_product",
         product_id,
@@ -3524,22 +3586,21 @@ async fn update_admin_barcode_product_json(
     product_id: Uuid,
     input: &serde_json::Map<String, Value>,
 ) -> AppResult<Value> {
+    let actor = require_admin_actor(pool, actor_user_id).await?;
     let before = admin_food_product_by_id_json(pool, product_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Barcode product not found.".to_string()))?;
-    let barcode = required_string(input, "barcode")?;
-    if active_global_barcode_exists(pool, &barcode, Some(product_id)).await? {
+    let product_input = normalize_barcode_food_product_input(input)?;
+    let normalized = normalize_food_product_input(&product_input, "global")?;
+    let barcode = normalized
+        .barcode
+        .as_deref()
+        .ok_or_else(|| AppError::BadRequest("Barcode is required.".to_string()))?;
+    if active_global_barcode_exists(pool, barcode, Some(product_id)).await? {
         return Err(AppError::BadRequest(
             "That barcode already exists.".to_string(),
         ));
     }
-    let name = required_string(input, "name")?;
-    let brand = input.get("brands").and_then(Value::as_str).unwrap_or("");
-    let serving_size_g = optional_f64(input, "servingSizeG");
-    let protein_g = required_f64(input, "proteinG")?;
-    let carbs_g = required_f64(input, "carbsG")?;
-    let fat_g = required_f64(input, "fatG")?;
-    let calories_kcal = required_i32(input, "caloriesKcal")?;
     let updated = sqlx::query(
         r#"
         UPDATE food_products
@@ -3547,27 +3608,34 @@ async fn update_admin_barcode_product_json(
           barcode = $2,
           name = $3,
           brand = $4,
-          default_serving_quantity = coalesce($5, default_serving_quantity),
-          default_serving_unit = 'g',
-          protein_per_100 = $6,
-          carbs_per_100 = $7,
-          fat_per_100 = $8,
-          calories_per_100 = $9,
-          serving_weight_g = $5,
+          default_serving_quantity = $5,
+          default_serving_unit = $6,
+          protein_per_100 = $7,
+          carbs_per_100 = $8,
+          fat_per_100 = $9,
+          calories_per_100 = $10,
+          serving_weight_g = $11,
+          serving_volume_ml = NULL,
+          source_provider = coalesce($12, source_provider),
+          source_metadata = $13,
           updated_at = now()
         WHERE id = $1 AND owner_user_id IS NULL AND source = 'barcode'
         RETURNING id
         "#,
     )
     .bind(product_id)
-    .bind(&barcode)
-    .bind(&name)
-    .bind(brand)
-    .bind(serving_size_g)
-    .bind(protein_g)
-    .bind(carbs_g)
-    .bind(fat_g)
-    .bind(calories_kcal)
+    .bind(normalized.barcode.as_deref())
+    .bind(normalized.name)
+    .bind(normalized.brand)
+    .bind(normalized.default_serving_quantity)
+    .bind(normalized.default_serving_unit)
+    .bind(normalized.macros.protein)
+    .bind(normalized.macros.carbs)
+    .bind(normalized.macros.fat)
+    .bind(normalized.macros.calories)
+    .bind(normalized.serving_weight_g)
+    .bind(normalized.source_provider.as_deref())
+    .bind(normalized.source_metadata)
     .fetch_optional(pool)
     .await?
     .is_some();
@@ -3577,18 +3645,12 @@ async fn update_admin_barcode_product_json(
     let product = admin_food_product_by_id_json(pool, product_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Barcode product not found.".to_string()))?;
-    insert_food_product_revision(
-        pool,
-        product_id,
-        Some(actor_user_id),
-        "updated",
-        product.clone(),
-    )
-    .await?;
+    insert_food_product_revision(pool, product_id, Some(actor.id), "updated", product.clone())
+        .await?;
     insert_admin_audit_event(
         pool,
-        actor_user_id,
-        "admin",
+        actor.id,
+        &actor.role,
         "barcode.updated",
         "food_product",
         product_id,
@@ -3609,6 +3671,7 @@ async fn set_admin_barcode_deleted_json(
     product_id: Uuid,
     deleted: bool,
 ) -> AppResult<Value> {
+    let actor = require_admin_actor(pool, actor_user_id).await?;
     let existing = admin_food_product_by_id_json(pool, product_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Barcode product not found.".to_string()))?;
@@ -3640,7 +3703,7 @@ async fn set_admin_barcode_deleted_json(
         RETURNING id
         "#,
     )
-    .bind(actor_user_id)
+    .bind(actor.id)
     .bind(product_id)
     .bind(deleted)
     .fetch_optional(pool)
@@ -3654,15 +3717,15 @@ async fn set_admin_barcode_deleted_json(
     insert_food_product_revision(
         pool,
         product_id,
-        Some(actor_user_id),
+        Some(actor.id),
         if deleted { "deleted" } else { "restored" },
         product,
     )
     .await?;
     insert_admin_audit_event(
         pool,
-        actor_user_id,
-        "admin",
+        actor.id,
+        &actor.role,
         if deleted {
             "barcode.deleted"
         } else {
@@ -3936,6 +3999,8 @@ async fn update_food_product_json(
     product_id: Uuid,
     input: &serde_json::Map<String, Value>,
 ) -> AppResult<Value> {
+    let mut normalized = normalize_food_product_input(input, "personal")?;
+    normalized.scope = "personal".to_string();
     let updated = sqlx::query(
         r#"
         UPDATE food_products
@@ -3963,28 +4028,18 @@ async fn update_food_product_json(
     )
     .bind(user_id)
     .bind(product_id)
-    .bind(
-        input
-            .get("source")
-            .and_then(Value::as_str)
-            .unwrap_or("manual"),
-    )
-    .bind(input.get("barcode").and_then(Value::as_str))
-    .bind(required_string(input, "name")?)
-    .bind(input.get("brand").and_then(Value::as_str).unwrap_or(""))
-    .bind(optional_f64(input, "defaultServingQuantity").unwrap_or(1.0))
-    .bind(
-        input
-            .get("defaultServingUnit")
-            .and_then(Value::as_str)
-            .unwrap_or("serving"),
-    )
-    .bind(required_f64(input, "proteinPer100")?)
-    .bind(required_f64(input, "carbsPer100")?)
-    .bind(required_f64(input, "fatPer100")?)
-    .bind(required_i32(input, "caloriesPer100")?)
-    .bind(optional_f64(input, "servingWeightG"))
-    .bind(optional_f64(input, "servingVolumeMl"))
+    .bind(normalized.source)
+    .bind(normalized.barcode.as_deref())
+    .bind(normalized.name)
+    .bind(normalized.brand)
+    .bind(normalized.default_serving_quantity)
+    .bind(normalized.default_serving_unit)
+    .bind(normalized.macros.protein)
+    .bind(normalized.macros.carbs)
+    .bind(normalized.macros.fat)
+    .bind(normalized.macros.calories)
+    .bind(normalized.serving_weight_g)
+    .bind(normalized.serving_volume_ml)
     .fetch_optional(pool)
     .await?
     .is_some();
@@ -4003,9 +4058,20 @@ async fn create_recipe_json(
     test_fault: Option<&serde_json::Map<String, Value>>,
 ) -> AppResult<Value> {
     let recipe_id = Uuid::new_v4();
-    let label = required_string(input, "label")?;
-    let portions = optional_i32(input, "portions").unwrap_or(1).max(1);
-    let total_cooked_weight_g = optional_f64(input, "totalCookedWeightG");
+    let label = required_string_with_message(input, "label", "Recipe name is required.")?;
+    let portions = optional_i32(input, "portions").unwrap_or(1);
+    if portions < 1 {
+        return Err(AppError::BadRequest(
+            "Portions must be at least 1.".to_string(),
+        ));
+    }
+    if portions > 999 {
+        return Err(AppError::BadRequest(
+            "Portions must be less than 1000.".to_string(),
+        ));
+    }
+    let total_cooked_weight_g =
+        optional_positive_number(input, "totalCookedWeightG", "Cooked weight")?;
     let ingredients = input
         .get("ingredients")
         .and_then(Value::as_array)
@@ -4041,9 +4107,20 @@ async fn update_recipe_json(
     input: &serde_json::Map<String, Value>,
     test_fault: Option<&serde_json::Map<String, Value>>,
 ) -> AppResult<Value> {
-    let label = required_string(input, "label")?;
-    let portions = optional_i32(input, "portions").unwrap_or(1).max(1);
-    let total_cooked_weight_g = optional_f64(input, "totalCookedWeightG");
+    let label = required_string_with_message(input, "label", "Recipe name is required.")?;
+    let portions = optional_i32(input, "portions").unwrap_or(1);
+    if portions < 1 {
+        return Err(AppError::BadRequest(
+            "Portions must be at least 1.".to_string(),
+        ));
+    }
+    if portions > 999 {
+        return Err(AppError::BadRequest(
+            "Portions must be less than 1000.".to_string(),
+        ));
+    }
+    let total_cooked_weight_g =
+        optional_positive_number(input, "totalCookedWeightG", "Cooked weight")?;
     let ingredients = input
         .get("ingredients")
         .and_then(Value::as_array)
@@ -4091,6 +4168,11 @@ async fn insert_recipe_ingredients(
         let ingredient = ingredient.as_object().ok_or_else(|| {
             AppError::BadRequest("Recipe ingredient must be an object.".to_string())
         })?;
+        let values = normalize_meal_food_values(
+            ingredient,
+            index as i32,
+            &format!("Ingredient {} name is required.", index + 1),
+        )?;
         sqlx::query(
             r#"
             INSERT INTO recipe_ingredients (
@@ -4102,21 +4184,16 @@ async fn insert_recipe_ingredients(
         )
         .bind(Uuid::new_v4())
         .bind(recipe_id)
-        .bind(optional_uuid(ingredient, "productId")?)
+        .bind(values.product_id)
         .bind(index as i32)
-        .bind(required_string(ingredient, "label")?)
-        .bind(optional_f64(ingredient, "quantity").unwrap_or(1.0))
-        .bind(
-            ingredient
-                .get("unit")
-                .and_then(Value::as_str)
-                .unwrap_or("serving"),
-        )
-        .bind(optional_f64(ingredient, "servingMultiplier").unwrap_or(1.0))
-        .bind(required_f64(ingredient, "proteinG")?)
-        .bind(required_f64(ingredient, "carbsG")?)
-        .bind(required_f64(ingredient, "fatG")?)
-        .bind(required_i32(ingredient, "caloriesKcal")?)
+        .bind(values.label)
+        .bind(values.quantity)
+        .bind(values.unit)
+        .bind(values.serving_multiplier)
+        .bind(values.macros.protein)
+        .bind(values.macros.carbs)
+        .bind(values.macros.fat)
+        .bind(values.macros.calories)
         .execute(&mut **tx)
         .await?;
     }
@@ -4265,10 +4342,7 @@ async fn create_weight_entry_json(
     overwrite: bool,
 ) -> AppResult<Value> {
     let id = Uuid::new_v4();
-    let date = required_string(input, "date")?;
-    let weight_kg = required_f64(input, "weightKg")?;
-    let body_fat_pct = optional_f64(input, "bodyFatPct");
-    let notes = input.get("notes").and_then(Value::as_str);
+    let values = normalize_weight_entry_input(input)?;
     let row = if overwrite {
         sqlx::query(
             r#"
@@ -4281,10 +4355,10 @@ async fn create_weight_entry_json(
         )
         .bind(id)
         .bind(user_id)
-        .bind(date)
-        .bind(weight_kg)
-        .bind(body_fat_pct)
-        .bind(notes)
+        .bind(&values.date)
+        .bind(values.weight_kg)
+        .bind(values.body_fat_pct)
+        .bind(values.notes.as_deref())
         .fetch_optional(pool)
         .await?
     } else {
@@ -4298,10 +4372,10 @@ async fn create_weight_entry_json(
         )
         .bind(id)
         .bind(user_id)
-        .bind(date)
-        .bind(weight_kg)
-        .bind(body_fat_pct)
-        .bind(notes)
+        .bind(&values.date)
+        .bind(values.weight_kg)
+        .bind(values.body_fat_pct)
+        .bind(values.notes.as_deref())
         .fetch_optional(pool)
         .await?
     };
@@ -4317,6 +4391,7 @@ async fn update_weight_entry_json(
     entry_id: Uuid,
     input: &serde_json::Map<String, Value>,
 ) -> AppResult<Value> {
+    let values = normalize_weight_entry_input(input)?;
     let updated = sqlx::query(
         r#"
         UPDATE weight_entries
@@ -4327,10 +4402,10 @@ async fn update_weight_entry_json(
     )
     .bind(user_id)
     .bind(entry_id)
-    .bind(required_string(input, "date")?)
-    .bind(required_f64(input, "weightKg")?)
-    .bind(optional_f64(input, "bodyFatPct"))
-    .bind(input.get("notes").and_then(Value::as_str))
+    .bind(values.date)
+    .bind(values.weight_kg)
+    .bind(values.body_fat_pct)
+    .bind(values.notes.as_deref())
     .fetch_optional(pool)
     .await?
     .is_some();
@@ -5125,6 +5200,252 @@ fn page_json(items: Vec<Value>, page: i64, page_size: i64, total_items: i32) -> 
     })
 }
 
+fn is_quantity_unit(value: &str) -> bool {
+    matches!(value, "g" | "ml" | "serving" | "count")
+}
+
+fn trim_optional_string(input: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+    input
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn required_string_with_message(
+    input: &serde_json::Map<String, Value>,
+    key: &str,
+    message: &str,
+) -> AppResult<String> {
+    input
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| AppError::BadRequest(message.to_string()))
+}
+
+fn normalize_positive_number(
+    input: &serde_json::Map<String, Value>,
+    key: &str,
+    field_name: &str,
+    fallback: f64,
+) -> AppResult<f64> {
+    let value = optional_f64(input, key).unwrap_or(fallback);
+    if !value.is_finite() || value <= 0.0 {
+        return Err(AppError::BadRequest(format!(
+            "{field_name} must be a positive number."
+        )));
+    }
+    Ok(round2(value))
+}
+
+fn optional_positive_number(
+    input: &serde_json::Map<String, Value>,
+    key: &str,
+    field_name: &str,
+) -> AppResult<Option<f64>> {
+    if matches!(input.get(key), None | Some(Value::Null)) {
+        return Ok(None);
+    }
+    Ok(Some(normalize_positive_number(
+        input, key, field_name, 1.0,
+    )?))
+}
+
+fn normalize_quantity_unit(input: &serde_json::Map<String, Value>, key: &str) -> AppResult<String> {
+    let unit = input.get(key).and_then(Value::as_str).unwrap_or("serving");
+    if !is_quantity_unit(unit) {
+        return Err(AppError::BadRequest(
+            "Quantity unit is invalid.".to_string(),
+        ));
+    }
+    Ok(unit.to_string())
+}
+
+fn normalize_macros(
+    input: &serde_json::Map<String, Value>,
+    protein_key: &str,
+    carbs_key: &str,
+    fat_key: &str,
+    calories_key: &str,
+) -> AppResult<MacroValues> {
+    Ok(MacroValues {
+        protein: round1(required_f64(input, protein_key)?),
+        carbs: round1(required_f64(input, carbs_key)?),
+        fat: round1(required_f64(input, fat_key)?),
+        calories: required_i32(input, calories_key)?,
+    })
+}
+
+fn require_any_nutrition(macros: &MacroValues) -> AppResult<()> {
+    if macros.protein > 0.0 || macros.carbs > 0.0 || macros.fat > 0.0 || macros.calories > 0 {
+        return Ok(());
+    }
+    Err(AppError::BadRequest(
+        "At least one macro or calorie value must be greater than zero.".to_string(),
+    ))
+}
+
+fn validate_meal_components(
+    label: &str,
+    sort_order: i32,
+    quantity: f64,
+    unit: &str,
+    serving_multiplier: f64,
+    macros: &MacroValues,
+    label_message: &str,
+) -> AppResult<()> {
+    if label.trim().is_empty() {
+        return Err(AppError::BadRequest(label_message.to_string()));
+    }
+    if sort_order < 0 {
+        return Err(AppError::BadRequest(
+            "Sort order must be a non-negative integer.".to_string(),
+        ));
+    }
+    if !quantity.is_finite() || quantity <= 0.0 {
+        return Err(AppError::BadRequest(
+            "Quantity must be a positive number.".to_string(),
+        ));
+    }
+    if !is_quantity_unit(unit) {
+        return Err(AppError::BadRequest(
+            "Quantity unit is invalid.".to_string(),
+        ));
+    }
+    if !serving_multiplier.is_finite() || serving_multiplier <= 0.0 {
+        return Err(AppError::BadRequest(
+            "Serving multiplier must be a positive number.".to_string(),
+        ));
+    }
+    require_any_nutrition(macros)
+}
+
+fn normalize_meal_food_values(
+    input: &serde_json::Map<String, Value>,
+    sort_order: i32,
+    label_message: &str,
+) -> AppResult<MealFoodValues> {
+    let values = MealFoodValues {
+        product_id: optional_uuid(input, "productId")?,
+        label: required_string_with_message(input, "label", label_message)?,
+        quantity: normalize_positive_number(input, "quantity", "Quantity", 1.0)?,
+        unit: normalize_quantity_unit(input, "unit")?,
+        serving_multiplier: normalize_positive_number(
+            input,
+            "servingMultiplier",
+            "Serving multiplier",
+            1.0,
+        )?,
+        macros: normalize_macros(input, "proteinG", "carbsG", "fatG", "caloriesKcal")?,
+    };
+    validate_meal_components(
+        &values.label,
+        sort_order,
+        values.quantity,
+        &values.unit,
+        values.serving_multiplier,
+        &values.macros,
+        label_message,
+    )?;
+    Ok(values)
+}
+
+fn normalize_food_product_input(
+    input: &serde_json::Map<String, Value>,
+    scope_fallback: &str,
+) -> AppResult<FoodProductValues> {
+    let scope = input
+        .get("scope")
+        .and_then(Value::as_str)
+        .unwrap_or(scope_fallback);
+    if !matches!(scope, "global" | "personal" | "legacy") {
+        return Err(AppError::BadRequest(
+            "Product scope is invalid.".to_string(),
+        ));
+    }
+    let source = input
+        .get("source")
+        .and_then(Value::as_str)
+        .unwrap_or("manual");
+    if !matches!(
+        source,
+        "manual" | "barcode" | "ai_photo" | "legacy" | "recipe"
+    ) {
+        return Err(AppError::BadRequest(
+            "Product source is invalid.".to_string(),
+        ));
+    }
+    let source_confidence = optional_f64(input, "sourceConfidence").map(round2);
+    if let Some(value) = source_confidence
+        && (!value.is_finite() || !(0.0..=1.0).contains(&value))
+    {
+        return Err(AppError::BadRequest(
+            "Source confidence must be between 0 and 1.".to_string(),
+        ));
+    }
+    Ok(FoodProductValues {
+        scope: scope.to_string(),
+        source: source.to_string(),
+        barcode: trim_optional_string(input, "barcode"),
+        name: required_string_with_message(input, "name", "Product name is required.")?,
+        brand: trim_optional_string(input, "brand").unwrap_or_default(),
+        default_serving_quantity: normalize_positive_number(
+            input,
+            "defaultServingQuantity",
+            "Default serving quantity",
+            1.0,
+        )?,
+        default_serving_unit: normalize_quantity_unit(input, "defaultServingUnit")?,
+        macros: normalize_macros(
+            input,
+            "proteinPer100",
+            "carbsPer100",
+            "fatPer100",
+            "caloriesPer100",
+        )?,
+        serving_weight_g: optional_positive_number(input, "servingWeightG", "Serving weight")?,
+        serving_volume_ml: optional_positive_number(input, "servingVolumeMl", "Serving volume")?,
+        source_provider: trim_optional_string(input, "sourceProvider"),
+        source_confidence,
+        source_metadata: input
+            .get("sourceMetadata")
+            .cloned()
+            .unwrap_or_else(|| json!({})),
+        corrected_from_product_id: optional_uuid(input, "correctedFromProductId")?,
+    })
+}
+
+fn normalize_weight_entry_input(
+    input: &serde_json::Map<String, Value>,
+) -> AppResult<WeightEntryValues> {
+    let weight_kg = optional_f64(input, "weightKg")
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .ok_or_else(|| AppError::BadRequest("Weight must be a positive number.".to_string()))?;
+    if weight_kg >= 1000.0 {
+        return Err(AppError::BadRequest(
+            "Weight must be less than 1000 kg.".to_string(),
+        ));
+    }
+    let body_fat_pct = optional_f64(input, "bodyFatPct");
+    if let Some(value) = body_fat_pct
+        && (!value.is_finite() || !(0.0..=100.0).contains(&value))
+    {
+        return Err(AppError::BadRequest(
+            "Body fat percentage must be between 0 and 100.".to_string(),
+        ));
+    }
+    Ok(WeightEntryValues {
+        date: required_string(input, "date")?,
+        weight_kg: round2(weight_kg),
+        body_fat_pct: body_fat_pct.map(round1),
+        notes: trim_optional_string(input, "notes"),
+    })
+}
+
 fn required_string(input: &serde_json::Map<String, Value>, key: &str) -> AppResult<String> {
     input
         .get(key)
@@ -5194,6 +5515,178 @@ fn round2(value: f64) -> f64 {
 mod tests {
     use super::*;
     use std::{collections::HashSet, fs, path::PathBuf};
+
+    fn bad_request_message(result: AppResult<impl Sized>) -> String {
+        match result {
+            Err(AppError::BadRequest(message)) => message,
+            Err(error) => panic!("expected bad request, got {error:?}"),
+            Ok(_) => panic!("expected bad request, got ok"),
+        }
+    }
+
+    fn meal_payload(overrides: &[(&str, Value)]) -> serde_json::Map<String, Value> {
+        let mut payload = serde_json::Map::from_iter([
+            ("label".to_string(), json!("Oats")),
+            ("quantity".to_string(), json!(1.0)),
+            ("unit".to_string(), json!("serving")),
+            ("servingMultiplier".to_string(), json!(1.0)),
+            ("proteinG".to_string(), json!(10.0)),
+            ("carbsG".to_string(), json!(20.0)),
+            ("fatG".to_string(), json!(5.0)),
+            ("caloriesKcal".to_string(), json!(165)),
+        ]);
+        for (key, value) in overrides {
+            payload.insert((*key).to_string(), value.clone());
+        }
+        payload
+    }
+
+    fn food_payload(overrides: &[(&str, Value)]) -> serde_json::Map<String, Value> {
+        let mut payload = serde_json::Map::from_iter([
+            ("scope".to_string(), json!("personal")),
+            ("source".to_string(), json!("manual")),
+            ("name".to_string(), json!("Oats")),
+            ("defaultServingQuantity".to_string(), json!(1.0)),
+            ("defaultServingUnit".to_string(), json!("serving")),
+            ("proteinPer100".to_string(), json!(10.0)),
+            ("carbsPer100".to_string(), json!(20.0)),
+            ("fatPer100".to_string(), json!(5.0)),
+            ("caloriesPer100".to_string(), json!(165)),
+        ]);
+        for (key, value) in overrides {
+            payload.insert((*key).to_string(), value.clone());
+        }
+        payload
+    }
+
+    #[test]
+    fn meal_template_and_recipe_item_validation_rejects_invalid_payloads() {
+        assert_eq!(
+            bad_request_message(normalize_meal_food_values(
+                &meal_payload(&[("label", json!("   "))]),
+                0,
+                "Meal name is required.",
+            )),
+            "Meal name is required."
+        );
+        assert_eq!(
+            bad_request_message(normalize_meal_food_values(
+                &meal_payload(&[("quantity", json!(0))]),
+                0,
+                "Meal name is required.",
+            )),
+            "Quantity must be a positive number."
+        );
+        assert_eq!(
+            bad_request_message(normalize_meal_food_values(
+                &meal_payload(&[("unit", json!("oz"))]),
+                0,
+                "Meal name is required.",
+            )),
+            "Quantity unit is invalid."
+        );
+        assert_eq!(
+            bad_request_message(normalize_meal_food_values(
+                &meal_payload(&[("servingMultiplier", json!(0))]),
+                0,
+                "Meal name is required.",
+            )),
+            "Serving multiplier must be a positive number."
+        );
+        assert_eq!(
+            bad_request_message(normalize_meal_food_values(
+                &meal_payload(&[
+                    ("proteinG", json!(0)),
+                    ("carbsG", json!(0)),
+                    ("fatG", json!(0)),
+                    ("caloriesKcal", json!(0)),
+                ]),
+                0,
+                "Meal name is required.",
+            )),
+            "At least one macro or calorie value must be greater than zero."
+        );
+    }
+
+    #[test]
+    fn food_and_barcode_validation_rejects_invalid_payloads() {
+        assert_eq!(
+            bad_request_message(normalize_food_product_input(
+                &food_payload(&[("name", json!(" "))]),
+                "personal",
+            )),
+            "Product name is required."
+        );
+        assert_eq!(
+            bad_request_message(normalize_food_product_input(
+                &food_payload(&[("defaultServingQuantity", json!(0))]),
+                "personal",
+            )),
+            "Default serving quantity must be a positive number."
+        );
+        assert_eq!(
+            bad_request_message(normalize_food_product_input(
+                &food_payload(&[("sourceConfidence", json!(1.1))]),
+                "personal",
+            )),
+            "Source confidence must be between 0 and 1."
+        );
+        assert_eq!(
+            bad_request_message(normalize_barcode_food_product_input(
+                &serde_json::Map::from_iter([
+                    ("barcode".to_string(), json!("123")),
+                    ("name".to_string(), json!("Bar")),
+                    ("servingSizeG".to_string(), json!(0)),
+                    ("proteinG".to_string(), json!(1)),
+                    ("carbsG".to_string(), json!(1)),
+                    ("fatG".to_string(), json!(1)),
+                    ("caloriesKcal".to_string(), json!(10)),
+                ])
+            )),
+            "Serving weight must be a positive number."
+        );
+    }
+
+    #[test]
+    fn weight_validation_rejects_invalid_values_and_trims_notes() {
+        let base = serde_json::Map::from_iter([
+            ("date".to_string(), json!("2026-07-09")),
+            ("weightKg".to_string(), json!(80.0)),
+            ("bodyFatPct".to_string(), json!(20.0)),
+            ("notes".to_string(), json!("  hello  ")),
+        ]);
+        let values = normalize_weight_entry_input(&base).expect("valid weight entry");
+        assert_eq!(values.notes.as_deref(), Some("hello"));
+
+        let mut zero = base.clone();
+        zero.insert("weightKg".to_string(), json!(0));
+        assert_eq!(
+            bad_request_message(normalize_weight_entry_input(&zero)),
+            "Weight must be a positive number."
+        );
+
+        let mut huge = base.clone();
+        huge.insert("weightKg".to_string(), json!(1000));
+        assert_eq!(
+            bad_request_message(normalize_weight_entry_input(&huge)),
+            "Weight must be less than 1000 kg."
+        );
+
+        let mut bad_body_fat = base;
+        bad_body_fat.insert("bodyFatPct".to_string(), json!(101));
+        assert_eq!(
+            bad_request_message(normalize_weight_entry_input(&bad_body_fat)),
+            "Body fat percentage must be between 0 and 100."
+        );
+    }
+
+    #[test]
+    fn only_admin_and_owner_roles_are_admin_actors() {
+        assert!(is_admin_actor_role("admin"));
+        assert!(is_admin_actor_role("owner"));
+        assert!(!is_admin_actor_role("user"));
+        assert!(!is_admin_actor_role(""));
+    }
 
     #[test]
     fn expected_drizzle_migrations_match_repo_sql_files() {
