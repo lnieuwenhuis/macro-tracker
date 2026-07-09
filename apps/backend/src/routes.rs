@@ -31,10 +31,15 @@ pub async fn health(State(state): State<AppState>) -> (StatusCode, Json<Value>) 
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({ "ok": false, "error": "database readiness check failed" })),
         ),
-        Err(error) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({ "ok": false, "error": error.to_string() })),
-        ),
+        Err(error) => {
+            tracing::warn!(error = ?error, "database readiness check failed");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(
+                    serde_json::json!({ "ok": false, "error": "database readiness check failed" }),
+                ),
+            )
+        }
     }
 }
 

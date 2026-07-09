@@ -48,11 +48,11 @@ export async function handleApiV1Request(
       {
         ok: false,
         error: {
-          code: "internal_error",
-          message: "An internal server error occurred.",
+          code: "upstream_error",
+          message: "Backend service is unavailable.",
         },
       },
-      { status: 500, headers: CORS_HEADERS },
+      { status: 502, headers: CORS_HEADERS },
     );
   }
 }

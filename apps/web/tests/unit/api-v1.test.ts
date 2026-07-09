@@ -20,6 +20,39 @@ import { handleApiV1Request } from "@/lib/api-v1";
 import { API_V1_ENDPOINTS, formatApiV1ScopeSummary, getApiV1OpenApi } from "@/lib/api-v1-openapi";
 import * as apiV1Route from "@/app/api/v1/[[...path]]/route";
 
+describe("API v1 backend proxy failures", () => {
+  async function withBackendUrl<T>(url: string, operation: () => Promise<T>) {
+    const previous = process.env.BACKEND_URL;
+    process.env.BACKEND_URL = url;
+    try {
+      return await operation();
+    } finally {
+      if (previous === undefined) {
+        delete process.env.BACKEND_URL;
+      } else {
+        process.env.BACKEND_URL = previous;
+      }
+    }
+  }
+
+  it("returns upstream_error with CORS headers when backendFetch rejects", async () => {
+    const response = await withBackendUrl("http://127.0.0.1:9", () =>
+      handleApiV1Request(new Request("http://localhost/api/v1/me"), ["me"], "GET"),
+    );
+
+    expect(response.status).toBe(502);
+    expect(response.headers.get("access-control-allow-origin")).toBe("*");
+    expect(response.headers.get("access-control-allow-headers")).toContain("Authorization");
+    await expect(response.json()).resolves.toMatchObject({
+      ok: false,
+      error: {
+        code: "upstream_error",
+        message: "Backend service is unavailable.",
+      },
+    });
+  });
+});
+
 describe("Macro Tracker API v1", () => {
   let runtime: DatabaseRuntime;
   let userId: string;
@@ -1360,38 +1393,6 @@ describe("Macro Tracker API v1", () => {
       error: {
         code: "weight_entry_date_conflict",
         message: "A weight entry already exists for this date.",
-      },
-    });
-  });
-
-  it("returns internal_error for backend proxy failures", async () => {
-    const response = await withBackendUrl("http://127.0.0.1:9", () =>
-      apiRequest("GET", "/me", { token: fullToken }),
-    );
-
-    expect(response.status).toBe(500);
-    await expect(response.json()).resolves.toMatchObject({
-      ok: false,
-      error: {
-        code: "internal_error",
-        message: "An internal server error occurred.",
-      },
-    });
-  });
-
-  it("returns internal_error with CORS headers for backend proxy failures", async () => {
-    const response = await withBackendUrl("http://127.0.0.1:9", () =>
-      apiRequest("GET", "/me", { token: fullToken }),
-    );
-
-    expect(response.status).toBe(500);
-    expect(response.headers.get("access-control-allow-origin")).toBe("*");
-    expect(response.headers.get("access-control-allow-headers")).toContain("Authorization");
-    await expect(response.json()).resolves.toMatchObject({
-      ok: false,
-      error: {
-        code: "internal_error",
-        message: "An internal server error occurred.",
       },
     });
   });

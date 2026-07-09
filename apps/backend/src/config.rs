@@ -39,7 +39,11 @@ impl Config {
     {
         let allow_insecure_local =
             parse_env_bool(read_value(&mut read, ALLOW_INSECURE_LOCAL_BACKEND_ENV).as_deref());
-        let app_url = read_required(&mut read, "APP_URL", Some("http://localhost:3000"))?;
+        let app_url = read_required(
+            &mut read,
+            "APP_URL",
+            allow_insecure_local.then_some("http://localhost:3000"),
+        )?;
         validate_insecure_local_backend_mode(allow_insecure_local, &app_url)?;
         let session_secret = read_secret(
             &mut read,
@@ -298,6 +302,18 @@ mod tests {
                 "internal-secret-with-at-least-32-chars",
             ),
         ]
+    }
+
+    #[test]
+    fn production_config_requires_app_url() {
+        let values = production_values()
+            .into_iter()
+            .filter(|(key, _)| *key != "APP_URL")
+            .collect::<Vec<_>>();
+
+        let error = config_from(&values).expect_err("APP_URL should be required");
+
+        assert!(error.to_string().contains("APP_URL is required"));
     }
 
     #[test]

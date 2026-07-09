@@ -101,6 +101,7 @@ mod tests {
         body::Body,
         http::{Request, StatusCode},
     };
+    use http_body_util::BodyExt;
     use std::env;
     use tower::ServiceExt;
 
@@ -180,6 +181,19 @@ mod tests {
             .expect("request should complete");
 
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body should collect")
+            .to_bytes();
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("body should be JSON");
+        assert_eq!(
+            payload,
+            serde_json::json!({ "ok": false, "error": "database readiness check failed" })
+        );
+        assert!(!String::from_utf8_lossy(&body).contains("127.0.0.1"));
     }
 
     #[tokio::test]
