@@ -1,3 +1,9 @@
-import { createMigratedTestDatabase } from "./migration";
+export {
+  assertSafeDestructiveTestDatabaseUrl,
+  resolveDestructiveTestDatabaseUrl,
+} from "./test-database-safety";
 
-export const createTestDatabase = createMigratedTestDatabase;
+export async function createTestDatabase() {
+  const { createMigratedTestDatabase } = await import("./migration");
+  return createMigratedTestDatabase();
+}

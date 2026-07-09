@@ -2,7 +2,7 @@ use crate::{
     errors::{AppError, AppResult},
     types::{AppUser, MacroGoals, ShooProfile},
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row, postgres::PgRow};
@@ -1251,7 +1251,8 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
         }
         "getWeightPageData" => {
             let user_id = uuid_arg(&args, "userId")?;
-            weight_page_data_json(pool, user_id).await
+            let selected_date = string_arg(&args, "selectedDate")?;
+            weight_page_data_json(pool, user_id, &selected_date).await
         }
         "createWeightEntry" => {
             let user_id = uuid_arg(&args, "userId")?;
@@ -4013,7 +4014,7 @@ async fn weight_entries_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
             'bodyFatPct', body_fat_pct::float8,
             'notes', notes
           )
-          ORDER BY entry_date DESC
+          ORDER BY entry_date ASC
         ), '[]'::jsonb) AS data
         FROM weight_entries
         WHERE user_id = $1
@@ -4025,7 +4026,56 @@ async fn weight_entries_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
     Ok(row.try_get("data")?)
 }
 
-async fn weight_page_data_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
+#[derive(Clone, Copy)]
+struct WeightStatEntry {
+    date: NaiveDate,
+    weight_kg: f64,
+}
+
+fn weight_stat_entry(entry: &Value) -> AppResult<WeightStatEntry> {
+    let date = entry
+        .get("date")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::BadRequest("weight entry date is required.".to_string()))
+        .and_then(|value| {
+            NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                .map_err(|_| AppError::BadRequest("weight entry date is invalid.".to_string()))
+        })?;
+    let weight_kg = entry
+        .get("weightKg")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| AppError::BadRequest("weight entry weightKg is required.".to_string()))?;
+    Ok(WeightStatEntry { date, weight_kg })
+}
+
+fn closest_weight_on_or_before(
+    entries: &[WeightStatEntry],
+    target_date: NaiveDate,
+) -> Option<WeightStatEntry> {
+    entries
+        .iter()
+        .copied()
+        .filter(|entry| entry.date <= target_date)
+        .min_by_key(|entry| {
+            entry
+                .date
+                .signed_duration_since(target_date)
+                .num_days()
+                .abs()
+        })
+}
+
+fn trend_direction_from_diff(diff: f64) -> &'static str {
+    if diff > 0.1 {
+        "up"
+    } else if diff < -0.1 {
+        "down"
+    } else {
+        "stable"
+    }
+}
+
+async fn weight_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppResult<Value> {
     let entries = weight_entries_json(pool, user_id).await?;
     let row =
         sqlx::query("SELECT goal_weight_kg::float8 AS goal_weight_kg FROM users WHERE id = $1")
@@ -4034,18 +4084,43 @@ async fn weight_page_data_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value>
             .await?;
     let goal_weight_kg: Option<f64> = row.try_get("goal_weight_kg")?;
     let entry_array = entries.as_array().cloned().unwrap_or_default();
-    let current_weight = entry_array
-        .first()
-        .and_then(|entry| entry.get("weightKg"))
-        .and_then(Value::as_f64);
+    let stat_entries = entry_array
+        .iter()
+        .map(weight_stat_entry)
+        .collect::<AppResult<Vec<_>>>()?;
+    let today_date = NaiveDate::parse_from_str(today, "%Y-%m-%d")
+        .map_err(|_| AppError::BadRequest("selectedDate must be YYYY-MM-DD.".to_string()))?;
+    let latest = stat_entries.last().copied();
+    let current_weight = latest.map(|entry| entry.weight_kg);
+    let week_change = latest.and_then(|latest| {
+        closest_weight_on_or_before(&stat_entries, today_date - Duration::days(7))
+            .map(|entry| round2(latest.weight_kg - entry.weight_kg))
+    });
+    let month_change = latest.and_then(|latest| {
+        closest_weight_on_or_before(&stat_entries, today_date - Duration::days(30))
+            .map(|entry| round2(latest.weight_kg - entry.weight_kg))
+    });
+    let trend_direction = match stat_entries.len() {
+        0 | 1 => None,
+        2 => {
+            let diff = stat_entries[1].weight_kg - stat_entries[0].weight_kg;
+            Some(trend_direction_from_diff(diff))
+        }
+        len => {
+            let last3 = &stat_entries[len - 3..];
+            let first_diff = last3[1].weight_kg - last3[0].weight_kg;
+            let second_diff = last3[2].weight_kg - last3[1].weight_kg;
+            Some(trend_direction_from_diff((first_diff + second_diff) / 2.0))
+        }
+    };
     Ok(json!({
         "entries": entries,
         "goalWeightKg": goal_weight_kg,
         "stats": {
             "currentWeight": current_weight,
-            "weekChange": Value::Null,
-            "monthChange": Value::Null,
-            "trendDirection": Value::Null
+            "weekChange": week_change,
+            "monthChange": month_change,
+            "trendDirection": trend_direction
         }
     }))
 }
@@ -4784,4 +4859,8 @@ fn required_i32_lossy(input: &serde_json::Map<String, Value>, key: &str) -> i32 
 
 fn round1(value: f64) -> f64 {
     (value * 10.0).round() / 10.0
+}
+
+fn round2(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
 }

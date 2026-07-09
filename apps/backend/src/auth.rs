@@ -44,7 +44,12 @@ impl FromRequestParts<AppState> for InternalAuth {
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> AppResult<Self> {
         let Some(expected) = &state.config.backend_internal_secret else {
-            return Ok(Self);
+            if state.config.allow_insecure_internal_auth {
+                return Ok(Self);
+            }
+            return Err(AppError::Unauthorized(
+                "Backend internal secret is not configured.".to_string(),
+            ));
         };
         let provided = parts
             .headers

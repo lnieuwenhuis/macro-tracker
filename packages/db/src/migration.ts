@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { createDatabaseRuntime, getDatabaseRuntime, type DatabaseRuntime } from "./client";
 import * as schema from "./schema";
+import { resolveDestructiveTestDatabaseUrl } from "./test-database-safety";
 
 function getMigrationsFolder() {
   return fileURLToPath(new URL("../drizzle", import.meta.url));
@@ -31,7 +32,10 @@ export async function migrateCurrentDatabase() {
 }
 
 export async function createMigratedTestDatabase() {
-  const databaseUrl = process.env.TEST_DATABASE_URL ?? process.env.DATABASE_URL;
+  const databaseUrl = resolveDestructiveTestDatabaseUrl(process.env, {
+    explicitEnvNames: ["TEST_DATABASE_URL"],
+    purpose: "database unit tests",
+  });
   if (
     databaseUrl &&
     !databaseUrl.startsWith("file:") &&

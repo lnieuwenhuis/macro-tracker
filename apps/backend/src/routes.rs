@@ -60,6 +60,7 @@ struct ShooVerifyResponse {
 
 async fn verify_shoo(
     State(state): State<AppState>,
+    _auth: InternalAuth,
     Json(payload): Json<ShooVerifyRequest>,
 ) -> AppResult<Json<Value>> {
     if !state.config.is_trusted_origin(&payload.app_origin) {

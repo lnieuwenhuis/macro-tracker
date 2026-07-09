@@ -7,8 +7,11 @@ export async function backendFetch(path: string, init: RequestInit = {}) {
   if (!headers.has("Content-Type") && typeof init.body === "string") {
     headers.set("Content-Type", "application/json");
   }
-  if (process.env.BACKEND_INTERNAL_SECRET) {
-    headers.set("x-backend-internal-secret", process.env.BACKEND_INTERNAL_SECRET);
+  const backendInternalSecret = process.env.BACKEND_INTERNAL_SECRET?.trim();
+  if (backendInternalSecret) {
+    headers.set("x-backend-internal-secret", backendInternalSecret);
+  } else if (process.env.NODE_ENV === "production") {
+    throw new Error("BACKEND_INTERNAL_SECRET is required to call the Rust backend.");
   }
 
   return fetch(`${getBackendUrl()}${path}`, {

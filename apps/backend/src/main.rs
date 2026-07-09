@@ -93,3 +93,90 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use tower::ServiceExt;
+
+    fn test_config() -> Config {
+        Config {
+            allow_insecure_internal_auth: false,
+            app_url: "http://localhost:3000".to_string(),
+            backend_internal_secret: Some("internal-secret-with-at-least-32-chars".to_string()),
+            database_url: "postgres://postgres:postgres@127.0.0.1:5432/macro_tracker".to_string(),
+            port: 4000,
+            postgres_pool_max: 1,
+            session_secret: "session-secret-with-at-least-32-chars".to_string(),
+            shoo_base_url: "https://shoo.dev".to_string(),
+            trusted_origins: vec!["http://localhost:3000".to_string()],
+            admin_owner_emails: vec![],
+            openrouter_api_key: None,
+            openrouter_model: None,
+            openrouter_fallback_models: None,
+            openrouter_model_timeout_ms: None,
+        }
+    }
+
+    fn test_state(config: Config) -> AppState {
+        AppState {
+            config,
+            db: PgPoolOptions::new()
+                .connect_lazy("postgres://postgres:postgres@127.0.0.1:5432/macro_tracker")
+                .expect("test pool should be created lazily"),
+            http: reqwest::Client::new(),
+        }
+    }
+
+    fn internal_rpc_request(secret: Option<&str>) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/internal/rpc")
+            .header("content-type", "application/json");
+        if let Some(secret) = secret {
+            builder = builder.header("x-backend-internal-secret", secret);
+        }
+
+        builder
+            .body(Body::from(r#"{"op":"unknownTestOperation","args":{}}"#))
+            .expect("request should build")
+    }
+
+    #[tokio::test]
+    async fn internal_rpc_rejects_missing_backend_secret_config() {
+        let mut config = test_config();
+        config.backend_internal_secret = None;
+        let response = build_router(test_state(config))
+            .oneshot(internal_rpc_request(None))
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn internal_rpc_rejects_incorrect_backend_secret() {
+        let response = build_router(test_state(test_config()))
+            .oneshot(internal_rpc_request(Some("wrong-secret")))
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn internal_rpc_accepts_correct_backend_secret() {
+        let response = build_router(test_state(test_config()))
+            .oneshot(internal_rpc_request(Some(
+                "internal-secret-with-at-least-32-chars",
+            )))
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+}

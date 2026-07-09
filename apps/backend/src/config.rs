@@ -1,8 +1,13 @@
 use anyhow::{Context, bail};
 use std::env;
 
-#[derive(Clone)]
+pub const ALLOW_INSECURE_LOCAL_BACKEND_ENV: &str = "BACKEND_ALLOW_INSECURE_LOCAL";
+pub const LOCAL_SESSION_SECRET: &str = "macro-tracker-dev-session-secret";
+const MIN_SECRET_LENGTH: usize = 32;
+
+#[derive(Clone, Debug)]
 pub struct Config {
+    pub allow_insecure_internal_auth: bool,
     pub app_url: String,
     pub backend_internal_secret: Option<String>,
     pub database_url: String,
@@ -20,10 +25,31 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> anyhow::Result<Self> {
-        let app_url = read_required("APP_URL", Some("http://localhost:3000"))?;
-        let session_secret =
-            read_required("SESSION_SECRET", Some("macro-tracker-dev-session-secret"))?;
-        let database_url = read_required("DATABASE_URL", None)?;
+        Self::from_env_reader(|name| env::var(name).ok())
+    }
+
+    fn from_env_reader<F>(mut read: F) -> anyhow::Result<Self>
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        let allow_insecure_local =
+            parse_env_bool(read_value(&mut read, ALLOW_INSECURE_LOCAL_BACKEND_ENV).as_deref());
+        let app_url = read_required(&mut read, "APP_URL", Some("http://localhost:3000"))?;
+        let session_secret = read_secret(
+            &mut read,
+            "SESSION_SECRET",
+            allow_insecure_local.then_some(LOCAL_SESSION_SECRET),
+            allow_insecure_local,
+        )?;
+        let backend_internal_secret = read_value(&mut read, "BACKEND_INTERNAL_SECRET");
+        match backend_internal_secret.as_deref() {
+            Some(value) => validate_secret("BACKEND_INTERNAL_SECRET", value, allow_insecure_local)?,
+            None if allow_insecure_local => {}
+            None => bail!(
+                "BACKEND_INTERNAL_SECRET is required. Set {ALLOW_INSECURE_LOCAL_BACKEND_ENV}=true only for local test backends."
+            ),
+        }
+        let database_url = read_required(&mut read, "DATABASE_URL", None)?;
         if database_url.starts_with("file:") || database_url == "memory:" {
             bail!("Rust backend requires a PostgreSQL DATABASE_URL.");
         }
@@ -33,32 +59,33 @@ impl Config {
             .origin()
             .ascii_serialization();
         let mut trusted_origins = vec![app_origin];
-        trusted_origins.extend(parse_origin_list(env::var("APP_TRUSTED_ORIGINS").ok())?);
+        trusted_origins.extend(parse_origin_list(read_value(
+            &mut read,
+            "APP_TRUSTED_ORIGINS",
+        ))?);
         trusted_origins.sort();
         trusted_origins.dedup();
 
         Ok(Self {
+            allow_insecure_internal_auth: allow_insecure_local,
             app_url,
-            backend_internal_secret: env::var("BACKEND_INTERNAL_SECRET").ok(),
+            backend_internal_secret,
             database_url,
-            port: env::var("PORT")
-                .ok()
+            port: read_value(&mut read, "PORT")
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(4000),
-            postgres_pool_max: env::var("POSTGRES_POOL_MAX")
-                .ok()
+            postgres_pool_max: read_value(&mut read, "POSTGRES_POOL_MAX")
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(3),
             session_secret,
-            shoo_base_url: env::var("SHOO_BASE_URL")
-                .unwrap_or_else(|_| "https://shoo.dev".to_string()),
+            shoo_base_url: read_value(&mut read, "SHOO_BASE_URL")
+                .unwrap_or_else(|| "https://shoo.dev".to_string()),
             trusted_origins,
-            admin_owner_emails: parse_csv_lower(env::var("ADMIN_OWNER_EMAILS").ok()),
-            openrouter_api_key: env::var("OPENROUTER_API_KEY").ok(),
-            openrouter_model: env::var("OPENROUTER_MODEL").ok(),
-            openrouter_fallback_models: env::var("OPENROUTER_FALLBACK_MODELS").ok(),
-            openrouter_model_timeout_ms: env::var("OPENROUTER_MODEL_TIMEOUT_MS")
-                .ok()
+            admin_owner_emails: parse_csv_lower(read_value(&mut read, "ADMIN_OWNER_EMAILS")),
+            openrouter_api_key: read_value(&mut read, "OPENROUTER_API_KEY"),
+            openrouter_model: read_value(&mut read, "OPENROUTER_MODEL"),
+            openrouter_fallback_models: read_value(&mut read, "OPENROUTER_FALLBACK_MODELS"),
+            openrouter_model_timeout_ms: read_value(&mut read, "OPENROUTER_MODEL_TIMEOUT_MS")
                 .and_then(|value| value.parse().ok()),
         })
     }
@@ -68,11 +95,55 @@ impl Config {
     }
 }
 
-fn read_required(name: &str, fallback: Option<&str>) -> anyhow::Result<String> {
-    match env::var(name).ok().or_else(|| fallback.map(str::to_string)) {
+fn read_value<F>(read: &mut F, name: &str) -> Option<String>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    read(name).map(|value| value.trim().to_string())
+}
+
+fn read_required<F>(read: &mut F, name: &str, fallback: Option<&str>) -> anyhow::Result<String>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    match read_value(read, name).or_else(|| fallback.map(str::to_string)) {
         Some(value) if !value.trim().is_empty() => Ok(value),
         _ => bail!("{name} is required."),
     }
+}
+
+fn read_secret<F>(
+    read: &mut F,
+    name: &str,
+    fallback: Option<&str>,
+    allow_insecure_local: bool,
+) -> anyhow::Result<String>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let value = read_required(read, name, fallback)?;
+    validate_secret(name, &value, allow_insecure_local)?;
+    Ok(value)
+}
+
+fn validate_secret(name: &str, value: &str, allow_insecure_local: bool) -> anyhow::Result<()> {
+    if allow_insecure_local {
+        return Ok(());
+    }
+    if value == LOCAL_SESSION_SECRET {
+        bail!("{name} must not use the local development default secret.");
+    }
+    if value.len() < MIN_SECRET_LENGTH {
+        bail!("{name} must be at least {MIN_SECRET_LENGTH} characters long.");
+    }
+    Ok(())
+}
+
+fn parse_env_bool(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|item| item.trim().to_ascii_lowercase()),
+        Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on")
+    )
 }
 
 fn parse_csv_lower(value: Option<String>) -> Vec<String> {
@@ -97,4 +168,92 @@ fn parse_origin_list(value: Option<String>) -> anyhow::Result<Vec<String>> {
                 .ascii_serialization())
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn config_from(values: &[(&str, &str)]) -> anyhow::Result<Config> {
+        let env = values
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect::<HashMap<_, _>>();
+        Config::from_env_reader(|name| env.get(name).cloned())
+    }
+
+    fn production_values() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("APP_URL", "https://macro.example.com"),
+            (
+                "DATABASE_URL",
+                "postgres://postgres:postgres@127.0.0.1:5432/macro_tracker",
+            ),
+            ("SESSION_SECRET", "session-secret-with-at-least-32-chars"),
+            (
+                "BACKEND_INTERNAL_SECRET",
+                "internal-secret-with-at-least-32-chars",
+            ),
+        ]
+    }
+
+    #[test]
+    fn production_config_requires_session_secret() {
+        let values = production_values()
+            .into_iter()
+            .filter(|(key, _)| *key != "SESSION_SECRET")
+            .collect::<Vec<_>>();
+
+        let error = config_from(&values).expect_err("SESSION_SECRET should be required");
+
+        assert!(error.to_string().contains("SESSION_SECRET is required"));
+    }
+
+    #[test]
+    fn production_config_rejects_local_session_default() {
+        let mut values = production_values();
+        values.retain(|(key, _)| *key != "SESSION_SECRET");
+        values.push(("SESSION_SECRET", LOCAL_SESSION_SECRET));
+
+        let error = config_from(&values).expect_err("local default should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("must not use the local development default")
+        );
+    }
+
+    #[test]
+    fn production_config_requires_backend_internal_secret() {
+        let values = production_values()
+            .into_iter()
+            .filter(|(key, _)| *key != "BACKEND_INTERNAL_SECRET")
+            .collect::<Vec<_>>();
+
+        let error = config_from(&values).expect_err("BACKEND_INTERNAL_SECRET should be required");
+
+        assert!(
+            error
+                .to_string()
+                .contains("BACKEND_INTERNAL_SECRET is required")
+        );
+    }
+
+    #[test]
+    fn explicit_local_mode_allows_dev_defaults() {
+        let config = config_from(&[
+            (
+                "DATABASE_URL",
+                "postgres://postgres:postgres@127.0.0.1:5432/macro_tracker",
+            ),
+            (ALLOW_INSECURE_LOCAL_BACKEND_ENV, "true"),
+        ])
+        .expect("local mode should allow explicit dev defaults");
+
+        assert!(config.allow_insecure_internal_auth);
+        assert_eq!(config.session_secret, LOCAL_SESSION_SECRET);
+        assert!(config.backend_internal_secret.is_none());
+    }
 }
