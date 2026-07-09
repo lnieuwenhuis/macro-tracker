@@ -7,6 +7,7 @@ import {
   type DatabaseRuntime,
 } from "@macro-tracker/db";
 import { createTestDatabase } from "@macro-tracker/db/testing";
+import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocked = vi.hoisted(() => ({
@@ -58,10 +59,11 @@ describe("API token settings actions", () => {
   beforeEach(async () => {
     runtime = await createTestDatabase();
     setDatabaseRuntimeForTesting(runtime);
+    const testUserKey = randomUUID();
     const user = await upsertUserFromShooProfile(
       {
-        pairwiseSub: "settings-api-user",
-        email: "settings-api@example.com",
+        pairwiseSub: `settings-api-user-${testUserKey}`,
+        email: `settings-api-${testUserKey}@example.com`,
       },
       runtime.db,
     );
@@ -185,6 +187,21 @@ describe("API token settings actions", () => {
       ok: false,
       error: "API token name is required.",
     });
+  });
+
+  it("rejects mixed valid and invalid API token scopes without creating a token", async () => {
+    const formData = new FormData();
+    formData.set("name", "Shortcut");
+    formData.set("expires", "never");
+    formData.append("scopes", "read:daily");
+    formData.append("scopes", "write:unknown");
+
+    await expect(createApiTokenAction({}, formData)).resolves.toEqual({
+      ok: false,
+      error: "API scope is invalid: write:unknown",
+    });
+    await expect(listApiTokens(mocked.userId, runtime.db)).resolves.toHaveLength(0);
+    expect(mocked.revalidatePath).not.toHaveBeenCalled();
   });
 
   it("rejects invalid API token expiry values without creating a token", async () => {

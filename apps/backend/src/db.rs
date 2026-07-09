@@ -451,6 +451,17 @@ pub async fn get_user_by_id(pool: &PgPool, user_id: Uuid) -> AppResult<Option<Ap
 }
 
 pub async fn ensure_user_role(pool: &PgPool, user_id: Uuid, role: &str) -> AppResult<AppUser> {
+    ensure_user_role_with_executor(pool, user_id, role).await
+}
+
+async fn ensure_user_role_with_executor<'e, E>(
+    executor: E,
+    user_id: Uuid,
+    role: &str,
+) -> AppResult<AppUser>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     let row = sqlx::query(
         r#"
         UPDATE users
@@ -476,7 +487,7 @@ pub async fn ensure_user_role(pool: &PgPool, user_id: Uuid, role: &str) -> AppRe
     )
     .bind(user_id)
     .bind(role)
-    .fetch_one(pool)
+    .fetch_one(executor)
     .await?;
 
     row_to_app_user(row)
@@ -1572,7 +1583,15 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
             let actor_user_id = uuid_arg(&args, "actorUserId")?;
             let target_user_id = uuid_arg(&args, "targetUserId")?;
             let next_role = string_arg(&args, "nextRole")?;
-            set_user_role_json(pool, actor_user_id, target_user_id, &next_role).await
+            let audit_test_fault = test_fault_arg(&args, "admin_audit_event").cloned();
+            set_user_role_json(
+                pool,
+                actor_user_id,
+                target_user_id,
+                &next_role,
+                audit_test_fault.as_ref(),
+            )
+            .await
         }
         "listAdminBarcodeProducts" => {
             let input = optional_object_arg(&args, "input");
@@ -1591,23 +1610,55 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
         "createAdminBarcodeProduct" => {
             let actor_user_id = uuid_arg(&args, "actorUserId")?;
             let input = object_arg(&args, "input")?;
-            create_admin_barcode_product_json(pool, actor_user_id, input).await
+            let audit_test_fault = test_fault_arg(&args, "admin_audit_event").cloned();
+            create_admin_barcode_product_json(pool, actor_user_id, input, audit_test_fault.as_ref())
+                .await
         }
         "updateAdminBarcodeProduct" => {
             let actor_user_id = uuid_arg(&args, "actorUserId")?;
             let product_id = uuid_arg(&args, "barcodeProductId")?;
             let input = object_arg(&args, "input")?;
-            update_admin_barcode_product_json(pool, actor_user_id, product_id, input).await
+            let revision_test_fault = test_fault_arg(&args, "food_product_revision").cloned();
+            let audit_test_fault = test_fault_arg(&args, "admin_audit_event").cloned();
+            update_admin_barcode_product_json(
+                pool,
+                actor_user_id,
+                product_id,
+                input,
+                revision_test_fault.as_ref(),
+                audit_test_fault.as_ref(),
+            )
+            .await
         }
         "softDeleteAdminBarcodeProduct" => {
             let actor_user_id = uuid_arg(&args, "actorUserId")?;
             let product_id = uuid_arg(&args, "barcodeProductId")?;
-            set_admin_barcode_deleted_json(pool, actor_user_id, product_id, true).await
+            let revision_test_fault = test_fault_arg(&args, "food_product_revision").cloned();
+            let audit_test_fault = test_fault_arg(&args, "admin_audit_event").cloned();
+            set_admin_barcode_deleted_json(
+                pool,
+                actor_user_id,
+                product_id,
+                true,
+                revision_test_fault.as_ref(),
+                audit_test_fault.as_ref(),
+            )
+            .await
         }
         "restoreAdminBarcodeProduct" => {
             let actor_user_id = uuid_arg(&args, "actorUserId")?;
             let product_id = uuid_arg(&args, "barcodeProductId")?;
-            set_admin_barcode_deleted_json(pool, actor_user_id, product_id, false).await
+            let revision_test_fault = test_fault_arg(&args, "food_product_revision").cloned();
+            let audit_test_fault = test_fault_arg(&args, "admin_audit_event").cloned();
+            set_admin_barcode_deleted_json(
+                pool,
+                actor_user_id,
+                product_id,
+                false,
+                revision_test_fault.as_ref(),
+                audit_test_fault.as_ref(),
+            )
+            .await
         }
         "listAdminAuditEvents" => {
             let input = optional_object_arg(&args, "input");
@@ -3060,15 +3111,27 @@ async fn save_barcode_food_product_json(
     input: &serde_json::Map<String, Value>,
     test_fault: Option<&serde_json::Map<String, Value>>,
 ) -> AppResult<Value> {
+    let mut tx = pool.begin().await?;
+    let (_, product) =
+        save_barcode_food_product_with_executor(&mut *tx, user_id, input, test_fault).await?;
+    tx.commit().await?;
+    Ok(product)
+}
+
+async fn save_barcode_food_product_with_executor(
+    executor: &mut sqlx::PgConnection,
+    user_id: Uuid,
+    input: &serde_json::Map<String, Value>,
+    test_fault: Option<&serde_json::Map<String, Value>>,
+) -> AppResult<(Uuid, Value)> {
     let product_input = normalize_barcode_food_product_input(input)?;
     let product_id = Uuid::new_v4();
     let mut normalized = normalize_food_product_input(&product_input, "global")?;
     normalized.scope = "global".to_string();
-    let mut tx = pool.begin().await?;
 
     if normalized.source == "barcode"
         && let Some(barcode) = normalized.barcode.as_deref()
-        && active_global_barcode_exists_with_executor(&mut *tx, barcode, None).await?
+        && active_global_barcode_exists_with_executor(&mut *executor, barcode, None).await?
     {
         return Err(AppError::BadRequest(
             "That barcode already exists.".to_string(),
@@ -3110,23 +3173,22 @@ async fn save_barcode_food_product_json(
     .bind(normalized.source_confidence)
     .bind(normalized.source_metadata)
     .bind(normalized.corrected_from_product_id)
-    .execute(&mut *tx)
+    .execute(&mut *executor)
     .await?;
 
-    let product = food_product_json_by_id_with_executor(&mut *tx, user_id, product_id)
+    let product = food_product_json_by_id_with_executor(&mut *executor, user_id, product_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Food product not found.".to_string()))?;
     maybe_trigger_test_fault(test_fault, 1)?;
     insert_food_product_revision_with_executor(
-        &mut *tx,
+        &mut *executor,
         product_id,
         Some(user_id),
         "created",
         product.clone(),
     )
     .await?;
-    tx.commit().await?;
-    Ok(product)
+    Ok((product_id, product))
 }
 
 async fn admin_dashboard_json(pool: &PgPool) -> AppResult<Value> {
@@ -3387,38 +3449,96 @@ async fn set_user_role_json(
     actor_user_id: Uuid,
     target_user_id: Uuid,
     next_role: &str,
+    audit_test_fault: Option<&serde_json::Map<String, Value>>,
 ) -> AppResult<Value> {
     if !matches!(next_role, "user" | "admin" | "owner") {
         return Err(AppError::BadRequest("User role is invalid.".to_string()));
     }
-    let actor = get_user_by_id(pool, actor_user_id)
-        .await?
-        .ok_or_else(|| AppError::Forbidden("Actor user not found.".to_string()))?;
+
+    let mut tx = pool.begin().await?;
+    let actor = sqlx::query(
+        r#"
+        SELECT
+          id,
+          email,
+          shoo_pairwise_sub,
+          display_name,
+          picture_url,
+          role,
+          created_at,
+          last_login_at,
+          goal_calories_kcal,
+          goal_protein_g::float8 AS goal_protein_g,
+          goal_carbs_g::float8 AS goal_carbs_g,
+          goal_fat_g::float8 AS goal_fat_g,
+          goal_weight_kg::float8 AS goal_weight_kg,
+          onboarding_completed_at,
+          preferred_weight_unit
+        FROM users
+        WHERE id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(actor_user_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .map(row_to_app_user)
+    .transpose()?
+    .ok_or_else(|| AppError::Forbidden("Actor user not found.".to_string()))?;
     if actor.role != "owner" {
         return Err(AppError::Forbidden(
             "Only owners can change user roles.".to_string(),
         ));
     }
-    let target = get_user_by_id(pool, target_user_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("User not found.".to_string()))?;
+
+    let target = sqlx::query(
+        r#"
+        SELECT
+          id,
+          email,
+          shoo_pairwise_sub,
+          display_name,
+          picture_url,
+          role,
+          created_at,
+          last_login_at,
+          goal_calories_kcal,
+          goal_protein_g::float8 AS goal_protein_g,
+          goal_carbs_g::float8 AS goal_carbs_g,
+          goal_fat_g::float8 AS goal_fat_g,
+          goal_weight_kg::float8 AS goal_weight_kg,
+          onboarding_completed_at,
+          preferred_weight_unit
+        FROM users
+        WHERE id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(target_user_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .map(row_to_app_user)
+    .transpose()?
+    .ok_or_else(|| AppError::NotFound("User not found.".to_string()))?;
     if target.role == next_role {
         return Ok(serde_json::to_value(target)?);
     }
     if target.role == "owner" && next_role != "owner" {
-        let row = sqlx::query("SELECT count(*)::int AS total FROM users WHERE role = 'owner'")
-            .fetch_one(pool)
-            .await?;
-        let owner_count: i32 = row.try_get("total")?;
-        if owner_count <= 1 {
+        let owner_rows =
+            sqlx::query("SELECT id FROM users WHERE role = 'owner' ORDER BY id FOR UPDATE")
+                .fetch_all(&mut *tx)
+                .await?;
+        if owner_rows.len() <= 1 {
             return Err(AppError::BadRequest(
                 "You cannot demote the last owner.".to_string(),
             ));
         }
     }
-    let user = ensure_user_role(pool, target_user_id, next_role).await?;
-    insert_admin_audit_event(
-        pool,
+
+    let user = ensure_user_role_with_executor(&mut *tx, target_user_id, next_role).await?;
+    maybe_trigger_test_fault(audit_test_fault, 1)?;
+    insert_admin_audit_event_with_executor(
+        &mut *tx,
         actor_user_id,
         &actor.role,
         "user.role_changed",
@@ -3431,6 +3551,7 @@ async fn set_user_role_json(
         }),
     )
     .await?;
+    tx.commit().await?;
     Ok(serde_json::to_value(user)?)
 }
 
@@ -3704,6 +3825,16 @@ async fn admin_food_product_by_id_json(
     pool: &PgPool,
     product_id: Uuid,
 ) -> AppResult<Option<Value>> {
+    admin_food_product_by_id_json_with_executor(pool, product_id).await
+}
+
+async fn admin_food_product_by_id_json_with_executor<'e, E>(
+    executor: E,
+    product_id: Uuid,
+) -> AppResult<Option<Value>>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     let row = sqlx::query(
         r#"
         SELECT jsonb_build_object(
@@ -3737,7 +3868,7 @@ async fn admin_food_product_by_id_json(
         "#,
     )
     .bind(product_id)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
     row.map(|row| row.try_get("data"))
         .transpose()
@@ -3768,16 +3899,15 @@ async fn create_admin_barcode_product_json(
     pool: &PgPool,
     actor_user_id: Uuid,
     input: &serde_json::Map<String, Value>,
+    audit_test_fault: Option<&serde_json::Map<String, Value>>,
 ) -> AppResult<Value> {
     let actor = require_admin_actor(pool, actor_user_id).await?;
-    let product = save_barcode_food_product_json(pool, actor.id, input, None).await?;
-    let product_id = product
-        .get("id")
-        .and_then(Value::as_str)
-        .and_then(|value| Uuid::parse_str(value).ok())
-        .ok_or_else(|| AppError::BadRequest("Created product id is invalid.".to_string()))?;
-    insert_admin_audit_event(
-        pool,
+    let mut tx = pool.begin().await?;
+    let (product_id, product) =
+        save_barcode_food_product_with_executor(&mut *tx, actor.id, input, None).await?;
+    maybe_trigger_test_fault(audit_test_fault, 1)?;
+    insert_admin_audit_event_with_executor(
+        &mut *tx,
         actor.id,
         &actor.role,
         "barcode.created",
@@ -3789,6 +3919,7 @@ async fn create_admin_barcode_product_json(
         }),
     )
     .await?;
+    tx.commit().await?;
     Ok(product)
 }
 
@@ -3797,18 +3928,22 @@ async fn update_admin_barcode_product_json(
     actor_user_id: Uuid,
     product_id: Uuid,
     input: &serde_json::Map<String, Value>,
+    revision_test_fault: Option<&serde_json::Map<String, Value>>,
+    audit_test_fault: Option<&serde_json::Map<String, Value>>,
 ) -> AppResult<Value> {
     let actor = require_admin_actor(pool, actor_user_id).await?;
-    let before = admin_food_product_by_id_json(pool, product_id)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Barcode product not found.".to_string()))?;
     let product_input = normalize_barcode_food_product_input(input)?;
     let normalized = normalize_food_product_input(&product_input, "global")?;
     let barcode = normalized
         .barcode
         .as_deref()
         .ok_or_else(|| AppError::BadRequest("Barcode is required.".to_string()))?;
-    if active_global_barcode_exists(pool, barcode, Some(product_id)).await? {
+
+    let mut tx = pool.begin().await?;
+    let before = admin_food_product_by_id_json_with_executor(&mut *tx, product_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Barcode product not found.".to_string()))?;
+    if active_global_barcode_exists_with_executor(&mut *tx, barcode, Some(product_id)).await? {
         return Err(AppError::BadRequest(
             "That barcode already exists.".to_string(),
         ));
@@ -3848,19 +3983,27 @@ async fn update_admin_barcode_product_json(
     .bind(normalized.serving_weight_g)
     .bind(normalized.source_provider.as_deref())
     .bind(normalized.source_metadata)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?
     .is_some();
     if !updated {
         return Err(AppError::NotFound("Barcode product not found.".to_string()));
     }
-    let product = admin_food_product_by_id_json(pool, product_id)
+    let product = admin_food_product_by_id_json_with_executor(&mut *tx, product_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Barcode product not found.".to_string()))?;
-    insert_food_product_revision(pool, product_id, Some(actor.id), "updated", product.clone())
-        .await?;
-    insert_admin_audit_event(
-        pool,
+    maybe_trigger_test_fault(revision_test_fault, 1)?;
+    insert_food_product_revision_with_executor(
+        &mut *tx,
+        product_id,
+        Some(actor.id),
+        "updated",
+        product.clone(),
+    )
+    .await?;
+    maybe_trigger_test_fault(audit_test_fault, 1)?;
+    insert_admin_audit_event_with_executor(
+        &mut *tx,
         actor.id,
         &actor.role,
         "barcode.updated",
@@ -3872,6 +4015,7 @@ async fn update_admin_barcode_product_json(
         }),
     )
     .await?;
+    tx.commit().await?;
     admin_food_product_by_id_json(pool, product_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Barcode product not found.".to_string()))
@@ -3882,9 +4026,12 @@ async fn set_admin_barcode_deleted_json(
     actor_user_id: Uuid,
     product_id: Uuid,
     deleted: bool,
+    revision_test_fault: Option<&serde_json::Map<String, Value>>,
+    audit_test_fault: Option<&serde_json::Map<String, Value>>,
 ) -> AppResult<Value> {
     let actor = require_admin_actor(pool, actor_user_id).await?;
-    let existing = admin_food_product_by_id_json(pool, product_id)
+    let mut tx = pool.begin().await?;
+    let existing = admin_food_product_by_id_json_with_executor(&mut *tx, product_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Barcode product not found.".to_string()))?;
     let already_deleted = existing
@@ -3898,7 +4045,7 @@ async fn set_admin_barcode_deleted_json(
     }
     if !deleted
         && let Some(barcode) = existing.get("barcode").and_then(Value::as_str)
-        && active_global_barcode_exists(pool, barcode, Some(product_id)).await?
+        && active_global_barcode_exists_with_executor(&mut *tx, barcode, Some(product_id)).await?
     {
         return Err(AppError::BadRequest(
             "That barcode already exists.".to_string(),
@@ -3918,24 +4065,26 @@ async fn set_admin_barcode_deleted_json(
     .bind(actor.id)
     .bind(product_id)
     .bind(deleted)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?;
     if row.is_none() {
         return Err(AppError::NotFound("Barcode product not found.".to_string()));
     }
-    let product = admin_food_product_by_id_json(pool, product_id)
+    let product = admin_food_product_by_id_json_with_executor(&mut *tx, product_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Barcode product not found.".to_string()))?;
-    insert_food_product_revision(
-        pool,
+    maybe_trigger_test_fault(revision_test_fault, 1)?;
+    insert_food_product_revision_with_executor(
+        &mut *tx,
         product_id,
         Some(actor.id),
         if deleted { "deleted" } else { "restored" },
         product,
     )
     .await?;
-    insert_admin_audit_event(
-        pool,
+    maybe_trigger_test_fault(audit_test_fault, 1)?;
+    insert_admin_audit_event_with_executor(
+        &mut *tx,
         actor.id,
         &actor.role,
         if deleted {
@@ -3951,20 +4100,10 @@ async fn set_admin_barcode_deleted_json(
         }),
     )
     .await?;
+    tx.commit().await?;
     admin_food_product_by_id_json(pool, product_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Barcode product not found.".to_string()))
-}
-
-async fn insert_food_product_revision(
-    pool: &PgPool,
-    product_id: Uuid,
-    actor_user_id: Option<Uuid>,
-    action: &str,
-    snapshot: Value,
-) -> AppResult<()> {
-    insert_food_product_revision_with_executor(pool, product_id, actor_user_id, action, snapshot)
-        .await
 }
 
 async fn insert_food_product_revision_with_executor<'e, E>(
@@ -3995,15 +4134,18 @@ where
     Ok(())
 }
 
-async fn insert_admin_audit_event(
-    pool: &PgPool,
+async fn insert_admin_audit_event_with_executor<'e, E>(
+    executor: E,
     actor_user_id: Uuid,
     actor_role: &str,
     action: &str,
     target_type: &str,
     target_id: Uuid,
     details: Value,
-) -> AppResult<()> {
+) -> AppResult<()>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     sqlx::query(
         r#"
         INSERT INTO admin_audit_events (
@@ -4019,7 +4161,7 @@ async fn insert_admin_audit_event(
     .bind(target_type)
     .bind(target_id.to_string())
     .bind(details)
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(())
 }
@@ -5875,21 +6017,36 @@ mod tests {
     }
 
     async fn test_db() -> Option<TestDb> {
+        test_db_with_connections(1).await
+    }
+
+    async fn test_db_with_connections(max_connections: u32) -> Option<TestDb> {
         let database_url = env::var("TEST_DATABASE_URL")
             .or_else(|_| env::var("DATABASE_URL"))
             .ok()?;
         let schema = format!("backend_test_{}", Uuid::new_v4().simple());
-        let pool = PgPoolOptions::new()
+        let setup_pool = PgPoolOptions::new()
             .max_connections(1)
             .connect(&database_url)
             .await
             .ok()?;
         sqlx::query(&format!(r#"CREATE SCHEMA "{}""#, schema))
-            .execute(&pool)
+            .execute(&setup_pool)
             .await
             .ok()?;
-        sqlx::query(&format!(r#"SET search_path TO "{}""#, schema))
-            .execute(&pool)
+        setup_pool.close().await;
+
+        let search_path_sql = format!(r#"SET search_path TO "{}""#, schema);
+        let pool = PgPoolOptions::new()
+            .max_connections(max_connections)
+            .after_connect(move |connection, _metadata| {
+                let search_path_sql = search_path_sql.clone();
+                Box::pin(async move {
+                    sqlx::query(&search_path_sql).execute(connection).await?;
+                    Ok(())
+                })
+            })
+            .connect(&database_url)
             .await
             .ok()?;
         sqlx::raw_sql(SCHEMA_SQL).execute(&pool).await.ok()?;
@@ -6418,6 +6575,273 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(ids, vec![eaten_id.to_string()]);
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_owner_demotions_cannot_remove_last_owner() {
+        let Some(test_db) = test_db_with_connections(4).await else {
+            eprintln!(
+                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
+            );
+            return;
+        };
+        let actor_id = insert_test_user_with_email(&test_db.pool, "owner-a@example.test").await;
+        let other_owner_id =
+            insert_test_user_with_email(&test_db.pool, "owner-b@example.test").await;
+        ensure_user_role(&test_db.pool, actor_id, "owner")
+            .await
+            .expect("actor should become owner");
+        ensure_user_role(&test_db.pool, other_owner_id, "owner")
+            .await
+            .expect("other user should become owner");
+
+        let demote_actor = rpc_json(
+            &test_db.pool,
+            "setUserRole",
+            json!({
+                "actorUserId": actor_id,
+                "targetUserId": actor_id,
+                "nextRole": "user"
+            }),
+        );
+        let demote_other_owner = rpc_json(
+            &test_db.pool,
+            "setUserRole",
+            json!({
+                "actorUserId": actor_id,
+                "targetUserId": other_owner_id,
+                "nextRole": "user"
+            }),
+        );
+        let (actor_result, other_owner_result) = tokio::join!(demote_actor, demote_other_owner);
+
+        let successful_demotions = [actor_result.as_ref(), other_owner_result.as_ref()]
+            .into_iter()
+            .filter(|result| result.is_ok())
+            .count();
+        assert_eq!(successful_demotions, 1);
+        let owner_count: i64 =
+            sqlx::query("SELECT count(*)::bigint AS count FROM users WHERE role = 'owner'")
+                .fetch_one(&test_db.pool)
+                .await
+                .expect("owner count should query")
+                .try_get("count")
+                .unwrap();
+        assert_eq!(owner_count, 1);
+
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn set_user_role_rolls_back_role_when_audit_insert_fails() {
+        let Some(test_db) = test_db().await else {
+            eprintln!(
+                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
+            );
+            return;
+        };
+        let actor_id = insert_test_user_with_email(&test_db.pool, "owner@example.test").await;
+        let target_id = insert_test_user_with_email(&test_db.pool, "target@example.test").await;
+        ensure_user_role(&test_db.pool, actor_id, "owner")
+            .await
+            .expect("actor should become owner");
+
+        let result = rpc_json(
+            &test_db.pool,
+            "setUserRole",
+            json!({
+                "actorUserId": actor_id,
+                "targetUserId": target_id,
+                "nextRole": "admin",
+                "testFault": {
+                    "kind": "admin_audit_event",
+                    "message": "forced audit failure"
+                }
+            }),
+        )
+        .await;
+
+        assert_eq!(bad_request_message(result), "forced audit failure");
+        let role: String = sqlx::query("SELECT role FROM users WHERE id = $1")
+            .bind(target_id)
+            .fetch_one(&test_db.pool)
+            .await
+            .expect("target role should query")
+            .try_get("role")
+            .unwrap();
+        let audit_count: i64 =
+            sqlx::query("SELECT count(*)::bigint AS count FROM admin_audit_events")
+                .fetch_one(&test_db.pool)
+                .await
+                .expect("audit count should query")
+                .try_get("count")
+                .unwrap();
+        assert_eq!(role, "user");
+        assert_eq!(audit_count, 0);
+
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn create_admin_barcode_product_rolls_back_product_and_revision_when_audit_fails() {
+        let Some(test_db) = test_db().await else {
+            eprintln!(
+                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
+            );
+            return;
+        };
+        let actor_id = insert_test_user_with_email(&test_db.pool, "admin@example.test").await;
+        ensure_user_role(&test_db.pool, actor_id, "admin")
+            .await
+            .expect("actor should become admin");
+        let barcode = format!("admin-create-{}", Uuid::new_v4());
+
+        let result = rpc_json(
+            &test_db.pool,
+            "createAdminBarcodeProduct",
+            json!({
+                "actorUserId": actor_id,
+                "input": barcode_payload(&barcode),
+                "testFault": {
+                    "kind": "admin_audit_event",
+                    "message": "forced audit failure"
+                }
+            }),
+        )
+        .await;
+
+        assert_eq!(bad_request_message(result), "forced audit failure");
+        let product_count: i64 =
+            sqlx::query("SELECT count(*)::bigint AS count FROM food_products WHERE barcode = $1")
+                .bind(&barcode)
+                .fetch_one(&test_db.pool)
+                .await
+                .expect("product count should query")
+                .try_get("count")
+                .unwrap();
+        let revision_count: i64 =
+            sqlx::query("SELECT count(*)::bigint AS count FROM food_product_revisions")
+                .fetch_one(&test_db.pool)
+                .await
+                .expect("revision count should query")
+                .try_get("count")
+                .unwrap();
+        assert_eq!(product_count, 0);
+        assert_eq!(revision_count, 0);
+
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn update_admin_barcode_product_rolls_back_product_when_revision_fails() {
+        let Some(test_db) = test_db().await else {
+            eprintln!(
+                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
+            );
+            return;
+        };
+        let actor_id =
+            insert_test_user_with_email(&test_db.pool, "admin-update@example.test").await;
+        ensure_user_role(&test_db.pool, actor_id, "admin")
+            .await
+            .expect("actor should become admin");
+        let product_id = insert_test_admin_barcode_product(
+            &test_db.pool,
+            "admin-update-original",
+            "Original Bar",
+            "Original Brand",
+            Some(actor_id),
+            false,
+        )
+        .await;
+
+        let result = rpc_json(
+            &test_db.pool,
+            "updateAdminBarcodeProduct",
+            json!({
+                "actorUserId": actor_id,
+                "barcodeProductId": product_id,
+                "input": barcode_payload("admin-update-next"),
+                "testFault": {
+                    "kind": "food_product_revision",
+                    "message": "forced revision failure"
+                }
+            }),
+        )
+        .await;
+
+        assert_eq!(bad_request_message(result), "forced revision failure");
+        let row = sqlx::query("SELECT barcode, name FROM food_products WHERE id = $1")
+            .bind(product_id)
+            .fetch_one(&test_db.pool)
+            .await
+            .expect("product should query");
+        assert_eq!(
+            row.try_get::<String, _>("barcode").unwrap(),
+            "admin-update-original"
+        );
+        assert_eq!(row.try_get::<String, _>("name").unwrap(), "Original Bar");
+
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn delete_admin_barcode_product_rolls_back_product_when_audit_fails() {
+        let Some(test_db) = test_db().await else {
+            eprintln!(
+                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
+            );
+            return;
+        };
+        let actor_id =
+            insert_test_user_with_email(&test_db.pool, "admin-delete@example.test").await;
+        ensure_user_role(&test_db.pool, actor_id, "admin")
+            .await
+            .expect("actor should become admin");
+        let product_id = insert_test_admin_barcode_product(
+            &test_db.pool,
+            "admin-delete-original",
+            "Delete Bar",
+            "Delete Brand",
+            Some(actor_id),
+            false,
+        )
+        .await;
+
+        let result = rpc_json(
+            &test_db.pool,
+            "softDeleteAdminBarcodeProduct",
+            json!({
+                "actorUserId": actor_id,
+                "barcodeProductId": product_id,
+                "testFault": {
+                    "kind": "admin_audit_event",
+                    "message": "forced audit failure"
+                }
+            }),
+        )
+        .await;
+
+        assert_eq!(bad_request_message(result), "forced audit failure");
+        let deleted_at: Option<DateTime<Utc>> =
+            sqlx::query("SELECT deleted_at FROM food_products WHERE id = $1")
+                .bind(product_id)
+                .fetch_one(&test_db.pool)
+                .await
+                .expect("product should query")
+                .try_get("deleted_at")
+                .unwrap();
+        let revision_count: i64 =
+            sqlx::query("SELECT count(*)::bigint AS count FROM food_product_revisions")
+                .fetch_one(&test_db.pool)
+                .await
+                .expect("revision count should query")
+                .try_get("count")
+                .unwrap();
+        assert!(deleted_at.is_none());
+        assert_eq!(revision_count, 0);
+
         test_db.cleanup().await;
     }
 

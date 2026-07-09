@@ -50,10 +50,19 @@ function getStringValue(formData: FormData, key: string) {
 }
 
 function getSelectedScopes(formData: FormData): ApiScope[] {
-  return formData
-    .getAll("scopes")
-    .filter((value): value is string => typeof value === "string")
-    .filter(isApiScope);
+  const scopes: ApiScope[] = [];
+
+  for (const value of formData.getAll("scopes")) {
+    if (typeof value !== "string") {
+      continue;
+    }
+    if (!isApiScope(value)) {
+      throw new Error(`API scope is invalid: ${value}`);
+    }
+    scopes.push(value);
+  }
+
+  return scopes;
 }
 
 export async function createApiTokenAction(
@@ -62,7 +71,15 @@ export async function createApiTokenAction(
 ): Promise<CreateApiTokenActionState> {
   const sessionUser = await requireOnboardedSessionUser();
   const name = getStringValue(formData, "name");
-  const scopes = getSelectedScopes(formData);
+  let scopes: ApiScope[];
+  try {
+    scopes = getSelectedScopes(formData);
+  } catch (caught) {
+    return {
+      ok: false,
+      error: getCreateApiTokenError(caught),
+    };
+  }
   const expires = getStringValue(formData, "expires");
 
   if (!name.trim()) {
