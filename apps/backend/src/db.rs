@@ -1493,7 +1493,7 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
             let limit = args
                 .get("limit")
                 .and_then(Value::as_i64)
-                .unwrap_or(20)
+                .unwrap_or(30)
                 .clamp(1, 100) as i32;
             recent_quick_add_json(pool, user_id, limit).await
         }
@@ -4948,25 +4948,25 @@ async fn search_meal_entries_json(pool: &PgPool, user_id: Uuid, query: &str) -> 
         r#"
         SELECT coalesce(jsonb_agg(
           jsonb_build_object(
-            'id', id,
-            'userId', user_id,
-            'date', entry_date,
-            'mealGroupId', meal_group_id,
-            'status', status,
-            'productId', product_id,
-            'label', label,
-            'sortOrder', sort_order,
-            'quantity', quantity::float8,
-            'unit', unit,
-            'servingMultiplier', serving_multiplier::float8,
-            'proteinG', protein_g::float8,
-            'carbsG', carbs_g::float8,
-            'fatG', fat_g::float8,
-            'caloriesKcal', calories_kcal,
-            'clientMutationId', client_mutation_id,
-            'sourceLabel', NULL
+            'id', matches.id,
+            'userId', matches.user_id,
+            'date', matches.entry_date,
+            'mealGroupId', matches.meal_group_id,
+            'status', matches.status,
+            'productId', CASE WHEN fp.id IS NULL THEN NULL ELSE matches.product_id END,
+            'label', matches.label,
+            'sortOrder', matches.sort_order,
+            'quantity', matches.quantity::float8,
+            'unit', matches.unit,
+            'servingMultiplier', matches.serving_multiplier::float8,
+            'proteinG', matches.protein_g::float8,
+            'carbsG', matches.carbs_g::float8,
+            'fatG', matches.fat_g::float8,
+            'caloriesKcal', matches.calories_kcal,
+            'clientMutationId', matches.client_mutation_id,
+            'sourceLabel', fp.name
           )
-          ORDER BY entry_date DESC, sort_order ASC
+          ORDER BY matches.entry_date DESC, matches.sort_order ASC
         ), '[]'::jsonb) AS data
         FROM (
           SELECT *
@@ -4991,6 +4991,10 @@ async fn search_meal_entries_json(pool: &PgPool, user_id: Uuid, query: &str) -> 
           ORDER BY entry_date DESC, sort_order ASC
           LIMIT 50
         ) matches
+        LEFT JOIN food_products fp
+          ON fp.id = matches.product_id
+          AND fp.deleted_at IS NULL
+          AND (fp.owner_user_id = $1 OR fp.owner_user_id IS NULL)
         "#,
     )
     .bind(user_id)
@@ -6521,6 +6525,100 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(ids, vec![newest_id.to_string(), distinct_id.to_string()]);
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn search_meal_entries_hides_soft_deleted_product_id_but_keeps_macro_snapshot() {
+        let Some(test_db) = test_db().await else {
+            eprintln!(
+                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
+            );
+            return;
+        };
+        let user_id = insert_test_user(&test_db.pool).await;
+        let product_id =
+            insert_test_food_product(&test_db.pool, Some(user_id), "Deleted Protein", "", None)
+                .await;
+        let entry_id = insert_test_meal_entry(
+            &test_db.pool,
+            user_id,
+            "2026-07-07",
+            "eaten",
+            "Deleted Protein Bowl",
+            0,
+            (44.0, 22.0, 11.0, 363),
+        )
+        .await;
+        sqlx::query("UPDATE meal_entries SET product_id = $1 WHERE id = $2")
+            .bind(product_id)
+            .bind(entry_id)
+            .execute(&test_db.pool)
+            .await
+            .expect("meal product link should update");
+
+        let visible_results = search_meal_entries_json(&test_db.pool, user_id, "deleted protein")
+            .await
+            .expect("meal search should succeed");
+        assert_eq!(visible_results[0]["productId"], json!(product_id));
+        assert_eq!(visible_results[0]["sourceLabel"], json!("Deleted Protein"));
+
+        sqlx::query("UPDATE food_products SET deleted_at = now() WHERE id = $1")
+            .bind(product_id)
+            .execute(&test_db.pool)
+            .await
+            .expect("product should soft-delete");
+
+        let deleted_results = search_meal_entries_json(&test_db.pool, user_id, "deleted protein")
+            .await
+            .expect("meal search should still succeed");
+        assert_eq!(deleted_results[0]["id"], json!(entry_id));
+        assert_eq!(deleted_results[0]["productId"], Value::Null);
+        assert_eq!(deleted_results[0]["sourceLabel"], Value::Null);
+        assert_eq!(deleted_results[0]["proteinG"], json!(44.0));
+        assert_eq!(deleted_results[0]["carbsG"], json!(22.0));
+        assert_eq!(deleted_results[0]["fatG"], json!(11.0));
+        assert_eq!(deleted_results[0]["caloriesKcal"], json!(363));
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn get_recent_quick_add_candidates_defaults_to_thirty_when_limit_is_omitted() {
+        let Some(test_db) = test_db().await else {
+            eprintln!(
+                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
+            );
+            return;
+        };
+        let user_id = insert_test_user(&test_db.pool).await;
+        for index in 0..31 {
+            insert_test_meal_entry(
+                &test_db.pool,
+                user_id,
+                &format!("2026-07-{:02}", index + 1),
+                "eaten",
+                &format!("Quick Add Candidate {index}"),
+                index,
+                (10.0 + f64::from(index), 20.0, 5.0, 165 + index),
+            )
+            .await;
+        }
+
+        let results = rpc_json(
+            &test_db.pool,
+            "getRecentQuickAddCandidates",
+            json!({ "userId": user_id }),
+        )
+        .await
+        .expect("quick-add candidates should load");
+
+        assert_eq!(
+            results
+                .as_array()
+                .expect("quick-add result should be array")
+                .len(),
+            30
+        );
         test_db.cleanup().await;
     }
 

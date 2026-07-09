@@ -13,12 +13,29 @@ use jsonwebtoken::{
     jwk::JwkSet,
 };
 use serde::{Deserialize, Serialize};
-use std::time::Duration as StdDuration;
+use std::{
+    collections::HashMap,
+    sync::{Mutex, OnceLock},
+    time::{Duration as StdDuration, Instant as StdInstant},
+};
 use uuid::Uuid;
 
 pub const SESSION_COOKIE_NAME: &str = "mt_session";
 pub const SESSION_MAX_AGE_SECONDS: i64 = 60 * 60 * 24 * 7;
 const SHOO_JWKS_FETCH_TIMEOUT: StdDuration = StdDuration::from_secs(2);
+const SHOO_JWKS_CACHE_TTL: StdDuration = StdDuration::from_secs(5 * 60);
+
+#[derive(Clone)]
+struct CachedJwks {
+    jwks: JwkSet,
+    expires_at: StdInstant,
+}
+
+static SHOO_JWKS_CACHE: OnceLock<Mutex<HashMap<String, CachedJwks>>> = OnceLock::new();
+
+fn shoo_jwks_cache() -> &'static Mutex<HashMap<String, CachedJwks>> {
+    SHOO_JWKS_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 fn install_crypto_provider() {
     let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
@@ -224,22 +241,7 @@ async fn verify_shoo_token(
     let kid = header
         .kid
         .ok_or_else(|| AppError::Unauthorized("Shoo token is missing kid.".to_string()))?;
-    let jwks_url = format!(
-        "{}/.well-known/jwks.json",
-        state.config.shoo_base_url.trim_end_matches('/')
-    );
-    let jwks = state
-        .http
-        .get(jwks_url)
-        .timeout(SHOO_JWKS_FETCH_TIMEOUT)
-        .send()
-        .await
-        .map_err(|error| AppError::Upstream(error.to_string()))?
-        .error_for_status()
-        .map_err(|error| AppError::Upstream(error.to_string()))?
-        .json::<JwkSet>()
-        .await
-        .map_err(|error| AppError::Upstream(error.to_string()))?;
+    let jwks = fetch_shoo_jwks(state).await?;
     let jwk = jwks
         .find(&kid)
         .ok_or_else(|| AppError::Unauthorized("Shoo signing key was not found.".to_string()))?;
@@ -260,13 +262,63 @@ async fn verify_shoo_token(
     Ok(decoded.claims)
 }
 
+async fn fetch_shoo_jwks(state: &AppState) -> AppResult<JwkSet> {
+    let shoo_base_url = state.config.shoo_base_url.trim_end_matches('/').to_string();
+    let now = StdInstant::now();
+    if let Some(cached) = shoo_jwks_cache()
+        .lock()
+        .expect("Shoo JWKS cache mutex should not be poisoned")
+        .get(&shoo_base_url)
+        .filter(|cached| cached.expires_at > now)
+        .cloned()
+    {
+        return Ok(cached.jwks);
+    }
+
+    let jwks_url = format!("{shoo_base_url}/.well-known/jwks.json");
+    let jwks = state
+        .http
+        .get(jwks_url)
+        .timeout(SHOO_JWKS_FETCH_TIMEOUT)
+        .send()
+        .await
+        .map_err(|error| AppError::Upstream(error.to_string()))?
+        .error_for_status()
+        .map_err(|error| AppError::Upstream(error.to_string()))?
+        .json::<JwkSet>()
+        .await
+        .map_err(|error| AppError::Upstream(error.to_string()))?;
+
+    shoo_jwks_cache()
+        .lock()
+        .expect("Shoo JWKS cache mutex should not be poisoned")
+        .insert(
+            shoo_base_url,
+            CachedJwks {
+                jwks: jwks.clone(),
+                expires_at: StdInstant::now() + SHOO_JWKS_CACHE_TTL,
+            },
+        );
+
+    Ok(jwks)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use base64ct::{Base64UrlUnpadded, Encoding};
     use sqlx::postgres::PgPoolOptions;
-    use std::time::Instant;
-    use tokio::{io::AsyncReadExt, net::TcpListener};
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Instant,
+    };
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
 
     fn test_config(session_secret: &str) -> crate::config::Config {
         crate::config::Config {
@@ -339,6 +391,61 @@ mod tests {
         format!("http://{address}")
     }
 
+    async fn jwks_base_url(jwks_body: String) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let server_count = Arc::clone(&request_count);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                server_count.fetch_add(1, Ordering::SeqCst);
+                let mut buffer = [0; 1024];
+                let _ = socket.read(&mut buffer).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                    jwks_body.len(),
+                    jwks_body
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        (format!("http://{address}"), request_count)
+    }
+
+    fn signed_shoo_token(kid: &str, secret: &[u8], issuer: &str, app_origin: &str) -> String {
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some(kid.to_string());
+        let now = Utc::now();
+        let claims = serde_json::json!({
+            "iss": issuer,
+            "aud": format!("origin:{app_origin}"),
+            "exp": (now + Duration::minutes(5)).timestamp(),
+            "iat": now.timestamp(),
+            "pairwise_sub": "pairwise-test-sub",
+            "email": "coach@example.test",
+            "name": "Coach Test",
+            "picture": null
+        });
+        encode(&header, &claims, &EncodingKey::from_secret(secret)).expect("test token should sign")
+    }
+
+    fn symmetric_jwks(kid: &str, secret: &[u8]) -> String {
+        serde_json::json!({
+            "keys": [{
+                "kty": "oct",
+                "kid": kid,
+                "alg": "HS256",
+                "k": Base64UrlUnpadded::encode_string(secret)
+            }]
+        })
+        .to_string()
+    }
+
     #[tokio::test]
     async fn internal_auth_accepts_correct_backend_secret() {
         let result =
@@ -388,6 +495,34 @@ mod tests {
 
         assert!(started.elapsed() < StdDuration::from_secs(5));
         assert!(matches!(error, AppError::Upstream(_)));
+    }
+
+    #[tokio::test]
+    async fn shoo_jwks_are_cached_per_base_url() {
+        let secret = b"cached-shoo-secret-with-at-least-32-chars";
+        let kid = "cached-key";
+        let (base_url, request_count) = jwks_base_url(symmetric_jwks(kid, secret)).await;
+        let mut config = test_config("session-secret-with-at-least-32-chars");
+        config.shoo_base_url = base_url.clone();
+        let state = crate::AppState {
+            config,
+            db: PgPoolOptions::new()
+                .connect_lazy("postgres://postgres:***@127.0.0.1:5432/macro_tracker")
+                .expect("test pool should be created lazily"),
+            http: reqwest::Client::new(),
+        };
+        let token = signed_shoo_token(kid, secret, &base_url, "http://localhost:3000");
+
+        let first = verify_shoo_token(&state, &token, "http://localhost:3000")
+            .await
+            .expect("first token verification should succeed");
+        let second = verify_shoo_token(&state, &token, "http://localhost:3000")
+            .await
+            .expect("second token verification should use cached JWKS");
+
+        assert_eq!(first.pairwise_sub, "pairwise-test-sub");
+        assert_eq!(second.email.as_deref(), Some("coach@example.test"));
+        assert_eq!(request_count.load(Ordering::SeqCst), 1);
     }
 
     #[test]

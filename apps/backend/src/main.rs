@@ -101,6 +101,7 @@ mod tests {
         body::Body,
         http::{Request, StatusCode},
     };
+    use std::env;
     use tower::ServiceExt;
 
     fn test_config() -> Config {
@@ -129,10 +130,26 @@ mod tests {
         AppState {
             config,
             db: PgPoolOptions::new()
-                .connect_lazy("postgres://postgres:postgres@127.0.0.1:5432/macro_tracker")
+                .connect_lazy("postgres://postgres:***@127.0.0.1:5432/macro_tracker")
                 .expect("test pool should be created lazily"),
             http: reqwest::Client::new(),
         }
+    }
+
+    fn test_state_with_db(config: Config, db: sqlx::PgPool) -> AppState {
+        AppState {
+            config,
+            db,
+            http: reqwest::Client::new(),
+        }
+    }
+
+    fn health_request() -> Request<Body> {
+        Request::builder()
+            .method("GET")
+            .uri("/health")
+            .body(Body::empty())
+            .expect("request should build")
     }
 
     fn internal_rpc_request(secret: Option<&str>) -> Request<Body> {
@@ -147,6 +164,47 @@ mod tests {
         builder
             .body(Body::from(r#"{"op":"unknownTestOperation","args":{}}"#))
             .expect("request should build")
+    }
+
+    #[tokio::test]
+    async fn health_returns_unavailable_when_database_is_not_ready() {
+        let mut config = test_config();
+        config.database_url = "postgres://postgres:postgres@127.0.0.1:1/macro_tracker".to_string();
+        let db = PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_millis(100))
+            .connect_lazy(&config.database_url)
+            .expect("test pool should be created lazily");
+        let response = build_router(test_state_with_db(config, db))
+            .oneshot(health_request())
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn health_returns_ok_when_database_is_ready() {
+        let Ok(database_url) = env::var("TEST_DATABASE_URL").or_else(|_| env::var("DATABASE_URL"))
+        else {
+            eprintln!(
+                "skipping PostgreSQL health test: TEST_DATABASE_URL/DATABASE_URL unavailable"
+            );
+            return;
+        };
+        let mut config = test_config();
+        config.database_url = database_url.clone();
+        let db = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .expect("test database should connect");
+        let response = build_router(test_state_with_db(config, db.clone()))
+            .oneshot(health_request())
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        db.close().await;
     }
 
     #[tokio::test]

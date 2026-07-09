@@ -21,8 +21,21 @@ pub fn internal_router() -> Router<AppState> {
         .route("/auth/shoo/verify", post(verify_shoo))
 }
 
-pub async fn health() -> (StatusCode, Json<Value>) {
-    (StatusCode::OK, Json(serde_json::json!({ "ok": true })))
+pub async fn health(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
+    match sqlx::query_scalar::<_, i32>("SELECT 1")
+        .fetch_one(&state.db)
+        .await
+    {
+        Ok(1) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))),
+        Ok(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "ok": false, "error": "database readiness check failed" })),
+        ),
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "ok": false, "error": error.to_string() })),
+        ),
+    }
 }
 
 async fn internal_rpc(

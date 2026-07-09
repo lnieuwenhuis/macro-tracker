@@ -450,7 +450,7 @@ export async function saveBarcodeFoodProduct(
   });
 }
 
-export async function getRecentQuickAddCandidates(userId: string, limit = 20, ..._ignored: unknown[]) {
+export async function getRecentQuickAddCandidates(userId: string, limit = 30, ..._ignored: unknown[]) {
   return backendRpc<QuickAddCandidate[]>("getRecentQuickAddCandidates", { userId, limit });
 }
 
