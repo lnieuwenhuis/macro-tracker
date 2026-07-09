@@ -1,5 +1,7 @@
 use anyhow::{Context, bail};
+use sqlx::postgres::{PgConnectOptions, PgSslMode};
 use std::env;
+use std::str::FromStr;
 
 pub const ALLOW_INSECURE_LOCAL_BACKEND_ENV: &str = "BACKEND_ALLOW_INSECURE_LOCAL";
 pub const LOCAL_SESSION_SECRET: &str = "macro-tracker-dev-session-secret";
@@ -54,9 +56,7 @@ impl Config {
             ),
         }
         let database_url = read_required(&mut read, "DATABASE_URL", None)?;
-        if database_url.starts_with("file:") || database_url == "memory:" {
-            bail!("Rust backend requires a PostgreSQL DATABASE_URL.");
-        }
+        validate_postgres_database_url(&database_url)?;
 
         let app_origin = url::Url::parse(&app_url)
             .context("APP_URL must be a valid URL")?
@@ -106,6 +106,67 @@ impl Config {
 
     pub fn allows_insecure_internal_auth_for_app_url(&self) -> bool {
         self.allow_insecure_internal_auth && is_local_app_url(&self.app_url)
+    }
+
+    pub fn postgres_connect_options(&self) -> anyhow::Result<PgConnectOptions> {
+        postgres_connect_options_from_url(&self.database_url)
+    }
+}
+
+fn postgres_connect_options_from_url(database_url: &str) -> anyhow::Result<PgConnectOptions> {
+    let url = validate_postgres_database_url(database_url)?;
+    let ssl_mode = postgres_ssl_mode_for_url(&url)?;
+
+    PgConnectOptions::from_str(database_url)
+        .context("DATABASE_URL must be a valid PostgreSQL connection string")
+        .map(|options| options.ssl_mode(ssl_mode))
+}
+
+fn validate_postgres_database_url(database_url: &str) -> anyhow::Result<url::Url> {
+    if database_url.starts_with("file:") || database_url == "memory:" {
+        bail!("Rust backend requires a PostgreSQL DATABASE_URL, not file: or memory:.");
+    }
+
+    let url = url::Url::parse(database_url)
+        .context("DATABASE_URL must be a valid PostgreSQL connection string")?;
+    match url.scheme() {
+        "postgres" | "postgresql" => {
+            postgres_ssl_mode_for_url(&url)?;
+            Ok(url)
+        }
+        scheme => bail!("DATABASE_URL must use postgres:// or postgresql://, not {scheme}://."),
+    }
+}
+
+fn postgres_ssl_mode_for_url(url: &url::Url) -> anyhow::Result<PgSslMode> {
+    if is_local_database_host(url.host()) {
+        return Ok(PgSslMode::Disable);
+    }
+
+    let sslmode = url
+        .query_pairs()
+        .find(|(key, _)| {
+            key.eq_ignore_ascii_case("sslmode") || key.eq_ignore_ascii_case("ssl-mode")
+        })
+        .map(|(_, value)| value.to_ascii_lowercase());
+
+    match sslmode.as_deref() {
+        None => Ok(PgSslMode::VerifyFull),
+        Some("verify-full") => Ok(PgSslMode::VerifyFull),
+        Some("require") => Ok(PgSslMode::Require),
+        Some(value @ ("disable" | "allow" | "prefer" | "no-verify")) => {
+            bail!("Remote PostgreSQL DATABASE_URL cannot use insecure sslmode={value}.")
+        }
+        Some(value) => bail!("Remote PostgreSQL DATABASE_URL has unsupported sslmode={value}."),
+    }
+}
+
+fn is_local_database_host(host: Option<url::Host<&str>>) -> bool {
+    match host {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
     }
 }
 
@@ -297,6 +358,143 @@ mod tests {
                 .to_string()
                 .contains("BACKEND_INTERNAL_SECRET is required")
         );
+    }
+
+    #[test]
+    fn local_postgres_database_url_is_accepted() {
+        let mut values = production_values();
+        values.retain(|(key, _)| *key != "DATABASE_URL");
+        values.push((
+            "DATABASE_URL",
+            "postgres://postgres:***@localhost:5432/macro_tracker",
+        ));
+
+        let config = config_from(&values).expect("local postgres URL should be accepted");
+
+        assert_eq!(config.database_url, values.last().expect("DATABASE_URL").1);
+        assert_eq!(
+            format!(
+                "{:?}",
+                postgres_ssl_mode_for_url(&url::Url::parse(&config.database_url).unwrap()).unwrap()
+            ),
+            "Disable"
+        );
+    }
+
+    #[test]
+    fn remote_postgres_database_url_without_sslmode_uses_verifying_tls() {
+        let mut values = production_values();
+        values.retain(|(key, _)| *key != "DATABASE_URL");
+        values.push((
+            "DATABASE_URL",
+            "postgres://postgres:***@db.example.com:5432/macro_tracker",
+        ));
+
+        let config = config_from(&values).expect("remote postgres URL should be accepted");
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                postgres_ssl_mode_for_url(&url::Url::parse(&config.database_url).unwrap()).unwrap()
+            ),
+            "VerifyFull"
+        );
+    }
+
+    #[test]
+    fn remote_postgres_database_url_accepts_verify_full_sslmode() {
+        let mut values = production_values();
+        values.retain(|(key, _)| *key != "DATABASE_URL");
+        values.push((
+            "DATABASE_URL",
+            "postgres://postgres:***@db.example.com:5432/macro_tracker?sslmode=verify-full",
+        ));
+
+        let config = config_from(&values).expect("verify-full should be accepted");
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                postgres_ssl_mode_for_url(&url::Url::parse(&config.database_url).unwrap()).unwrap()
+            ),
+            "VerifyFull"
+        );
+    }
+
+    #[test]
+    fn remote_postgres_database_url_accepts_require_sslmode() {
+        let mut values = production_values();
+        values.retain(|(key, _)| *key != "DATABASE_URL");
+        values.push((
+            "DATABASE_URL",
+            "postgres://postgres:***@db.example.com:5432/macro_tracker?sslmode=require",
+        ));
+
+        let config = config_from(&values).expect("documented require mode should be accepted");
+
+        assert_eq!(
+            format!(
+                "{:?}",
+                postgres_ssl_mode_for_url(&url::Url::parse(&config.database_url).unwrap()).unwrap()
+            ),
+            "Require"
+        );
+    }
+
+    #[test]
+    fn remote_postgres_database_url_rejects_insecure_sslmodes() {
+        for sslmode in ["disable", "allow", "prefer", "no-verify"] {
+            let mut values = production_values();
+            values.retain(|(key, _)| *key != "DATABASE_URL");
+            let database_url = format!(
+                "postgres://postgres:***@db.example.com:5432/macro_tracker?sslmode={sslmode}"
+            );
+            values.push(("DATABASE_URL", &database_url));
+
+            let error = config_from(&values).expect_err("insecure sslmode should be rejected");
+
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("insecure sslmode={sslmode}")),
+                "unexpected error for sslmode={sslmode}: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_postgres_database_url_is_rejected_with_clear_error() {
+        let mut values = production_values();
+        values.retain(|(key, _)| *key != "DATABASE_URL");
+        values.push((
+            "DATABASE_URL",
+            "mysql://user:pass@db.example.com/macro_tracker",
+        ));
+
+        let error = config_from(&values).expect_err("non-postgres scheme should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("DATABASE_URL must use postgres:// or postgresql://"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn pglite_database_url_is_rejected_with_clear_error() {
+        for database_url in ["file:./data", "memory:"] {
+            let mut values = production_values();
+            values.retain(|(key, _)| *key != "DATABASE_URL");
+            values.push(("DATABASE_URL", database_url));
+
+            let error = config_from(&values).expect_err("PGlite URL should be rejected");
+
+            assert!(
+                error.to_string().contains("not file: or memory"),
+                "unexpected error for {database_url}: {error:#}"
+            );
+        }
     }
 
     #[test]

@@ -45,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_env()?;
     let db = PgPoolOptions::new()
         .max_connections(config.postgres_pool_max)
-        .connect(&config.database_url)
+        .connect_with(config.postgres_connect_options()?)
         .await
         .context("failed to connect to PostgreSQL")?;
 

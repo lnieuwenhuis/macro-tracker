@@ -208,14 +208,14 @@ async fn admin_benchmark(
         "compare"
     };
 
-    if !acquire_benchmark_lock() {
+    let Some(_benchmark_lock) = acquire_benchmark_lock() else {
         return (
             StatusCode::CONFLICT,
             [("Retry-After", "10")],
             Json(json!({ "ok": false, "error": "A benchmark run is already in progress. Try again shortly." })),
         )
-            .into_response();
-    }
+        .into_response();
+    };
 
     let result = run_macro_benchmark(
         &state,
@@ -226,7 +226,6 @@ async fn admin_benchmark(
         payload.get("baseline").cloned(),
     )
     .await;
-    release_benchmark_lock();
 
     match result {
         Ok(result) => legacy_json(StatusCode::OK, json!({ "ok": true, "result": result })),
@@ -1289,14 +1288,22 @@ fn skipped_result(model: &str, error: &str, failure_kind: &str) -> Value {
     })
 }
 
-fn acquire_benchmark_lock() -> bool {
+struct BenchmarkLockGuard;
+
+impl Drop for BenchmarkLockGuard {
+    fn drop(&mut self) {
+        release_benchmark_lock();
+    }
+}
+
+fn acquire_benchmark_lock() -> Option<BenchmarkLockGuard> {
     let lock = BENCHMARK_LOCK.get_or_init(|| Mutex::new(None));
     let mut active = lock.lock().expect("benchmark lock poisoned");
     if active.is_some_and(|expires_at| expires_at > Instant::now()) {
-        return false;
+        return None;
     }
     *active = Some(Instant::now() + BENCHMARK_RUN_LOCK_TTL);
-    true
+    Some(BenchmarkLockGuard)
 }
 
 fn release_benchmark_lock() {
@@ -1628,6 +1635,25 @@ mod tests {
                 .expect("stub server should run");
         });
         format!("http://{addr}")
+    }
+
+    #[test]
+    fn benchmark_lock_guard_releases_on_drop() {
+        release_benchmark_lock();
+
+        let guard = acquire_benchmark_lock().expect("first acquire should succeed");
+        assert!(
+            acquire_benchmark_lock().is_none(),
+            "second acquire should be blocked while guard is live"
+        );
+
+        drop(guard);
+
+        assert!(
+            acquire_benchmark_lock().is_some(),
+            "dropping guard should release benchmark lock"
+        );
+        release_benchmark_lock();
     }
 
     async fn food_photo_test_handler(
