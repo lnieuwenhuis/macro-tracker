@@ -5,7 +5,7 @@ const appPort = process.env.PLAYWRIGHT_PORT ?? "3000";
 const appUrl = `http://localhost:${appPort}`;
 const testRoutesSecret = process.env.TEST_ROUTES_SECRET ?? randomUUID();
 process.env.TEST_ROUTES_SECRET = testRoutesSecret;
-const backendUrl = process.env.BACKEND_URL ?? "http://127.0.0.1:4410";
+const backendUrl = process.env.BACKEND_URL ?? "http://127.0.0.1:4000";
 const backendInternalSecret =
   process.env.BACKEND_INTERNAL_SECRET ?? "macro-tracker-local-backend-secret";
 process.env.BACKEND_INTERNAL_SECRET = backendInternalSecret;
@@ -15,7 +15,7 @@ const e2eDatabaseUrl =
   process.env.E2E_DATABASE_URL ??
   process.env.TEST_DATABASE_URL ??
   process.env.DATABASE_URL ??
-  "postgres://postgres:postgres@127.0.0.1:55432/macro_tracker";
+  "postgres://postgres:***@127.0.0.1:55432/macro_tracker_e2e";
 process.env.E2E_DATABASE_URL = e2eDatabaseUrl;
 
 export default defineConfig({

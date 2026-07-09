@@ -445,9 +445,23 @@ describe("test database safety", () => {
     ).toThrow(/Refusing to truncate plain DATABASE_URL/);
   });
 
-  it("accepts an explicit local TEST_DATABASE_URL", () => {
+  it("refuses to truncate an explicit local non-test TEST_DATABASE_URL by default", () => {
+    expect(() =>
+      resolveDestructiveTestDatabaseUrl(
+        {
+          TEST_DATABASE_URL: "postgres://postgres:***@localhost:5432/macro_tracker",
+        },
+        {
+          explicitEnvNames: ["TEST_DATABASE_URL"],
+          purpose: "database unit tests",
+        },
+      ),
+    ).toThrow(/does not look like a test database/);
+  });
+
+  it("accepts an explicit local test-named TEST_DATABASE_URL", () => {
     const testDatabaseUrl =
-      "postgres://postgres:postgres@127.0.0.1:5432/macro_tracker";
+      "postgres://postgres:***@127.0.0.1:5432/macro_tracker_test";
 
     expect(
       resolveDestructiveTestDatabaseUrl(

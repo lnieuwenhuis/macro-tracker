@@ -12,7 +12,7 @@
     "db:generate": "drizzle-kit generate --config drizzle.config.ts",
     "db:migrate": "tsx src/migrate.ts",
     "db:studio": "drizzle-kit studio --config drizzle.config.ts",
-    "test": "vitest run",
+    "test": "vitest run --fileParallelism=false",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

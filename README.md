@@ -149,12 +149,16 @@ pnpm dev
 
 Run `pnpm backend:start` and `pnpm dev` in separate terminals so both services stay up while you work.
 
-Useful checks. Keep the Rust backend running first for package tests and Playwright e2e checks, because backend-backed routes call it during test runs:
+Useful checks. Use a dedicated PostgreSQL test database whose name clearly contains `test`, `tests`, `e2e`, or `ci`; destructive test setup refuses plain local app databases like `macro_tracker` by default. Point both the Rust backend and JS test helpers at that same test database so backend-backed routes and direct Drizzle assertions share state:
 
 ```bash
+export TEST_DATABASE_URL="postgres://postgres:postgres@127.0.0.1:55432/macro_tracker_test"
+export DATABASE_URL="$TEST_DATABASE_URL"
+export E2E_DATABASE_URL="postgres://postgres:postgres@127.0.0.1:55432/macro_tracker_e2e"
+
 pnpm db:migrate
 
-# terminal 1: keep the backend running
+# terminal 1: keep the backend running against $TEST_DATABASE_URL
 pnpm backend:start
 
 # terminal 2: run checks

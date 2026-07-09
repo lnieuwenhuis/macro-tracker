@@ -13,10 +13,12 @@ use jsonwebtoken::{
     jwk::JwkSet,
 };
 use serde::{Deserialize, Serialize};
+use std::time::Duration as StdDuration;
 use uuid::Uuid;
 
 pub const SESSION_COOKIE_NAME: &str = "mt_session";
 pub const SESSION_MAX_AGE_SECONDS: i64 = 60 * 60 * 24 * 7;
+const SHOO_JWKS_FETCH_TIMEOUT: StdDuration = StdDuration::from_secs(2);
 
 fn install_crypto_provider() {
     let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
@@ -213,6 +215,7 @@ async fn verify_shoo_token(
     let jwks = state
         .http
         .get(jwks_url)
+        .timeout(SHOO_JWKS_FETCH_TIMEOUT)
         .send()
         .await
         .map_err(|error| AppError::Upstream(error.to_string()))?
@@ -244,6 +247,10 @@ async fn verify_shoo_token(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64ct::{Base64UrlUnpadded, Encoding};
+    use sqlx::postgres::PgPoolOptions;
+    use std::time::Instant;
+    use tokio::{io::AsyncReadExt, net::TcpListener};
 
     fn test_config(session_secret: &str) -> crate::config::Config {
         crate::config::Config {
@@ -265,6 +272,56 @@ mod tests {
             albert_heijn_base_url: "https://api.ah.nl".to_string(),
             jumbo_base_url: "https://mobileapi.jumbo.com".to_string(),
         }
+    }
+
+    fn unsigned_shoo_token_with_kid(kid: &str) -> String {
+        let header = serde_json::json!({ "alg": "RS256", "kid": kid, "typ": "JWT" }).to_string();
+        let claims = serde_json::json!({ "sub": "unused" }).to_string();
+        format!(
+            "{}.{}.",
+            Base64UrlUnpadded::encode_string(header.as_bytes()),
+            Base64UrlUnpadded::encode_string(claims.as_bytes())
+        )
+    }
+
+    async fn stalled_http_base_url() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buffer = [0; 1024];
+                let _ = socket.read(&mut buffer).await;
+                tokio::time::sleep(StdDuration::from_secs(30)).await;
+            }
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn shoo_jwks_fetch_times_out_instead_of_hanging() {
+        let mut config = test_config("session-secret-with-at-least-32-chars");
+        config.shoo_base_url = stalled_http_base_url().await;
+        let state = crate::AppState {
+            config,
+            db: PgPoolOptions::new()
+                .connect_lazy("postgres://postgres:***@127.0.0.1:5432/macro_tracker")
+                .expect("test pool should be created lazily"),
+            http: reqwest::Client::new(),
+        };
+        let started = Instant::now();
+
+        let error = verify_shoo_token(
+            &state,
+            &unsigned_shoo_token_with_kid("slow-key"),
+            "http://localhost:3000",
+        )
+        .await
+        .expect_err("stalled JWKS fetch should fail");
+
+        assert!(started.elapsed() < StdDuration::from_secs(5));
+        assert!(matches!(error, AppError::Upstream(_)));
     }
 
     #[test]

@@ -12,9 +12,17 @@ describe("Playwright global setup database safety", () => {
     ).toThrow(/Refusing to truncate plain DATABASE_URL/);
   });
 
-  it("accepts an explicit local E2E_DATABASE_URL", () => {
+  it("refuses to truncate an explicit local non-test E2E_DATABASE_URL by default", () => {
+    expect(() =>
+      resolveE2eDatabaseUrl({
+        E2E_DATABASE_URL: "postgres://postgres:***@localhost:5432/macro_tracker",
+      }),
+    ).toThrow(/does not look like a test database/);
+  });
+
+  it("accepts an explicit local test-named E2E_DATABASE_URL", () => {
     const e2eDatabaseUrl =
-      "postgres://postgres:postgres@127.0.0.1:55432/macro_tracker";
+      "postgres://postgres:***@127.0.0.1:55432/macro_tracker_e2e";
 
     expect(
       resolveE2eDatabaseUrl({

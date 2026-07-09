@@ -7,7 +7,7 @@
     "build": "next build && node ./scripts/prepare-standalone.mjs",
     "start": "node ./scripts/start-with-migrations.mjs",
     "lint": "eslint .",
-    "test": "vitest run",
+    "test": "vitest run --fileParallelism=false",
     "typecheck": "next typegen && tsc --noEmit",
     "test:e2e": "playwright test"
   },

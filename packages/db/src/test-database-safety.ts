@@ -10,6 +10,7 @@ type ResolveDestructiveTestDatabaseUrlOptions = {
 
 const LOCAL_DATABASE_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 const TEST_DATABASE_MARKER_PATTERN = /(^|[-_])(test|tests|e2e|ci)([-_]|$)/;
+const ALLOW_DESTRUCTIVE_LOCAL_DB_ENV = "ALLOW_DESTRUCTIVE_LOCAL_DB";
 
 function readEnvValue(env: TestDatabaseEnv, name: string) {
   const value = env[name]?.trim();
@@ -26,6 +27,11 @@ function isLocalDatabaseHost(hostname: string) {
 
 function isClearlyTestDatabaseName(name: string) {
   return TEST_DATABASE_MARKER_PATTERN.test(name);
+}
+
+function allowsDestructiveLocalDatabase(env: TestDatabaseEnv) {
+  const value = env[ALLOW_DESTRUCTIVE_LOCAL_DB_ENV]?.trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes" || value === "on";
 }
 
 function parsePostgresUrl(connectionString: string, source: string) {
@@ -46,6 +52,7 @@ function parsePostgresUrl(connectionString: string, source: string) {
 export function assertSafeDestructiveTestDatabaseUrl(
   connectionString: string,
   source: string,
+  env: TestDatabaseEnv = process.env,
 ) {
   if (isPgliteConnectionString(connectionString)) {
     return connectionString;
@@ -53,13 +60,18 @@ export function assertSafeDestructiveTestDatabaseUrl(
 
   const url = parsePostgresUrl(connectionString, source);
   const databaseName = getDatabaseName(url);
-  if (isLocalDatabaseHost(url.hostname) || isClearlyTestDatabaseName(databaseName)) {
+  if (isClearlyTestDatabaseName(databaseName)) {
+    return connectionString;
+  }
+
+  if (isLocalDatabaseHost(url.hostname) && allowsDestructiveLocalDatabase(env)) {
     return connectionString;
   }
 
   throw new Error(
-    `Refusing to truncate ${source} because it does not look like a local or test database. ` +
-      "Set TEST_DATABASE_URL or E2E_DATABASE_URL to an explicit local/test database URL.",
+    `Refusing to truncate ${source} because it does not look like a test database. ` +
+      "Use a database name containing test, tests, e2e, or ci, " +
+      `or set ${ALLOW_DESTRUCTIVE_LOCAL_DB_ENV}=true to deliberately allow a local non-test database.`,
   );
 }
 
@@ -70,7 +82,7 @@ export function resolveDestructiveTestDatabaseUrl(
   for (const name of options.explicitEnvNames) {
     const value = readEnvValue(env, name);
     if (value) {
-      return assertSafeDestructiveTestDatabaseUrl(value, name);
+      return assertSafeDestructiveTestDatabaseUrl(value, name, env);
     }
   }
 

@@ -6,7 +6,7 @@ import {
 } from "@macro-tracker/db/testing";
 
 const DEFAULT_E2E_DATABASE_URL =
-  "postgres://postgres:postgres@127.0.0.1:55432/macro_tracker";
+  "postgres://postgres:***@127.0.0.1:55432/macro_tracker_e2e";
 
 export function resolveE2eDatabaseUrl(
   env: Record<string, string | undefined> = process.env,
@@ -19,6 +19,7 @@ export function resolveE2eDatabaseUrl(
     assertSafeDestructiveTestDatabaseUrl(
       DEFAULT_E2E_DATABASE_URL,
       "default local Playwright database",
+      env,
     )
   );
 }
