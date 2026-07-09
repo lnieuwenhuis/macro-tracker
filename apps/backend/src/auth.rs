@@ -45,6 +45,19 @@ struct ShooClaims {
 #[derive(Debug)]
 pub struct InternalAuth;
 
+fn constant_time_eq_bytes(provided: &[u8], expected: &[u8]) -> bool {
+    let mut diff = provided.len() ^ expected.len();
+    let max_len = provided.len().max(expected.len());
+
+    for index in 0..max_len {
+        let provided_byte = provided.get(index).copied().unwrap_or(0);
+        let expected_byte = expected.get(index).copied().unwrap_or(0);
+        diff |= usize::from(provided_byte ^ expected_byte);
+    }
+
+    diff == 0
+}
+
 impl FromRequestParts<AppState> for InternalAuth {
     type Rejection = AppError;
 
@@ -61,7 +74,10 @@ impl FromRequestParts<AppState> for InternalAuth {
             .headers
             .get("x-backend-internal-secret")
             .and_then(|value| value.to_str().ok());
-        if provided == Some(expected.as_str()) {
+        if provided
+            .map(|provided| constant_time_eq_bytes(provided.as_bytes(), expected.as_bytes()))
+            .unwrap_or(false)
+        {
             Ok(Self)
         } else {
             Err(AppError::Unauthorized(
@@ -257,7 +273,7 @@ mod tests {
             allow_insecure_internal_auth: false,
             app_url: "http://localhost:3000".to_string(),
             backend_internal_secret: Some("internal-secret-with-at-least-32-chars".to_string()),
-            database_url: "postgres://postgres:***@127.0.0.1:5432/macro_tracker".to_string(),
+            database_url: "postgres://postgres:postgres@127.0.0.1:5432/macro_tracker".to_string(),
             port: 4000,
             postgres_pool_max: 1,
             session_secret: session_secret.to_string(),
@@ -272,6 +288,30 @@ mod tests {
             albert_heijn_base_url: "https://api.ah.nl".to_string(),
             jumbo_base_url: "https://mobileapi.jumbo.com".to_string(),
         }
+    }
+
+    fn test_state() -> crate::AppState {
+        crate::AppState {
+            config: test_config("session-secret-with-at-least-32-chars"),
+            db: PgPoolOptions::new()
+                .connect_lazy("postgres://postgres:postgres@127.0.0.1:5432/macro_tracker")
+                .expect("test pool should be created lazily"),
+            http: reqwest::Client::new(),
+        }
+    }
+
+    async fn authorize_internal_request(secret: Option<&str>) -> AppResult<InternalAuth> {
+        let state = test_state();
+        let mut builder = axum::http::Request::builder();
+        if let Some(secret) = secret {
+            builder = builder.header("x-backend-internal-secret", secret);
+        }
+        let (mut parts, ()) = builder
+            .body(())
+            .expect("test request should build")
+            .into_parts();
+
+        InternalAuth::from_request_parts(&mut parts, &state).await
     }
 
     fn unsigned_shoo_token_with_kid(kid: &str) -> String {
@@ -297,6 +337,32 @@ mod tests {
             }
         });
         format!("http://{address}")
+    }
+
+    #[tokio::test]
+    async fn internal_auth_accepts_correct_backend_secret() {
+        let result =
+            authorize_internal_request(Some("internal-secret-with-at-least-32-chars")).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn internal_auth_rejects_incorrect_backend_secret() {
+        let error = authorize_internal_request(Some("wrong-secret-with-at-least-32-chars"))
+            .await
+            .expect_err("incorrect secret should be rejected");
+
+        assert!(matches!(error, AppError::Unauthorized(_)));
+    }
+
+    #[tokio::test]
+    async fn internal_auth_rejects_missing_backend_secret() {
+        let error = authorize_internal_request(None)
+            .await
+            .expect_err("missing secret should be rejected");
+
+        assert!(matches!(error, AppError::Unauthorized(_)));
     }
 
     #[tokio::test]

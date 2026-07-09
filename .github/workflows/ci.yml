@@ -22,9 +22,9 @@ concurrency:
 env:
   CI: true
   NEXT_TELEMETRY_DISABLED: 1
-  DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/macro_tracker
-  TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/macro_tracker
-  E2E_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/macro_tracker
+  DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/macro_tracker_ci
+  TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/macro_tracker_ci
+  E2E_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/macro_tracker_ci
   BACKEND_URL: http://127.0.0.1:4000
   BACKEND_INTERNAL_SECRET: macro-tracker-ci-backend-secret-32-chars
   APP_URL: http://localhost:3000
@@ -41,13 +41,13 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_DB: macro_tracker
+          POSTGRES_DB: macro_tracker_ci
           POSTGRES_PASSWORD: postgres
           POSTGRES_USER: postgres
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d macro_tracker"
+          --health-cmd "pg_isready -U postgres -d macro_tracker_ci"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -140,13 +140,13 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_DB: macro_tracker
+          POSTGRES_DB: macro_tracker_ci
           POSTGRES_PASSWORD: postgres
           POSTGRES_USER: postgres
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d macro_tracker"
+          --health-cmd "pg_isready -U postgres -d macro_tracker_ci"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -200,13 +200,13 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_DB: macro_tracker
+          POSTGRES_DB: macro_tracker_ci
           POSTGRES_PASSWORD: postgres
           POSTGRES_USER: postgres
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d macro_tracker"
+          --health-cmd "pg_isready -U postgres -d macro_tracker_ci"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -260,13 +260,13 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_DB: macro_tracker
+          POSTGRES_DB: macro_tracker_ci
           POSTGRES_PASSWORD: postgres
           POSTGRES_USER: postgres
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d macro_tracker"
+          --health-cmd "pg_isready -U postgres -d macro_tracker_ci"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -330,13 +330,13 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_DB: macro_tracker
+          POSTGRES_DB: macro_tracker_ci
           POSTGRES_PASSWORD: postgres
           POSTGRES_USER: postgres
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d macro_tracker"
+          --health-cmd "pg_isready -U postgres -d macro_tracker_ci"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10

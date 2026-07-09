@@ -459,22 +459,36 @@ describe("test database safety", () => {
     ).toThrow(/does not look like a test database/);
   });
 
-  it("accepts an explicit local test-named TEST_DATABASE_URL", () => {
-    const testDatabaseUrl =
-      "postgres://postgres:***@127.0.0.1:5432/macro_tracker_test";
+  it("accepts explicit CI-style test and e2e database URLs", () => {
+    const ciDatabaseUrl =
+      "postgres://postgres:postgres@127.0.0.1:5432/macro_tracker_ci";
 
     expect(
       resolveDestructiveTestDatabaseUrl(
         {
           DATABASE_URL:
-            "postgres://macro:secret@db.internal.example.com:5432/macro_tracker",
-          TEST_DATABASE_URL: testDatabaseUrl,
+            "postgres://macro:password@db.internal.example.com:5432/macro_tracker",
+          TEST_DATABASE_URL: ciDatabaseUrl,
         },
         {
           explicitEnvNames: ["TEST_DATABASE_URL"],
           purpose: "database unit tests",
         },
       ),
-    ).toBe(testDatabaseUrl);
+    ).toBe(ciDatabaseUrl);
+
+    expect(
+      resolveDestructiveTestDatabaseUrl(
+        {
+          DATABASE_URL: ciDatabaseUrl,
+          TEST_DATABASE_URL: ciDatabaseUrl,
+          E2E_DATABASE_URL: ciDatabaseUrl,
+        },
+        {
+          explicitEnvNames: ["E2E_DATABASE_URL", "TEST_DATABASE_URL"],
+          purpose: "Playwright global setup",
+        },
+      ),
+    ).toBe(ciDatabaseUrl);
   });
 });
