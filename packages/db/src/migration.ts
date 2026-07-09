@@ -2,6 +2,7 @@ import { migrate as migrateNode } from "drizzle-orm/node-postgres/migrator";
 import { type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { migrate as migratePglite } from "drizzle-orm/pglite/migrator";
 import { type PgliteDatabase } from "drizzle-orm/pglite";
+import { sql } from "drizzle-orm";
 import { fileURLToPath } from "node:url";
 
 import { createDatabaseRuntime, getDatabaseRuntime, type DatabaseRuntime } from "./client";
@@ -30,6 +31,32 @@ export async function migrateCurrentDatabase() {
 }
 
 export async function createMigratedTestDatabase() {
+  const databaseUrl = process.env.TEST_DATABASE_URL ?? process.env.DATABASE_URL;
+  if (
+    databaseUrl &&
+    !databaseUrl.startsWith("file:") &&
+    databaseUrl !== "memory:"
+  ) {
+    const runtime = await createDatabaseRuntime(databaseUrl);
+    await runtime.db.execute(sql.raw(`
+      TRUNCATE TABLE
+        admin_audit_events,
+        api_tokens,
+        meal_template_items,
+        meal_templates,
+        recipe_ingredients,
+        recipes,
+        weight_entries,
+        meal_entries,
+        meal_groups,
+        food_product_revisions,
+        food_products,
+        users
+      RESTART IDENTITY CASCADE
+    `));
+    return runtime;
+  }
+
   const runtime = await createDatabaseRuntime("memory:");
   await migrateDatabase(runtime);
   return runtime;

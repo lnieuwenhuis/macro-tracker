@@ -3,7 +3,9 @@
 import {
   createApiToken,
   getApiScopes,
+  isApiScope,
   revokeApiToken,
+  type ApiScope,
   type ApiTokenRecord,
 } from "@macro-tracker/db";
 import { revalidatePath } from "next/cache";
@@ -45,10 +47,11 @@ function getStringValue(formData: FormData, key: string) {
   return typeof value === "string" ? value : "";
 }
 
-function getSelectedScopes(formData: FormData) {
+function getSelectedScopes(formData: FormData): ApiScope[] {
   return formData
     .getAll("scopes")
-    .filter((value): value is string => typeof value === "string");
+    .filter((value): value is string => typeof value === "string")
+    .filter(isApiScope);
 }
 
 export async function createApiTokenAction(
@@ -59,6 +62,20 @@ export async function createApiTokenAction(
   const name = getStringValue(formData, "name");
   const scopes = getSelectedScopes(formData);
   const expires = getStringValue(formData, "expires");
+
+  if (!name.trim()) {
+    return {
+      ok: false,
+      error: "API token name is required.",
+    };
+  }
+
+  if (scopes.length === 0) {
+    return {
+      ok: false,
+      error: "At least one API scope is required.",
+    };
+  }
 
   if (expires !== "90" && expires !== "never") {
     return {

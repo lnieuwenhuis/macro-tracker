@@ -1,5 +1,4 @@
 import {
-  apiTokens,
   createApiToken,
   listApiTokens,
   setDatabaseRuntimeForTesting,
@@ -41,6 +40,20 @@ import ApiSettingsPage from "@/app/settings/api/page";
 
 describe("API token settings actions", () => {
   let runtime: DatabaseRuntime;
+
+  async function withBackendUrl<T>(url: string, operation: () => Promise<T>) {
+    const previous = process.env.BACKEND_URL;
+    process.env.BACKEND_URL = url;
+    try {
+      return await operation();
+    } finally {
+      if (previous === undefined) {
+        delete process.env.BACKEND_URL;
+      } else {
+        process.env.BACKEND_URL = previous;
+      }
+    }
+  }
 
   beforeEach(async () => {
     runtime = await createTestDatabase();
@@ -169,38 +182,20 @@ describe("API token settings actions", () => {
   });
 
   it("hides unexpected API token creation failures from the client", async () => {
-    const rawMessage = "database password leaked in driver error";
-    const failingDb = new Proxy(runtime.db, {
-      get(target, prop, receiver) {
-        if (prop === "insert") {
-          return (table: unknown) => {
-            if (table === apiTokens) {
-              throw new Error(rawMessage);
-            }
-
-            const insert = Reflect.get(target, prop, receiver) as (insertTable: unknown) => unknown;
-            return insert.call(target, table);
-          };
-        }
-
-        const value = Reflect.get(target, prop, receiver);
-        return typeof value === "function" ? value.bind(target) : value;
-      },
-    });
-    setDatabaseRuntimeForTesting({ ...runtime, db: failingDb });
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const formData = new FormData();
     formData.set("name", "Shortcut");
     formData.set("expires", "never");
     formData.append("scopes", "read:daily");
 
-    const created = await createApiTokenAction({}, formData);
+    const created = await withBackendUrl("http://127.0.0.1:9", () =>
+      createApiTokenAction({}, formData),
+    );
 
     expect(created).toEqual({
       ok: false,
       error: "Unable to create API token.",
     });
-    expect(JSON.stringify(created)).not.toContain(rawMessage);
     expect(consoleError).toHaveBeenCalledWith("Unexpected API token creation error", expect.any(Error));
     consoleError.mockRestore();
   });

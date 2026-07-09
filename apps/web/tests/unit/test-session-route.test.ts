@@ -138,10 +138,6 @@ describe("POST /api/test/session", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(mocked.ensureUserRole).toHaveBeenCalledWith(
-      "owner-1",
-      "owner",
-      expect.anything(),
-    );
+    expect(mocked.ensureUserRole).toHaveBeenCalledWith("owner-1", "owner");
   });
 });

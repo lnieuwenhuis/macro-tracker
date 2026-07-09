@@ -1,38 +1,22 @@
 import { resetServerEnvForTests } from "@/lib/env";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const mocked = vi.hoisted(() => {
-  class MockShooAuthError extends Error {
-    status: number;
-    code: string;
+const mocked = vi.hoisted(() => ({
+  applySessionTokenCookie: vi.fn(),
+  backendFetch: vi.fn(),
+}));
 
-    constructor(message: string, status: number, code: string) {
-      super(message);
-      this.name = "ShooAuthError";
-      this.status = status;
-      this.code = code;
-    }
-  }
-
-  return {
-    applySessionCookie: vi.fn(),
-    authorizeShooLogin: vi.fn(),
-    ShooAuthError: MockShooAuthError,
-  };
-});
+vi.mock("@macro-tracker/db", () => ({
+  backendFetch: mocked.backendFetch,
+}));
 
 vi.mock("@/lib/session", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/session")>();
   return {
     ...actual,
-    applySessionCookie: mocked.applySessionCookie,
+    applySessionTokenCookie: mocked.applySessionTokenCookie,
   };
 });
-
-vi.mock("@/lib/shoo", () => ({
-  authorizeShooLogin: mocked.authorizeShooLogin,
-  ShooAuthError: mocked.ShooAuthError,
-}));
 
 import { POST } from "@/app/api/auth/shoo/verify/route";
 
@@ -64,24 +48,23 @@ describe("POST /api/auth/shoo/verify", () => {
   });
 
   it("accepts a token for a configured trusted forwarded origin", async () => {
-    mocked.authorizeShooLogin.mockImplementation(async (idToken, _db, options) => {
-      if (
-        idToken !== "token-for-trusted-origin" ||
-        options?.appOrigin !== "https://trusted.example"
-      ) {
-        throw new mocked.ShooAuthError(
-          "Shoo token has an invalid audience.",
-          401,
-          "invalid_token",
-        );
-      }
-
-      return {
-        sessionUser: {
-          userId: "user-1",
-          email: "coach@example.com",
+    mocked.backendFetch.mockImplementation(async (path, init) => {
+      expect(path).toBe("/internal/auth/shoo/verify");
+      expect(JSON.parse(String(init?.body))).toEqual({
+        idToken: "token-for-trusted-origin",
+        appOrigin: "https://trusted.example",
+      });
+      return Response.json({
+        ok: true,
+        data: {
+          sessionToken: "session-token",
+          sessionMaxAgeSeconds: 3600,
+          user: {
+            userId: "user-1",
+            email: "coach@example.com",
+          },
         },
-      };
+      });
     });
 
     const response = await POST(
@@ -96,44 +79,34 @@ describe("POST /api/auth/shoo/verify", () => {
       },
     });
     expect(response.status).toBe(200);
-    expect(mocked.authorizeShooLogin).toHaveBeenCalledWith(
-      "token-for-trusted-origin",
-      undefined,
-      {
-        appOrigin: "https://trusted.example",
-      },
-    );
-    expect(mocked.applySessionCookie).toHaveBeenCalledTimes(1);
-    expect(mocked.applySessionCookie).toHaveBeenCalledWith(
+    expect(mocked.backendFetch).toHaveBeenCalledTimes(1);
+    expect(mocked.applySessionTokenCookie).toHaveBeenCalledTimes(1);
+    expect(mocked.applySessionTokenCookie).toHaveBeenCalledWith(
       expect.anything(),
+      "session-token",
       {
-        userId: "user-1",
-        email: "coach@example.com",
-      },
-      {
+        maxAge: 3600,
         secure: true,
       },
     );
   });
 
   it("rejects a token for an untrusted forwarded origin", async () => {
-    mocked.authorizeShooLogin.mockImplementation(async (idToken, _db, options) => {
-      if (
-        idToken === "token-for-untrusted-origin" &&
-        options?.appOrigin === "https://evil.example"
-      ) {
-        return {
-          sessionUser: {
-            userId: "user-1",
-            email: "coach@example.com",
+    mocked.backendFetch.mockImplementation(async (path, init) => {
+      expect(path).toBe("/internal/auth/shoo/verify");
+      expect(JSON.parse(String(init?.body))).toEqual({
+        idToken: "token-for-untrusted-origin",
+        appOrigin: "http://app.example",
+      });
+      return Response.json(
+        {
+          ok: false,
+          error: {
+            message: "Shoo token has an invalid audience.",
+            code: "invalid_token",
           },
-        };
-      }
-
-      throw new mocked.ShooAuthError(
-        "Shoo token has an invalid audience.",
-        401,
-        "invalid_token",
+        },
+        { status: 401 },
       );
     });
 
@@ -146,35 +119,28 @@ describe("POST /api/auth/shoo/verify", () => {
       code: "invalid_token",
     });
     expect(response.status).toBe(401);
-    expect(mocked.authorizeShooLogin).toHaveBeenCalledWith(
-      "token-for-untrusted-origin",
-      undefined,
-      {
-        appOrigin: "http://app.example",
-      },
-    );
-    expect(mocked.applySessionCookie).not.toHaveBeenCalled();
+    expect(mocked.backendFetch).toHaveBeenCalledTimes(1);
+    expect(mocked.applySessionTokenCookie).not.toHaveBeenCalled();
   });
 
   it("does not use untrusted forwarded HTTPS headers for secure cookies", async () => {
-    mocked.authorizeShooLogin.mockImplementation(async (idToken, _db, options) => {
-      if (
-        idToken !== "token-for-app-origin" ||
-        options?.appOrigin !== "http://app.example"
-      ) {
-        throw new mocked.ShooAuthError(
-          "Shoo token has an invalid audience.",
-          401,
-          "invalid_token",
-        );
-      }
-
-      return {
-        sessionUser: {
-          userId: "user-1",
-          email: "coach@example.com",
+    mocked.backendFetch.mockImplementation(async (path, init) => {
+      expect(path).toBe("/internal/auth/shoo/verify");
+      expect(JSON.parse(String(init?.body))).toEqual({
+        idToken: "token-for-app-origin",
+        appOrigin: "http://app.example",
+      });
+      return Response.json({
+        ok: true,
+        data: {
+          sessionToken: "session-token",
+          sessionMaxAgeSeconds: 3600,
+          user: {
+            userId: "user-1",
+            email: "coach@example.com",
+          },
         },
-      };
+      });
     });
 
     const response = await POST(
@@ -189,13 +155,11 @@ describe("POST /api/auth/shoo/verify", () => {
       },
     });
     expect(response.status).toBe(200);
-    expect(mocked.applySessionCookie).toHaveBeenCalledWith(
+    expect(mocked.applySessionTokenCookie).toHaveBeenCalledWith(
       expect.anything(),
+      "session-token",
       {
-        userId: "user-1",
-        email: "coach@example.com",
-      },
-      {
+        maxAge: 3600,
         secure: false,
       },
     );

@@ -4,6 +4,9 @@
   "license": "MIT",
   "packageManager": "pnpm@10.28.2",
   "scripts": {
+    "backend:check": "cargo check -p macro-tracker-backend",
+    "backend:start": "cargo run -p macro-tracker-backend",
+    "backend:test": "cargo test -p macro-tracker-backend",
     "build": "pnpm --filter @macro-tracker/web build",
     "dev": "pnpm --filter @macro-tracker/web dev",
     "lint": "pnpm --filter @macro-tracker/web lint",

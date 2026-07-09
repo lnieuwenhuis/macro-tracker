@@ -113,12 +113,21 @@ describe("database queries", () => {
     table: unknown;
     failOnCall?: number;
     message: string;
+    backendFault: {
+      kind: string;
+      failOnCall?: number;
+      message: string;
+    };
   }) {
     let callCount = 0;
 
     function wrapClient(client: any) {
       return new Proxy(client, {
         get(target, prop, receiver) {
+          if (prop === "__backendTestFault") {
+            return input.backendFault;
+          }
+
           if (prop === input.method) {
             return (table: unknown) => {
               if (table === input.table) {
@@ -152,6 +161,11 @@ describe("database queries", () => {
       table: recipeIngredients,
       failOnCall: failOnIngredientInsertNumber,
       message: "Forced ingredient insert failure.",
+      backendFault: {
+        kind: "recipe_ingredient_insert",
+        failOnCall: failOnIngredientInsertNumber,
+        message: "Forced ingredient insert failure.",
+      },
     });
   }
 
@@ -160,6 +174,10 @@ describe("database queries", () => {
       method: "insert",
       table: foodProducts,
       message: "Forced barcode food product insert failure.",
+      backendFault: {
+        kind: "barcode_food_product_insert",
+        message: "Forced barcode food product insert failure.",
+      },
     });
   }
 
@@ -169,6 +187,11 @@ describe("database queries", () => {
       table: mealEntries,
       failOnCall: failOnMealEntryInsertNumber,
       message: "Forced meal entry insert failure.",
+      backendFault: {
+        kind: "meal_entry_insert",
+        failOnCall: failOnMealEntryInsertNumber,
+        message: "Forced meal entry insert failure.",
+      },
     });
   }
 
@@ -177,6 +200,10 @@ describe("database queries", () => {
       method: "update",
       table: mealEntries,
       message: "Forced meal group unassign failure.",
+      backendFault: {
+        kind: "meal_group_unassign",
+        message: "Forced meal group unassign failure.",
+      },
     });
   }
 
