@@ -18,6 +18,8 @@ const CREATE_API_TOKEN_VALIDATION_MESSAGES = new Set([
   "API token expiry is invalid.",
 ]);
 
+const DEFAULT_API_TOKEN_EXPIRY_DAYS = 90;
+
 function getCreateApiTokenError(caught: unknown) {
   if (!(caught instanceof Error)) {
     console.error("Unexpected API token creation error", caught);
@@ -88,7 +90,10 @@ export async function createApiTokenAction(
     const created = await createApiToken(sessionUser.userId, {
       name,
       scopes,
-      expiresAt: expires === "never" ? null : undefined,
+      expiresAt:
+        expires === "never"
+          ? null
+          : new Date(Date.now() + DEFAULT_API_TOKEN_EXPIRY_DAYS * 24 * 60 * 60 * 1000),
     });
     revalidatePath("/settings/api");
     return {

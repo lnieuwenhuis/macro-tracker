@@ -117,6 +117,26 @@ describe("API token settings actions", () => {
     expect(revoked?.revokedAt).toBeTruthy();
   });
 
+  it("creates 90-day tokens through the settings action", async () => {
+    const formData = new FormData();
+    formData.set("name", "Shortcut");
+    formData.set("expires", "90");
+    formData.append("scopes", "read:daily");
+    const beforeCreate = Date.now();
+
+    const created = await createApiTokenAction({}, formData);
+
+    expect(created.ok).toBe(true);
+    if (!created.record?.expiresAt) {
+      throw new Error("Expected API token creation to return an expiry.");
+    }
+    const expiresAt = new Date(created.record.expiresAt).getTime();
+    const ninetyDaysFromBeforeCreate = beforeCreate + 90 * 24 * 60 * 60 * 1000;
+    expect(expiresAt).toBeGreaterThanOrEqual(ninetyDaysFromBeforeCreate);
+    expect(expiresAt).toBeLessThan(ninetyDaysFromBeforeCreate + 60_000);
+    expect(expiresAt).toBeLessThan(beforeCreate + 365 * 24 * 60 * 60 * 1000);
+  });
+
   it("requires completed onboarding before listing API tokens", async () => {
     mocked.requireOnboardedSessionUser.mockRejectedValue(new Error("redirect:/onboarding"));
 
