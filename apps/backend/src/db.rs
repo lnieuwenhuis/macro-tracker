@@ -5533,7 +5533,7 @@ fn optional_f64(input: &serde_json::Map<String, Value>, key: &str) -> Option<f64
 
 fn optional_i32(input: &serde_json::Map<String, Value>, key: &str) -> Option<i32> {
     input.get(key).and_then(|value| match value {
-        Value::Number(number) => number.as_i64().map(|value| value as i32),
+        Value::Number(number) => number.as_i64().and_then(|value| i32::try_from(value).ok()),
         Value::String(value) => value.parse().ok(),
         _ => None,
     })
@@ -5661,6 +5661,18 @@ mod tests {
                 "Meal name is required.",
             )),
             "At least one macro or calorie value must be greater than zero."
+        );
+    }
+
+    #[test]
+    fn meal_validation_rejects_overflowing_integer_fields() {
+        assert_eq!(
+            bad_request_message(normalize_meal_food_values(
+                &meal_payload(&[("caloriesKcal", json!(4_294_967_296_u64))]),
+                0,
+                "Meal name is required.",
+            )),
+            "caloriesKcal must be a non-negative integer."
         );
     }
 

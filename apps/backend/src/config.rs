@@ -159,7 +159,10 @@ fn read_secret<F>(
 where
     F: FnMut(&str) -> Option<String>,
 {
-    let value = read_required(read, name, fallback)?;
+    let value = match read(name).or_else(|| fallback.map(str::to_string)) {
+        Some(value) if !value.trim().is_empty() => value,
+        _ => bail!("{name} is required."),
+    };
     validate_secret(name, &value, allow_insecure_local)?;
     Ok(value)
 }
@@ -260,6 +263,23 @@ mod tests {
             error
                 .to_string()
                 .contains("must not use the local development default")
+        );
+    }
+
+    #[test]
+    fn production_config_preserves_session_secret_whitespace() {
+        let mut values = production_values();
+        values.retain(|(key, _)| *key != "SESSION_SECRET");
+        values.push((
+            "SESSION_SECRET",
+            "  session-secret-with-at-least-32-chars  \n",
+        ));
+
+        let config = config_from(&values).expect("whitespace is part of the secret bytes");
+
+        assert_eq!(
+            config.session_secret,
+            "  session-secret-with-at-least-32-chars  \n"
         );
     }
 

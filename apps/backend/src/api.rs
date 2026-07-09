@@ -14,6 +14,7 @@ const CORS_ALLOW_ORIGIN: &str = "*";
 const CORS_ALLOW_METHODS: &str = "GET, POST, PATCH, DELETE, OPTIONS";
 const CORS_ALLOW_HEADERS: &str = "Authorization, Content-Type";
 const CORS_MAX_AGE: &str = "86400";
+const API_V1_OPENAPI_JSON: &str = include_str!("generated/api-v1-openapi.json");
 
 type ApiResult<T> = Result<T, ApiFailure>;
 
@@ -89,6 +90,26 @@ async fn handle_api_v1(
 ) -> Response {
     if method == Method::OPTIONS {
         return empty_response(StatusCode::NO_CONTENT, None);
+    }
+
+    if method == Method::GET && path.as_slice() == ["openapi.json"] {
+        return match serde_json::from_str(API_V1_OPENAPI_JSON) {
+            Ok(openapi) => raw_json_response(StatusCode::OK, openapi, None),
+            Err(error) => {
+                tracing::error!(error = ?error, "API v1 OpenAPI document is invalid");
+                json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    json!({
+                        "ok": false,
+                        "error": {
+                            "code": "internal_error",
+                            "message": "An internal server error occurred."
+                        }
+                    }),
+                    None,
+                )
+            }
+        };
     }
 
     let result = async {
@@ -935,6 +956,7 @@ fn endpoint_for(path: &[String]) -> Option<Endpoint> {
         (Some("leaderboard"), None, None, 1) => {
             Some(endpoint(&["GET"], &[("GET", &["read:stats"])]))
         }
+        (Some("openapi.json"), None, None, 1) => Some(endpoint(&["GET"], &[("GET", &[])])),
         _ => None,
     }
 }
@@ -1379,6 +1401,10 @@ fn api_failure_from_app_error(error: AppError) -> ApiFailure {
 }
 
 fn json_response(status: StatusCode, body: Value, allow: Option<&str>) -> Response {
+    raw_json_response(status, body, allow)
+}
+
+fn raw_json_response(status: StatusCode, body: Value, allow: Option<&str>) -> Response {
     let mut headers = cors_headers();
     if let Some(allow) = allow {
         headers.insert(header::ALLOW, allow.parse().expect("valid Allow header"));
@@ -1417,4 +1443,78 @@ fn cors_headers() -> HeaderMap {
 
 fn round1(value: f64) -> f64 {
     (value * 10.0).round() / 10.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use sqlx::postgres::PgPoolOptions;
+    use tower::ServiceExt;
+
+    fn test_state() -> AppState {
+        AppState {
+            config: crate::config::Config {
+                allow_insecure_internal_auth: false,
+                app_url: "http://localhost:3000".to_string(),
+                backend_internal_secret: Some("internal-secret-with-at-least-32-chars".to_string()),
+                database_url: "postgres://postgres:***@127.0.0.1:5432/macro_tracker".to_string(),
+                port: 4000,
+                postgres_pool_max: 1,
+                session_secret: "session-secret-with-at-least-32-chars".to_string(),
+                shoo_base_url: "https://shoo.dev".to_string(),
+                trusted_origins: vec!["http://localhost:3000".to_string()],
+                admin_owner_emails: vec![],
+                openrouter_api_key: None,
+                openrouter_model: None,
+                openrouter_fallback_models: None,
+                openrouter_model_timeout_ms: None,
+                open_food_facts_base_url: "https://world.openfoodfacts.org".to_string(),
+                albert_heijn_base_url: "https://api.ah.nl".to_string(),
+                jumbo_base_url: "https://mobileapi.jumbo.com".to_string(),
+            },
+            db: PgPoolOptions::new()
+                .connect_lazy("postgres://postgres:***@127.0.0.1:5432/macro_tracker")
+                .expect("test pool should be created lazily"),
+            http: reqwest::Client::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn openapi_json_is_public_and_uses_cors_contract() {
+        let response = router()
+            .with_state(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/openapi.json")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            Some(&CORS_ALLOW_ORIGIN.parse().unwrap())
+        );
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body should collect")
+            .to_bytes();
+        let payload: Value = serde_json::from_slice(&body).expect("body should be JSON");
+
+        assert_eq!(payload["openapi"], "3.1.0");
+        assert_eq!(payload["info"]["title"], "Macro Tracker API");
+        assert_eq!(payload["servers"], json!([{ "url": "/api/v1" }]));
+        assert_eq!(
+            payload["paths"]["/openapi.json"]["get"]["security"],
+            json!([])
+        );
+        assert!(payload["paths"].get("/goals").is_some());
+    }
 }

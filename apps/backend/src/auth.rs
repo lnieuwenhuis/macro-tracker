@@ -18,6 +18,10 @@ use uuid::Uuid;
 pub const SESSION_COOKIE_NAME: &str = "mt_session";
 pub const SESSION_MAX_AGE_SECONDS: i64 = 60 * 60 * 24 * 7;
 
+fn install_crypto_provider() {
+    let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct SessionClaims {
     sub: String,
@@ -69,6 +73,7 @@ pub fn create_session_token(
     config: &crate::config::Config,
     user: &SessionUser,
 ) -> AppResult<String> {
+    install_crypto_provider();
     let now = Utc::now();
     let claims = SessionClaims {
         sub: user.user_id.to_string(),
@@ -87,6 +92,7 @@ pub fn create_session_token(
 }
 
 pub fn verify_session_token(config: &crate::config::Config, token: &str) -> AppResult<SessionUser> {
+    install_crypto_provider();
     let mut validation = Validation::new(Algorithm::HS256);
     validation.validate_aud = false;
     let decoded = decode::<SessionClaims>(
@@ -194,6 +200,7 @@ async fn verify_shoo_token(
     id_token: &str,
     app_origin: &str,
 ) -> AppResult<ShooClaims> {
+    install_crypto_provider();
     let header = decode_header(id_token)
         .map_err(|_| AppError::Unauthorized("Invalid Shoo token.".to_string()))?;
     let kid = header
@@ -232,4 +239,49 @@ async fn verify_shoo_token(
     }
 
     Ok(decoded.claims)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config(session_secret: &str) -> crate::config::Config {
+        crate::config::Config {
+            allow_insecure_internal_auth: false,
+            app_url: "http://localhost:3000".to_string(),
+            backend_internal_secret: Some("internal-secret-with-at-least-32-chars".to_string()),
+            database_url: "postgres://postgres:***@127.0.0.1:5432/macro_tracker".to_string(),
+            port: 4000,
+            postgres_pool_max: 1,
+            session_secret: session_secret.to_string(),
+            shoo_base_url: "https://shoo.dev".to_string(),
+            trusted_origins: vec!["http://localhost:3000".to_string()],
+            admin_owner_emails: vec![],
+            openrouter_api_key: None,
+            openrouter_model: None,
+            openrouter_fallback_models: None,
+            openrouter_model_timeout_ms: None,
+            open_food_facts_base_url: "https://world.openfoodfacts.org".to_string(),
+            albert_heijn_base_url: "https://api.ah.nl".to_string(),
+            jumbo_base_url: "https://mobileapi.jumbo.com".to_string(),
+        }
+    }
+
+    #[test]
+    fn session_tokens_use_exact_secret_bytes_with_whitespace() {
+        let secret = "  whitespace-session-secret-with-at-least-32-chars  \n";
+        let config = test_config(secret);
+        let trimmed_config = test_config(secret.trim());
+        let user = SessionUser {
+            user_id: Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap(),
+            email: "coach@example.com".to_string(),
+        };
+
+        let token = create_session_token(&config, &user).expect("token should sign");
+
+        let verified = verify_session_token(&config, &token).unwrap();
+        assert_eq!(verified.user_id, user.user_id);
+        assert_eq!(verified.email, user.email);
+        assert!(verify_session_token(&trimmed_config, &token).is_err());
+    }
 }
