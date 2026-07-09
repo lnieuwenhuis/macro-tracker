@@ -1866,7 +1866,10 @@ async fn recipes_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
 }
 
 async fn search_food_products_json(pool: &PgPool, user_id: Uuid, query: &str) -> AppResult<Value> {
-    let pattern = format!("%{}%", query.trim().replace('%', "\\%").replace('_', "\\_"));
+    let patterns = search_like_patterns(query);
+    if patterns.is_empty() {
+        return Ok(Value::Array(Vec::new()));
+    }
     let row = sqlx::query(
         r#"
         SELECT coalesce(jsonb_agg(
@@ -1897,8 +1900,12 @@ async fn search_food_products_json(pool: &PgPool, user_id: Uuid, query: &str) ->
             'deletedAt', deleted_at
           )
           ORDER BY
-            CASE WHEN lower(name) = lower($2) THEN 0 ELSE 1 END,
-            updated_at DESC
+            CASE
+              WHEN owner_user_id = $1 AND corrected_from_product_id IS NOT NULL THEN 0
+              WHEN owner_user_id = $1 THEN 1
+              ELSE 2
+            END,
+            name ASC
         ), '[]'::jsonb) AS data
         FROM (
           SELECT *
@@ -1906,20 +1913,45 @@ async fn search_food_products_json(pool: &PgPool, user_id: Uuid, query: &str) ->
           WHERE
             deleted_at IS NULL
             AND (owner_user_id = $1 OR owner_user_id IS NULL)
-            AND (
-              name ILIKE $2 ESCAPE '\'
-              OR brand ILIKE $2 ESCAPE '\'
-              OR barcode ILIKE $2 ESCAPE '\'
+            AND NOT EXISTS (
+              SELECT 1
+              FROM unnest($2::text[]) AS patterns(pattern)
+              WHERE NOT (
+                name ILIKE pattern ESCAPE '\'
+                OR brand ILIKE pattern ESCAPE '\'
+                OR barcode ILIKE pattern ESCAPE '\'
+              )
             )
-          LIMIT 20
+          ORDER BY
+            CASE
+              WHEN owner_user_id = $1 AND corrected_from_product_id IS NOT NULL THEN 0
+              WHEN owner_user_id = $1 THEN 1
+              ELSE 2
+            END,
+            name ASC
+          LIMIT 50
         ) products
         "#,
     )
     .bind(user_id)
-    .bind(pattern)
+    .bind(patterns)
     .fetch_one(pool)
     .await?;
     Ok(row.try_get("data")?)
+}
+
+fn search_like_patterns(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .map(|word| format!("%{}%", escape_like_pattern(word)))
+        .collect()
+}
+
+fn escape_like_pattern(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 
 async fn assert_meal_group_access(
@@ -4691,7 +4723,10 @@ async fn recent_quick_add_json(pool: &PgPool, user_id: Uuid, limit: i32) -> AppR
 }
 
 async fn search_meal_entries_json(pool: &PgPool, user_id: Uuid, query: &str) -> AppResult<Value> {
-    let pattern = format!("%{}%", query.trim().replace('%', "\\%").replace('_', "\\_"));
+    let patterns = search_like_patterns(query);
+    if patterns.is_empty() {
+        return Ok(Value::Array(Vec::new()));
+    }
     let row = sqlx::query(
         r#"
         SELECT coalesce(jsonb_agg(
@@ -4714,18 +4749,35 @@ async fn search_meal_entries_json(pool: &PgPool, user_id: Uuid, query: &str) -> 
             'clientMutationId', client_mutation_id,
             'sourceLabel', NULL
           )
-          ORDER BY entry_date DESC, created_at DESC
+          ORDER BY entry_date DESC, sort_order ASC
         ), '[]'::jsonb) AS data
         FROM (
           SELECT *
-          FROM meal_entries
-          WHERE user_id = $1 AND label ILIKE $2 ESCAPE '\'
-          LIMIT 30
+          FROM (
+            SELECT
+              meal_entries.*,
+              row_number() OVER (
+                PARTITION BY lower(label), protein_g, carbs_g, fat_g, calories_kcal
+                ORDER BY entry_date DESC, sort_order ASC, created_at DESC, id
+              ) AS duplicate_rank
+            FROM meal_entries
+            WHERE
+              user_id = $1
+              AND status = 'eaten'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM unnest($2::text[]) AS patterns(pattern)
+                WHERE label NOT ILIKE pattern ESCAPE '\'
+              )
+          ) ranked
+          WHERE duplicate_rank = 1
+          ORDER BY entry_date DESC, sort_order ASC
+          LIMIT 50
         ) matches
         "#,
     )
     .bind(user_id)
-    .bind(pattern)
+    .bind(patterns)
     .fetch_one(pool)
     .await?;
     Ok(row.try_get("data")?)
@@ -4763,8 +4815,8 @@ async fn list_recent_meal_entries_json(
         FROM (
           SELECT *
           FROM meal_entries
-          WHERE user_id = $1
-          ORDER BY entry_date DESC, created_at DESC, id
+          WHERE user_id = $1 AND status = 'eaten'
+          ORDER BY entry_date DESC, sort_order ASC
           LIMIT $2
         ) recent
         "#,
@@ -5784,6 +5836,341 @@ mod tests {
         .await
         .expect("test user should insert");
         user_id
+    }
+
+    async fn insert_test_food_product(
+        pool: &PgPool,
+        user_id: Option<Uuid>,
+        name: &str,
+        brand: &str,
+        corrected_from_product_id: Option<Uuid>,
+    ) -> Uuid {
+        let product_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO food_products (
+              id, owner_user_id, scope, source, name, brand,
+              default_serving_quantity, default_serving_unit,
+              protein_per_100, carbs_per_100, fat_per_100, calories_per_100,
+              corrected_from_product_id
+            )
+            VALUES (
+              $1, $2, CASE WHEN $2::uuid IS NULL THEN 'global' ELSE 'personal' END, 'manual', $3, $4,
+              100, 'g', 10, 20, 5, 165, $5
+            )
+            "#,
+        )
+        .bind(product_id)
+        .bind(user_id)
+        .bind(name)
+        .bind(brand)
+        .bind(corrected_from_product_id)
+        .execute(pool)
+        .await
+        .expect("test food product should insert");
+        product_id
+    }
+
+    async fn insert_test_meal_entry(
+        pool: &PgPool,
+        user_id: Uuid,
+        entry_date: &str,
+        status: &str,
+        label: &str,
+        sort_order: i32,
+        macros: (f64, f64, f64, i32),
+    ) -> Uuid {
+        let entry_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO meal_entries (
+              id, user_id, entry_date, status, label, sort_order,
+              quantity, unit, serving_multiplier,
+              protein_g, carbs_g, fat_g, calories_kcal
+            )
+            VALUES ($1, $2, $3::date, $4, $5, $6, 1, 'serving', 1, $7, $8, $9, $10)
+            "#,
+        )
+        .bind(entry_id)
+        .bind(user_id)
+        .bind(entry_date)
+        .bind(status)
+        .bind(label)
+        .bind(sort_order)
+        .bind(macros.0)
+        .bind(macros.1)
+        .bind(macros.2)
+        .bind(macros.3)
+        .execute(pool)
+        .await
+        .expect("test meal entry should insert");
+        entry_id
+    }
+
+    #[tokio::test]
+    async fn search_food_products_blank_query_returns_empty_array() {
+        let Some(test_db) = test_db().await else {
+            eprintln!(
+                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
+            );
+            return;
+        };
+        let user_id = insert_test_user(&test_db.pool).await;
+        insert_test_food_product(
+            &test_db.pool,
+            Some(user_id),
+            "Blank Match",
+            "Macro Test",
+            None,
+        )
+        .await;
+
+        let results = search_food_products_json(&test_db.pool, user_id, "   ")
+            .await
+            .expect("product search should succeed");
+
+        assert!(
+            results
+                .as_array()
+                .expect("search result should be array")
+                .is_empty()
+        );
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn search_food_products_matches_each_word_independently() {
+        let Some(test_db) = test_db().await else {
+            eprintln!(
+                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
+            );
+            return;
+        };
+        let user_id = insert_test_user(&test_db.pool).await;
+        let product_id = insert_test_food_product(
+            &test_db.pool,
+            Some(user_id),
+            "Plain Yogurt",
+            "Greek House",
+            None,
+        )
+        .await;
+
+        let results = search_food_products_json(&test_db.pool, user_id, "greek yogurt")
+            .await
+            .expect("product search should succeed");
+        let product_id_value = product_id.to_string();
+        let ids = results
+            .as_array()
+            .expect("search result should be array")
+            .iter()
+            .filter_map(|item| item.get("id").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert!(ids.contains(&product_id_value.as_str()));
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn search_food_products_prioritizes_corrected_and_personal_products() {
+        let Some(test_db) = test_db().await else {
+            eprintln!(
+                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
+            );
+            return;
+        };
+        let user_id = insert_test_user(&test_db.pool).await;
+        let global_id =
+            insert_test_food_product(&test_db.pool, None, "Alpha Yogurt", "Macro", None).await;
+        let personal_id =
+            insert_test_food_product(&test_db.pool, Some(user_id), "Beta Yogurt", "Macro", None)
+                .await;
+        let corrected_id = insert_test_food_product(
+            &test_db.pool,
+            Some(user_id),
+            "Gamma Yogurt",
+            "Macro",
+            Some(global_id),
+        )
+        .await;
+
+        let results = search_food_products_json(&test_db.pool, user_id, "yogurt")
+            .await
+            .expect("product search should succeed");
+        let ids = results
+            .as_array()
+            .expect("search result should be array")
+            .iter()
+            .map(|item| {
+                Uuid::parse_str(item.get("id").and_then(Value::as_str).unwrap())
+                    .expect("result id should be uuid")
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(&ids[..3], &[corrected_id, personal_id, global_id]);
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn search_meal_entries_excludes_planned_and_skipped_entries() {
+        let Some(test_db) = test_db().await else {
+            eprintln!(
+                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
+            );
+            return;
+        };
+        let user_id = insert_test_user(&test_db.pool).await;
+        let eaten_id = insert_test_meal_entry(
+            &test_db.pool,
+            user_id,
+            "2026-07-03",
+            "eaten",
+            "Protein Bowl",
+            1,
+            (30.0, 40.0, 10.0, 370),
+        )
+        .await;
+        insert_test_meal_entry(
+            &test_db.pool,
+            user_id,
+            "2026-07-04",
+            "planned",
+            "Protein Bowl Planned",
+            0,
+            (30.0, 40.0, 10.0, 370),
+        )
+        .await;
+        insert_test_meal_entry(
+            &test_db.pool,
+            user_id,
+            "2026-07-05",
+            "skipped",
+            "Protein Bowl Skipped",
+            0,
+            (30.0, 40.0, 10.0, 370),
+        )
+        .await;
+
+        let results = search_meal_entries_json(&test_db.pool, user_id, "protein bowl")
+            .await
+            .expect("meal search should succeed");
+        let ids = results
+            .as_array()
+            .expect("search result should be array")
+            .iter()
+            .map(|item| item.get("id").and_then(Value::as_str).unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec![eaten_id.to_string()]);
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn search_meal_entries_deduplicates_equivalent_historical_foods() {
+        let Some(test_db) = test_db().await else {
+            eprintln!(
+                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
+            );
+            return;
+        };
+        let user_id = insert_test_user(&test_db.pool).await;
+        let newest_id = insert_test_meal_entry(
+            &test_db.pool,
+            user_id,
+            "2026-07-06",
+            "eaten",
+            "Turkey Chili",
+            2,
+            (35.0, 45.0, 12.0, 428),
+        )
+        .await;
+        insert_test_meal_entry(
+            &test_db.pool,
+            user_id,
+            "2026-07-01",
+            "eaten",
+            "turkey chili",
+            0,
+            (35.0, 45.0, 12.0, 428),
+        )
+        .await;
+        let distinct_id = insert_test_meal_entry(
+            &test_db.pool,
+            user_id,
+            "2026-07-02",
+            "eaten",
+            "Turkey Chili",
+            1,
+            (36.0, 45.0, 12.0, 432),
+        )
+        .await;
+
+        let results = search_meal_entries_json(&test_db.pool, user_id, "turkey chili")
+            .await
+            .expect("meal search should succeed");
+        let ids = results
+            .as_array()
+            .expect("search result should be array")
+            .iter()
+            .map(|item| item.get("id").and_then(Value::as_str).unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec![newest_id.to_string(), distinct_id.to_string()]);
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn list_recent_meal_entries_excludes_planned_and_skipped_entries() {
+        let Some(test_db) = test_db().await else {
+            eprintln!(
+                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
+            );
+            return;
+        };
+        let user_id = insert_test_user(&test_db.pool).await;
+        let eaten_id = insert_test_meal_entry(
+            &test_db.pool,
+            user_id,
+            "2026-07-03",
+            "eaten",
+            "Recent Eaten",
+            0,
+            (20.0, 30.0, 8.0, 272),
+        )
+        .await;
+        insert_test_meal_entry(
+            &test_db.pool,
+            user_id,
+            "2026-07-04",
+            "planned",
+            "Recent Planned",
+            0,
+            (20.0, 30.0, 8.0, 272),
+        )
+        .await;
+        insert_test_meal_entry(
+            &test_db.pool,
+            user_id,
+            "2026-07-05",
+            "skipped",
+            "Recent Skipped",
+            0,
+            (20.0, 30.0, 8.0, 272),
+        )
+        .await;
+
+        let results = list_recent_meal_entries_json(&test_db.pool, user_id, 10)
+            .await
+            .expect("recent meals should list");
+        let ids = results
+            .as_array()
+            .expect("recent result should be array")
+            .iter()
+            .map(|item| item.get("id").and_then(Value::as_str).unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec![eaten_id.to_string()]);
+        test_db.cleanup().await;
     }
 
     #[tokio::test]
