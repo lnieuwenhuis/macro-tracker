@@ -149,26 +149,36 @@ pnpm dev
 
 Run `pnpm backend:start` and `pnpm dev` in separate terminals so both services stay up while you work.
 
-Useful checks. Use a dedicated PostgreSQL test database whose name clearly contains `test`, `tests`, `e2e`, or `ci`; destructive test setup refuses plain local app databases like `macro_tracker` by default. Point both the Rust backend and JS test helpers at that same test database so backend-backed routes and direct Drizzle assertions share state:
+Useful checks. Use a dedicated PostgreSQL test database whose name clearly contains `test`, `tests`, `e2e`, or `ci`; destructive test setup refuses plain local app databases like `macro_tracker` by default. Point the Rust backend and JS test helpers at the same database for the check you are running so backend-backed routes and direct Drizzle assertions share state:
 
 ```bash
-export TEST_DATABASE_URL="postgres://postgres:postgres@127.0.0.1:55432/macro_tracker_test"
-export DATABASE_URL="$TEST_DATABASE_URL"
-export E2E_DATABASE_URL="postgres://postgres:postgres@127.0.0.1:55432/macro_tracker_e2e"
+export TEST_DATABASE_URL="postgres://postgres:***@127.0.0.1:55432/macro_tracker_test"
+export E2E_DATABASE_URL="postgres://postgres:***@127.0.0.1:55432/macro_tracker_e2e"
 
+# Unit/integration checks use TEST_DATABASE_URL.
+export DATABASE_URL="$TEST_DATABASE_URL"
 pnpm db:migrate
 
 # terminal 1: keep the backend running against $TEST_DATABASE_URL
 pnpm backend:start
 
-# terminal 2: run checks
+# terminal 2: run non-E2E checks
 pnpm --filter @macro-tracker/db test
 pnpm --filter @macro-tracker/web test
 pnpm --filter @macro-tracker/web lint
 pnpm typecheck
 pnpm --filter @macro-tracker/web exec tsc --noEmit
 pnpm --filter @macro-tracker/db exec tsc --noEmit
-pnpm test:e2e
+
+# E2E uses E2E_DATABASE_URL. Restart the backend against the same database
+# before Playwright so global setup, the frontend, and the Rust backend share state.
+DATABASE_URL="$E2E_DATABASE_URL" pnpm db:migrate
+
+# terminal 1: keep the backend running against $E2E_DATABASE_URL
+DATABASE_URL="$E2E_DATABASE_URL" pnpm backend:start
+
+# terminal 2: run Playwright against that backend/database
+DATABASE_URL="$E2E_DATABASE_URL" pnpm test:e2e
 ```
 
 Database helpers:

@@ -24,8 +24,23 @@ export function resolveE2eDatabaseUrl(
   );
 }
 
+export function assertE2eBackendDatabaseContract(
+  connectionString: string,
+  env: Record<string, string | undefined> = process.env,
+) {
+  const backendDatabaseUrl = env.DATABASE_URL?.trim();
+  if (backendDatabaseUrl && backendDatabaseUrl !== connectionString) {
+    throw new Error(
+      "Playwright global setup and the Rust backend must use the same database. " +
+        "Start the backend with DATABASE_URL=$E2E_DATABASE_URL before running E2E tests, " +
+        "or unset DATABASE_URL so Playwright can use its default E2E database consistently.",
+    );
+  }
+}
+
 export default async function globalSetup() {
   const connectionString = resolveE2eDatabaseUrl();
+  assertE2eBackendDatabaseContract(connectionString);
 
   await migrateTestDatabase(connectionString);
   const pool = new Pool({ connectionString });

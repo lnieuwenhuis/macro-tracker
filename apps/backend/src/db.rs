@@ -3155,7 +3155,8 @@ async fn admin_dashboard_json(pool: &PgPool) -> AppResult<Value> {
     .fetch_one(pool)
     .await?;
     let recent_barcode_additions =
-        admin_food_products_json(pool, 1, 5, false).await?["items"].clone();
+        admin_food_products_json(pool, 1, 5, false, &AdminBarcodeFilters::empty()).await?["items"]
+            .clone();
     let recent_audit_events = list_admin_audit_events_json(
         pool,
         &serde_json::Map::from_iter([("pageSize".to_string(), json!(5))]),
@@ -3433,13 +3434,52 @@ async fn set_user_role_json(
     Ok(serde_json::to_value(user)?)
 }
 
+struct AdminBarcodeFilters {
+    q_pattern: Option<String>,
+    status: String,
+    submitter_pattern: Option<String>,
+}
+
+impl AdminBarcodeFilters {
+    fn from_input(input: &serde_json::Map<String, Value>) -> Self {
+        let q_pattern = trim_optional_string(input, "q")
+            .map(|value| format!("%{}%", escape_like_pattern(&value)));
+        let status = match trim_optional_string(input, "status").as_deref() {
+            Some("active") => "active",
+            Some("deleted") => "deleted",
+            _ => "all",
+        }
+        .to_string();
+        let submitter_pattern = trim_optional_string(input, "submitter")
+            .map(|value| format!("%{}%", escape_like_pattern(&value)));
+        Self {
+            q_pattern,
+            status,
+            submitter_pattern,
+        }
+    }
+
+    fn empty() -> Self {
+        Self {
+            q_pattern: None,
+            status: "all".to_string(),
+            submitter_pattern: None,
+        }
+    }
+}
+
 async fn list_admin_barcode_products_json(
     pool: &PgPool,
     input: &serde_json::Map<String, Value>,
     review_queue: bool,
 ) -> AppResult<Value> {
     let (page, page_size, _offset) = pagination(input);
-    admin_food_products_json(pool, page, page_size, review_queue).await
+    let filters = if review_queue {
+        AdminBarcodeFilters::empty()
+    } else {
+        AdminBarcodeFilters::from_input(input)
+    };
+    admin_food_products_json(pool, page, page_size, review_queue, &filters).await
 }
 
 async fn admin_food_products_json(
@@ -3447,6 +3487,7 @@ async fn admin_food_products_json(
     page: i64,
     page_size: i64,
     review_queue: bool,
+    filters: &AdminBarcodeFilters,
 ) -> AppResult<Value> {
     let offset = (page - 1) * page_size;
     let rows = sqlx::query(
@@ -3456,7 +3497,21 @@ async fn admin_food_products_json(
             fp.*,
             nullif(regexp_replace(lower(trim(fp.name)), '\s+', ' ', 'g'), '') AS review_name
           FROM food_products fp
-          WHERE fp.owner_user_id IS NULL AND fp.source = 'barcode'
+          LEFT JOIN users submitter ON submitter.id = fp.submitted_by_user_id
+          WHERE fp.owner_user_id IS NULL
+            AND fp.source = 'barcode'
+            AND (
+              $4::text IS NULL
+              OR fp.barcode ILIKE $4 ESCAPE '\'
+              OR fp.name ILIKE $4 ESCAPE '\'
+              OR fp.brand ILIKE $4 ESCAPE '\'
+            )
+            AND (
+              $5 = 'all'
+              OR ($5 = 'active' AND fp.deleted_at IS NULL)
+              OR ($5 = 'deleted' AND fp.deleted_at IS NOT NULL)
+            )
+            AND ($6::text IS NULL OR submitter.email ILIKE $6 ESCAPE '\')
         ),
         duplicate_names AS (
           SELECT review_name, count(*)::int AS duplicate_name_count
@@ -3555,6 +3610,9 @@ async fn admin_food_products_json(
     .bind(page_size)
     .bind(offset)
     .bind(review_queue)
+    .bind(filters.q_pattern.as_deref())
+    .bind(filters.status.as_str())
+    .bind(filters.submitter_pattern.as_deref())
     .fetch_all(pool)
     .await?;
     let total_row = sqlx::query(
@@ -3564,7 +3622,21 @@ async fn admin_food_products_json(
             fp.*,
             nullif(regexp_replace(lower(trim(fp.name)), '\s+', ' ', 'g'), '') AS review_name
           FROM food_products fp
-          WHERE fp.owner_user_id IS NULL AND fp.source = 'barcode'
+          LEFT JOIN users submitter ON submitter.id = fp.submitted_by_user_id
+          WHERE fp.owner_user_id IS NULL
+            AND fp.source = 'barcode'
+            AND (
+              $2::text IS NULL
+              OR fp.barcode ILIKE $2 ESCAPE '\'
+              OR fp.name ILIKE $2 ESCAPE '\'
+              OR fp.brand ILIKE $2 ESCAPE '\'
+            )
+            AND (
+              $3 = 'all'
+              OR ($3 = 'active' AND fp.deleted_at IS NULL)
+              OR ($3 = 'deleted' AND fp.deleted_at IS NOT NULL)
+            )
+            AND ($4::text IS NULL OR submitter.email ILIKE $4 ESCAPE '\')
         ),
         duplicate_names AS (
           SELECT review_name, count(*)::int AS duplicate_name_count
@@ -3612,6 +3684,9 @@ async fn admin_food_products_json(
         "#,
     )
     .bind(review_queue)
+    .bind(filters.q_pattern.as_deref())
+    .bind(filters.status.as_str())
+    .bind(filters.submitter_pattern.as_deref())
     .fetch_one(pool)
     .await?;
     let total: i32 = total_row.try_get("total")?;
@@ -5838,6 +5913,59 @@ mod tests {
         user_id
     }
 
+    async fn insert_test_user_with_email(pool: &PgPool, email: &str) -> Uuid {
+        let user_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO users (id, shoo_pairwise_sub, email, display_name)
+            VALUES ($1, $2, $3, 'Test User')
+            "#,
+        )
+        .bind(user_id)
+        .bind(format!("test-sub-{user_id}"))
+        .bind(email)
+        .execute(pool)
+        .await
+        .expect("test user should insert");
+        user_id
+    }
+
+    async fn insert_test_admin_barcode_product(
+        pool: &PgPool,
+        barcode: &str,
+        name: &str,
+        brand: &str,
+        submitted_by_user_id: Option<Uuid>,
+        deleted: bool,
+    ) -> Uuid {
+        let product_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO food_products (
+              id, owner_user_id, scope, source, barcode, name, brand,
+              default_serving_quantity, default_serving_unit,
+              protein_per_100, carbs_per_100, fat_per_100, calories_per_100,
+              submitted_by_user_id, deleted_at
+            )
+            VALUES (
+              $1, NULL, 'global', 'barcode', $2, $3, $4,
+              100, 'g', 10, 20, 5, 165,
+              $5, CASE WHEN $6 THEN now() ELSE NULL END
+            )
+            "#,
+        )
+        .bind(product_id)
+        .bind(barcode)
+        .bind(name)
+        .bind(brand)
+        .bind(submitted_by_user_id)
+        .bind(deleted)
+        .execute(pool)
+        .await
+        .expect("test barcode product should insert");
+        product_id
+    }
+
     async fn insert_test_food_product(
         pool: &PgPool,
         user_id: Option<Uuid>,
@@ -5905,6 +6033,126 @@ mod tests {
         .await
         .expect("test meal entry should insert");
         entry_id
+    }
+
+    #[tokio::test]
+    async fn list_admin_barcode_products_applies_catalogue_filters_to_items_and_totals() {
+        let Some(test_db) = test_db().await else {
+            eprintln!(
+                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
+            );
+            return;
+        };
+        let alice_id =
+            insert_test_user_with_email(&test_db.pool, "alice.submitter@example.test").await;
+        let bob_id = insert_test_user_with_email(&test_db.pool, "bob.submitter@example.test").await;
+        let barcode_match_id = insert_test_admin_barcode_product(
+            &test_db.pool,
+            "991-filter-barcode",
+            "Barcode Match",
+            "Macro Labs",
+            Some(alice_id),
+            false,
+        )
+        .await;
+        let name_match_id = insert_test_admin_barcode_product(
+            &test_db.pool,
+            "992-filter-name",
+            "Needle Crunch",
+            "Other Brand",
+            Some(alice_id),
+            true,
+        )
+        .await;
+        let brand_match_id = insert_test_admin_barcode_product(
+            &test_db.pool,
+            "993-filter-brand",
+            "Plain Bar",
+            "Needle Brand",
+            Some(bob_id),
+            false,
+        )
+        .await;
+        insert_test_admin_barcode_product(
+            &test_db.pool,
+            "994-filter-other",
+            "Plain Cereal",
+            "Other Brand",
+            None,
+            false,
+        )
+        .await;
+
+        let barcode_result = list_admin_barcode_products_json(
+            &test_db.pool,
+            &serde_json::Map::from_iter([
+                ("q".to_string(), json!("991-filter-barcode")),
+                ("pageSize".to_string(), json!(1)),
+            ]),
+            false,
+        )
+        .await
+        .expect("barcode query should filter");
+        assert_eq!(barcode_result["pagination"]["totalItems"], json!(1));
+        assert_eq!(barcode_result["items"][0]["id"], json!(barcode_match_id));
+
+        let name_result = list_admin_barcode_products_json(
+            &test_db.pool,
+            &serde_json::Map::from_iter([("q".to_string(), json!("Needle Crunch"))]),
+            false,
+        )
+        .await
+        .expect("name query should filter");
+        assert_eq!(name_result["pagination"]["totalItems"], json!(1));
+        assert_eq!(name_result["items"][0]["id"], json!(name_match_id));
+
+        let brand_result = list_admin_barcode_products_json(
+            &test_db.pool,
+            &serde_json::Map::from_iter([("q".to_string(), json!("Needle Brand"))]),
+            false,
+        )
+        .await
+        .expect("brand query should filter");
+        assert_eq!(brand_result["pagination"]["totalItems"], json!(1));
+        assert_eq!(brand_result["items"][0]["id"], json!(brand_match_id));
+
+        let active_result = list_admin_barcode_products_json(
+            &test_db.pool,
+            &serde_json::Map::from_iter([
+                ("status".to_string(), json!("active")),
+                ("pageSize".to_string(), json!(1)),
+            ]),
+            false,
+        )
+        .await
+        .expect("active status should filter");
+        assert_eq!(active_result["pagination"]["totalItems"], json!(3));
+        assert_eq!(active_result["pagination"]["totalPages"], json!(3));
+
+        let deleted_result = list_admin_barcode_products_json(
+            &test_db.pool,
+            &serde_json::Map::from_iter([("status".to_string(), json!("deleted"))]),
+            false,
+        )
+        .await
+        .expect("deleted status should filter");
+        assert_eq!(deleted_result["pagination"]["totalItems"], json!(1));
+        assert_eq!(deleted_result["items"][0]["id"], json!(name_match_id));
+
+        let submitter_result = list_admin_barcode_products_json(
+            &test_db.pool,
+            &serde_json::Map::from_iter([
+                ("submitter".to_string(), json!("alice.submitter")),
+                ("pageSize".to_string(), json!(1)),
+            ]),
+            false,
+        )
+        .await
+        .expect("submitter should filter");
+        assert_eq!(submitter_result["pagination"]["totalItems"], json!(2));
+        assert_eq!(submitter_result["pagination"]["totalPages"], json!(2));
+
+        test_db.cleanup().await;
     }
 
     #[tokio::test]

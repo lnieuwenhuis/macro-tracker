@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveE2eDatabaseUrl } from "../e2e/global-setup";
+import { assertE2eBackendDatabaseContract, resolveE2eDatabaseUrl } from "../e2e/global-setup";
 
 describe("Playwright global setup database safety", () => {
   it("refuses to truncate a plain non-test DATABASE_URL", () => {
@@ -27,9 +27,32 @@ describe("Playwright global setup database safety", () => {
     expect(
       resolveE2eDatabaseUrl({
         DATABASE_URL:
-          "postgres://macro:secret@db.internal.example.com:5432/macro_tracker",
+          "postgres://macro:***@db.internal.example.com:5432/macro_tracker",
         E2E_DATABASE_URL: e2eDatabaseUrl,
       }),
     ).toBe(e2eDatabaseUrl);
+  });
+
+  it("requires DATABASE_URL to match the resolved E2E database when provided", () => {
+    const e2eDatabaseUrl =
+      "postgres://postgres:***@127.0.0.1:55432/macro_tracker_e2e";
+
+    expect(() =>
+      assertE2eBackendDatabaseContract(e2eDatabaseUrl, {
+        DATABASE_URL:
+          "postgres://postgres:***@127.0.0.1:55432/macro_tracker_test",
+      }),
+    ).toThrow(/must use the same database/);
+  });
+
+  it("accepts a DATABASE_URL that matches the resolved E2E database", () => {
+    const e2eDatabaseUrl =
+      "postgres://postgres:***@127.0.0.1:55432/macro_tracker_e2e";
+
+    expect(() =>
+      assertE2eBackendDatabaseContract(e2eDatabaseUrl, {
+        DATABASE_URL: e2eDatabaseUrl,
+      }),
+    ).not.toThrow();
   });
 });
