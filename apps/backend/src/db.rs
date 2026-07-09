@@ -3707,7 +3707,7 @@ async fn create_api_token_json(
     let expires_at = match input.get("expiresAt") {
         Some(Value::Null) => None,
         Some(Value::String(value)) if !value.is_empty() => Some(value.clone()),
-        _ => Some((Utc::now() + chrono::Duration::days(365)).to_rfc3339()),
+        _ => Some((Utc::now() + chrono::Duration::days(90)).to_rfc3339()),
     };
     let row = sqlx::query(
         r#"
