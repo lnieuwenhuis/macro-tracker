@@ -95,7 +95,7 @@ jobs:
             exit 1
           fi
           grep -q "database migrations have not been applied" backend-before-migrations.log
-          node <<'NODE'
+          pnpm --filter @macro-tracker/db exec node <<'NODE'
           const { Pool } = require("pg");
           const pool = new Pool({ connectionString: process.env.DATABASE_URL });
           (async () => {
