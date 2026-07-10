@@ -1,7 +1,6 @@
 import {
   createApiToken,
   listApiTokens,
-  setDatabaseRuntimeForTesting,
   upsertUserFromShooProfile,
   type ApiTokenRecord,
   type DatabaseRuntime,
@@ -58,7 +57,6 @@ describe("API token settings actions", () => {
 
   beforeEach(async () => {
     runtime = await createTestDatabase();
-    setDatabaseRuntimeForTesting(runtime);
     const testUserKey = randomUUID();
     const user = await upsertUserFromShooProfile(
       {
@@ -76,7 +74,6 @@ describe("API token settings actions", () => {
   });
 
   afterEach(async () => {
-    setDatabaseRuntimeForTesting();
     await runtime.close();
     vi.clearAllMocks();
   });

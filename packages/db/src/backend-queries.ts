@@ -70,15 +70,6 @@ function backendTestFault(args: unknown[]): BackendTestFault | undefined {
   return undefined;
 }
 
-export function setDatabaseRuntimeForTesting(_runtime?: DatabaseRuntime) {
-  // The Rust backend owns database runtime selection. This stays exported so
-  // older tests and mocks compile while they migrate to backend-backed setup.
-}
-
-export async function getDb(): Promise<DatabaseClient> {
-  throw new Error("The TypeScript database runtime has moved to the Rust backend.");
-}
-
 export function getApiScopes(): ApiScope[] {
   return [...API_SCOPE_VALUES];
 }
