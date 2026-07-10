@@ -1,10 +1,5 @@
 export * from "./dates";
 export * from "./backend-client";
-export {
-  closeDatabase,
-  createDatabaseRuntime,
-  getDatabaseRuntime,
-} from "./client";
 export * from "./backend-queries";
 export {
   getPostgresConnectionConfig,

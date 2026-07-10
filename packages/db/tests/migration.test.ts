@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createDatabaseRuntime, type DatabaseRuntime } from "../src";
+import { createDatabaseRuntime, type DatabaseRuntime } from "../src/client";
 import { resolveDestructiveTestDatabaseUrl } from "../src/testing";
 
 const migrationFiles = [

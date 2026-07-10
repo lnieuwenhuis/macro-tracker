@@ -8,7 +8,6 @@ import {
   lookupBarcodeFoodProduct,
   revokeApiToken,
   saveBarcodeFoodProduct,
-  setDatabaseRuntimeForTesting,
   upsertUserFromShooProfile,
   type DatabaseRuntime,
 } from "@macro-tracker/db";
@@ -60,7 +59,6 @@ describe("Macro Tracker API v1", () => {
 
   beforeEach(async () => {
     runtime = await createTestDatabase();
-    setDatabaseRuntimeForTesting(runtime);
     const user = await upsertUserFromShooProfile(
       {
         pairwiseSub: "api-user",
@@ -84,7 +82,6 @@ describe("Macro Tracker API v1", () => {
   });
 
   afterEach(async () => {
-    setDatabaseRuntimeForTesting();
     await runtime.close();
   });
 
