@@ -12,7 +12,8 @@ watchPatterns = [
   "/pnpm-lock.yaml",
   "/pnpm-workspace.yaml",
   "/Cargo.toml",
-  "/Cargo.lock"
+  "/Cargo.lock",
+  "/railpack.json"
 ]
 
 [deploy]
