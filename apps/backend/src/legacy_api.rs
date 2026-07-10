@@ -20,6 +20,7 @@ const DEFAULT_FOOD_PHOTO_FALLBACK_MODELS: &[&str] = &[
 ];
 const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 const FOOD_PHOTO_BODY_LIMIT_BYTES: usize = MAX_IMAGE_BYTES + 1024 * 1024;
+const FOOD_PHOTO_REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
 const BENCHMARK_ROUTE_RUNTIME_BUDGET_MS: u64 = 270_000;
 const BENCHMARK_RUN_LOCK_TTL: Duration = Duration::from_secs(300);
 
@@ -691,6 +692,38 @@ async fn analyze_food_photo_url(
     user_id: &str,
     force_ready: bool,
 ) -> Value {
+    let model_timeout = Duration::from_millis(
+        state
+            .config
+            .openrouter_model_timeout_ms
+            .unwrap_or(10_000)
+            .clamp(3_000, 30_000),
+    );
+    analyze_food_photo_url_with_limits(
+        state,
+        image_url,
+        clarification,
+        requested_model,
+        user_id,
+        force_ready,
+        OPENROUTER_CHAT_COMPLETIONS_URL,
+        model_timeout,
+        FOOD_PHOTO_REQUEST_TIMEOUT,
+    )
+    .await
+}
+
+async fn analyze_food_photo_url_with_limits(
+    state: &AppState,
+    image_url: &str,
+    clarification: &str,
+    requested_model: Option<&str>,
+    user_id: &str,
+    force_ready: bool,
+    openrouter_url: &str,
+    model_timeout: Duration,
+    request_timeout: Duration,
+) -> Value {
     let Some(api_key) = state.config.openrouter_api_key.as_deref() else {
         return photo_failure(
             "OPENROUTER_API_KEY is not configured on the server.",
@@ -734,19 +767,21 @@ async fn analyze_food_photo_url(
         });
     }
 
+    let deadline = Instant::now() + request_timeout;
     let mut last_failure = None;
     for model in models {
+        let remaining_budget = deadline.saturating_duration_since(Instant::now());
+        if remaining_budget.is_zero() {
+            return food_photo_timeout_failure(request_timeout);
+        }
+        let attempt_timeout = model_timeout.min(remaining_budget);
+        let attempt_uses_remaining_budget = remaining_budget <= model_timeout;
         let body =
             build_openrouter_request_body(&model, image_url, clarification, user_id, force_ready);
-        let timeout_ms = state
-            .config
-            .openrouter_model_timeout_ms
-            .unwrap_or(10_000)
-            .clamp(3_000, 30_000);
         let request = state
             .http
-            .post(OPENROUTER_CHAT_COMPLETIONS_URL)
-            .timeout(Duration::from_millis(timeout_ms))
+            .post(openrouter_url)
+            .timeout(attempt_timeout)
             .bearer_auth(api_key)
             .header("Content-Type", "application/json")
             .header("HTTP-Referer", &state.config.app_url)
@@ -758,13 +793,16 @@ async fn analyze_food_photo_url(
             Ok(response) if !response.status().is_success() => {
                 let status = response.status().as_u16();
                 let error = read_openrouter_error(response).await;
+                if Instant::now() >= deadline {
+                    return food_photo_timeout_failure(request_timeout);
+                }
                 let kind = classify_food_photo_failure(&error, Some(status));
-                last_failure = Some(photo_failure(
-                    &error,
-                    kind,
-                    Some(status),
-                    Some(is_retryable_openrouter_error(&error, Some(status))),
-                ));
+                let retryable = is_retryable_openrouter_error(&error, Some(status));
+                let failure = photo_failure(&error, kind, Some(status), Some(retryable));
+                if !retryable {
+                    return failure;
+                }
+                last_failure = Some(failure);
             }
             Ok(response) => match response.json::<Value>().await {
                 Ok(payload) => {
@@ -774,12 +812,12 @@ async fn analyze_food_photo_url(
                         .and_then(Value::as_str)
                     {
                         let kind = classify_food_photo_failure(message, None);
-                        last_failure = Some(photo_failure(
-                            message,
-                            kind,
-                            None,
-                            Some(is_retryable_openrouter_error(message, None)),
-                        ));
+                        let retryable = is_retryable_openrouter_error(message, None);
+                        let failure = photo_failure(message, kind, None, Some(retryable));
+                        if !retryable {
+                            return failure;
+                        }
+                        last_failure = Some(failure);
                         continue;
                     }
 
@@ -798,12 +836,12 @@ async fn analyze_food_photo_url(
                             .and_then(Value::as_str)
                             .unwrap_or("The AI provider returned an error.");
                         let kind = classify_food_photo_failure(error, None);
-                        last_failure = Some(photo_failure(
-                            error,
-                            kind,
-                            None,
-                            Some(is_retryable_openrouter_error(error, None)),
-                        ));
+                        let retryable = is_retryable_openrouter_error(error, None);
+                        let failure = photo_failure(error, kind, None, Some(retryable));
+                        if !retryable {
+                            return failure;
+                        }
+                        last_failure = Some(failure);
                         continue;
                     }
 
@@ -835,21 +873,29 @@ async fn analyze_food_photo_url(
                     }
                 }
                 Err(error) => {
-                    last_failure = Some(photo_failure(
-                        &error.to_string(),
-                        "provider_error",
-                        None,
-                        Some(false),
-                    ));
+                    if error.is_timeout() && attempt_uses_remaining_budget {
+                        return food_photo_timeout_failure(request_timeout);
+                    }
+                    let retryable = error.is_timeout();
+                    let failure =
+                        photo_failure(&error.to_string(), "provider_error", None, Some(retryable));
+                    if !retryable {
+                        return failure;
+                    }
+                    last_failure = Some(failure);
                 }
             },
             Err(error) => {
-                last_failure = Some(photo_failure(
-                    &error.to_string(),
-                    "provider_error",
-                    None,
-                    Some(error.is_timeout()),
-                ));
+                if error.is_timeout() && attempt_uses_remaining_budget {
+                    return food_photo_timeout_failure(request_timeout);
+                }
+                let retryable = error.is_timeout();
+                let failure =
+                    photo_failure(&error.to_string(), "provider_error", None, Some(retryable));
+                if !retryable {
+                    return failure;
+                }
+                last_failure = Some(failure);
             }
         }
     }
@@ -857,6 +903,18 @@ async fn analyze_food_photo_url(
     last_failure.unwrap_or_else(|| {
         json!({ "ok": false, "error": "The AI request failed.", "kind": "unknown", "retryable": false })
     })
+}
+
+fn food_photo_timeout_failure(request_timeout: Duration) -> Value {
+    photo_failure(
+        &format!(
+            "Food photo AI request timed out after {}ms.",
+            request_timeout.as_millis()
+        ),
+        "provider_error",
+        None,
+        Some(false),
+    )
 }
 
 fn build_openrouter_request_body(
@@ -1551,6 +1609,10 @@ mod tests {
         http::{Request, StatusCode},
     };
     use http_body_util::BodyExt;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     use tower::ServiceExt;
 
     fn test_config(provider_base_url: Option<&str>) -> Config {
@@ -1635,6 +1697,165 @@ mod tests {
                 .expect("stub server should run");
         });
         format!("http://{addr}")
+    }
+
+    #[derive(Clone)]
+    struct OpenRouterStubResponse {
+        status: StatusCode,
+        delay: Duration,
+        body: Value,
+    }
+
+    struct OpenRouterStubState {
+        requests: AtomicUsize,
+        responses: Vec<OpenRouterStubResponse>,
+    }
+
+    async fn openrouter_stub_handler(
+        State(state): State<Arc<OpenRouterStubState>>,
+    ) -> impl IntoResponse {
+        let request_index = state.requests.fetch_add(1, Ordering::SeqCst);
+        let response = state
+            .responses
+            .get(request_index)
+            .or_else(|| state.responses.last())
+            .expect("stub should have at least one response")
+            .clone();
+        tokio::time::sleep(response.delay).await;
+        (response.status, Json(response.body))
+    }
+
+    async fn spawn_openrouter_stub(
+        responses: Vec<OpenRouterStubResponse>,
+    ) -> (String, Arc<OpenRouterStubState>) {
+        let state = Arc::new(OpenRouterStubState {
+            requests: AtomicUsize::new(0),
+            responses,
+        });
+        let app = Router::new()
+            .route("/chat/completions", post(openrouter_stub_handler))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("stub listener should bind");
+        let addr = listener.local_addr().expect("stub address should exist");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("stub server should run");
+        });
+        (format!("http://{addr}/chat/completions"), state)
+    }
+
+    fn openrouter_test_state(models: &str) -> AppState {
+        let mut state = test_state(None);
+        state.config.openrouter_api_key = Some("test-api-key".to_string());
+        state.config.openrouter_model = Some("test/primary:free".to_string());
+        state.config.openrouter_fallback_models = Some(models.to_string());
+        state
+    }
+
+    #[tokio::test]
+    async fn food_photo_stops_after_non_retryable_provider_response() {
+        let (endpoint, stub) = spawn_openrouter_stub(vec![OpenRouterStubResponse {
+            status: StatusCode::UNAUTHORIZED,
+            delay: Duration::ZERO,
+            body: json!({ "error": { "message": "Invalid API key." } }),
+        }])
+        .await;
+
+        let result = analyze_food_photo_url_with_limits(
+            &openrouter_test_state("test/fallback-1:free,test/fallback-2:free"),
+            "data:image/png;base64,AA==",
+            "",
+            None,
+            "test-user",
+            false,
+            &endpoint,
+            Duration::from_millis(100),
+            Duration::from_secs(1),
+        )
+        .await;
+
+        assert_eq!(stub.requests.load(Ordering::SeqCst), 1);
+        assert_eq!(result["statusCode"], json!(401));
+        assert_eq!(result["retryable"], json!(false));
+        assert_eq!(result["error"], json!("Invalid API key."));
+    }
+
+    #[tokio::test]
+    async fn food_photo_uses_fallback_after_retryable_provider_response() {
+        let (endpoint, stub) = spawn_openrouter_stub(vec![
+            OpenRouterStubResponse {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                delay: Duration::ZERO,
+                body: json!({ "error": { "message": "Provider temporarily unavailable." } }),
+            },
+            OpenRouterStubResponse {
+                status: StatusCode::OK,
+                delay: Duration::ZERO,
+                body: json!({
+                    "choices": [{
+                        "message": {
+                            "content": "{\"status\":\"ready\",\"estimate\":{\"label\":\"Test meal\",\"caloriesKcal\":100,\"proteinG\":10,\"carbsG\":12,\"fatG\":2,\"confidence\":0.9,\"notes\":[]}}"
+                        }
+                    }]
+                }),
+            },
+        ])
+        .await;
+
+        let result = analyze_food_photo_url_with_limits(
+            &openrouter_test_state("test/fallback:free"),
+            "data:image/png;base64,AA==",
+            "",
+            None,
+            "test-user",
+            false,
+            &endpoint,
+            Duration::from_millis(100),
+            Duration::from_secs(1),
+        )
+        .await;
+
+        assert_eq!(stub.requests.load(Ordering::SeqCst), 2);
+        assert_eq!(result["ok"], json!(true));
+        assert_eq!(result["analysis"]["estimate"]["label"], json!("Test meal"));
+    }
+
+    #[tokio::test]
+    async fn food_photo_fallback_chain_cannot_exceed_request_deadline() {
+        let delayed_retryable_failure = OpenRouterStubResponse {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            delay: Duration::from_millis(40),
+            body: json!({ "error": { "message": "Provider temporarily unavailable." } }),
+        };
+        let (endpoint, stub) = spawn_openrouter_stub(vec![delayed_retryable_failure]).await;
+        let started = Instant::now();
+
+        let result = analyze_food_photo_url_with_limits(
+            &openrouter_test_state(
+                "test/fallback-1:free,test/fallback-2:free,test/fallback-3:free",
+            ),
+            "data:image/png;base64,AA==",
+            "",
+            None,
+            "test-user",
+            false,
+            &endpoint,
+            Duration::from_millis(60),
+            Duration::from_millis(100),
+        )
+        .await;
+
+        assert!(started.elapsed() < Duration::from_millis(300));
+        assert!((1..4).contains(&stub.requests.load(Ordering::SeqCst)));
+        assert_eq!(result["kind"], json!("provider_error"));
+        assert_eq!(result["retryable"], json!(false));
+        assert_eq!(
+            result["error"],
+            json!("Food photo AI request timed out after 100ms.")
+        );
     }
 
     #[test]
