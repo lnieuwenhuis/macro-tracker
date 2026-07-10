@@ -85,14 +85,17 @@ pnpm backend:start
 pnpm dev
 ```
 
-For production, build the frontend and start the two services independently:
+For production, build the release backend and frontend, then start the two services independently:
 
 ```bash
+# build artifacts before starting services
+pnpm backend:build
+pnpm build
+
 # service 1
-pnpm backend:start
+pnpm backend:start:release
 
 # service 2
-pnpm build
 pnpm --filter @macro-tracker/web start
 ```
 
