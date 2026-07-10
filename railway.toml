@@ -3,7 +3,7 @@
 
 [build]
 builder = "RAILPACK"
-buildCommand = "pnpm --filter @macro-tracker/web build"
+buildCommand = "pnpm install --frozen-lockfile && pnpm --filter @macro-tracker/web build"
 watchPatterns = [
   "/apps/web/**",
   "/packages/db/**",
