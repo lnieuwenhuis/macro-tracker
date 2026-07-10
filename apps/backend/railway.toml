@@ -1,6 +1,6 @@
 [build]
 builder = "RAILPACK"
-buildCommand = "pnpm install --frozen-lockfile && cargo build --release -p macro-tracker-backend"
+buildCommand = "cargo build --release -p macro-tracker-backend"
 watchPatterns = [
   "/apps/backend/**",
   "/packages/db/drizzle/**",
@@ -12,7 +12,8 @@ watchPatterns = [
   "/pnpm-lock.yaml",
   "/pnpm-workspace.yaml",
   "/Cargo.toml",
-  "/Cargo.lock"
+  "/Cargo.lock",
+  "/railpack.json"
 ]
 
 [deploy]
