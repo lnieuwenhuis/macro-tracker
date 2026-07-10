@@ -94,6 +94,22 @@ export async function applySessionCookie(
   return response;
 }
 
+export function applySessionTokenCookie(
+  response: NextResponse,
+  token: string,
+  options?: {
+    maxAge?: number;
+    secure?: boolean;
+  },
+) {
+  response.cookies.set(
+    SESSION_COOKIE_NAME,
+    token,
+    getCookieOptions(options?.maxAge ?? SESSION_MAX_AGE_SECONDS, options?.secure),
+  );
+  return response;
+}
+
 export function clearSessionCookie(
   response: NextResponse,
   options?: {

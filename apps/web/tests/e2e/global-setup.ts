@@ -1,0 +1,67 @@
+import { Pool } from "pg";
+import {
+  assertSafeDestructiveTestDatabaseUrl,
+  migrateTestDatabase,
+  resolveDestructiveTestDatabaseUrl,
+} from "@macro-tracker/db/testing";
+
+const DEFAULT_E2E_DATABASE_URL =
+  "postgres://postgres:***@127.0.0.1:55432/macro_tracker_e2e";
+
+export function resolveE2eDatabaseUrl(
+  env: Record<string, string | undefined> = process.env,
+) {
+  return (
+    resolveDestructiveTestDatabaseUrl(env, {
+      explicitEnvNames: ["E2E_DATABASE_URL", "TEST_DATABASE_URL"],
+      purpose: "Playwright global setup",
+    }) ??
+    assertSafeDestructiveTestDatabaseUrl(
+      DEFAULT_E2E_DATABASE_URL,
+      "default local Playwright database",
+      env,
+    )
+  );
+}
+
+export function assertE2eBackendDatabaseContract(
+  connectionString: string,
+  env: Record<string, string | undefined> = process.env,
+) {
+  const backendDatabaseUrl = env.DATABASE_URL?.trim();
+  if (backendDatabaseUrl && backendDatabaseUrl !== connectionString) {
+    throw new Error(
+      "Playwright global setup and the Rust backend must use the same database. " +
+        "Start the backend with DATABASE_URL=$E2E_DATABASE_URL before running E2E tests, " +
+        "or unset DATABASE_URL so Playwright can use its default E2E database consistently.",
+    );
+  }
+}
+
+export default async function globalSetup() {
+  const connectionString = resolveE2eDatabaseUrl();
+  assertE2eBackendDatabaseContract(connectionString);
+
+  await migrateTestDatabase(connectionString);
+  const pool = new Pool({ connectionString });
+  try {
+    await pool.query(`
+      TRUNCATE TABLE
+        admin_audit_events,
+        api_tokens,
+        meal_template_items,
+        meal_templates,
+        recipe_ingredients,
+        recipes,
+        weight_entries,
+        meal_entries,
+        meal_groups,
+        food_product_revisions,
+        food_products,
+        users
+      RESTART IDENTITY CASCADE
+    `);
+  } finally {
+    await pool.end();
+  }
+}

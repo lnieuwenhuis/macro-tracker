@@ -3,7 +3,9 @@
 import {
   createApiToken,
   getApiScopes,
+  isApiScope,
   revokeApiToken,
+  type ApiScope,
   type ApiTokenRecord,
 } from "@macro-tracker/db";
 import { revalidatePath } from "next/cache";
@@ -15,6 +17,8 @@ const CREATE_API_TOKEN_VALIDATION_MESSAGES = new Set([
   "At least one API scope is required.",
   "API token expiry is invalid.",
 ]);
+
+const DEFAULT_API_TOKEN_EXPIRY_DAYS = 90;
 
 function getCreateApiTokenError(caught: unknown) {
   if (!(caught instanceof Error)) {
@@ -45,10 +49,20 @@ function getStringValue(formData: FormData, key: string) {
   return typeof value === "string" ? value : "";
 }
 
-function getSelectedScopes(formData: FormData) {
-  return formData
-    .getAll("scopes")
-    .filter((value): value is string => typeof value === "string");
+function getSelectedScopes(formData: FormData): ApiScope[] {
+  const scopes: ApiScope[] = [];
+
+  for (const value of formData.getAll("scopes")) {
+    if (typeof value !== "string") {
+      continue;
+    }
+    if (!isApiScope(value)) {
+      throw new Error(`API scope is invalid: ${value}`);
+    }
+    scopes.push(value);
+  }
+
+  return scopes;
 }
 
 export async function createApiTokenAction(
@@ -57,8 +71,30 @@ export async function createApiTokenAction(
 ): Promise<CreateApiTokenActionState> {
   const sessionUser = await requireOnboardedSessionUser();
   const name = getStringValue(formData, "name");
-  const scopes = getSelectedScopes(formData);
+  let scopes: ApiScope[];
+  try {
+    scopes = getSelectedScopes(formData);
+  } catch (caught) {
+    return {
+      ok: false,
+      error: getCreateApiTokenError(caught),
+    };
+  }
   const expires = getStringValue(formData, "expires");
+
+  if (!name.trim()) {
+    return {
+      ok: false,
+      error: "API token name is required.",
+    };
+  }
+
+  if (scopes.length === 0) {
+    return {
+      ok: false,
+      error: "At least one API scope is required.",
+    };
+  }
 
   if (expires !== "90" && expires !== "never") {
     return {
@@ -71,7 +107,10 @@ export async function createApiTokenAction(
     const created = await createApiToken(sessionUser.userId, {
       name,
       scopes,
-      expiresAt: expires === "never" ? null : undefined,
+      expiresAt:
+        expires === "never"
+          ? null
+          : new Date(Date.now() + DEFAULT_API_TOKEN_EXPIRY_DAYS * 24 * 60 * 60 * 1000),
     });
     revalidatePath("/settings/api");
     return {

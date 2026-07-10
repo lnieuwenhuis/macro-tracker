@@ -1,11 +1,13 @@
 import { sql } from "drizzle-orm";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createDatabaseRuntime, type DatabaseRuntime } from "../src";
+import { createDatabaseRuntime, type DatabaseRuntime } from "../src/client";
+import { migrateDatabase } from "../src/migration";
+import { resolveDestructiveTestDatabaseUrl } from "../src/testing";
 
 const migrationFiles = [
   "0000_yielding_the_spike.sql",
@@ -425,5 +427,150 @@ describe("database migrations", () => {
         AND "indexname" = 'api_tokens_token_hash_key'
     `));
     expect(indexResult.rows).toEqual([{ indexname: "api_tokens_token_hash_key" }]);
+  });
+});
+
+describe.skipIf(!process.env.TEST_DATABASE_URL)("PostgreSQL migration locking", () => {
+  it("serializes concurrent migration runners", async () => {
+    const databaseUrl = resolveDestructiveTestDatabaseUrl(process.env, {
+      explicitEnvNames: ["TEST_DATABASE_URL"],
+      purpose: "concurrent migration regression test",
+    });
+    if (!databaseUrl) {
+      throw new Error("TEST_DATABASE_URL is required");
+    }
+
+    const migrationsFolder = await mkdtemp(join(tmpdir(), "macro-tracker-migrations-"));
+    const setupRuntime = await createDatabaseRuntime(databaseUrl);
+    try {
+      await setupRuntime.db.execute(
+        sql.raw(
+          "DROP SCHEMA public CASCADE; DROP SCHEMA IF EXISTS drizzle CASCADE; CREATE SCHEMA public",
+        ),
+      );
+      await mkdir(join(migrationsFolder, "meta"));
+      await writeFile(
+        join(migrationsFolder, "meta", "_journal.json"),
+        JSON.stringify({
+          version: "7",
+          dialect: "postgresql",
+          entries: [
+            {
+              idx: 0,
+              version: "7",
+              when: 1_800_000_000_000,
+              tag: "0000_concurrent_probe",
+              breakpoints: true,
+            },
+          ],
+        }),
+      );
+      await writeFile(
+        join(migrationsFolder, "0000_concurrent_probe.sql"),
+        [
+          "CREATE TABLE migration_concurrency_probe (applications integer NOT NULL)",
+          "INSERT INTO migration_concurrency_probe VALUES (0)",
+          "SELECT pg_sleep(0.5)",
+          "UPDATE migration_concurrency_probe SET applications = applications + 1",
+        ].join("--> statement-breakpoint\n"),
+      );
+
+      const runtimes = await Promise.all([
+        createDatabaseRuntime(databaseUrl),
+        createDatabaseRuntime(databaseUrl),
+      ]);
+      try {
+        await Promise.all(
+          runtimes.map((migrationRuntime) =>
+            migrateDatabase(migrationRuntime, migrationsFolder),
+          ),
+        );
+      } finally {
+        await Promise.all(runtimes.map((migrationRuntime) => migrationRuntime.close()));
+      }
+
+      const probe = await setupRuntime.db.execute<{ applications: number }>(
+        sql.raw("SELECT applications FROM migration_concurrency_probe"),
+      );
+      expect(probe.rows).toEqual([{ applications: 1 }]);
+
+      const journal = await setupRuntime.db.execute<{ count: string }>(
+        sql.raw('SELECT count(*)::text AS count FROM drizzle."__drizzle_migrations"'),
+      );
+      expect(journal.rows).toEqual([{ count: "1" }]);
+    } finally {
+      await setupRuntime.db.execute(
+        sql.raw(
+          "DROP SCHEMA public CASCADE; DROP SCHEMA IF EXISTS drizzle CASCADE; CREATE SCHEMA public",
+        ),
+      );
+      await migrateDatabase(setupRuntime);
+      await setupRuntime.close();
+      await rm(migrationsFolder, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("test database safety", () => {
+  it("refuses to truncate a plain non-test DATABASE_URL", () => {
+    expect(() =>
+      resolveDestructiveTestDatabaseUrl(
+        {
+          DATABASE_URL:
+            "postgres://macro:secret@db.internal.example.com:5432/macro_tracker",
+        },
+        {
+          explicitEnvNames: ["TEST_DATABASE_URL"],
+          purpose: "database unit tests",
+        },
+      ),
+    ).toThrow(/Refusing to truncate plain DATABASE_URL/);
+  });
+
+  it("refuses to truncate an explicit local non-test TEST_DATABASE_URL by default", () => {
+    expect(() =>
+      resolveDestructiveTestDatabaseUrl(
+        {
+          TEST_DATABASE_URL: "postgres://postgres:***@localhost:5432/macro_tracker",
+        },
+        {
+          explicitEnvNames: ["TEST_DATABASE_URL"],
+          purpose: "database unit tests",
+        },
+      ),
+    ).toThrow(/does not look like a test database/);
+  });
+
+  it("accepts explicit CI-style test and e2e database URLs", () => {
+    const ciDatabaseUrl =
+      "postgres://postgres:postgres@127.0.0.1:5432/macro_tracker_ci";
+
+    expect(
+      resolveDestructiveTestDatabaseUrl(
+        {
+          DATABASE_URL:
+            "postgres://macro:password@db.internal.example.com:5432/macro_tracker",
+          TEST_DATABASE_URL: ciDatabaseUrl,
+        },
+        {
+          explicitEnvNames: ["TEST_DATABASE_URL"],
+          purpose: "database unit tests",
+        },
+      ),
+    ).toBe(ciDatabaseUrl);
+
+    expect(
+      resolveDestructiveTestDatabaseUrl(
+        {
+          DATABASE_URL: ciDatabaseUrl,
+          TEST_DATABASE_URL: ciDatabaseUrl,
+          E2E_DATABASE_URL: ciDatabaseUrl,
+        },
+        {
+          explicitEnvNames: ["E2E_DATABASE_URL", "TEST_DATABASE_URL"],
+          purpose: "Playwright global setup",
+        },
+      ),
+    ).toBe(ciDatabaseUrl);
   });
 });

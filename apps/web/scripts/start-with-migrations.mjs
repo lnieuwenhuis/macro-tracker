@@ -18,8 +18,20 @@ export function getStartupMigrationConnectionConfig(connectionString) {
   return getPostgresConnectionConfig(connectionString, { max: 1 });
 }
 
+export function shouldRunStartupMigrations(env = process.env) {
+  const value = env.LEGACY_FRONTEND_RUN_MIGRATIONS?.trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes" || value === "on";
+}
+
 async function runMigrationsIfNeeded() {
   const connectionString = process.env.DATABASE_URL;
+
+  if (!shouldRunStartupMigrations()) {
+    console.info(
+      "Skipping frontend startup migrations; backend service owns database migrations.",
+    );
+    return;
+  }
 
   if (!connectionString || isPgliteConnectionString(connectionString)) {
     return;

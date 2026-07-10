@@ -1,6 +1,10 @@
-export * from "./client";
 export * from "./dates";
-export * from "./queries";
+export * from "./backend-client";
+export * from "./backend-queries";
+export {
+  getPostgresConnectionConfig,
+  getSslConfig,
+} from "./postgres-config.js";
 export * from "./schema";
 export * from "./types";
 export * from "./validators";

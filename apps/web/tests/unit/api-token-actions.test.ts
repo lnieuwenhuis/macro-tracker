@@ -1,13 +1,12 @@
 import {
-  apiTokens,
   createApiToken,
   listApiTokens,
-  setDatabaseRuntimeForTesting,
   upsertUserFromShooProfile,
   type ApiTokenRecord,
   type DatabaseRuntime,
 } from "@macro-tracker/db";
 import { createTestDatabase } from "@macro-tracker/db/testing";
+import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocked = vi.hoisted(() => ({
@@ -42,13 +41,27 @@ import ApiSettingsPage from "@/app/settings/api/page";
 describe("API token settings actions", () => {
   let runtime: DatabaseRuntime;
 
+  async function withBackendUrl<T>(url: string, operation: () => Promise<T>) {
+    const previous = process.env.BACKEND_URL;
+    process.env.BACKEND_URL = url;
+    try {
+      return await operation();
+    } finally {
+      if (previous === undefined) {
+        delete process.env.BACKEND_URL;
+      } else {
+        process.env.BACKEND_URL = previous;
+      }
+    }
+  }
+
   beforeEach(async () => {
     runtime = await createTestDatabase();
-    setDatabaseRuntimeForTesting(runtime);
+    const testUserKey = randomUUID();
     const user = await upsertUserFromShooProfile(
       {
-        pairwiseSub: "settings-api-user",
-        email: "settings-api@example.com",
+        pairwiseSub: `settings-api-user-${testUserKey}`,
+        email: `settings-api-${testUserKey}@example.com`,
       },
       runtime.db,
     );
@@ -61,7 +74,6 @@ describe("API token settings actions", () => {
   });
 
   afterEach(async () => {
-    setDatabaseRuntimeForTesting();
     await runtime.close();
     vi.clearAllMocks();
   });
@@ -102,6 +114,26 @@ describe("API token settings actions", () => {
 
     const [revoked] = await listApiTokens(mocked.userId, runtime.db);
     expect(revoked?.revokedAt).toBeTruthy();
+  });
+
+  it("creates 90-day tokens through the settings action", async () => {
+    const formData = new FormData();
+    formData.set("name", "Shortcut");
+    formData.set("expires", "90");
+    formData.append("scopes", "read:daily");
+    const beforeCreate = Date.now();
+
+    const created = await createApiTokenAction({}, formData);
+
+    expect(created.ok).toBe(true);
+    if (!created.record?.expiresAt) {
+      throw new Error("Expected API token creation to return an expiry.");
+    }
+    const expiresAt = new Date(created.record.expiresAt).getTime();
+    const ninetyDaysFromBeforeCreate = beforeCreate + 90 * 24 * 60 * 60 * 1000;
+    expect(expiresAt).toBeGreaterThanOrEqual(ninetyDaysFromBeforeCreate);
+    expect(expiresAt).toBeLessThan(ninetyDaysFromBeforeCreate + 60_000);
+    expect(expiresAt).toBeLessThan(beforeCreate + 365 * 24 * 60 * 60 * 1000);
   });
 
   it("requires completed onboarding before listing API tokens", async () => {
@@ -154,6 +186,21 @@ describe("API token settings actions", () => {
     });
   });
 
+  it("rejects mixed valid and invalid API token scopes without creating a token", async () => {
+    const formData = new FormData();
+    formData.set("name", "Shortcut");
+    formData.set("expires", "never");
+    formData.append("scopes", "read:daily");
+    formData.append("scopes", "write:unknown");
+
+    await expect(createApiTokenAction({}, formData)).resolves.toEqual({
+      ok: false,
+      error: "API scope is invalid: write:unknown",
+    });
+    await expect(listApiTokens(mocked.userId, runtime.db)).resolves.toHaveLength(0);
+    expect(mocked.revalidatePath).not.toHaveBeenCalled();
+  });
+
   it("rejects invalid API token expiry values without creating a token", async () => {
     const formData = new FormData();
     formData.set("name", "Shortcut");
@@ -169,38 +216,20 @@ describe("API token settings actions", () => {
   });
 
   it("hides unexpected API token creation failures from the client", async () => {
-    const rawMessage = "database password leaked in driver error";
-    const failingDb = new Proxy(runtime.db, {
-      get(target, prop, receiver) {
-        if (prop === "insert") {
-          return (table: unknown) => {
-            if (table === apiTokens) {
-              throw new Error(rawMessage);
-            }
-
-            const insert = Reflect.get(target, prop, receiver) as (insertTable: unknown) => unknown;
-            return insert.call(target, table);
-          };
-        }
-
-        const value = Reflect.get(target, prop, receiver);
-        return typeof value === "function" ? value.bind(target) : value;
-      },
-    });
-    setDatabaseRuntimeForTesting({ ...runtime, db: failingDb });
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const formData = new FormData();
     formData.set("name", "Shortcut");
     formData.set("expires", "never");
     formData.append("scopes", "read:daily");
 
-    const created = await createApiTokenAction({}, formData);
+    const created = await withBackendUrl("http://127.0.0.1:9", () =>
+      createApiTokenAction({}, formData),
+    );
 
     expect(created).toEqual({
       ok: false,
       error: "Unable to create API token.",
     });
-    expect(JSON.stringify(created)).not.toContain(rawMessage);
     expect(consoleError).toHaveBeenCalledWith("Unexpected API token creation error", expect.any(Error));
     consoleError.mockRestore();
   });

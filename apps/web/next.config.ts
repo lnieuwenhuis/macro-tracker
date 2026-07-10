@@ -23,6 +23,9 @@ const nextConfig: NextConfig = {
   output: "standalone",
   outputFileTracingRoot: repoRoot,
   transpilePackages: ["@macro-tracker/db"],
+  turbopack: {
+    root: repoRoot,
+  },
 };
 
 export default nextConfig;
