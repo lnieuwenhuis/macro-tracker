@@ -1,6 +1,7 @@
 use anyhow::{Context, bail};
 use sqlx::postgres::{PgConnectOptions, PgSslMode};
 use std::env;
+use std::net::IpAddr;
 use std::str::FromStr;
 
 pub const ALLOW_INSECURE_LOCAL_BACKEND_ENV: &str = "BACKEND_ALLOW_INSECURE_LOCAL";
@@ -167,7 +168,12 @@ fn postgres_ssl_mode_for_url(url: &url::Url) -> anyhow::Result<PgSslMode> {
 
 fn is_local_database_host(host: Option<url::Host<&str>>) -> bool {
     match host {
-        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Domain(host)) => {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        }
         Some(url::Host::Ipv4(address)) => address.is_loopback(),
         Some(url::Host::Ipv6(address)) => address.is_loopback(),
         None => false,
@@ -377,24 +383,29 @@ mod tests {
     }
 
     #[test]
-    fn local_postgres_database_url_is_accepted() {
-        let mut values = production_values();
-        values.retain(|(key, _)| *key != "DATABASE_URL");
-        values.push((
-            "DATABASE_URL",
+    fn local_postgres_database_urls_disable_tls() {
+        for database_url in [
             "postgres://postgres:***@localhost:5432/macro_tracker",
-        ));
+            "postgres://postgres:***@127.0.0.1:5432/macro_tracker",
+            "postgres://postgres:***@[::1]:5432/macro_tracker",
+        ] {
+            let mut values = production_values();
+            values.retain(|(key, _)| *key != "DATABASE_URL");
+            values.push(("DATABASE_URL", database_url));
 
-        let config = config_from(&values).expect("local postgres URL should be accepted");
+            let config = config_from(&values).expect("local postgres URL should be accepted");
 
-        assert_eq!(config.database_url, values.last().expect("DATABASE_URL").1);
-        assert_eq!(
-            format!(
-                "{:?}",
-                postgres_ssl_mode_for_url(&url::Url::parse(&config.database_url).unwrap()).unwrap()
-            ),
-            "Disable"
-        );
+            assert_eq!(config.database_url, database_url);
+            assert_eq!(
+                format!(
+                    "{:?}",
+                    postgres_ssl_mode_for_url(&url::Url::parse(&config.database_url).unwrap())
+                        .unwrap()
+                ),
+                "Disable",
+                "local URL should disable TLS: {database_url}"
+            );
+        }
     }
 
     #[test]

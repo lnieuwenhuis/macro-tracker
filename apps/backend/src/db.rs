@@ -6575,9 +6575,9 @@ mod tests {
         assert_eq!(deleted_results[0]["id"], json!(entry_id));
         assert_eq!(deleted_results[0]["productId"], Value::Null);
         assert_eq!(deleted_results[0]["sourceLabel"], Value::Null);
-        assert_eq!(deleted_results[0]["proteinG"], json!(44.0));
-        assert_eq!(deleted_results[0]["carbsG"], json!(22.0));
-        assert_eq!(deleted_results[0]["fatG"], json!(11.0));
+        assert_eq!(deleted_results[0]["proteinG"].as_f64(), Some(44.0));
+        assert_eq!(deleted_results[0]["carbsG"].as_f64(), Some(22.0));
+        assert_eq!(deleted_results[0]["fatG"].as_f64(), Some(11.0));
         assert_eq!(deleted_results[0]["caloriesKcal"], json!(363));
         test_db.cleanup().await;
     }
