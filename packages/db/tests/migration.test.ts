@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createDatabaseRuntime, type DatabaseRuntime } from "../src";
+import { resolveDestructiveTestDatabaseUrl } from "../src/testing";
 
 const migrationFiles = [
   "0000_yielding_the_spike.sql",
@@ -425,5 +426,69 @@ describe("database migrations", () => {
         AND "indexname" = 'api_tokens_token_hash_key'
     `));
     expect(indexResult.rows).toEqual([{ indexname: "api_tokens_token_hash_key" }]);
+  });
+});
+
+describe("test database safety", () => {
+  it("refuses to truncate a plain non-test DATABASE_URL", () => {
+    expect(() =>
+      resolveDestructiveTestDatabaseUrl(
+        {
+          DATABASE_URL:
+            "postgres://macro:secret@db.internal.example.com:5432/macro_tracker",
+        },
+        {
+          explicitEnvNames: ["TEST_DATABASE_URL"],
+          purpose: "database unit tests",
+        },
+      ),
+    ).toThrow(/Refusing to truncate plain DATABASE_URL/);
+  });
+
+  it("refuses to truncate an explicit local non-test TEST_DATABASE_URL by default", () => {
+    expect(() =>
+      resolveDestructiveTestDatabaseUrl(
+        {
+          TEST_DATABASE_URL: "postgres://postgres:***@localhost:5432/macro_tracker",
+        },
+        {
+          explicitEnvNames: ["TEST_DATABASE_URL"],
+          purpose: "database unit tests",
+        },
+      ),
+    ).toThrow(/does not look like a test database/);
+  });
+
+  it("accepts explicit CI-style test and e2e database URLs", () => {
+    const ciDatabaseUrl =
+      "postgres://postgres:postgres@127.0.0.1:5432/macro_tracker_ci";
+
+    expect(
+      resolveDestructiveTestDatabaseUrl(
+        {
+          DATABASE_URL:
+            "postgres://macro:password@db.internal.example.com:5432/macro_tracker",
+          TEST_DATABASE_URL: ciDatabaseUrl,
+        },
+        {
+          explicitEnvNames: ["TEST_DATABASE_URL"],
+          purpose: "database unit tests",
+        },
+      ),
+    ).toBe(ciDatabaseUrl);
+
+    expect(
+      resolveDestructiveTestDatabaseUrl(
+        {
+          DATABASE_URL: ciDatabaseUrl,
+          TEST_DATABASE_URL: ciDatabaseUrl,
+          E2E_DATABASE_URL: ciDatabaseUrl,
+        },
+        {
+          explicitEnvNames: ["E2E_DATABASE_URL", "TEST_DATABASE_URL"],
+          purpose: "Playwright global setup",
+        },
+      ),
+    ).toBe(ciDatabaseUrl);
   });
 });

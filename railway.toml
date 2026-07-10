@@ -1,0 +1,20 @@
+# Default Railway config for the frontend service.
+# Configure the Rust backend as a separate Railway service using /apps/backend/railway.toml.
+
+[build]
+builder = "RAILPACK"
+buildCommand = "pnpm --filter @macro-tracker/web build"
+watchPatterns = [
+  "/apps/web/**",
+  "/packages/db/**",
+  "/package.json",
+  "/pnpm-lock.yaml",
+  "/pnpm-workspace.yaml"
+]
+
+[deploy]
+startCommand = "pnpm --filter @macro-tracker/web start"
+healthcheckPath = "/"
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3

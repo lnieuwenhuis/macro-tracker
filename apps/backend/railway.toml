@@ -1,0 +1,23 @@
+[build]
+builder = "RAILPACK"
+buildCommand = "cargo build --release -p macro-tracker-backend"
+watchPatterns = [
+  "/apps/backend/**",
+  "/packages/db/drizzle/**",
+  "/packages/db/src/migrate.ts",
+  "/packages/db/src/migration.ts",
+  "/packages/db/src/postgres-config.ts",
+  "/packages/db/package.json",
+  "/package.json",
+  "/pnpm-lock.yaml",
+  "/pnpm-workspace.yaml",
+  "/Cargo.toml",
+  "/Cargo.lock"
+]
+
+[deploy]
+startCommand = "pnpm --filter @macro-tracker/db db:migrate && ./target/release/macro-tracker-backend"
+healthcheckPath = "/health"
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3

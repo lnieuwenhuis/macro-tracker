@@ -6,12 +6,11 @@
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?style=flat-square&logo=typescript&logoColor=white)
 ![Drizzle](https://img.shields.io/badge/Drizzle-ORM-c5f74f?style=flat-square)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-ready-4169e1?style=flat-square&logo=postgresql&logoColor=white)
-![PGlite](https://img.shields.io/badge/PGlite-local%20friendly-5f6fef?style=flat-square)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
 
 Macro Tracker is a phone-first macro tracking app for the day-to-day work of eating like you meant to. It is built around the stuff I actually want when I am logging food: fast daily entries, planned meals, reusable meals and days, barcode scanning, recipes, weight tracking, and enough stats to see patterns without turning breakfast into a spreadsheet ceremony.
 
-Current app version: `v2.11`
+Current app version: `v3.01`
 
 ## Try It
 
@@ -34,14 +33,14 @@ Sign in with Google, set your goals during onboarding, and start logging. The ho
 
 ## Run It Yourself
 
-You can run Macro Tracker with either PostgreSQL or a local PGlite file. For a small personal instance, PGlite is the quickest path. For a public deployment, use PostgreSQL.
+Macro Tracker runs as two services: a Rust backend that owns database access and a Next.js frontend that calls it. The backend requires PostgreSQL; `file:` and `memory:` database URLs are not supported for the app runtime.
 
 Requirements:
 
 - Node.js 20+
 - pnpm 10+
+- A PostgreSQL database
 - A Google sign-in flow through Shoo, which is the auth broker this app uses
-- Either PostgreSQL or a PGlite file database
 
 Clone and install:
 
@@ -51,24 +50,56 @@ cd macro-tracker
 pnpm install
 ```
 
-Export the required environment variables in the shell or deployment environment that starts the web app:
+Export the required environment variables in the shell or deployment environment for each service. Use the same `BACKEND_INTERNAL_SECRET` value for the backend and frontend.
 
 ```bash
 export APP_URL=http://localhost:3000
 export SESSION_SECRET=change-this-to-a-long-random-string
-export DATABASE_URL=file:./macro-tracker.db
+export BACKEND_INTERNAL_SECRET=change-this-to-another-long-random-string
+export BACKEND_URL=http://127.0.0.1:4000
+export DATABASE_URL=postgres://macro:macro@localhost:5432/macro_tracker
 ```
 
-The web package runs from `apps/web`, and its production start script reads `process.env` directly. A repo-root `.env` file is not loaded automatically by the start command. If you use a relative PGlite URL such as `file:./macro-tracker.db`, it is resolved relative to the web app process working directory; use an absolute `file:/.../macro-tracker.db` path if that location needs to be unambiguous.
+Required runtime variables:
 
-Then build and run:
+| Variable | Service | Use |
+| --- | --- | --- |
+| `DATABASE_URL` | Backend and migration commands | PostgreSQL connection string for the Rust backend database. Must be `postgres://` or `postgresql://`, not `file:` or `memory:`. |
+| `APP_URL` | Backend and frontend | Public URL of the web app, for example `http://localhost:3000` locally. |
+| `SESSION_SECRET` | Backend and frontend | Long random secret used for sessions. |
+| `BACKEND_INTERNAL_SECRET` | Backend and frontend | Shared secret the frontend sends when calling backend internal routes. |
+| `BACKEND_URL` | Frontend | URL the Next.js app uses to reach the Rust backend. Defaults to `http://127.0.0.1:4000` outside production, but set it explicitly in deployments. |
+
+The web package runs from `apps/web`, and its production start script reads `process.env` directly. A repo-root `.env` file is not loaded automatically by the start command.
+
+Run migrations before starting the backend, then start the backend and web app as separate processes:
 
 ```bash
+# terminal 1: apply PostgreSQL migrations
+pnpm db:migrate
+
+# terminal 2: start the Rust backend on port 4000
+pnpm backend:start
+
+# terminal 3: start the Next.js web app on port 3000
+pnpm dev
+```
+
+For production, build the release backend and frontend, then start the two services independently:
+
+```bash
+# build artifacts before starting services
+pnpm backend:build
 pnpm build
+
+# service 1
+pnpm backend:start:release
+
+# service 2
 pnpm --filter @macro-tracker/web start
 ```
 
-For a deployed instance, set `APP_URL` to the public URL and use a real `SESSION_SECRET`. If you use remote PostgreSQL, `DATABASE_URL` uses TLS with certificate verification by default when `sslmode` is omitted or set to `verify-full`; use `sslmode=require` only when your provider requires encrypted TLS without certificate verification.
+For a deployed instance, set `APP_URL` to the public URL, `BACKEND_URL` to the backend service URL reachable from the frontend server, and use real random values for `SESSION_SECRET` and `BACKEND_INTERNAL_SECRET`. If you use remote PostgreSQL, `DATABASE_URL` uses TLS with certificate verification by default when `sslmode` is omitted or set to `verify-full`; use `sslmode=require` only when your provider requires encrypted TLS without certificate verification.
 
 The production build uses Next.js standalone output and starts that smaller server automatically when it is present. PostgreSQL pools default to a small personal-instance footprint of 3 connections; set `POSTGRES_POOL_MAX` if you need a different cap.
 
@@ -103,25 +134,54 @@ Useful optional environment variables:
 This is a pnpm workspace:
 
 - `apps/web` - the Next.js app and PWA
+- `apps/backend` - the Rust backend service
 - `packages/db` - database schema, migrations, query layer, and database tests
 
-Local development:
+Local development needs PostgreSQL plus the backend and frontend processes:
 
 ```bash
 pnpm install
+pnpm db:migrate
+
+# terminal 1
+pnpm backend:start
+
+# terminal 2
 pnpm dev
 ```
 
-Useful checks:
+Run `pnpm backend:start` and `pnpm dev` in separate terminals so both services stay up while you work.
+
+Useful checks. Use a dedicated PostgreSQL test database whose name clearly contains `test`, `tests`, `e2e`, or `ci`; destructive test setup refuses plain local app databases like `macro_tracker` by default. Point the Rust backend and JS test helpers at the same database for the check you are running so backend-backed routes and direct Drizzle assertions share state:
 
 ```bash
+export TEST_DATABASE_URL="postgres://postgres:***@127.0.0.1:55432/macro_tracker_test"
+export E2E_DATABASE_URL="postgres://postgres:***@127.0.0.1:55432/macro_tracker_e2e"
+
+# Unit/integration checks use TEST_DATABASE_URL.
+export DATABASE_URL="$TEST_DATABASE_URL"
+pnpm db:migrate
+
+# terminal 1: keep the backend running against $TEST_DATABASE_URL
+pnpm backend:start
+
+# terminal 2: run non-E2E checks
 pnpm --filter @macro-tracker/db test
 pnpm --filter @macro-tracker/web test
 pnpm --filter @macro-tracker/web lint
 pnpm typecheck
 pnpm --filter @macro-tracker/web exec tsc --noEmit
 pnpm --filter @macro-tracker/db exec tsc --noEmit
-pnpm test:e2e
+
+# E2E uses E2E_DATABASE_URL. Restart the backend against the same database
+# before Playwright so global setup, the frontend, and the Rust backend share state.
+DATABASE_URL="$E2E_DATABASE_URL" pnpm db:migrate
+
+# terminal 1: keep the backend running against $E2E_DATABASE_URL
+DATABASE_URL="$E2E_DATABASE_URL" pnpm backend:start
+
+# terminal 2: run Playwright against that backend/database
+DATABASE_URL="$E2E_DATABASE_URL" pnpm test:e2e
 ```
 
 Database helpers:

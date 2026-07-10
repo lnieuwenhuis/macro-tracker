@@ -1,8 +1,28 @@
 import { NextResponse } from "next/server";
+import { backendFetch } from "@macro-tracker/db";
 
 import { getRequestOrigin } from "@/lib/request";
-import { applySessionCookie, isSecureRequest } from "@/lib/session";
-import { authorizeShooLogin, ShooAuthError } from "@/lib/shoo";
+import { applySessionTokenCookie, isSecureRequest } from "@/lib/session";
+
+type ShooVerifyPayload =
+  | {
+      ok: true;
+      data: {
+        sessionToken: string;
+        sessionMaxAgeSeconds: number;
+        user: {
+          userId: string;
+          email: string;
+        };
+      };
+    }
+  | {
+      ok: false;
+      error?: {
+        code?: string;
+        message?: string;
+      };
+    };
 
 export async function POST(request: Request) {
   try {
@@ -18,29 +38,37 @@ export async function POST(request: Request) {
       );
     }
 
-    const { sessionUser } = await authorizeShooLogin(body.idToken, undefined, {
-      appOrigin: getRequestOrigin(request),
+    const backendResponse = await backendFetch("/internal/auth/shoo/verify", {
+      method: "POST",
+      body: JSON.stringify({
+        idToken: body.idToken,
+        appOrigin: getRequestOrigin(request),
+      }),
     });
+    const payload = (await backendResponse.json().catch(() => null)) as ShooVerifyPayload | null;
+
+    if (!backendResponse.ok || !payload?.ok) {
+      const errorPayload = payload && !payload.ok ? payload.error : undefined;
+      return NextResponse.json(
+        {
+          error: errorPayload?.message ?? "Unable to verify Shoo login.",
+          code: errorPayload?.code ?? "login_failed",
+        },
+        { status: backendResponse.status || 500 },
+      );
+    }
+
     const response = NextResponse.json({
       ok: true,
-      user: sessionUser,
+      user: payload.data.user,
     });
 
-    await applySessionCookie(response, sessionUser, {
+    applySessionTokenCookie(response, payload.data.sessionToken, {
+      maxAge: payload.data.sessionMaxAgeSeconds,
       secure: isSecureRequest(request),
     });
     return response;
   } catch (error) {
-    if (error instanceof ShooAuthError) {
-      return NextResponse.json(
-        {
-          error: error.message,
-          code: error.code,
-        },
-        { status: error.status },
-      );
-    }
-
     console.error("Unexpected Shoo login verification failure", error);
 
     return NextResponse.json(

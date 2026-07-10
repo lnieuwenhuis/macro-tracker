@@ -13,6 +13,7 @@ import {
   markNavigationRendered,
   prepareNavigationMotion,
   resolveNavigationMotion,
+  type ScreenMotion,
 } from "@/lib/navigation-motion";
 import { prefetchFullRoute } from "@/lib/full-prefetch";
 import { getLocalDateString, getStartupDateRedirect } from "@/lib/startup-date";
@@ -46,12 +47,12 @@ export function ExperimentalAppShell({
   const router = useRouter();
   const [isPending, startNavigation] = useTransition();
   const [profileOpen, setProfileOpen] = useState(false);
+  const [screenMotion, setScreenMotion] = useState<ScreenMotion>("intro");
   const todayStr = useMemo(() => getLocalDateString(), []);
   const isToday = selectedDate === todayStr;
   const basePath = activeTab === "summary" ? "/summary" : "/";
   const previousDateHref = `${basePath}?date=${previousDateString(selectedDate)}`;
   const nextDateHref = `${basePath}?date=${nextDateString(selectedDate)}`;
-  const screenMotion = resolveNavigationMotion(pathname, selectedDate);
   const screenKey = `${pathname}?date=${selectedDate}`;
   const isDayMotion =
     screenMotion === "day-forward" ||
@@ -83,6 +84,8 @@ export function ExperimentalAppShell({
   }, [router, selectedDate, startNavigation]);
 
   useEffect(() => {
+    const nextMotion = resolveNavigationMotion(pathname, selectedDate);
+    setScreenMotion(nextMotion);
     markNavigationRendered(pathname, selectedDate);
   }, [pathname, selectedDate]);
 
@@ -149,7 +152,10 @@ export function ExperimentalAppShell({
 
     function handleAddEvent(event: Event) {
       const action = (event as CustomEvent<ComposeAction>).detail;
-      if (action) onComposeAction!(action);
+      if (action) {
+        event.preventDefault();
+        onComposeAction!(action);
+      }
     }
 
     window.addEventListener("macro-tracker-add", handleAddEvent);

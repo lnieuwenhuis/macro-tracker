@@ -25,6 +25,9 @@ type StartupMigrationModule = {
   getNextServerEnv: (
     env?: Record<string, string | undefined>,
   ) => Record<string, string | undefined>;
+  shouldRunStartupMigrations: (
+    env?: Record<string, string | undefined>,
+  ) => boolean;
 };
 
 const poolDefaults = {
@@ -145,14 +148,30 @@ describe("startup migration database SSL config", () => {
 
     expect(
       getStartupMigrationConnectionConfig(
-        "postgres://user:pass@db.example.com:5432/macro",
+        "postgres://user:***@db.example.com:5432/macro",
       ),
     ).toEqual({
-      connectionString: "postgres://user:pass@db.example.com:5432/macro",
+      connectionString: "postgres://user:***@db.example.com:5432/macro",
       ssl: { rejectUnauthorized: true },
       ...poolDefaults,
       max: 1,
     });
+  });
+
+  it("does not run frontend startup migrations unless legacy mode is explicitly enabled", async () => {
+    const { shouldRunStartupMigrations } = await getStartupMigrationModule();
+
+    expect(
+      shouldRunStartupMigrations({
+        DATABASE_URL: "postgres://user:***@db.example.com:5432/macro",
+      }),
+    ).toBe(false);
+    expect(
+      shouldRunStartupMigrations({
+        DATABASE_URL: "postgres://user:***@db.example.com:5432/macro",
+        LEGACY_FRONTEND_RUN_MIGRATIONS: "true",
+      }),
+    ).toBe(true);
   });
 
   it("prefers the traced standalone app server when present", async () => {

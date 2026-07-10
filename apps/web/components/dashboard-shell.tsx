@@ -6,6 +6,7 @@ import { useEffect, useEffectEvent, useMemo, useRef, useState, useTransition } f
 
 import { applyTemplateAction, createMealGroupAction, deleteMealGroupAction, deleteMealEntryAction, markMealEntryStatusAction, saveMealEntryAction, updateMealGroupAction } from "@/lib/actions";
 import {
+  type AppWarmupPayload,
   getDailyMutationCacheKeys,
 } from "@/lib/app-warmup";
 import type { ComposeAction } from "@/lib/compose";
@@ -240,6 +241,7 @@ export function DashboardShell({
   const router = useRouter();
   const composeHandledRef = useRef<string | null>(null);
   const selectedDateRef = useRef(selectedDate);
+  const [clientReady, setClientReady] = useState(false);
   const [drafts, setDrafts] = useState<MealDraft[]>(() =>
     dailySummary.meals.map(mealToDraft),
   );
@@ -255,6 +257,8 @@ export function DashboardShell({
   const [presetInitialKind, setPresetInitialKind] =
     useState<PresetTemplateKind | null>(null);
   const [localTemplates, setLocalTemplates] = useState<MealTemplate[]>(initialTemplates);
+  const [localRecentCandidates, setLocalRecentCandidates] =
+    useState<QuickAddCandidate[]>(recentCandidates);
   const [presetMutation, setPresetMutation] = useState<PresetMutationState | null>(null);
   const [presetError, setPresetError] = useState<string | null>(null);
   const {
@@ -283,6 +287,46 @@ export function DashboardShell({
 
   // AI photo estimate state
   const [showPhotoModal, setShowPhotoModal] = useState(false);
+
+  useEffect(() => {
+    setClientReady(true);
+  }, []);
+
+  useEffect(() => {
+    setLocalRecentCandidates(recentCandidates);
+  }, [recentCandidates]);
+
+  useEffect(() => {
+    if (!clientReady) {
+      return;
+    }
+
+    const controller = new AbortController();
+    const params = new URLSearchParams({
+      date: selectedDate,
+      scope: "core",
+    });
+
+    void fetch(`/api/app/warmup?${params.toString()}`, {
+      cache: "no-store",
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (!response.ok) {
+          return null;
+        }
+
+        return (await response.json()) as AppWarmupPayload;
+      })
+      .then((payload) => {
+        if (payload) {
+          setLocalRecentCandidates(payload.recentCandidates);
+        }
+      })
+      .catch(() => undefined);
+
+    return () => controller.abort();
+  }, [clientReady, selectedDate]);
 
   useEffect(() => {
     setSavedMeals(dailySummary.meals);
@@ -342,8 +386,8 @@ export function DashboardShell({
           presetId: template.id,
         };
       });
-    return [...templateCandidates, ...recentCandidates];
-  }, [localTemplates, recentCandidates]);
+    return [...templateCandidates, ...localRecentCandidates];
+  }, [localTemplates, localRecentCandidates]);
 
   // Single unified quick-add list: ranked by routine signals, not macro fit.
   const quickAddItems = useMemo(
@@ -1019,8 +1063,9 @@ export function DashboardShell({
           <div className="flex items-center gap-2">
             <button
               type="button"
+              disabled={!clientReady}
               onClick={() => setShowSearchModal(true)}
-              className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--color-muted)] transition hover:bg-[var(--color-card-muted)] hover:text-[var(--color-ink)]"
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--color-muted)] transition hover:bg-[var(--color-card-muted)] hover:text-[var(--color-ink)] disabled:opacity-60"
               aria-label="Search food history"
             >
               <svg width="17" height="17" viewBox="0 0 17 17" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -1030,11 +1075,12 @@ export function DashboardShell({
             </button>
             <button
               type="button"
+              disabled={!clientReady}
               onClick={() => {
                 setGroupError(null);
                 setShowGroupManager((open) => !open);
               }}
-              className="flex h-9 items-center rounded-xl px-3 text-xs font-semibold text-[var(--color-muted)] transition hover:bg-[var(--color-card-muted)] hover:text-[var(--color-ink)]"
+              className="flex h-9 items-center rounded-xl px-3 text-xs font-semibold text-[var(--color-muted)] transition hover:bg-[var(--color-card-muted)] hover:text-[var(--color-ink)] disabled:opacity-60"
             >
               Groups
             </button>
@@ -1047,15 +1093,17 @@ export function DashboardShell({
             <div className="mt-3 flex justify-center gap-2">
               <button
                 type="button"
+                disabled={!clientReady}
                 onClick={() => openPresetModal()}
-                className="rounded-full border border-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-[var(--color-accent)] transition hover:-translate-y-0.5"
+                className="rounded-full border border-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-[var(--color-accent)] transition hover:-translate-y-0.5 disabled:opacity-60"
               >
                 From template
               </button>
               <button
                 type="button"
+                disabled={!clientReady}
                 onClick={addCustomDraft}
-                className="rounded-full bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-white transition hover:-translate-y-0.5"
+                className="rounded-full bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-white transition hover:-translate-y-0.5 disabled:opacity-60"
               >
                 Add custom
               </button>

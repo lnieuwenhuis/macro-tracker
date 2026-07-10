@@ -61,11 +61,16 @@ export function ExperimentalLayoutNav() {
 
     if (pathname === "/") {
       // On the log page: delegate to the dashboard shell via custom event
-      window.dispatchEvent(new CustomEvent("macro-tracker-add", { detail: action }));
-      return;
+      const event = new CustomEvent("macro-tracker-add", {
+        cancelable: true,
+        detail: action,
+      });
+      if (!window.dispatchEvent(event)) {
+        return;
+      }
     }
 
-    // On other pages: navigate to the log page with the compose action
+    // If the dashboard shell has not hydrated yet, use the URL compose fallback.
     const href = `/?date=${selectedDate}&compose=${action}`;
     prepareNavigationMotion(href, "screen-backward");
     startNavigation(() => {

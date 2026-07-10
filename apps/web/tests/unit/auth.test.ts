@@ -64,6 +64,34 @@ describe("shoo auth helpers", () => {
       .sign(privateKey);
   }
 
+  async function createRustLikeSessionToken(secret: string, userId: string, email: string) {
+    const encodeBase64Url = (value: unknown) =>
+      Buffer.from(JSON.stringify(value)).toString("base64url");
+    const signingInput = [
+      encodeBase64Url({ typ: "JWT", alg: "HS256" }),
+      encodeBase64Url({
+        sub: userId,
+        email,
+        type: "mt_session",
+        exp: 4_102_444_800,
+        iat: 1_893_456_000,
+      }),
+    ].join(".");
+    const signature = await crypto.subtle.sign(
+      "HMAC",
+      await crypto.subtle.importKey(
+        "raw",
+        new TextEncoder().encode(secret),
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"],
+      ),
+      new TextEncoder().encode(signingInput),
+    );
+
+    return `${signingInput}.${Buffer.from(signature).toString("base64url")}`;
+  }
+
   it("verifies a valid Shoo token", async () => {
     const token = await createToken();
 
@@ -139,6 +167,29 @@ describe("shoo auth helpers", () => {
     const sessionToken = await createSessionToken(result.sessionUser);
     const sessionUser = await verifySessionToken(sessionToken);
     expect(sessionUser).toEqual(result.sessionUser);
+  });
+
+  it("uses identical SESSION_SECRET bytes for frontend and Rust-shaped session tokens", async () => {
+    const sessionUser = {
+      userId: "11111111-1111-4111-8111-111111111111",
+      email: "coach@example.com",
+    };
+    process.env.SESSION_SECRET = "  whitespace-session-secret-with-at-least-32-chars  \n";
+    resetServerEnvForTests();
+
+    const frontendToken = await createSessionToken(sessionUser);
+    expect(await verifySessionToken(frontendToken)).toEqual(sessionUser);
+
+    const rustToken = await createRustLikeSessionToken(
+      process.env.SESSION_SECRET,
+      sessionUser.userId,
+      sessionUser.email,
+    );
+    expect(await verifySessionToken(rustToken)).toEqual(sessionUser);
+
+    process.env.SESSION_SECRET = process.env.SESSION_SECRET.trim();
+    resetServerEnvForTests();
+    expect(await verifySessionToken(rustToken)).toBeNull();
   });
 
   it("updates shooPairwiseSub when a user with the same email logs in with a different sub", async () => {

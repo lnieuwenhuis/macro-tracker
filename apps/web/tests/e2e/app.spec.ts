@@ -2,6 +2,15 @@ import { expect, test, type Page } from "@playwright/test";
 
 import { createTestSession, testRouteHeaders, uniqueTestEmail } from "./test-users";
 
+async function changeSelectedDate(page: Page, date: string) {
+  const datePicker = page.getByLabel("Pick a day").first();
+  await expect(datePicker).toBeEnabled();
+  await datePicker.fill(date);
+  await datePicker.blur();
+  await expect(datePicker).toHaveValue(date);
+  await expect(page).toHaveURL(new RegExp(`date=${date}`));
+}
+
 async function startCustomFoodDraft(page: Page) {
   const addCustomButton = page.getByRole("button", { name: "Add custom" });
 
@@ -121,8 +130,7 @@ test("allows an allowlisted user to track food items across days", async ({
 
   await expect(datePicker).toHaveValue(currentBrowserDate);
 
-  await datePicker.fill("2026-03-17");
-  await expect(page).toHaveURL(/date=2026-03-17/);
+  await changeSelectedDate(page, "2026-03-17");
   await addCustomFood(page, {
     label: "Greek yogurt",
     proteinG: "30",
@@ -131,8 +139,7 @@ test("allows an allowlisted user to track food items across days", async ({
     caloriesKcal: "370",
   });
 
-  await datePicker.fill("2026-03-19");
-  await expect(page).toHaveURL(/date=2026-03-19/);
+  await changeSelectedDate(page, "2026-03-19");
   await addCustomFood(page, {
     label: "Chicken breast",
     proteinG: "50",

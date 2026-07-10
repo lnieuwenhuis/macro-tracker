@@ -1,7 +1,7 @@
 import {
-  apiTokens,
   completeUserOnboarding,
   createApiToken,
+  createMealEntry,
   createPersonalFoodProduct,
   foodProducts,
   getApiScopes,
@@ -9,7 +9,6 @@ import {
   revokeApiToken,
   saveBarcodeFoodProduct,
   setDatabaseRuntimeForTesting,
-  users,
   upsertUserFromShooProfile,
   type DatabaseRuntime,
 } from "@macro-tracker/db";
@@ -20,6 +19,39 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { handleApiV1Request } from "@/lib/api-v1";
 import { API_V1_ENDPOINTS, formatApiV1ScopeSummary, getApiV1OpenApi } from "@/lib/api-v1-openapi";
 import * as apiV1Route from "@/app/api/v1/[[...path]]/route";
+
+describe("API v1 backend proxy failures", () => {
+  async function withBackendUrl<T>(url: string, operation: () => Promise<T>) {
+    const previous = process.env.BACKEND_URL;
+    process.env.BACKEND_URL = url;
+    try {
+      return await operation();
+    } finally {
+      if (previous === undefined) {
+        delete process.env.BACKEND_URL;
+      } else {
+        process.env.BACKEND_URL = previous;
+      }
+    }
+  }
+
+  it("returns upstream_error with CORS headers when backendFetch rejects", async () => {
+    const response = await withBackendUrl("http://127.0.0.1:9", () =>
+      handleApiV1Request(new Request("http://localhost/api/v1/me"), ["me"], "GET"),
+    );
+
+    expect(response.status).toBe(502);
+    expect(response.headers.get("access-control-allow-origin")).toBe("*");
+    expect(response.headers.get("access-control-allow-headers")).toContain("Authorization");
+    await expect(response.json()).resolves.toMatchObject({
+      ok: false,
+      error: {
+        code: "upstream_error",
+        message: "Backend service is unavailable.",
+      },
+    });
+  });
+});
 
 describe("Macro Tracker API v1", () => {
   let runtime: DatabaseRuntime;
@@ -86,6 +118,20 @@ describe("Macro Tracker API v1", () => {
     );
   }
 
+  async function withBackendUrl<T>(url: string, operation: () => Promise<T>) {
+    const previous = process.env.BACKEND_URL;
+    process.env.BACKEND_URL = url;
+    try {
+      return await operation();
+    } finally {
+      if (previous === undefined) {
+        delete process.env.BACKEND_URL;
+      } else {
+        process.env.BACKEND_URL = previous;
+      }
+    }
+  }
+
   function expectNoInternalFoodFields(product: Record<string, unknown>) {
     expect(product).not.toHaveProperty("ownerUserId");
     expect(product).not.toHaveProperty("submittedByUserId");
@@ -94,71 +140,6 @@ describe("Macro Tracker API v1", () => {
     expect(product).not.toHaveProperty("sourceConfidence");
     expect(product).not.toHaveProperty("sourceMetadata");
     expect(product).not.toHaveProperty("correctedFromProductId");
-  }
-
-  function createFailingRuntimeForTables(input: {
-    selectTable?: unknown;
-    updateTable?: unknown;
-    message: string;
-  }) {
-    const failingDb = new Proxy(runtime.db, {
-      get(target, prop, receiver) {
-        if (prop === "update" && input.updateTable) {
-          return (table: unknown) => {
-            if (table === input.updateTable) {
-              throw new Error(input.message);
-            }
-            const update = Reflect.get(target, prop, receiver) as (updateTable: unknown) => unknown;
-            return update.call(target, table);
-          };
-        }
-
-        if (prop === "select") {
-          return (...args: unknown[]) => {
-            const select = Reflect.get(target, prop, receiver) as (...selectArgs: unknown[]) => unknown;
-            const builder = select.apply(target, args);
-            return new Proxy(builder as object, {
-              get(selectTarget, selectProp, selectReceiver) {
-                if (selectProp === "from") {
-                  return (table: unknown) => {
-                    if (table === input.selectTable) {
-                      throw new Error(input.message);
-                    }
-                    const from = Reflect.get(selectTarget, selectProp, selectReceiver) as (
-                      fromTable: unknown,
-                    ) => unknown;
-                    return from.call(selectTarget, table);
-                  };
-                }
-
-                const value = Reflect.get(selectTarget, selectProp, selectReceiver);
-                return typeof value === "function" ? value.bind(selectTarget) : value;
-              },
-            });
-          };
-        }
-
-        const value = Reflect.get(target, prop, receiver);
-        return typeof value === "function" ? value.bind(target) : value;
-      },
-    });
-
-    return { ...runtime, db: failingDb } satisfies DatabaseRuntime;
-  }
-
-  function createFailingUserLookupRuntime() {
-    return createFailingRuntimeForTables({
-      selectTable: users,
-      message: "Forced user lookup failure.",
-    });
-  }
-
-  function createFailingApiTokenLookupRuntime() {
-    return createFailingRuntimeForTables({
-      selectTable: apiTokens,
-      updateTable: apiTokens,
-      message: "Forced API token lookup failure.",
-    });
   }
 
   it("returns CORS preflight headers for API v1 paths", async () => {
@@ -1374,15 +1355,18 @@ describe("Macro Tracker API v1", () => {
     ]);
 
     expect([first.status, duplicate.status].sort()).toEqual([201, 409]);
+    const created = first.status === 201 ? first : duplicate;
+    const createdPayload = await created.json();
 
     const entries = await apiRequest("GET", "/weight/entries", { token: fullToken });
     const payload = await entries.json();
     expect(payload.data).toHaveLength(1);
     expect(payload.data[0]).toMatchObject({
-      date: "2026-03-19",
-      weightKg: 80,
-      bodyFatPct: 18.5,
-      notes: "Original entry",
+      id: createdPayload.data.id,
+      date: createdPayload.data.date,
+      weightKg: createdPayload.data.weightKg,
+      bodyFatPct: createdPayload.data.bodyFatPct,
+      notes: createdPayload.data.notes,
     });
   });
 
@@ -1409,38 +1393,6 @@ describe("Macro Tracker API v1", () => {
       error: {
         code: "weight_entry_date_conflict",
         message: "A weight entry already exists for this date.",
-      },
-    });
-  });
-
-  it("returns internal_error for unexpected dispatch failures", async () => {
-    setDatabaseRuntimeForTesting(createFailingUserLookupRuntime());
-
-    const response = await apiRequest("GET", "/me", { token: fullToken });
-
-    expect(response.status).toBe(500);
-    await expect(response.json()).resolves.toMatchObject({
-      ok: false,
-      error: {
-        code: "internal_error",
-        message: "An internal server error occurred.",
-      },
-    });
-  });
-
-  it("returns internal_error with CORS headers for unexpected authentication storage failures", async () => {
-    setDatabaseRuntimeForTesting(createFailingApiTokenLookupRuntime());
-
-    const response = await apiRequest("GET", "/me", { token: fullToken });
-
-    expect(response.status).toBe(500);
-    expect(response.headers.get("access-control-allow-origin")).toBe("*");
-    expect(response.headers.get("access-control-allow-headers")).toContain("Authorization");
-    await expect(response.json()).resolves.toMatchObject({
-      ok: false,
-      error: {
-        code: "internal_error",
-        message: "An internal server error occurred.",
       },
     });
   });
@@ -2111,5 +2063,57 @@ describe("Macro Tracker API v1", () => {
         }
       }
     }
+  });
+
+  it("handles OpenAPI CORS preflight without proxying to the backend", async () => {
+    await withBackendUrl("http://127.0.0.1:1", async () => {
+      const response = await apiRequest("OPTIONS", "/openapi.json");
+
+      expect(response.status).toBe(204);
+      expect(response.headers.get("access-control-allow-origin")).toBe("*");
+      expect(response.headers.get("access-control-allow-methods")).toContain("OPTIONS");
+      expect(response.headers.get("access-control-allow-headers")).toContain("Authorization");
+    });
+  });
+
+  it("passes leaderboard reference dates through the API", async () => {
+    for (const [date, label] of [
+      ["2026-03-18", "Protein bowl"],
+      ["2026-03-19", "Rice bowl"],
+      ["2026-03-20", "Yogurt"],
+    ] as const) {
+      await createMealEntry(
+        userId,
+        {
+          date,
+          mealGroupId: null,
+          status: "eaten",
+          label,
+          proteinG: 25,
+          carbsG: 45,
+          fatG: 10,
+          caloriesKcal: 420,
+        },
+        runtime.db,
+      );
+    }
+
+    const current = await apiRequest("GET", "/leaderboard?date=2026-03-20", { token: fullToken });
+    await expect(current.json()).resolves.toMatchObject({
+      ok: true,
+      data: {
+        currentStreak: 3,
+        longestStreak: 3,
+      },
+    });
+
+    const missed = await apiRequest("GET", "/leaderboard?date=2026-03-22", { token: fullToken });
+    await expect(missed.json()).resolves.toMatchObject({
+      ok: true,
+      data: {
+        currentStreak: 0,
+        longestStreak: 3,
+      },
+    });
   });
 });

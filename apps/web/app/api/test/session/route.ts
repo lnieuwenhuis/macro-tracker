@@ -1,15 +1,14 @@
 import {
   completeUserOnboarding,
   ensureUserRole,
+  setUserOnboardingForTesting,
   upsertUserFromShooProfile,
 } from "@macro-tracker/db";
-import { sql } from "drizzle-orm";
 import { NextResponse } from "next/server";
 
 import { getServerEnv } from "@/lib/env";
 import { applySessionCookie, isSecureRequest } from "@/lib/session";
 import { ensureTestRouteRequest } from "@/lib/test-routes";
-import { ensureTestSessionSchema } from "@/lib/test-session-schema";
 
 const TEST_LOGIN_BASES = new Set(["coach", "owner", "admin", "user", "setup"]);
 
@@ -44,7 +43,6 @@ async function createTestSessionResponse(
     );
   }
 
-  const db = await ensureTestSessionSchema();
   const user = await upsertUserFromShooProfile(
     {
       pairwiseSub: `test:${email}`,
@@ -52,19 +50,14 @@ async function createTestSessionResponse(
       displayName: "Playwright User",
       pictureUrl: null,
     },
-    db,
   );
   if (testLoginBase === "owner") {
-    await ensureUserRole(user.id, "owner", db);
+    await ensureUserRole(user.id, "owner");
   }
   if (options.onboarded) {
-    await completeUserOnboarding(user.id, { preferredWeightUnit: "kg" }, db);
+    await completeUserOnboarding(user.id, { preferredWeightUnit: "kg" });
   } else {
-    await db.execute(sql`
-      UPDATE "users"
-      SET "onboarding_completed_at" = NULL
-      WHERE "id" = ${user.id}
-    `);
+    await setUserOnboardingForTesting(user.id, false);
   }
   const response = options.redirectOnSuccess
     ? NextResponse.redirect(new URL("/", request.url))

@@ -5,6 +5,7 @@ import {
   createMealGroup,
   createRecipe,
   createMealEntry,
+  createWeightEntry,
   completeOnboardingSetup,
   createPersonalFoodProduct,
   createTemplate,
@@ -12,6 +13,7 @@ import {
   deleteMealEntry,
   ensureDefaultMealGroups,
   getDailySummary,
+  getLeaderboardStats,
   getMealGroups,
   getPeriodAverages,
   getRecipeById,
@@ -113,12 +115,21 @@ describe("database queries", () => {
     table: unknown;
     failOnCall?: number;
     message: string;
+    backendFault: {
+      kind: string;
+      failOnCall?: number;
+      message: string;
+    };
   }) {
     let callCount = 0;
 
     function wrapClient(client: any) {
       return new Proxy(client, {
         get(target, prop, receiver) {
+          if (prop === "__backendTestFault") {
+            return input.backendFault;
+          }
+
           if (prop === input.method) {
             return (table: unknown) => {
               if (table === input.table) {
@@ -152,6 +163,11 @@ describe("database queries", () => {
       table: recipeIngredients,
       failOnCall: failOnIngredientInsertNumber,
       message: "Forced ingredient insert failure.",
+      backendFault: {
+        kind: "recipe_ingredient_insert",
+        failOnCall: failOnIngredientInsertNumber,
+        message: "Forced ingredient insert failure.",
+      },
     });
   }
 
@@ -160,6 +176,10 @@ describe("database queries", () => {
       method: "insert",
       table: foodProducts,
       message: "Forced barcode food product insert failure.",
+      backendFault: {
+        kind: "barcode_food_product_insert",
+        message: "Forced barcode food product insert failure.",
+      },
     });
   }
 
@@ -169,6 +189,11 @@ describe("database queries", () => {
       table: mealEntries,
       failOnCall: failOnMealEntryInsertNumber,
       message: "Forced meal entry insert failure.",
+      backendFault: {
+        kind: "meal_entry_insert",
+        failOnCall: failOnMealEntryInsertNumber,
+        message: "Forced meal entry insert failure.",
+      },
     });
   }
 
@@ -177,6 +202,10 @@ describe("database queries", () => {
       method: "update",
       table: mealEntries,
       message: "Forced meal group unassign failure.",
+      backendFault: {
+        kind: "meal_group_unassign",
+        message: "Forced meal group unassign failure.",
+      },
     });
   }
 
@@ -227,6 +256,57 @@ describe("database queries", () => {
     );
 
     expect(created.record.expiresAt).toBeNull();
+  });
+
+  it("validates and dedupes API token scopes", async () => {
+    await expect(
+      createApiToken(userId, { name: "Empty", scopes: [] }, runtime.db),
+    ).rejects.toThrow("API token must include at least one scope.");
+    await expect(
+      createApiToken(userId, { name: "Bad", scopes: ["read:daily", "admin:*"] }, runtime.db),
+    ).rejects.toThrow("API token scope is invalid.");
+
+    const created = await createApiToken(
+      userId,
+      {
+        name: "Duplicates",
+        scopes: ["read:daily", "write:daily", "read:daily"],
+      },
+      runtime.db,
+    );
+
+    expect(created.record.scopes).toEqual(["read:daily", "write:daily"]);
+  });
+
+  it("rejects invalid API token expiry strings with validation errors", async () => {
+    await expect(
+      createApiToken(
+        userId,
+        {
+          name: "Bad expiry",
+          scopes: ["read:daily"],
+          expiresAt: "not-a-date",
+        },
+        runtime.db,
+      ),
+    ).rejects.toThrow("API token expiry is invalid.");
+  });
+
+  it("defaults API token expiry to about ninety days", async () => {
+    const before = Date.now();
+    const created = await createApiToken(
+      userId,
+      {
+        name: "Default expiry",
+        scopes: ["read:daily"],
+      },
+      runtime.db,
+    );
+    const after = Date.now();
+    const expiresAt = new Date(created.record.expiresAt!).getTime();
+
+    expect(expiresAt).toBeGreaterThanOrEqual(before + 89 * 24 * 60 * 60 * 1000);
+    expect(expiresAt).toBeLessThanOrEqual(after + 91 * 24 * 60 * 60 * 1000);
   });
 
   it("authenticates valid API tokens and updates last-used time", async () => {
@@ -1953,6 +2033,86 @@ describe("database queries", () => {
     await expect(getUserById(userId, runtime.db)).resolves.toMatchObject({
       onboardingCompletedAt: null,
       preferredWeightUnit: "kg",
+    });
+  });
+
+  it("uses the requested leaderboard reference date for streaks", async () => {
+    await createMealEntry(userId, {
+      date: "2026-03-18",
+      mealGroupId: null,
+      status: "eaten",
+      label: "Protein bowl",
+      proteinG: 35,
+      carbsG: 45,
+      fatG: 12,
+      caloriesKcal: 430,
+    }, runtime.db);
+    await createMealEntry(userId, {
+      date: "2026-03-19",
+      mealGroupId: null,
+      status: "eaten",
+      label: "Rice bowl",
+      proteinG: 25,
+      carbsG: 60,
+      fatG: 8,
+      caloriesKcal: 500,
+    }, runtime.db);
+    await createMealEntry(userId, {
+      date: "2026-03-20",
+      mealGroupId: null,
+      status: "eaten",
+      label: "Yogurt",
+      proteinG: 20,
+      carbsG: 25,
+      fatG: 4,
+      caloriesKcal: 240,
+    }, runtime.db);
+
+    await expect(getLeaderboardStats(userId, "2026-03-20", runtime.db)).resolves.toMatchObject({
+      currentStreak: 3,
+      longestStreak: 3,
+    });
+    await expect(getLeaderboardStats(userId, "2026-03-22", runtime.db)).resolves.toMatchObject({
+      currentStreak: 0,
+      longestStreak: 3,
+    });
+  });
+
+  it("computes weight progress stats from the selected reference date", async () => {
+    for (const entry of [
+      { date: "2026-05-29", weightKg: 85 },
+      { date: "2026-05-31", weightKg: 84.5 },
+      { date: "2026-06-22", weightKg: 83.5 },
+      { date: "2026-06-23", weightKg: 83 },
+      { date: "2026-06-29", weightKg: 82 },
+      { date: "2026-06-30", weightKg: 81.5 },
+    ]) {
+      await createWeightEntry(
+        userId,
+        {
+          ...entry,
+          bodyFatPct: null,
+          notes: null,
+        },
+        runtime.db,
+      );
+    }
+
+    const weightData = await getWeightPageData(userId, "2026-06-30", runtime.db);
+
+    expect(weightData.entries.map((entry) => entry.date)).toEqual([
+      "2026-05-29",
+      "2026-05-31",
+      "2026-06-22",
+      "2026-06-23",
+      "2026-06-29",
+      "2026-06-30",
+    ]);
+    expect(weightData.stats).toEqual({
+      currentWeight: 81.5,
+      weekChange: -1.5,
+      monthChange: -3,
+      trendDirection: "down",
     });
   });
 
