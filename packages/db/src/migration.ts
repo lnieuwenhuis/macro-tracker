@@ -1,5 +1,5 @@
 import { migrate as migrateNode } from "drizzle-orm/node-postgres/migrator";
-import { type NodePgDatabase } from "drizzle-orm/node-postgres";
+import { drizzle as drizzleNode } from "drizzle-orm/node-postgres";
 import { migrate as migratePglite } from "drizzle-orm/pglite/migrator";
 import { type PgliteDatabase } from "drizzle-orm/pglite";
 import { sql } from "drizzle-orm";
@@ -15,16 +15,33 @@ function getMigrationsFolder() {
   return fileURLToPath(new URL("../drizzle", import.meta.url));
 }
 
-export async function migrateDatabase(runtime: DatabaseRuntime) {
+const POSTGRES_MIGRATION_LOCK_ID = 1_836_027_411;
+
+export async function migrateDatabase(
+  runtime: DatabaseRuntime,
+  migrationsFolder = getMigrationsFolder(),
+) {
   if (runtime.mode === "postgres") {
-    await migrateNode(runtime.db as NodePgDatabase<typeof schema>, {
-      migrationsFolder: getMigrationsFolder(),
-    });
+    if (!runtime.migrationPool) {
+      throw new Error("PostgreSQL migration pool is unavailable.");
+    }
+
+    const client = await runtime.migrationPool.connect();
+    try {
+      await client.query("SELECT pg_advisory_lock($1)", [POSTGRES_MIGRATION_LOCK_ID]);
+      await migrateNode(drizzleNode(client, { schema }), { migrationsFolder });
+    } finally {
+      try {
+        await client.query("SELECT pg_advisory_unlock($1)", [POSTGRES_MIGRATION_LOCK_ID]);
+      } finally {
+        client.release();
+      }
+    }
     return;
   }
 
   await migratePglite(runtime.db as PgliteDatabase<typeof schema>, {
-    migrationsFolder: getMigrationsFolder(),
+    migrationsFolder,
   });
 }
 
