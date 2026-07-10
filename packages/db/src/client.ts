@@ -25,6 +25,7 @@ export type DatabaseClient =
 export type DatabaseRuntime = {
   db: DatabaseClient;
   mode: "postgres" | "pglite-memory" | "pglite-file";
+  migrationPool?: Pool;
   close: () => Promise<void>;
 };
 
@@ -819,6 +820,7 @@ export async function createDatabaseRuntime(
   return {
     db,
     mode: "postgres",
+    migrationPool: pool,
     close: async () => {
       await pool.end();
     },

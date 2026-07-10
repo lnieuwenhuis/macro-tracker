@@ -17,7 +17,8 @@ watchPatterns = [
 ]
 
 [deploy]
-startCommand = "pnpm --filter @macro-tracker/db db:migrate && ./target/release/macro-tracker-backend"
+preDeployCommand = "pnpm --filter @macro-tracker/db db:migrate"
+startCommand = "./target/release/macro-tracker-backend"
 healthcheckPath = "/health"
 healthcheckTimeout = 120
 restartPolicyType = "ON_FAILURE"
