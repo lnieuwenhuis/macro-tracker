@@ -3439,7 +3439,7 @@ async fn get_admin_user_detail_json(pool: &PgPool, user_id: Uuid) -> AppResult<V
             "barcodeSubmissions": counts.try_get::<i32, _>("barcode_submissions")?
         },
         "recentMeals": list_recent_meal_entries_json(pool, user_id, 10, false).await?,
-        "recentWeights": recent_weights.as_array().cloned().unwrap_or_default().into_iter().take(10).collect::<Vec<_>>(),
+        "recentWeights": recent_weights.as_array().cloned().unwrap_or_default().into_iter().rev().take(10).collect::<Vec<_>>(),
         "recentRecipes": recent_recipes.as_array().cloned().unwrap_or_default().into_iter().take(10).collect::<Vec<_>>(),
         "recentTemplates": recent_templates.as_array().cloned().unwrap_or_default().into_iter().take(10).collect::<Vec<_>>(),
         "recentBarcodeSubmissions": recent_barcode_submissions_json(pool, user_id, 10).await?
@@ -6548,9 +6548,18 @@ mod tests {
             .iter()
             .filter_map(|item| item["id"].as_str())
             .collect::<Vec<_>>();
+        let recent_weight_dates = detail["recentWeights"]
+            .as_array()
+            .expect("recent weights should be an array")
+            .iter()
+            .filter_map(|item| item["date"].as_str())
+            .collect::<Vec<_>>();
 
         assert!(recent_meal_ids.contains(&planned_id.to_string().as_str()));
-        assert_eq!(detail["recentWeights"].as_array().unwrap().len(), 10);
+        assert_eq!(recent_weight_dates.len(), 10);
+        assert_eq!(recent_weight_dates.first(), Some(&"2026-06-11"));
+        assert_eq!(recent_weight_dates.last(), Some(&"2026-06-02"));
+        assert!(!recent_weight_dates.contains(&"2026-06-01"));
         assert_eq!(recent_barcode_ids, vec![barcode_id.to_string()]);
         assert!(!recent_barcode_ids.contains(&manual_id.to_string().as_str()));
         test_db.cleanup().await;
