@@ -1504,7 +1504,7 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
                 .and_then(Value::as_i64)
                 .unwrap_or(200)
                 .clamp(1, 500) as i32;
-            list_recent_meal_entries_json(pool, user_id, limit).await
+            list_recent_meal_entries_json(pool, user_id, limit, true).await
         }
         "getRecentDailyOverviews" => {
             let user_id = uuid_arg(&args, "userId")?;
@@ -1967,10 +1967,11 @@ async fn search_food_products_json(pool: &PgPool, user_id: Uuid, query: &str) ->
             AND NOT EXISTS (
               SELECT 1
               FROM unnest($2::text[]) AS patterns(pattern)
-              WHERE NOT (
+              WHERE NOT coalesce(
                 name ILIKE pattern ESCAPE '\'
                 OR brand ILIKE pattern ESCAPE '\'
-                OR barcode ILIKE pattern ESCAPE '\'
+                OR barcode ILIKE pattern ESCAPE '\',
+                false
               )
             )
           ORDER BY
@@ -3426,6 +3427,7 @@ async fn get_admin_user_detail_json(pool: &PgPool, user_id: Uuid) -> AppResult<V
     .await?;
     let recent_recipes = recipes_json(pool, user_id).await?;
     let recent_templates = templates_json(pool, user_id).await?;
+    let recent_weights = weight_entries_json(pool, user_id).await?;
     Ok(json!({
         "user": user,
         "goals": get_user_goals(pool, user_id).await?,
@@ -3436,12 +3438,64 @@ async fn get_admin_user_detail_json(pool: &PgPool, user_id: Uuid) -> AppResult<V
             "templates": counts.try_get::<i32, _>("templates")?,
             "barcodeSubmissions": counts.try_get::<i32, _>("barcode_submissions")?
         },
-        "recentMeals": list_recent_meal_entries_json(pool, user_id, 10).await?,
-        "recentWeights": weight_entries_json(pool, user_id).await?,
+        "recentMeals": list_recent_meal_entries_json(pool, user_id, 10, false).await?,
+        "recentWeights": recent_weights.as_array().cloned().unwrap_or_default().into_iter().take(10).collect::<Vec<_>>(),
         "recentRecipes": recent_recipes.as_array().cloned().unwrap_or_default().into_iter().take(10).collect::<Vec<_>>(),
         "recentTemplates": recent_templates.as_array().cloned().unwrap_or_default().into_iter().take(10).collect::<Vec<_>>(),
-        "recentBarcodeSubmissions": search_food_products_json(pool, user_id, "").await?
+        "recentBarcodeSubmissions": recent_barcode_submissions_json(pool, user_id, 10).await?
     }))
+}
+
+async fn recent_barcode_submissions_json(
+    pool: &PgPool,
+    user_id: Uuid,
+    limit: i32,
+) -> AppResult<Value> {
+    let row = sqlx::query(
+        r#"
+        SELECT coalesce(jsonb_agg(
+          jsonb_build_object(
+            'id', id,
+            'ownerUserId', owner_user_id,
+            'scope', scope,
+            'source', source,
+            'barcode', barcode,
+            'name', name,
+            'brand', brand,
+            'defaultServingQuantity', default_serving_quantity::float8,
+            'defaultServingUnit', default_serving_unit,
+            'proteinPer100', protein_per_100::float8,
+            'carbsPer100', carbs_per_100::float8,
+            'fatPer100', fat_per_100::float8,
+            'caloriesPer100', calories_per_100,
+            'servingWeightG', serving_weight_g::float8,
+            'servingVolumeMl', serving_volume_ml::float8,
+            'submittedByUserId', submitted_by_user_id,
+            'deletedByUserId', deleted_by_user_id,
+            'sourceProvider', source_provider,
+            'sourceConfidence', source_confidence::float8,
+            'sourceMetadata', source_metadata,
+            'correctedFromProductId', corrected_from_product_id,
+            'createdAt', created_at,
+            'updatedAt', updated_at,
+            'deletedAt', deleted_at
+          )
+          ORDER BY created_at DESC, id
+        ), '[]'::jsonb) AS data
+        FROM (
+          SELECT *
+          FROM food_products
+          WHERE submitted_by_user_id = $1 AND source = 'barcode'
+          ORDER BY created_at DESC, id
+          LIMIT $2
+        ) recent
+        "#,
+    )
+    .bind(user_id)
+    .bind(limit)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.try_get("data")?)
 }
 
 async fn set_user_role_json(
@@ -5008,6 +5062,7 @@ async fn list_recent_meal_entries_json(
     pool: &PgPool,
     user_id: Uuid,
     limit: i32,
+    eaten_only: bool,
 ) -> AppResult<Value> {
     let row = sqlx::query(
         r#"
@@ -5036,7 +5091,7 @@ async fn list_recent_meal_entries_json(
         FROM (
           SELECT *
           FROM meal_entries
-          WHERE user_id = $1 AND status = 'eaten'
+          WHERE user_id = $1 AND (NOT $3::bool OR status = 'eaten')
           ORDER BY entry_date DESC, sort_order ASC
           LIMIT $2
         ) recent
@@ -5044,6 +5099,7 @@ async fn list_recent_meal_entries_json(
     )
     .bind(user_id)
     .bind(limit)
+    .bind(eaten_only)
     .fetch_one(pool)
     .await?;
     Ok(row.try_get("data")?)
@@ -6364,6 +6420,8 @@ mod tests {
             None,
         )
         .await;
+        let unrelated_id =
+            insert_test_food_product(&test_db.pool, Some(user_id), "Apple", "", None).await;
 
         let results = search_food_products_json(&test_db.pool, user_id, "greek yogurt")
             .await
@@ -6377,6 +6435,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(ids.contains(&product_id_value.as_str()));
+        assert!(!ids.contains(&unrelated_id.to_string().as_str()));
         test_db.cleanup().await;
     }
 
@@ -6417,6 +6476,83 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(&ids[..3], &[corrected_id, personal_id, global_id]);
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn admin_user_detail_preserves_recent_activity_contracts() {
+        let Some(test_db) = test_db().await else {
+            eprintln!(
+                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
+            );
+            return;
+        };
+        let user_id = insert_test_user(&test_db.pool).await;
+        let planned_id = insert_test_meal_entry(
+            &test_db.pool,
+            user_id,
+            "2026-07-10",
+            "planned",
+            "Tomorrow's lunch",
+            0,
+            (20.0, 30.0, 10.0, 290),
+        )
+        .await;
+        for day in 1..=11 {
+            sqlx::query(
+                r#"
+                INSERT INTO weight_entries (id, user_id, entry_date, weight_kg)
+                VALUES ($1, $2, $3::date, $4)
+                "#,
+            )
+            .bind(Uuid::new_v4())
+            .bind(user_id)
+            .bind(format!("2026-06-{day:02}"))
+            .bind(80.0 + f64::from(day) / 10.0)
+            .execute(&test_db.pool)
+            .await
+            .expect("test weight should insert");
+        }
+        let manual_id =
+            insert_test_food_product(&test_db.pool, Some(user_id), "Manual food", "", None).await;
+        let barcode_id = insert_test_food_product(
+            &test_db.pool,
+            None,
+            "Submitted barcode food",
+            "Test brand",
+            None,
+        )
+        .await;
+        sqlx::query(
+            "UPDATE food_products SET source = 'barcode', barcode = $2, submitted_by_user_id = $1 WHERE id = $3",
+        )
+        .bind(user_id)
+        .bind("8712345678901")
+        .bind(barcode_id)
+        .execute(&test_db.pool)
+        .await
+        .expect("test barcode product should update");
+
+        let detail = get_admin_user_detail_json(&test_db.pool, user_id)
+            .await
+            .expect("admin user detail should load");
+        let recent_meal_ids = detail["recentMeals"]
+            .as_array()
+            .expect("recent meals should be an array")
+            .iter()
+            .filter_map(|item| item["id"].as_str())
+            .collect::<Vec<_>>();
+        let recent_barcode_ids = detail["recentBarcodeSubmissions"]
+            .as_array()
+            .expect("recent barcode submissions should be an array")
+            .iter()
+            .filter_map(|item| item["id"].as_str())
+            .collect::<Vec<_>>();
+
+        assert!(recent_meal_ids.contains(&planned_id.to_string().as_str()));
+        assert_eq!(detail["recentWeights"].as_array().unwrap().len(), 10);
+        assert_eq!(recent_barcode_ids, vec![barcode_id.to_string()]);
+        assert!(!recent_barcode_ids.contains(&manual_id.to_string().as_str()));
         test_db.cleanup().await;
     }
 
@@ -6662,7 +6798,7 @@ mod tests {
         )
         .await;
 
-        let results = list_recent_meal_entries_json(&test_db.pool, user_id, 10)
+        let results = list_recent_meal_entries_json(&test_db.pool, user_id, 10, true)
             .await
             .expect("recent meals should list");
         let ids = results
