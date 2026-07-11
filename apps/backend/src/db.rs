@@ -5086,13 +5086,13 @@ async fn list_recent_meal_entries_json(
             'clientMutationId', client_mutation_id,
             'sourceLabel', NULL
           )
-          ORDER BY entry_date DESC, created_at DESC, id
+          ORDER BY entry_date DESC, sort_order ASC, created_at DESC, id
         ), '[]'::jsonb) AS data
         FROM (
           SELECT *
           FROM meal_entries
           WHERE user_id = $1 AND (NOT $3::bool OR status = 'eaten')
-          ORDER BY entry_date DESC, sort_order ASC
+          ORDER BY entry_date DESC, sort_order ASC, created_at DESC, id
           LIMIT $2
         ) recent
         "#,
@@ -6488,16 +6488,53 @@ mod tests {
             return;
         };
         let user_id = insert_test_user(&test_db.pool).await;
-        let planned_id = insert_test_meal_entry(
+        let last_meal_id = insert_test_meal_entry(
             &test_db.pool,
             user_id,
             "2026-07-10",
             "planned",
             "Tomorrow's lunch",
-            0,
+            2,
             (20.0, 30.0, 10.0, 290),
         )
         .await;
+        let first_meal_id = insert_test_meal_entry(
+            &test_db.pool,
+            user_id,
+            "2026-07-10",
+            "eaten",
+            "Breakfast",
+            0,
+            (25.0, 40.0, 12.0, 368),
+        )
+        .await;
+        let second_meal_id = insert_test_meal_entry(
+            &test_db.pool,
+            user_id,
+            "2026-07-10",
+            "eaten",
+            "Lunch",
+            1,
+            (30.0, 45.0, 15.0, 435),
+        )
+        .await;
+        sqlx::query(
+            r#"
+            UPDATE meal_entries
+            SET created_at = CASE id
+              WHEN $1 THEN '2026-07-10 08:00:00+00'::timestamptz
+              WHEN $2 THEN '2026-07-10 09:00:00+00'::timestamptz
+              WHEN $3 THEN '2026-07-10 10:00:00+00'::timestamptz
+            END
+            WHERE id IN ($1, $2, $3)
+            "#,
+        )
+        .bind(last_meal_id)
+        .bind(first_meal_id)
+        .bind(second_meal_id)
+        .execute(&test_db.pool)
+        .await
+        .expect("test meal creation order should update");
         for day in 1..=11 {
             sqlx::query(
                 r#"
@@ -6555,7 +6592,14 @@ mod tests {
             .filter_map(|item| item["date"].as_str())
             .collect::<Vec<_>>();
 
-        assert!(recent_meal_ids.contains(&planned_id.to_string().as_str()));
+        assert_eq!(
+            recent_meal_ids,
+            vec![
+                first_meal_id.to_string(),
+                second_meal_id.to_string(),
+                last_meal_id.to_string(),
+            ]
+        );
         assert_eq!(recent_weight_dates.len(), 10);
         assert_eq!(recent_weight_dates.first(), Some(&"2026-06-11"));
         assert_eq!(recent_weight_dates.last(), Some(&"2026-06-02"));
