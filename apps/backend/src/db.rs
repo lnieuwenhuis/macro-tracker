@@ -2730,7 +2730,7 @@ async fn apply_template_json(
         .and_then(Value::as_array)
         .ok_or_else(|| AppError::BadRequest("Template items missing.".to_string()))?;
     validate_item_product_access(pool, user_id, items).await?;
-    let group_by_label =
+    let meal_groups =
         sqlx::query("SELECT id, label FROM meal_groups WHERE user_id = $1 AND deleted_at IS NULL")
             .bind(user_id)
             .fetch_all(pool)
@@ -2738,11 +2738,11 @@ async fn apply_template_json(
             .into_iter()
             .map(|row| {
                 Ok((
-                    row.try_get::<String, _>("label")?.to_lowercase(),
+                    row.try_get::<String, _>("label")?,
                     row.try_get::<Uuid, _>("id")?,
                 ))
             })
-            .collect::<Result<std::collections::HashMap<_, _>, sqlx::Error>>()?;
+            .collect::<Result<Vec<_>, sqlx::Error>>()?;
     let row = sqlx::query(
         "SELECT coalesce(max(sort_order), -1) + 1 AS sort_order FROM meal_entries WHERE user_id = $1 AND entry_date = $2::date",
     )
@@ -2757,11 +2757,32 @@ async fn apply_template_json(
             .as_object()
             .ok_or_else(|| AppError::BadRequest("Template item must be an object.".to_string()))?
             .clone();
-        if let Some(meal_group_id) = item
+        let meal_group_id = item
             .get("mealGroupLabel")
             .and_then(Value::as_str)
-            .and_then(|label| group_by_label.get(&label.to_lowercase()))
-        {
+            .and_then(|label| {
+                let exact = meal_groups
+                    .iter()
+                    .filter(|(group_label, _)| group_label == label)
+                    .map(|(_, id)| *id)
+                    .collect::<Vec<_>>();
+                if exact.len() == 1 {
+                    return exact.first().copied();
+                }
+                if !exact.is_empty() {
+                    return None;
+                }
+                let lowercase_label = label.to_lowercase();
+                let case_insensitive = meal_groups
+                    .iter()
+                    .filter(|(group_label, _)| group_label.to_lowercase() == lowercase_label)
+                    .map(|(_, id)| *id)
+                    .collect::<Vec<_>>();
+                (case_insensitive.len() == 1)
+                    .then(|| case_insensitive.first().copied())
+                    .flatten()
+            });
+        if let Some(meal_group_id) = meal_group_id {
             meal.insert("mealGroupId".to_string(), json!(meal_group_id));
         }
         meal.insert("date".to_string(), Value::String(date.clone()));
@@ -6273,7 +6294,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_day_template_preserves_each_items_meal_group() {
+    async fn apply_day_template_resolves_exact_and_unambiguous_meal_group_labels() {
         let Some(test_db) = test_db().await else {
             eprintln!(
                 "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
@@ -6284,6 +6305,15 @@ mod tests {
         ensure_default_meal_groups(&test_db.pool, user_id)
             .await
             .expect("default meal groups should exist");
+        let lowercase_dinner_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO meal_groups (id, user_id, label, sort_order) VALUES ($1, $2, 'dinner', 4)",
+        )
+        .bind(lowercase_dinner_id)
+        .bind(user_id)
+        .execute(&test_db.pool)
+        .await
+        .expect("case-colliding meal group should insert");
         let group_rows = sqlx::query(
             "SELECT id, label FROM meal_groups WHERE user_id = $1 AND label IN ('Breakfast', 'Dinner')",
         )
@@ -6305,6 +6335,10 @@ mod tests {
         breakfast.insert("mealGroupLabel".to_string(), json!("breakfast"));
         let mut dinner = meal_payload(&[("label", json!("Pasta"))]);
         dinner.insert("mealGroupLabel".to_string(), json!("Dinner"));
+        let mut lowercase_dinner = meal_payload(&[("label", json!("Soup"))]);
+        lowercase_dinner.insert("mealGroupLabel".to_string(), json!("dinner"));
+        let mut ambiguous_dinner = meal_payload(&[("label", json!("Salad"))]);
+        ambiguous_dinner.insert("mealGroupLabel".to_string(), json!("DINNER"));
         let template = create_template_json(
             &test_db.pool,
             user_id,
@@ -6313,7 +6347,12 @@ mod tests {
                 ("label".to_string(), json!("Grouped day")),
                 (
                     "items".to_string(),
-                    Value::Array(vec![Value::Object(breakfast), Value::Object(dinner)]),
+                    Value::Array(vec![
+                        Value::Object(breakfast),
+                        Value::Object(dinner),
+                        Value::Object(lowercase_dinner),
+                        Value::Object(ambiguous_dinner),
+                    ]),
                 ),
             ]),
         )
@@ -6336,9 +6375,11 @@ mod tests {
             .as_array()
             .expect("created entries should be an array");
 
-        assert_eq!(entries.len(), 2);
+        assert_eq!(entries.len(), 4);
         assert_eq!(entries[0]["mealGroupId"], json!(group_ids["Breakfast"]));
         assert_eq!(entries[1]["mealGroupId"], json!(group_ids["Dinner"]));
+        assert_eq!(entries[2]["mealGroupId"], json!(lowercase_dinner_id));
+        assert_eq!(entries[3]["mealGroupId"], Value::Null);
         test_db.cleanup().await;
     }
 
