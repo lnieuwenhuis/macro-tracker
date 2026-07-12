@@ -2730,6 +2730,19 @@ async fn apply_template_json(
         .and_then(Value::as_array)
         .ok_or_else(|| AppError::BadRequest("Template items missing.".to_string()))?;
     validate_item_product_access(pool, user_id, items).await?;
+    let group_by_label =
+        sqlx::query("SELECT id, label FROM meal_groups WHERE user_id = $1 AND deleted_at IS NULL")
+            .bind(user_id)
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .map(|row| {
+                Ok((
+                    row.try_get::<String, _>("label")?.to_lowercase(),
+                    row.try_get::<Uuid, _>("id")?,
+                ))
+            })
+            .collect::<Result<std::collections::HashMap<_, _>, sqlx::Error>>()?;
     let row = sqlx::query(
         "SELECT coalesce(max(sort_order), -1) + 1 AS sort_order FROM meal_entries WHERE user_id = $1 AND entry_date = $2::date",
     )
@@ -2744,6 +2757,13 @@ async fn apply_template_json(
             .as_object()
             .ok_or_else(|| AppError::BadRequest("Template item must be an object.".to_string()))?
             .clone();
+        if let Some(meal_group_id) = item
+            .get("mealGroupLabel")
+            .and_then(Value::as_str)
+            .and_then(|label| group_by_label.get(&label.to_lowercase()))
+        {
+            meal.insert("mealGroupId".to_string(), json!(meal_group_id));
+        }
         meal.insert("date".to_string(), Value::String(date.clone()));
         meal.insert("status".to_string(), Value::String(status.clone()));
         normalized.push(
@@ -6250,6 +6270,76 @@ mod tests {
         .await
         .expect("test meal entry should insert");
         entry_id
+    }
+
+    #[tokio::test]
+    async fn apply_day_template_preserves_each_items_meal_group() {
+        let Some(test_db) = test_db().await else {
+            eprintln!(
+                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
+            );
+            return;
+        };
+        let user_id = insert_test_user(&test_db.pool).await;
+        ensure_default_meal_groups(&test_db.pool, user_id)
+            .await
+            .expect("default meal groups should exist");
+        let group_rows = sqlx::query(
+            "SELECT id, label FROM meal_groups WHERE user_id = $1 AND label IN ('Breakfast', 'Dinner')",
+        )
+        .bind(user_id)
+        .fetch_all(&test_db.pool)
+        .await
+        .expect("meal groups should load");
+        let group_ids = group_rows
+            .into_iter()
+            .map(|row| {
+                (
+                    row.try_get::<String, _>("label").unwrap(),
+                    row.try_get::<Uuid, _>("id").unwrap(),
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+
+        let mut breakfast = meal_payload(&[("label", json!("Oats"))]);
+        breakfast.insert("mealGroupLabel".to_string(), json!("breakfast"));
+        let mut dinner = meal_payload(&[("label", json!("Pasta"))]);
+        dinner.insert("mealGroupLabel".to_string(), json!("Dinner"));
+        let template = create_template_json(
+            &test_db.pool,
+            user_id,
+            &serde_json::Map::from_iter([
+                ("type".to_string(), json!("day")),
+                ("label".to_string(), json!("Grouped day")),
+                (
+                    "items".to_string(),
+                    Value::Array(vec![Value::Object(breakfast), Value::Object(dinner)]),
+                ),
+            ]),
+        )
+        .await
+        .expect("day template should be created");
+        let template_id = Uuid::parse_str(template["id"].as_str().unwrap()).unwrap();
+
+        let created = apply_template_json(
+            &test_db.pool,
+            user_id,
+            &serde_json::Map::from_iter([
+                ("templateId".to_string(), json!(template_id)),
+                ("date".to_string(), json!("2026-07-12")),
+            ]),
+            None,
+        )
+        .await
+        .expect("day template should apply");
+        let entries = created
+            .as_array()
+            .expect("created entries should be an array");
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["mealGroupId"], json!(group_ids["Breakfast"]));
+        assert_eq!(entries[1]["mealGroupId"], json!(group_ids["Dinner"]));
+        test_db.cleanup().await;
     }
 
     #[tokio::test]
