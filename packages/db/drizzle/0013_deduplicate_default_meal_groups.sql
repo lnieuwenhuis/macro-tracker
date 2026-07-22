@@ -1,3 +1,31 @@
+CREATE FUNCTION "ignore_duplicate_active_default_meal_group"()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW."deleted_at" IS NULL
+    AND NEW."is_default" = true
+    AND EXISTS (
+      SELECT 1
+      FROM "meal_groups"
+      WHERE "meal_groups"."user_id" = NEW."user_id"
+        AND "meal_groups"."label" = NEW."label"
+        AND "meal_groups"."deleted_at" IS NULL
+        AND "meal_groups"."is_default" = true
+    )
+  THEN
+    RETURN NULL;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+--> statement-breakpoint
+CREATE TRIGGER "meal_groups_default_insert_compat"
+BEFORE INSERT ON "meal_groups"
+FOR EACH ROW
+EXECUTE FUNCTION "ignore_duplicate_active_default_meal_group"();
+--> statement-breakpoint
 WITH default_group_candidates AS (
   SELECT
     "meal_groups"."id",

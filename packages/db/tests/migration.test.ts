@@ -475,10 +475,19 @@ describe("database migrations", () => {
       { meal_group_id: referencedGroupId },
     ]);
 
-    await expect(runtime.db.execute(sql.raw(`
+    await runtime.db.execute(sql.raw(`
       INSERT INTO "meal_groups" ("id", "user_id", "label", "sort_order", "is_default")
       VALUES ('86666666-6666-4666-8666-666666666666', '${userId}', 'Breakfast', 5, true)
-    `))).rejects.toThrow();
+    `));
+    const activeDefaultGroups = await runtime.db.execute<{ id: string }>(sql.raw(`
+      SELECT "id"
+      FROM "meal_groups"
+      WHERE "user_id" = '${userId}'
+        AND "label" = 'Breakfast'
+        AND "deleted_at" IS NULL
+        AND "is_default" = true
+    `));
+    expect(activeDefaultGroups.rows).toEqual([{ id: referencedGroupId }]);
   });
 
   it("creates API token storage with a unique token hash index", async () => {
@@ -506,7 +515,93 @@ describe("database migrations", () => {
   });
 });
 
-describe.skipIf(!process.env.TEST_DATABASE_URL)("PostgreSQL migration locking", () => {
+describe.skipIf(!process.env.TEST_DATABASE_URL)("PostgreSQL migration regressions", () => {
+  it("accepts the previous backend default-group insert after migration 0013", async () => {
+    const databaseUrl = resolveDestructiveTestDatabaseUrl(process.env, {
+      explicitEnvNames: ["TEST_DATABASE_URL"],
+      purpose: "default meal-group rollout regression test",
+    });
+    if (!databaseUrl) {
+      throw new Error("TEST_DATABASE_URL is required");
+    }
+
+    const postgresRuntime = await createDatabaseRuntime(databaseUrl);
+    try {
+      await postgresRuntime.db.execute(
+        sql.raw(
+          "DROP SCHEMA public CASCADE; DROP SCHEMA IF EXISTS drizzle CASCADE; CREATE SCHEMA public",
+        ),
+      );
+
+      for (const fileName of migrationFiles.slice(0, 8)) {
+        await applyMigration(postgresRuntime, fileName);
+      }
+
+      const userId = "91111111-1111-4111-8111-111111111111";
+      const entryId = "92222222-2222-4222-8222-222222222222";
+      const previousBackendGroupId = "34689180-08f1-5561-b87e-4e1d6d004914";
+
+      await postgresRuntime.db.execute(sql.raw(`
+        INSERT INTO "users" ("id", "shoo_pairwise_sub", "email")
+        VALUES ('${userId}', 'rollout_compat_user', 'rollout-compat@example.com')
+      `));
+
+      for (const fileName of migrationFiles.slice(8, -1)) {
+        await applyMigration(postgresRuntime, fileName);
+      }
+
+      const historicalGroup = await postgresRuntime.db.execute<{ id: string }>(sql.raw(`
+        SELECT "id"
+        FROM "meal_groups"
+        WHERE "user_id" = '${userId}' AND "label" = 'Breakfast'
+      `));
+      expect(historicalGroup.rows).toHaveLength(1);
+      const historicalGroupId = historicalGroup.rows[0]?.id;
+      expect(historicalGroupId).toBeTruthy();
+      expect(historicalGroupId).not.toBe(previousBackendGroupId);
+
+      await postgresRuntime.db.execute(sql.raw(`
+        INSERT INTO "meal_entries" (
+          "id", "user_id", "entry_date", "meal_group_id", "label", "sort_order",
+          "protein_g", "carbs_g", "fat_g", "calories_kcal"
+        )
+        VALUES (
+          '${entryId}', '${userId}', '2026-07-23', '${historicalGroupId}', 'Oats', 0,
+          10, 20, 5, 165
+        )
+      `));
+
+      await applyMigration(postgresRuntime, "0013_deduplicate_default_meal_groups.sql");
+
+      const insertResult = await postgresRuntime.migrationPool?.query(
+        `
+        INSERT INTO meal_groups (id, user_id, label, sort_order, is_default)
+        VALUES ($1, $2, $3, $4, true)
+        ON CONFLICT (id) DO NOTHING
+        `,
+        [previousBackendGroupId, userId, "Breakfast", 0],
+      );
+      expect(insertResult?.rowCount).toBe(0);
+
+      const activeGroups = await postgresRuntime.db.execute<{ id: string }>(sql.raw(`
+        SELECT "id"
+        FROM "meal_groups"
+        WHERE "user_id" = '${userId}'
+          AND "label" = 'Breakfast'
+          AND "deleted_at" IS NULL
+          AND "is_default" = true
+      `));
+      expect(activeGroups.rows).toEqual([{ id: historicalGroupId }]);
+
+      const entryAssignment = await postgresRuntime.db.execute<{ meal_group_id: string }>(
+        sql.raw(`SELECT "meal_group_id" FROM "meal_entries" WHERE "id" = '${entryId}'`),
+      );
+      expect(entryAssignment.rows).toEqual([{ meal_group_id: historicalGroupId }]);
+    } finally {
+      await postgresRuntime.close();
+    }
+  });
+
   it("serializes concurrent migration runners", async () => {
     const databaseUrl = resolveDestructiveTestDatabaseUrl(process.env, {
       explicitEnvNames: ["TEST_DATABASE_URL"],
