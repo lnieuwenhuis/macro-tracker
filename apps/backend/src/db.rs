@@ -5600,9 +5600,10 @@ async fn leaderboard_json(pool: &PgPool, user_id: Uuid, reference_date: &str) ->
         ),
         streak_summary AS (
           SELECT
-            coalesce(max(streak_length) FILTER (
-              WHERE end_date = $2 OR end_date = $2 - 1
-            ), 0)::int AS current_streak,
+            coalesce(max(CASE
+              WHEN start_date <= $2 AND end_date >= $2 THEN ($2 - start_date) + 1
+              WHEN end_date = $2 - 1 THEN streak_length
+            END), 0)::int AS current_streak,
             coalesce(max(streak_length), 0)::int AS longest_streak
           FROM streaks
         )
@@ -7088,6 +7089,22 @@ mod tests {
             .expect("today leaderboard should load");
         assert_eq!(today["currentStreak"], 3);
         assert_eq!(today["longestStreak"], 3);
+
+        insert_test_meal_entry(
+            &test_db.pool,
+            streak_user,
+            "2026-07-07",
+            "eaten",
+            "Future",
+            0,
+            (10.0, 20.0, 5.0, 165),
+        )
+        .await;
+        let future = leaderboard_json(&test_db.pool, streak_user, "2026-07-06")
+            .await
+            .expect("leaderboard with a future consecutive entry should load");
+        assert_eq!(future["currentStreak"], 3);
+        assert_eq!(future["longestStreak"], 4);
 
         let large_user = insert_test_user(&test_db.pool).await;
         sqlx::query(

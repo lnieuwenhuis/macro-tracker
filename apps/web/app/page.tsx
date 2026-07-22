@@ -27,6 +27,7 @@ export default async function HomePage({ searchParams }: HomePageProps) {
 
   return (
     <DashboardShell
+      key={selectedDate}
       userEmail={userEmail}
       canAccessAdmin={canAccessAdmin}
       selectedDate={selectedDate}
