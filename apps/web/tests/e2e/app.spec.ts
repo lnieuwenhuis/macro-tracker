@@ -145,6 +145,18 @@ test("allows an allowlisted user to track food items across days", async ({
     fatG: "10",
     caloriesKcal: "370",
   });
+  const yogurtCard = page.locator("article").filter({
+    has: page.getByRole("heading", { name: "Greek yogurt" }),
+  });
+  await yogurtCard
+    .getByRole("button", { name: "Edit details for Greek yogurt" })
+    .click();
+  await yogurtCard.getByLabel("Calories").fill("371");
+  await yogurtCard.getByRole("button", { name: "Update" }).click();
+  await expect(yogurtCard.getByLabel("Calories")).toHaveCount(0);
+  await expect(
+    yogurtCard.getByRole("button", { name: "Edit details for Greek yogurt" }),
+  ).toBeVisible();
 
   await changeSelectedDate(page, "2026-03-19");
   await addCustomFood(page, {
@@ -222,32 +234,6 @@ test("fresh users see the current dashboard empty states", async ({
     page.getByText("Log some foods or add templates to see suggestions here.").first(),
   ).toBeVisible();
   await expect(page.getByRole("button", { name: "Add custom" })).toBeVisible();
-});
-
-test("food cards collapse after saving and updating", async ({ page }, testInfo) => {
-  const label = `Collapsible food ${Date.now()}`;
-  await createTestSession(page, uniqueTestEmail("user", testInfo));
-  await page.goto("/?date=2026-03-21");
-
-  await addCustomFood(page, {
-    label,
-    proteinG: "20",
-    carbsG: "30",
-    fatG: "10",
-    caloriesKcal: "290",
-  });
-
-  const mealCard = page.locator("article").filter({
-    has: page.getByRole("heading", { name: label }),
-  });
-  await mealCard.getByRole("button", { name: `Edit details for ${label}` }).click();
-  await mealCard.getByLabel("Calories").fill("310");
-  await mealCard.getByRole("button", { name: "Update" }).click();
-
-  await expect(mealCard.getByLabel("Calories")).toHaveCount(0);
-  await expect(
-    mealCard.getByRole("button", { name: `Edit details for ${label}` }),
-  ).toBeVisible();
 });
 
 test("recent foods appear in quick add and create a prefilled draft", async ({
