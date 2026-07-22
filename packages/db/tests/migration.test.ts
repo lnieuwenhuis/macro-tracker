@@ -23,6 +23,7 @@ const migrationFiles = [
   "0010_templates_food_product_cleanup.sql",
   "0011_active_global_barcode_unique.sql",
   "0012_api_tokens.sql",
+  "0013_deduplicate_default_meal_groups.sql",
 ] as const;
 
 async function applyMigration(runtime: DatabaseRuntime, fileName: string) {
@@ -403,6 +404,81 @@ describe("database migrations", () => {
         dedupe_marker: null,
       },
     ]);
+  });
+
+  it("merges duplicate default meal groups without losing entry assignments", async () => {
+    runtime = await createDatabaseRuntime("memory:");
+
+    for (const fileName of migrationFiles.slice(0, -1)) {
+      await applyMigration(runtime, fileName);
+    }
+
+    const userId = "81111111-1111-4111-8111-111111111111";
+    const olderGroupId = "82222222-2222-4222-8222-222222222222";
+    const referencedGroupId = "83333333-3333-4333-8333-333333333333";
+    const customGroupId = "84444444-4444-4444-8444-444444444444";
+    const duplicateEntryId = "85555555-5555-4555-8555-555555555551";
+    const firstKeeperEntryId = "85555555-5555-4555-8555-555555555552";
+    const secondKeeperEntryId = "85555555-5555-4555-8555-555555555553";
+
+    await runtime.db.execute(sql.raw(`
+      INSERT INTO "users" ("id", "shoo_pairwise_sub", "email")
+      VALUES ('${userId}', 'duplicate_group_user', 'duplicate-groups@example.com')
+    `));
+    await runtime.db.execute(sql.raw(`
+      INSERT INTO "meal_groups" (
+        "id", "user_id", "label", "sort_order", "is_default", "created_at", "updated_at"
+      )
+      VALUES
+        ('${olderGroupId}', '${userId}', 'Breakfast', 0, true, '2026-07-20T10:00:00Z', '2026-07-20T10:00:00Z'),
+        ('${referencedGroupId}', '${userId}', 'Breakfast', 0, true, '2026-07-21T10:00:00Z', '2026-07-21T10:00:00Z'),
+        ('${customGroupId}', '${userId}', 'Breakfast', 4, false, '2026-07-21T11:00:00Z', '2026-07-21T11:00:00Z')
+    `));
+    await runtime.db.execute(sql.raw(`
+      INSERT INTO "meal_entries" (
+        "id", "user_id", "entry_date", "meal_group_id", "label", "sort_order",
+        "protein_g", "carbs_g", "fat_g", "calories_kcal"
+      )
+      VALUES
+        ('${duplicateEntryId}', '${userId}', '2026-07-22', '${olderGroupId}', 'Oats', 0, 10, 20, 5, 165),
+        ('${firstKeeperEntryId}', '${userId}', '2026-07-22', '${referencedGroupId}', 'Yogurt', 1, 20, 15, 0, 140),
+        ('${secondKeeperEntryId}', '${userId}', '2026-07-22', '${referencedGroupId}', 'Fruit', 2, 1, 25, 0, 104)
+    `));
+
+    await applyMigration(runtime, "0013_deduplicate_default_meal_groups.sql");
+
+    const groupResult = await runtime.db.execute<{
+      id: string;
+      is_default: boolean;
+      deleted_at: Date | string | null;
+    }>(sql.raw(`
+      SELECT "id", "is_default", "deleted_at"
+      FROM "meal_groups"
+      WHERE "user_id" = '${userId}' AND "label" = 'Breakfast'
+      ORDER BY "id"
+    `));
+    expect(groupResult.rows).toEqual([
+      { id: olderGroupId, is_default: true, deleted_at: expect.anything() },
+      { id: referencedGroupId, is_default: true, deleted_at: null },
+      { id: customGroupId, is_default: false, deleted_at: null },
+    ]);
+
+    const entryResult = await runtime.db.execute<{ meal_group_id: string }>(sql.raw(`
+      SELECT "meal_group_id"
+      FROM "meal_entries"
+      WHERE "id" IN ('${duplicateEntryId}', '${firstKeeperEntryId}', '${secondKeeperEntryId}')
+      ORDER BY "id"
+    `));
+    expect(entryResult.rows).toEqual([
+      { meal_group_id: referencedGroupId },
+      { meal_group_id: referencedGroupId },
+      { meal_group_id: referencedGroupId },
+    ]);
+
+    await expect(runtime.db.execute(sql.raw(`
+      INSERT INTO "meal_groups" ("id", "user_id", "label", "sort_order", "is_default")
+      VALUES ('86666666-6666-4666-8666-666666666666', '${userId}', 'Breakfast', 5, true)
+    `))).rejects.toThrow();
   });
 
   it("creates API token storage with a unique token hash index", async () => {

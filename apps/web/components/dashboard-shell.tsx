@@ -623,10 +623,10 @@ export function DashboardShell({
     }));
   }
 
-  async function handleSave(clientId: string) {
+  async function handleSave(clientId: string): Promise<boolean> {
     const draft = drafts.find((entry) => entry.clientId === clientId);
     if (!draft) {
-      return;
+      return false;
     }
 
     setSavingClientId(clientId);
@@ -640,22 +640,28 @@ export function DashboardShell({
           ...currentErrors,
           [clientId]: result.error ?? "Unable to save food item.",
         }));
-        return;
+        return false;
       }
 
-      if (result.entry) {
-        const savedEntry = result.entry;
-        setDrafts((currentDrafts) =>
-          currentDrafts.map((d) =>
-            d.clientId === clientId
-              ? mealToDraftWithClientId(savedEntry, clientId)
-              : d,
-          ),
-        );
-        setSavedMeals((meals) => upsertSavedMeal(meals, savedEntry));
+      if (!result.entry) {
+        setErrors((currentErrors) => ({
+          ...currentErrors,
+          [clientId]: "The food item was saved without a response. Try again.",
+        }));
+        return false;
       }
 
+      const savedEntry = result.entry;
+      setDrafts((currentDrafts) =>
+        currentDrafts.map((d) =>
+          d.clientId === clientId
+            ? mealToDraftWithClientId(savedEntry, clientId)
+            : d,
+        ),
+      );
+      setSavedMeals((meals) => upsertSavedMeal(meals, savedEntry));
       router.refresh();
+      return true;
     } finally {
       setSavingClientId(null);
     }

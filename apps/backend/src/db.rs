@@ -216,6 +216,7 @@ CREATE INDEX IF NOT EXISTS meal_entries_meal_group_idx ON meal_entries USING btr
 CREATE INDEX IF NOT EXISTS meal_entries_product_idx ON meal_entries USING btree (product_id);
 CREATE UNIQUE INDEX IF NOT EXISTS meal_entries_user_client_mutation_key ON meal_entries USING btree (user_id, client_mutation_id);
 CREATE INDEX IF NOT EXISTS meal_entries_user_date_sort_idx ON meal_entries USING btree (user_id, entry_date, sort_order);
+CREATE UNIQUE INDEX IF NOT EXISTS meal_groups_active_default_label_key ON meal_groups USING btree (user_id, label) WHERE deleted_at IS NULL AND is_default = true;
 
 CREATE TABLE IF NOT EXISTS weight_entries (
   id uuid PRIMARY KEY NOT NULL,
@@ -737,7 +738,7 @@ pub async fn ensure_default_meal_groups(pool: &PgPool, user_id: Uuid) -> AppResu
           true
         FROM unnest($2::uuid[], $3::text[])
           WITH ORDINALITY AS defaults(id, label, ordinality)
-        ON CONFLICT (id) DO NOTHING
+        ON CONFLICT DO NOTHING
         "#,
     )
     .bind(user_id)
@@ -950,7 +951,7 @@ async fn complete_onboarding_setup_json(
             r#"
             INSERT INTO meal_groups (id, user_id, label, sort_order, is_default)
             VALUES ($1, $2, $3, $4, true)
-            ON CONFLICT (id) DO NOTHING
+            ON CONFLICT DO NOTHING
             "#,
         )
         .bind(id)
@@ -6334,6 +6335,15 @@ mod tests {
             return;
         };
         let user_id = insert_test_user(&test_db.pool).await;
+        let legacy_breakfast_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO meal_groups (id, user_id, label, sort_order, is_default) VALUES ($1, $2, 'Breakfast', 0, true)",
+        )
+        .bind(legacy_breakfast_id)
+        .bind(user_id)
+        .execute(&test_db.pool)
+        .await
+        .expect("legacy default meal group should insert");
 
         ensure_default_meal_groups(&test_db.pool, user_id)
             .await
@@ -6374,6 +6384,14 @@ mod tests {
                 ("Snack".to_string(), 3, true),
             ]
         );
+        let breakfast_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM meal_groups WHERE user_id = $1 AND label = 'Breakfast' AND deleted_at IS NULL",
+        )
+        .bind(user_id)
+        .fetch_one(&test_db.pool)
+        .await
+        .expect("breakfast group should load");
+        assert_eq!(breakfast_id, legacy_breakfast_id);
         test_db.cleanup().await;
     }
 

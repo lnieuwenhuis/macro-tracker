@@ -237,6 +237,9 @@ export const mealGroups = pgTable(
   },
   (table) => [
     index("meal_groups_user_sort_idx").on(table.userId, table.sortOrder),
+    uniqueIndex("meal_groups_active_default_label_key")
+      .on(table.userId, table.label)
+      .where(sql`${table.deletedAt} IS NULL AND ${table.isDefault} = true`),
     index("meal_groups_deleted_at_idx").on(table.deletedAt),
   ],
 );

@@ -92,6 +92,13 @@
       "when": 1782489600000,
       "tag": "0012_api_tokens",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1784755484498,
+      "tag": "0013_deduplicate_default_meal_groups",
+      "breakpoints": true
     }
   ]
 }
