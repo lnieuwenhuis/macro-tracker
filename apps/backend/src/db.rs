@@ -720,6 +720,16 @@ pub async fn authenticate_api_token(pool: &PgPool, token: &str) -> AppResult<Val
 }
 
 pub async fn ensure_default_meal_groups(pool: &PgPool, user_id: Uuid) -> AppResult<()> {
+    ensure_default_meal_groups_with_executor(pool, user_id).await
+}
+
+async fn ensure_default_meal_groups_with_executor<'e, E>(
+    executor: E,
+    user_id: Uuid,
+) -> AppResult<()>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     let labels = ["Breakfast", "Lunch", "Dinner", "Snack"];
     let ids = labels.map(|label| {
         Uuid::new_v5(
@@ -729,22 +739,44 @@ pub async fn ensure_default_meal_groups(pool: &PgPool, user_id: Uuid) -> AppResu
     });
     sqlx::query(
         r#"
-        INSERT INTO meal_groups (id, user_id, label, sort_order, is_default)
-        SELECT
-          defaults.id,
-          $1,
-          defaults.label,
-          (defaults.ordinality - 1)::integer,
-          true
-        FROM unnest($2::uuid[], $3::text[])
-          WITH ORDINALITY AS defaults(id, label, ordinality)
-        ON CONFLICT DO NOTHING
+        WITH defaults AS (
+          SELECT
+            id,
+            label,
+            (ordinality - 1)::integer AS sort_order
+          FROM unnest($2::uuid[], $3::text[])
+            WITH ORDINALITY AS defaults(id, label, ordinality)
+        ), inserted AS (
+          INSERT INTO meal_groups (id, user_id, label, sort_order, is_default)
+          SELECT id, $1, label, sort_order, true
+          FROM defaults
+          ON CONFLICT DO NOTHING
+        )
+        UPDATE meal_groups AS existing
+        SET
+          label = defaults.label,
+          sort_order = defaults.sort_order,
+          is_default = true,
+          deleted_at = NULL,
+          updated_at = now()
+        FROM defaults
+        WHERE existing.id = defaults.id
+          AND existing.user_id = $1
+          AND existing.deleted_at IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1
+            FROM meal_groups AS active
+            WHERE active.user_id = $1
+              AND active.label = defaults.label
+              AND active.deleted_at IS NULL
+              AND active.is_default = true
+          )
         "#,
     )
     .bind(user_id)
     .bind(&ids[..])
     .bind(&labels[..])
-    .execute(pool)
+    .execute(executor)
     .await?;
     Ok(())
 }
@@ -942,25 +974,7 @@ async fn complete_onboarding_setup_json(
         return Err(AppError::NotFound("User not found.".to_string()));
     }
 
-    for (index, label) in ["Breakfast", "Lunch", "Dinner", "Snack"].iter().enumerate() {
-        let id = Uuid::new_v5(
-            &Uuid::NAMESPACE_URL,
-            format!("macro-tracker:meal-group:{user_id}:{label}").as_bytes(),
-        );
-        sqlx::query(
-            r#"
-            INSERT INTO meal_groups (id, user_id, label, sort_order, is_default)
-            VALUES ($1, $2, $3, $4, true)
-            ON CONFLICT DO NOTHING
-            "#,
-        )
-        .bind(id)
-        .bind(user_id)
-        .bind(label)
-        .bind(index as i32)
-        .execute(&mut *tx)
-        .await?;
-    }
+    ensure_default_meal_groups_with_executor(&mut *tx, user_id).await?;
 
     tx.commit().await?;
     get_user_by_id(pool, user_id)
@@ -6392,6 +6406,82 @@ mod tests {
         .await
         .expect("breakfast group should load");
         assert_eq!(breakfast_id, legacy_breakfast_id);
+
+        let deterministic_breakfast_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("macro-tracker:meal-group:{user_id}:Breakfast").as_bytes(),
+        );
+        sqlx::query(
+            "INSERT INTO meal_groups (id, user_id, label, sort_order, is_default, deleted_at) VALUES ($1, $2, 'Breakfast', 0, true, now())",
+        )
+        .bind(deterministic_breakfast_id)
+        .bind(user_id)
+        .execute(&test_db.pool)
+        .await
+        .expect("soft-deleted deterministic breakfast should insert");
+        ensure_default_meal_groups(&test_db.pool, user_id)
+            .await
+            .expect("the active legacy default should remain preferred");
+        let active_breakfast_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM meal_groups WHERE user_id = $1 AND label = 'Breakfast' AND deleted_at IS NULL AND is_default = true",
+        )
+        .bind(user_id)
+        .fetch_one(&test_db.pool)
+        .await
+        .expect("active breakfast group should load");
+        assert_eq!(active_breakfast_id, legacy_breakfast_id);
+        let deterministic_deleted_at: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT deleted_at FROM meal_groups WHERE id = $1")
+                .bind(deterministic_breakfast_id)
+                .fetch_one(&test_db.pool)
+                .await
+                .expect("deterministic breakfast group should load");
+        assert!(deterministic_deleted_at.is_some());
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn ensure_default_meal_groups_reactivates_a_soft_deleted_default() {
+        let Some(test_db) = test_db().await else {
+            eprintln!(
+                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
+            );
+            return;
+        };
+        let user_id = insert_test_user(&test_db.pool).await;
+        ensure_default_meal_groups(&test_db.pool, user_id)
+            .await
+            .expect("default meal groups should be created");
+        let lunch_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("macro-tracker:meal-group:{user_id}:Lunch").as_bytes(),
+        );
+        sqlx::query("UPDATE meal_groups SET deleted_at = now() WHERE id = $1")
+            .bind(lunch_id)
+            .execute(&test_db.pool)
+            .await
+            .expect("default meal group should be soft-deleted");
+
+        ensure_default_meal_groups(&test_db.pool, user_id)
+            .await
+            .expect("soft-deleted default meal group should be restored");
+
+        let active_groups: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM meal_groups WHERE user_id = $1 AND deleted_at IS NULL AND is_default = true",
+        )
+        .bind(user_id)
+        .fetch_one(&test_db.pool)
+        .await
+        .expect("active default meal groups should be counted");
+        assert_eq!(active_groups, 4);
+        let restored_lunch_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM meal_groups WHERE user_id = $1 AND label = 'Lunch' AND deleted_at IS NULL AND is_default = true",
+        )
+        .bind(user_id)
+        .fetch_one(&test_db.pool)
+        .await
+        .expect("restored lunch group should load");
+        assert_eq!(restored_lunch_id, lunch_id);
         test_db.cleanup().await;
     }
 
