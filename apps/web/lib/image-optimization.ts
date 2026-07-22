@@ -18,25 +18,16 @@ function canvasToJpeg(canvas: HTMLCanvasElement, quality: number) {
   });
 }
 
-function originalOrError(file: File) {
-  if (file.size <= TARGET_IMAGE_BYTES) {
-    return file;
-  }
-  throw new Error(
-    "This browser could not optimize the image below 2 MB. Try another image.",
-  );
-}
-
 export async function optimizeFoodPhoto(file: File): Promise<Blob> {
   if (typeof createImageBitmap !== "function") {
-    return originalOrError(file);
+    return file;
   }
 
   let bitmap: ImageBitmap;
   try {
     bitmap = await createImageBitmap(file);
   } catch {
-    return originalOrError(file);
+    return file;
   }
 
   try {
@@ -54,7 +45,7 @@ export async function optimizeFoodPhoto(file: File): Promise<Blob> {
       try {
         const context = canvas.getContext("2d");
         if (!context) {
-          return originalOrError(file);
+          return file;
         }
         context.fillStyle = "#ffffff";
         context.fillRect(0, 0, width, height);
@@ -67,7 +58,7 @@ export async function optimizeFoodPhoto(file: File): Promise<Blob> {
           }
         }
       } catch {
-        return originalOrError(file);
+        return file;
       } finally {
         canvas.width = 0;
         canvas.height = 0;
@@ -77,7 +68,7 @@ export async function optimizeFoodPhoto(file: File): Promise<Blob> {
     bitmap.close();
   }
 
-  return originalOrError(file);
+  return file;
 }
 
 export const FOOD_PHOTO_TARGET_BYTES = TARGET_IMAGE_BYTES;

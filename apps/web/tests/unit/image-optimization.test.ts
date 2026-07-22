@@ -103,18 +103,18 @@ describe("optimizeFoodPhoto", () => {
     await expect(optimizeFoodPhoto(file)).resolves.toBe(file);
   });
 
-  it("rejects a large original when conversion is unavailable", async () => {
+  it("keeps an original between the 2 MB target and 8 MB upload limit when conversion is unavailable", async () => {
     Object.defineProperty(globalThis, "createImageBitmap", {
       configurable: true,
       value: undefined,
     });
     const file = new File(
-      [new Uint8Array(FOOD_PHOTO_TARGET_BYTES + 1)],
+      [new Uint8Array(8 * 1024 * 1024)],
       "photo.webp",
       { type: "image/webp" },
     );
 
-    await expect(optimizeFoodPhoto(file)).rejects.toThrow("below 2 MB");
+    await expect(optimizeFoodPhoto(file)).resolves.toBe(file);
   });
 });
 
