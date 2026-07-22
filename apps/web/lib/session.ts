@@ -7,7 +7,7 @@ import { getServerEnv } from "./env";
 import { getRequestProtocol } from "./request";
 
 export const SESSION_COOKIE_NAME = "mt_session";
-export const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
+const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
 
 function getSessionKey() {
   return new TextEncoder().encode(getServerEnv().sessionSecret);

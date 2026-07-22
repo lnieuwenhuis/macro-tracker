@@ -104,6 +104,7 @@ export function AuthCallbackClient({
           {message}
         </p>
         <Link
+          prefetch={false}
           href="/login"
           className="mt-6 inline-flex text-sm font-semibold text-[var(--color-accent)]"
         >

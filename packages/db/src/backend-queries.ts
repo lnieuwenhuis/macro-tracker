@@ -445,6 +445,17 @@ export async function getRecentQuickAddCandidates(userId: string, limit = 30, ..
   return backendRpc<QuickAddCandidate[]>("getRecentQuickAddCandidates", { userId, limit });
 }
 
+export async function getDashboardQuickAddCandidates(
+  userId: string,
+  limitPerSource = 30,
+  ..._ignored: unknown[]
+) {
+  return backendRpc<QuickAddCandidate[]>("getDashboardQuickAddCandidates", {
+    userId,
+    limitPerSource,
+  });
+}
+
 export async function getAdminDashboardData(..._ignored: unknown[]) {
   return backendRpc<AdminDashboardData>("getAdminDashboardData");
 }

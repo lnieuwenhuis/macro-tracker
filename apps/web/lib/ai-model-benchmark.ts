@@ -3,14 +3,14 @@ import type {
   FoodPhotoEstimate,
 } from "./ai-food-photo";
 
-export type MacroBenchmarkMacros = {
+type MacroBenchmarkMacros = {
   caloriesKcal: number;
   proteinG: number;
   carbsG: number;
   fatG: number;
 };
 
-export type MacroBenchmarkCategory =
+type MacroBenchmarkCategory =
   | "fruit"
   | "protein"
   | "grain"
@@ -19,7 +19,7 @@ export type MacroBenchmarkCategory =
   | "fat"
   | "legume";
 
-export type MacroBenchmarkFixture = {
+type MacroBenchmarkFixture = {
   id: string;
   name: string;
   servingDescription: string;
@@ -44,7 +44,7 @@ export type MacroBenchmarkModelCaseResult = {
   wasSkipped?: boolean;
 };
 
-export type MacroBenchmarkCaseResult = {
+type MacroBenchmarkCaseResult = {
   fixtureId: string;
   fixtureName: string;
   servingDescription: string;
@@ -57,7 +57,7 @@ export type MacroBenchmarkCaseResult = {
   candidate: MacroBenchmarkModelCaseResult;
 };
 
-export type MacroBenchmarkMode = "compare" | "candidate_only";
+type MacroBenchmarkMode = "compare" | "candidate_only";
 
 export type MacroBenchmarkBaseline = {
   currentModel: string;

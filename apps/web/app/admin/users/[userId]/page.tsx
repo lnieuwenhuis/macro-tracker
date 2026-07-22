@@ -245,6 +245,7 @@ export default async function AdminUserDetailPage({
             >
               <div className="flex items-center justify-between gap-3">
                 <Link
+                  prefetch={false}
                   href={`/admin/barcodes/${item.id}`}
                   className="font-semibold text-[var(--color-ink)] underline-offset-4 hover:underline"
                 >

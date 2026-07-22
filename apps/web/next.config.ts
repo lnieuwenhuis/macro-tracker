@@ -6,7 +6,7 @@ const appDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(appDir, "../..");
 
 function getCacheMaxMemorySize() {
-  const fallbackMb = 8;
+  const fallbackMb = 0;
   const value = Number(process.env.NEXT_CACHE_MAX_MEMORY_MB ?? fallbackMb);
   const memoryMb = Number.isFinite(value) && value >= 0 ? value : fallbackMb;
 

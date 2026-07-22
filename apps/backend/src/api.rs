@@ -1,7 +1,7 @@
 use crate::{AppState, db, errors::AppError};
 use axum::{
     Json, Router,
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{Path, State},
     http::{HeaderMap, Method, StatusCode, Uri, header},
     response::{IntoResponse, Response},
@@ -14,7 +14,7 @@ const CORS_ALLOW_ORIGIN: &str = "*";
 const CORS_ALLOW_METHODS: &str = "GET, POST, PATCH, DELETE, OPTIONS";
 const CORS_ALLOW_HEADERS: &str = "Authorization, Content-Type";
 const CORS_MAX_AGE: &str = "86400";
-const API_V1_OPENAPI_JSON: &str = include_str!("generated/api-v1-openapi.json");
+const API_V1_OPENAPI_JSON: &[u8] = include_bytes!("generated/api-v1-openapi.json");
 
 type ApiResult<T> = Result<T, ApiFailure>;
 
@@ -93,23 +93,7 @@ async fn handle_api_v1(
     }
 
     if method == Method::GET && path.as_slice() == ["openapi.json"] {
-        return match serde_json::from_str(API_V1_OPENAPI_JSON) {
-            Ok(openapi) => raw_json_response(StatusCode::OK, openapi, None),
-            Err(error) => {
-                tracing::error!(error = ?error, "API v1 OpenAPI document is invalid");
-                json_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    json!({
-                        "ok": false,
-                        "error": {
-                            "code": "internal_error",
-                            "message": "An internal server error occurred."
-                        }
-                    }),
-                    None,
-                )
-            }
-        };
+        return static_json_response(API_V1_OPENAPI_JSON);
     }
 
     let result = async {
@@ -1410,6 +1394,20 @@ fn raw_json_response(status: StatusCode, body: Value, allow: Option<&str>) -> Re
         headers.insert(header::ALLOW, allow.parse().expect("valid Allow header"));
     }
     (status, headers, Json(body)).into_response()
+}
+
+fn static_json_response(body: &'static [u8]) -> Response {
+    let mut headers = cors_headers();
+    headers.insert(
+        header::CONTENT_TYPE,
+        "application/json".parse().expect("valid content type"),
+    );
+    (
+        StatusCode::OK,
+        headers,
+        Body::from(Bytes::from_static(body)),
+    )
+        .into_response()
 }
 
 fn empty_response(status: StatusCode, allow: Option<&str>) -> Response {

@@ -1,0 +1,30 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "ignore": [
+    "apps/web/public/sw.js",
+    "packages/db/drizzle.config.ts"
+  ],
+  "workspaces": {
+    "apps/web": {
+      "ignoreDependencies": ["tailwindcss"],
+      "entry": [
+        "app/**/{page,layout,route}.{ts,tsx}",
+        "scripts/*.mjs",
+        "tests/**/*.test.ts",
+        "next.config.ts"
+      ],
+      "project": ["**/*.{ts,tsx,mts,mjs}"]
+    },
+    "packages/db": {
+      "drizzle": false,
+      "entry": [
+        "src/index.ts",
+        "src/testing.ts",
+        "src/migrate.ts",
+        "src/test-backend-preflight.ts",
+        "src/**/*.test.ts"
+      ],
+      "project": ["src/**/*.ts"]
+    }
+  }
+}

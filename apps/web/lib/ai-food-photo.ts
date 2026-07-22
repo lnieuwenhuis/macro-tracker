@@ -8,7 +8,7 @@ export type FoodPhotoEstimate = {
   notes: string[];
 };
 
-export type FoodPhotoAnalysis =
+type FoodPhotoAnalysis =
   | {
       status: "ready";
       question: null;

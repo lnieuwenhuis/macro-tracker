@@ -23,6 +23,7 @@ const migrationFiles = [
   "0010_templates_food_product_cleanup.sql",
   "0011_active_global_barcode_unique.sql",
   "0012_api_tokens.sql",
+  "0013_deduplicate_default_meal_groups.sql",
 ] as const;
 
 async function applyMigration(runtime: DatabaseRuntime, fileName: string) {
@@ -405,6 +406,90 @@ describe("database migrations", () => {
     ]);
   });
 
+  it("merges duplicate default meal groups without losing entry assignments", async () => {
+    runtime = await createDatabaseRuntime("memory:");
+
+    for (const fileName of migrationFiles.slice(0, -1)) {
+      await applyMigration(runtime, fileName);
+    }
+
+    const userId = "81111111-1111-4111-8111-111111111111";
+    const olderGroupId = "82222222-2222-4222-8222-222222222222";
+    const referencedGroupId = "83333333-3333-4333-8333-333333333333";
+    const customGroupId = "84444444-4444-4444-8444-444444444444";
+    const duplicateEntryId = "85555555-5555-4555-8555-555555555551";
+    const firstKeeperEntryId = "85555555-5555-4555-8555-555555555552";
+    const secondKeeperEntryId = "85555555-5555-4555-8555-555555555553";
+
+    await runtime.db.execute(sql.raw(`
+      INSERT INTO "users" ("id", "shoo_pairwise_sub", "email")
+      VALUES ('${userId}', 'duplicate_group_user', 'duplicate-groups@example.com')
+    `));
+    await runtime.db.execute(sql.raw(`
+      INSERT INTO "meal_groups" (
+        "id", "user_id", "label", "sort_order", "is_default", "created_at", "updated_at"
+      )
+      VALUES
+        ('${olderGroupId}', '${userId}', 'Breakfast', 0, true, '2026-07-20T10:00:00Z', '2026-07-20T10:00:00Z'),
+        ('${referencedGroupId}', '${userId}', 'Breakfast', 0, true, '2026-07-21T10:00:00Z', '2026-07-21T10:00:00Z'),
+        ('${customGroupId}', '${userId}', 'Breakfast', 4, false, '2026-07-21T11:00:00Z', '2026-07-21T11:00:00Z')
+    `));
+    await runtime.db.execute(sql.raw(`
+      INSERT INTO "meal_entries" (
+        "id", "user_id", "entry_date", "meal_group_id", "label", "sort_order",
+        "protein_g", "carbs_g", "fat_g", "calories_kcal"
+      )
+      VALUES
+        ('${duplicateEntryId}', '${userId}', '2026-07-22', '${olderGroupId}', 'Oats', 0, 10, 20, 5, 165),
+        ('${firstKeeperEntryId}', '${userId}', '2026-07-22', '${referencedGroupId}', 'Yogurt', 1, 20, 15, 0, 140),
+        ('${secondKeeperEntryId}', '${userId}', '2026-07-22', '${referencedGroupId}', 'Fruit', 2, 1, 25, 0, 104)
+    `));
+
+    await applyMigration(runtime, "0013_deduplicate_default_meal_groups.sql");
+
+    const groupResult = await runtime.db.execute<{
+      id: string;
+      is_default: boolean;
+      deleted_at: Date | string | null;
+    }>(sql.raw(`
+      SELECT "id", "is_default", "deleted_at"
+      FROM "meal_groups"
+      WHERE "user_id" = '${userId}' AND "label" = 'Breakfast'
+      ORDER BY "id"
+    `));
+    expect(groupResult.rows).toEqual([
+      { id: olderGroupId, is_default: true, deleted_at: expect.anything() },
+      { id: referencedGroupId, is_default: true, deleted_at: null },
+      { id: customGroupId, is_default: false, deleted_at: null },
+    ]);
+
+    const entryResult = await runtime.db.execute<{ meal_group_id: string }>(sql.raw(`
+      SELECT "meal_group_id"
+      FROM "meal_entries"
+      WHERE "id" IN ('${duplicateEntryId}', '${firstKeeperEntryId}', '${secondKeeperEntryId}')
+      ORDER BY "id"
+    `));
+    expect(entryResult.rows).toEqual([
+      { meal_group_id: referencedGroupId },
+      { meal_group_id: referencedGroupId },
+      { meal_group_id: referencedGroupId },
+    ]);
+
+    await runtime.db.execute(sql.raw(`
+      INSERT INTO "meal_groups" ("id", "user_id", "label", "sort_order", "is_default")
+      VALUES ('86666666-6666-4666-8666-666666666666', '${userId}', 'Breakfast', 5, true)
+    `));
+    const activeDefaultGroups = await runtime.db.execute<{ id: string }>(sql.raw(`
+      SELECT "id"
+      FROM "meal_groups"
+      WHERE "user_id" = '${userId}'
+        AND "label" = 'Breakfast'
+        AND "deleted_at" IS NULL
+        AND "is_default" = true
+    `));
+    expect(activeDefaultGroups.rows).toEqual([{ id: referencedGroupId }]);
+  });
+
   it("creates API token storage with a unique token hash index", async () => {
     runtime = await createDatabaseRuntime("memory:");
 
@@ -430,7 +515,93 @@ describe("database migrations", () => {
   });
 });
 
-describe.skipIf(!process.env.TEST_DATABASE_URL)("PostgreSQL migration locking", () => {
+describe.skipIf(!process.env.TEST_DATABASE_URL)("PostgreSQL migration regressions", () => {
+  it("accepts the previous backend default-group insert after migration 0013", async () => {
+    const databaseUrl = resolveDestructiveTestDatabaseUrl(process.env, {
+      explicitEnvNames: ["TEST_DATABASE_URL"],
+      purpose: "default meal-group rollout regression test",
+    });
+    if (!databaseUrl) {
+      throw new Error("TEST_DATABASE_URL is required");
+    }
+
+    const postgresRuntime = await createDatabaseRuntime(databaseUrl);
+    try {
+      await postgresRuntime.db.execute(
+        sql.raw(
+          "DROP SCHEMA public CASCADE; DROP SCHEMA IF EXISTS drizzle CASCADE; CREATE SCHEMA public",
+        ),
+      );
+
+      for (const fileName of migrationFiles.slice(0, 8)) {
+        await applyMigration(postgresRuntime, fileName);
+      }
+
+      const userId = "91111111-1111-4111-8111-111111111111";
+      const entryId = "92222222-2222-4222-8222-222222222222";
+      const previousBackendGroupId = "34689180-08f1-5561-b87e-4e1d6d004914";
+
+      await postgresRuntime.db.execute(sql.raw(`
+        INSERT INTO "users" ("id", "shoo_pairwise_sub", "email")
+        VALUES ('${userId}', 'rollout_compat_user', 'rollout-compat@example.com')
+      `));
+
+      for (const fileName of migrationFiles.slice(8, -1)) {
+        await applyMigration(postgresRuntime, fileName);
+      }
+
+      const historicalGroup = await postgresRuntime.db.execute<{ id: string }>(sql.raw(`
+        SELECT "id"
+        FROM "meal_groups"
+        WHERE "user_id" = '${userId}' AND "label" = 'Breakfast'
+      `));
+      expect(historicalGroup.rows).toHaveLength(1);
+      const historicalGroupId = historicalGroup.rows[0]?.id;
+      expect(historicalGroupId).toBeTruthy();
+      expect(historicalGroupId).not.toBe(previousBackendGroupId);
+
+      await postgresRuntime.db.execute(sql.raw(`
+        INSERT INTO "meal_entries" (
+          "id", "user_id", "entry_date", "meal_group_id", "label", "sort_order",
+          "protein_g", "carbs_g", "fat_g", "calories_kcal"
+        )
+        VALUES (
+          '${entryId}', '${userId}', '2026-07-23', '${historicalGroupId}', 'Oats', 0,
+          10, 20, 5, 165
+        )
+      `));
+
+      await applyMigration(postgresRuntime, "0013_deduplicate_default_meal_groups.sql");
+
+      const insertResult = await postgresRuntime.migrationPool?.query(
+        `
+        INSERT INTO meal_groups (id, user_id, label, sort_order, is_default)
+        VALUES ($1, $2, $3, $4, true)
+        ON CONFLICT (id) DO NOTHING
+        `,
+        [previousBackendGroupId, userId, "Breakfast", 0],
+      );
+      expect(insertResult?.rowCount).toBe(0);
+
+      const activeGroups = await postgresRuntime.db.execute<{ id: string }>(sql.raw(`
+        SELECT "id"
+        FROM "meal_groups"
+        WHERE "user_id" = '${userId}'
+          AND "label" = 'Breakfast'
+          AND "deleted_at" IS NULL
+          AND "is_default" = true
+      `));
+      expect(activeGroups.rows).toEqual([{ id: historicalGroupId }]);
+
+      const entryAssignment = await postgresRuntime.db.execute<{ meal_group_id: string }>(
+        sql.raw(`SELECT "meal_group_id" FROM "meal_entries" WHERE "id" = '${entryId}'`),
+      );
+      expect(entryAssignment.rows).toEqual([{ meal_group_id: historicalGroupId }]);
+    } finally {
+      await postgresRuntime.close();
+    }
+  });
+
   it("serializes concurrent migration runners", async () => {
     const databaseUrl = resolveDestructiveTestDatabaseUrl(process.env, {
       explicitEnvNames: ["TEST_DATABASE_URL"],
