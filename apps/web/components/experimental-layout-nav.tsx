@@ -48,9 +48,9 @@ export function ExperimentalLayoutNav() {
   const [, startNavigation] = useTransition();
   const [addSheetOpen, setAddSheetOpen] = useState(false);
   const selectedDate = searchParams.get("date") ?? getLocalDateString();
-  const warmupEnabled = isAppPathname(pathname);
+  const showAppNavigation = isAppPathname(pathname);
 
-  if (!warmupEnabled) {
+  if (!showAppNavigation) {
     return null;
   }
 

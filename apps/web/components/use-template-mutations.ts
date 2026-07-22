@@ -8,11 +8,8 @@ import {
   saveTemplateAction,
   updateTemplateAction,
 } from "@/lib/actions";
-import { getTemplateMutationCacheKeys } from "@/lib/app-warmup";
 
-import { invalidateAppDataCache } from "./app-data-cache";
-
-export type TemplateMutationState =
+type TemplateMutationState =
   | { type: "save" }
   | { type: "update" | "delete"; presetId: string };
 
@@ -48,7 +45,6 @@ export function useTemplateMutations({
       }
 
       setLocalTemplates((prev) => sortTemplatesByLabel([...prev, savedTemplate]));
-      invalidateAppDataCache(getTemplateMutationCacheKeys());
       return true;
     } finally {
       setPresetMutation(null);
@@ -70,7 +66,6 @@ export function useTemplateMutations({
         return false;
       }
 
-      invalidateAppDataCache(getTemplateMutationCacheKeys());
       return true;
     } finally {
       setPresetMutation(null);
@@ -97,7 +92,6 @@ export function useTemplateMutations({
           prev.map((preset) => (preset.id === id ? updatedTemplate : preset)),
         ),
       );
-      invalidateAppDataCache(getTemplateMutationCacheKeys());
       return true;
     } finally {
       setPresetMutation(null);

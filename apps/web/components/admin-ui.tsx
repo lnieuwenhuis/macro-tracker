@@ -132,6 +132,7 @@ export function AdminAuditEventCard({
       <div className={contentClass}>
         <div>
           <Link
+            prefetch={false}
             href={`/admin/audit/${event.id}`}
             className="font-semibold text-[var(--color-ink)] underline-offset-4 hover:underline"
           >
@@ -169,6 +170,7 @@ export function AdminBarcodeProductRow({
     <tr>
       <td className="py-3 pr-4">
         <Link
+          prefetch={false}
           href={`/admin/barcodes/${product.id}`}
           className="font-semibold text-[var(--color-ink)] underline-offset-4 hover:underline"
         >
@@ -271,6 +273,7 @@ export function AdminPaginationLinks({
   return (
     <div className="mt-5 flex items-center justify-between text-sm">
       <Link
+        prefetch={false}
         href={buildHref(Math.max(1, pagination.page - 1))}
         className={`rounded-full border px-4 py-2 font-semibold ${
           pagination.page <= 1
@@ -284,6 +287,7 @@ export function AdminPaginationLinks({
         Page {pagination.page} of {pagination.totalPages}
       </p>
       <Link
+        prefetch={false}
         href={buildHref(Math.min(pagination.totalPages, pagination.page + 1))}
         className={`rounded-full border px-4 py-2 font-semibold ${
           pagination.page >= pagination.totalPages

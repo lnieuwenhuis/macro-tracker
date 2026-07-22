@@ -15,7 +15,6 @@ import {
   resolveNavigationMotion,
   type ScreenMotion,
 } from "@/lib/navigation-motion";
-import { prefetchFullRoute } from "@/lib/full-prefetch";
 import { getLocalDateString, getStartupDateRedirect } from "@/lib/startup-date";
 
 import { ExperimentalProfileSheet } from "./experimental-profile-sheet";
@@ -88,15 +87,6 @@ export function ExperimentalAppShell({
     setScreenMotion(nextMotion);
     markNavigationRendered(pathname, selectedDate);
   }, [pathname, selectedDate]);
-
-  useEffect(() => {
-    if (!showDateNavigation) {
-      return;
-    }
-
-    prefetchFullRoute(router, previousDateHref);
-    prefetchFullRoute(router, nextDateHref);
-  }, [nextDateHref, previousDateHref, router, showDateNavigation]);
 
   useEffect(() => {
     if (!showDateNavigation) {

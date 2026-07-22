@@ -1,12 +1,14 @@
 use crate::{AppState, auth, db};
 use axum::{
     Json, Router,
+    body::Bytes,
     extract::{DefaultBodyLimit, Multipart, Path, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use base64ct::{Base64, Encoding};
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -50,28 +52,27 @@ async fn lookup_barcode(State(state): State<AppState>, Path(barcode): Path<Strin
         json!({ "barcode": barcode }),
     )
     .await
+        && !product.is_null()
     {
-        if !product.is_null() {
-            return legacy_json(
-                StatusCode::OK,
-                json!({
-                    "found": true,
-                    "product": {
-                        "productId": product.get("id").cloned().unwrap_or(Value::Null),
-                        "name": product.get("name").cloned().unwrap_or(Value::Null),
-                        "brands": product.get("brand").cloned().unwrap_or(Value::Null),
-                        "barcode": product.get("barcode").cloned().unwrap_or(Value::Null),
-                        "proteinG": product.get("proteinPer100").cloned().unwrap_or(json!(0)),
-                        "carbsG": product.get("carbsPer100").cloned().unwrap_or(json!(0)),
-                        "fatG": product.get("fatPer100").cloned().unwrap_or(json!(0)),
-                        "caloriesKcal": product.get("caloriesPer100").cloned().unwrap_or(json!(0)),
-                        "servingSizeG": product.get("servingWeightG").cloned().unwrap_or(Value::Null),
-                        "imageUrl": Value::Null,
-                        "source": "custom"
-                    }
-                }),
-            );
-        }
+        return legacy_json(
+            StatusCode::OK,
+            json!({
+                "found": true,
+                "product": {
+                    "productId": product.get("id").cloned().unwrap_or(Value::Null),
+                    "name": product.get("name").cloned().unwrap_or(Value::Null),
+                    "brands": product.get("brand").cloned().unwrap_or(Value::Null),
+                    "barcode": product.get("barcode").cloned().unwrap_or(Value::Null),
+                    "proteinG": product.get("proteinPer100").cloned().unwrap_or(json!(0)),
+                    "carbsG": product.get("carbsPer100").cloned().unwrap_or(json!(0)),
+                    "fatG": product.get("fatPer100").cloned().unwrap_or(json!(0)),
+                    "caloriesKcal": product.get("caloriesPer100").cloned().unwrap_or(json!(0)),
+                    "servingSizeG": product.get("servingWeightG").cloned().unwrap_or(Value::Null),
+                    "imageUrl": Value::Null,
+                    "source": "custom"
+                }
+            }),
+        );
     }
 
     match lookup_barcode_provider_chain(&state, &barcode).await {
@@ -98,7 +99,7 @@ async fn food_photo(
         }
     };
 
-    let mut image: Option<(Vec<u8>, String)> = None;
+    let mut image: Option<(Bytes, String)> = None;
     let mut clarification = String::new();
 
     while let Ok(Some(field)) = multipart.next_field().await {
@@ -121,7 +122,7 @@ async fn food_photo(
                     );
                 }
             };
-            image = Some((bytes.to_vec(), content_type));
+            image = Some((bytes, content_type));
         }
     }
 
@@ -632,18 +633,19 @@ fn assign_nutrient(
             macros.carbs_g = round1(value);
             *found = true;
         }
-    } else if name.contains("vet") || name.contains("fat") {
-        if !name.contains("verzadigd") && !name.contains("saturat") && !name.contains("onverzadigd")
-        {
-            macros.fat_g = round1(value);
-            *found = true;
-        }
+    } else if (name.contains("vet") || name.contains("fat"))
+        && !name.contains("verzadigd")
+        && !name.contains("saturat")
+        && !name.contains("onverzadigd")
+    {
+        macros.fat_g = round1(value);
+        *found = true;
     }
 }
 
 async fn analyze_food_photo_bytes(
     state: &AppState,
-    image_bytes: Vec<u8>,
+    image_bytes: Bytes,
     mime_type: &str,
     clarification: &str,
     requested_model: Option<&str>,
@@ -706,11 +708,20 @@ async fn analyze_food_photo_url(
         requested_model,
         user_id,
         force_ready,
-        OPENROUTER_CHAT_COMPLETIONS_URL,
-        model_timeout,
-        FOOD_PHOTO_REQUEST_TIMEOUT,
+        FoodPhotoRequestLimits {
+            openrouter_url: OPENROUTER_CHAT_COMPLETIONS_URL,
+            model_timeout,
+            request_timeout: FOOD_PHOTO_REQUEST_TIMEOUT,
+        },
     )
     .await
+}
+
+#[derive(Clone, Copy)]
+struct FoodPhotoRequestLimits<'a> {
+    openrouter_url: &'a str,
+    model_timeout: Duration,
+    request_timeout: Duration,
 }
 
 async fn analyze_food_photo_url_with_limits(
@@ -720,10 +731,13 @@ async fn analyze_food_photo_url_with_limits(
     requested_model: Option<&str>,
     user_id: &str,
     force_ready: bool,
-    openrouter_url: &str,
-    model_timeout: Duration,
-    request_timeout: Duration,
+    limits: FoodPhotoRequestLimits<'_>,
 ) -> Value {
+    let FoodPhotoRequestLimits {
+        openrouter_url,
+        model_timeout,
+        request_timeout,
+    } = limits;
     let Some(api_key) = state.config.openrouter_api_key.as_deref() else {
         return photo_failure(
             "OPENROUTER_API_KEY is not configured on the server.",
@@ -917,35 +931,117 @@ fn food_photo_timeout_failure(request_timeout: Duration) -> Value {
     )
 }
 
-fn build_openrouter_request_body(
-    model: &str,
-    image_url: &str,
+#[derive(Serialize)]
+struct OpenRouterRequest<'a> {
+    model: &'a str,
+    messages: (OpenRouterSystemMessage<'a>, OpenRouterUserMessage<'a>),
+    user: &'a str,
+    provider: OpenRouterProvider,
+    plugins: [OpenRouterPlugin<'a>; 1],
+    response_format: OpenRouterResponseFormat<'a>,
+    temperature: u8,
+    max_tokens: u16,
+    include_reasoning: bool,
+    reasoning: OpenRouterReasoning,
+}
+
+#[derive(Serialize)]
+struct OpenRouterSystemMessage<'a> {
+    role: &'a str,
+    content: &'a str,
+}
+
+#[derive(Serialize)]
+struct OpenRouterUserMessage<'a> {
+    role: &'a str,
+    content: (OpenRouterTextContent, OpenRouterImageContent<'a>),
+}
+
+#[derive(Serialize)]
+struct OpenRouterTextContent {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    text: String,
+}
+
+#[derive(Serialize)]
+struct OpenRouterImageContent<'a> {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    image_url: OpenRouterImageUrl<'a>,
+}
+
+#[derive(Serialize)]
+struct OpenRouterImageUrl<'a> {
+    url: &'a str,
+}
+
+#[derive(Serialize)]
+struct OpenRouterProvider {
+    allow_fallbacks: bool,
+}
+
+#[derive(Serialize)]
+struct OpenRouterPlugin<'a> {
+    id: &'a str,
+    enabled: bool,
+}
+
+#[derive(Serialize)]
+struct OpenRouterResponseFormat<'a> {
+    #[serde(rename = "type")]
+    kind: &'a str,
+}
+
+#[derive(Serialize)]
+struct OpenRouterReasoning {
+    enabled: bool,
+}
+
+fn build_openrouter_request_body<'a>(
+    model: &'a str,
+    image_url: &'a str,
     clarification: &str,
-    user_id: &str,
+    user_id: &'a str,
     force_ready: bool,
-) -> Value {
-    let prompt = build_prompt(clarification, force_ready);
-    json!({
-        "model": model,
-        "messages": [
-            { "role": "system", "content": food_photo_system_prompt() },
-            {
-                "role": "user",
-                "content": [
-                    { "type": "text", "text": prompt },
-                    { "type": "image_url", "image_url": { "url": image_url } }
-                ]
-            }
-        ],
-        "user": user_id,
-        "provider": { "allow_fallbacks": true },
-        "plugins": [{ "id": "response-healing", "enabled": true }],
-        "response_format": { "type": "json_object" },
-        "temperature": 0,
-        "max_tokens": 300,
-        "include_reasoning": false,
-        "reasoning": { "enabled": false }
-    })
+) -> OpenRouterRequest<'a> {
+    OpenRouterRequest {
+        model,
+        messages: (
+            OpenRouterSystemMessage {
+                role: "system",
+                content: food_photo_system_prompt(),
+            },
+            OpenRouterUserMessage {
+                role: "user",
+                content: (
+                    OpenRouterTextContent {
+                        kind: "text",
+                        text: build_prompt(clarification, force_ready),
+                    },
+                    OpenRouterImageContent {
+                        kind: "image_url",
+                        image_url: OpenRouterImageUrl { url: image_url },
+                    },
+                ),
+            },
+        ),
+        user: user_id,
+        provider: OpenRouterProvider {
+            allow_fallbacks: true,
+        },
+        plugins: [OpenRouterPlugin {
+            id: "response-healing",
+            enabled: true,
+        }],
+        response_format: OpenRouterResponseFormat {
+            kind: "json_object",
+        },
+        temperature: 0,
+        max_tokens: 300,
+        include_reasoning: false,
+        reasoning: OpenRouterReasoning { enabled: false },
+    }
 }
 
 async fn read_openrouter_error(response: reqwest::Response) -> String {
@@ -1074,7 +1170,7 @@ fn configured_food_photo_models(config: &crate::config::Config) -> Vec<String> {
         })
         .unwrap_or_else(|| DEFAULT_FOOD_PHOTO_FALLBACK_MODELS.to_vec());
     let mut seen = Vec::<String>::new();
-    for model in std::iter::once(primary).chain(fallbacks.into_iter()) {
+    for model in std::iter::once(primary).chain(fallbacks) {
         if is_free_openrouter_model(model)
             && !is_deprecated_food_photo_model(model)
             && !seen.iter().any(|seen_model| seen_model == model)
@@ -1166,7 +1262,7 @@ async fn run_macro_benchmark(
         "mode": mode,
         "usedBaseline": used_baseline,
         "baselineCreatedAt": baseline_created_at,
-        "fixtures": fixtures.iter().map(|fixture| fixture.to_json()).collect::<Vec<_>>(),
+        "fixtures": fixtures.iter().map(|fixture| fixture.as_json()).collect::<Vec<_>>(),
         "cases": cases,
         "summaries": {
             "current": if mode == "candidate_only" { Value::Null } else { summarize_model(&current_model, &current_results, &fixtures) },
@@ -1771,9 +1867,11 @@ mod tests {
             None,
             "test-user",
             false,
-            &endpoint,
-            Duration::from_millis(100),
-            Duration::from_secs(1),
+            FoodPhotoRequestLimits {
+                openrouter_url: &endpoint,
+                model_timeout: Duration::from_millis(100),
+                request_timeout: Duration::from_secs(1),
+            },
         )
         .await;
 
@@ -1812,9 +1910,11 @@ mod tests {
             None,
             "test-user",
             false,
-            &endpoint,
-            Duration::from_millis(100),
-            Duration::from_secs(1),
+            FoodPhotoRequestLimits {
+                openrouter_url: &endpoint,
+                model_timeout: Duration::from_millis(100),
+                request_timeout: Duration::from_secs(1),
+            },
         )
         .await;
 
@@ -1842,9 +1942,11 @@ mod tests {
             None,
             "test-user",
             false,
-            &endpoint,
-            Duration::from_millis(60),
-            Duration::from_millis(100),
+            FoodPhotoRequestLimits {
+                openrouter_url: &endpoint,
+                model_timeout: Duration::from_millis(60),
+                request_timeout: Duration::from_millis(100),
+            },
         )
         .await;
 
@@ -1889,7 +1991,7 @@ mod tests {
                     .map(str::to_string)
                     .unwrap_or_else(|| "application/octet-stream".to_string());
                 let bytes = field.bytes().await.expect("test multipart should parse");
-                image = Some((bytes.to_vec(), content_type));
+                image = Some((bytes, content_type));
             }
         }
         let (bytes, content_type) = image.expect("test image should be present");
@@ -2014,7 +2116,7 @@ impl BenchmarkFixture {
         })
     }
 
-    fn to_json(&self) -> Value {
+    fn as_json(&self) -> Value {
         json!({
             "id": self.id,
             "name": self.name,

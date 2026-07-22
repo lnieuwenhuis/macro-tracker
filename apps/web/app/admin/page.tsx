@@ -56,6 +56,7 @@ export default async function AdminDashboardPage() {
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {dashboard.health.segments.map((segment) => (
             <Link
+              prefetch={false}
               key={segment.id}
               href={segment.href}
               className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-app-bg)] p-4 transition hover:-translate-y-0.5 hover:bg-[var(--color-card-muted)]"
@@ -77,6 +78,7 @@ export default async function AdminDashboardPage() {
           description="Newest records in the shared catalogue."
           action={
             <Link
+              prefetch={false}
               href="/admin/barcodes"
               className="rounded-full border border-[var(--color-border)] px-4 py-2 text-sm font-semibold text-[var(--color-ink)] transition hover:bg-[var(--color-card-muted)]"
             >
@@ -134,6 +136,7 @@ export default async function AdminDashboardPage() {
           description="Latest privileged actions across the admin panel."
           action={
             <Link
+              prefetch={false}
               href="/admin/audit"
               className="rounded-full border border-[var(--color-border)] px-4 py-2 text-sm font-semibold text-[var(--color-ink)] transition hover:bg-[var(--color-card-muted)]"
             >

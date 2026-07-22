@@ -4,7 +4,6 @@ import type { FoodProduct, MealEntryRecord } from "@macro-tracker/db";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { saveMealEntryAction, searchFoodsAction } from "@/lib/actions";
-import { getDailyMutationCacheKeys } from "@/lib/app-warmup";
 import {
   hasCurrentFoodSearchResults,
   normalizeFoodSearchQuery,
@@ -12,7 +11,6 @@ import {
 import { formatSelectedDate } from "@/lib/formatting";
 import { buildMealEntryCopyInput } from "@/lib/meal-entry-copy";
 import { getLocalDateString } from "@/lib/startup-date";
-import { invalidateAppDataCache } from "./app-data-cache";
 import { CompactModal } from "./compact-modal";
 
 type FoodSearchModalProps = {
@@ -103,7 +101,6 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
       );
 
       if (result.ok) {
-        invalidateAppDataCache(getDailyMutationCacheKeys(todayStr));
         if (result.entry) {
           onEntrySaved?.(result.entry);
         }
@@ -147,7 +144,6 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
       });
 
       if (result.ok) {
-        invalidateAppDataCache(getDailyMutationCacheKeys(todayStr));
         if (result.entry) {
           onEntrySaved?.(result.entry);
         }

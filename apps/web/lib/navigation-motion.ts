@@ -38,7 +38,7 @@ function matchesPendingNavigation(
   );
 }
 
-export function getScreenSignature(pathname: string, selectedDate: string) {
+function getScreenSignature(pathname: string, selectedDate: string) {
   return `${pathname}?date=${selectedDate}`;
 }
 

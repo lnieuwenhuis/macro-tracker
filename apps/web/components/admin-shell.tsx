@@ -42,6 +42,7 @@ export function AdminShell({ userEmail, role, children }: AdminShellProps) {
 
             <div className="flex flex-wrap items-center gap-3">
               <Link
+                prefetch={false}
                 href="/"
                 className="rounded-full border border-[var(--color-border)] px-4 py-2 text-sm font-semibold text-[var(--color-ink)] transition hover:bg-[var(--color-card-muted)]"
               >
@@ -63,6 +64,7 @@ export function AdminShell({ userEmail, role, children }: AdminShellProps) {
 
                 return (
                   <Link
+                    prefetch={false}
                     key={link.href}
                     href={link.href}
                     className={`rounded-full px-4 py-2 text-sm font-semibold transition ${

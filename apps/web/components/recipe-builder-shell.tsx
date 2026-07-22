@@ -7,14 +7,10 @@ import { useMemo, useState, useTransition } from "react";
 import {
   saveRecipeAction,
 } from "@/lib/actions";
-import {
-  getRecipeMutationCacheKeys,
-} from "@/lib/app-warmup";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
 import type { OpenFoodFactsProduct } from "@/lib/openfoodfacts";
 
 import { AddFoodButton } from "./add-food-button";
-import { invalidateAppDataCache } from "./app-data-cache";
 import { BarcodeCaptureModals } from "./barcode-capture-modals";
 import { ExperimentalAppShell } from "./experimental-app-shell";
 import { IngredientCard, type IngredientDraft } from "./ingredient-card";
@@ -206,7 +202,6 @@ export function RecipeBuilderShell({
       }
 
       const href = `/recipes?date=${selectedDate}`;
-      invalidateAppDataCache(getRecipeMutationCacheKeys());
       prepareNavigationMotion(href, "screen");
       router.push(href);
       router.refresh();

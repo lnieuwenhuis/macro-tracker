@@ -40,13 +40,13 @@ function subscribeToTheme(callback: () => void) {
   };
 }
 
-export function setTheme(theme: ThemeId) {
+function setTheme(theme: ThemeId) {
   window.localStorage.setItem(STORAGE_KEY, theme);
   applyTheme(theme);
   window.dispatchEvent(new Event("macro-tracker-theme-change"));
 }
 
-export function useTheme(): ThemeId {
+function useTheme(): ThemeId {
   return useSyncExternalStore<ThemeId>(
     subscribeToTheme,
     getActiveTheme,

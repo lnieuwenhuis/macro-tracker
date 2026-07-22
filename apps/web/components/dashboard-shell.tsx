@@ -4,25 +4,18 @@ import type { DailySummary, MacroGoals, MealEntryRecord, MealEntryStatus, MealGr
 import { useRouter } from "next/navigation";
 import { useEffect, useEffectEvent, useMemo, useRef, useState, useTransition } from "react";
 
-import { applyTemplateAction, createMealGroupAction, deleteMealGroupAction, deleteMealEntryAction, markMealEntryStatusAction, saveMealEntryAction, updateMealGroupAction } from "@/lib/actions";
-import {
-  type AppWarmupPayload,
-  getDailyMutationCacheKeys,
-} from "@/lib/app-warmup";
+import { applyTemplateAction, createMealGroupAction, deleteMealGroupAction, deleteMealEntryAction, loadRecipesAction, loadTemplatesAction, markMealEntryStatusAction, saveMealEntryAction, updateMealGroupAction } from "@/lib/actions";
 import type { ComposeAction } from "@/lib/compose";
 import { computeLiveTotals, rankCandidates } from "@/lib/quick-add";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
 import type { OpenFoodFactsProduct } from "@/lib/openfoodfacts";
 import type { PresetTemplateKind } from "@/lib/preset-modal-state";
 import { getLocalDateString } from "@/lib/startup-date";
-import {
-  canEditAsSingleFoodTemplate,
-  getTemplateMacroTotals,
-} from "@/lib/template-macros";
+import { createLazyCollectionLoader } from "@/lib/lazy-collection";
 
 import { AiFoodPhotoModal } from "./ai-food-photo-modal";
-import { invalidateAppDataCache } from "./app-data-cache";
 import { BarcodeCaptureModals } from "./barcode-capture-modals";
+import { CompactModal } from "./compact-modal";
 import { ExperimentalAppShell } from "./experimental-app-shell";
 import { FoodSearchModal } from "./food-search-modal";
 import { MacroBarGroup } from "./macro-bar";
@@ -38,9 +31,7 @@ type DashboardShellProps = {
   selectedDate: string;
   dailySummary: DailySummary;
   goals: MacroGoals;
-  templates: MealTemplate[];
-  recipes: RecipeRecord[];
-  recentCandidates: QuickAddCandidate[];
+  quickAddCandidates: QuickAddCandidate[];
   initialComposeAction?: ComposeAction | null;
   initialPresetTemplateKind?: PresetTemplateKind | null;
 };
@@ -226,15 +217,50 @@ function getNextSortOrder(drafts: MealDraft[]) {
   return drafts.reduce((highest, draft) => Math.max(highest, draft.sortOrder), -1) + 1;
 }
 
+function CollectionLoadStateModal({
+  title,
+  loading,
+  error,
+  onClose,
+  onRetry,
+}: {
+  title: string;
+  loading: boolean;
+  error: string | null;
+  onClose: () => void;
+  onRetry: () => void;
+}) {
+  return (
+    <CompactModal ariaLabel={title} title={title} onClose={onClose}>
+      <div className="py-8 text-center">
+        {loading ? (
+          <p className="text-sm text-[var(--color-muted)]">Loading…</p>
+        ) : (
+          <>
+            <p className="text-sm text-[var(--color-danger)]">
+              {error ?? "Unable to load this collection."}
+            </p>
+            <button
+              type="button"
+              onClick={onRetry}
+              className="mt-4 rounded-full bg-[var(--color-accent)] px-4 py-2 text-sm font-semibold text-white"
+            >
+              Retry
+            </button>
+          </>
+        )}
+      </div>
+    </CompactModal>
+  );
+}
+
 export function DashboardShell({
   userEmail,
   canAccessAdmin,
   selectedDate,
   dailySummary,
   goals,
-  templates: initialTemplates,
-  recipes,
-  recentCandidates,
+  quickAddCandidates,
   initialComposeAction = null,
   initialPresetTemplateKind = null,
 }: DashboardShellProps) {
@@ -256,9 +282,18 @@ export function DashboardShell({
   const [showPresetsModal, setShowPresetsModal] = useState(false);
   const [presetInitialKind, setPresetInitialKind] =
     useState<PresetTemplateKind | null>(null);
-  const [localTemplates, setLocalTemplates] = useState<MealTemplate[]>(initialTemplates);
-  const [localRecentCandidates, setLocalRecentCandidates] =
-    useState<QuickAddCandidate[]>(recentCandidates);
+  const [localTemplates, setLocalTemplates] = useState<MealTemplate[]>([]);
+  const [templatesLoaded, setTemplatesLoaded] = useState(false);
+  const [templatesLoading, setTemplatesLoading] = useState(false);
+  const [templateLoadError, setTemplateLoadError] = useState<string | null>(null);
+  const templateLoaderRef = useRef<ReturnType<typeof createLazyCollectionLoader<MealTemplate[]>> | null>(null);
+  templateLoaderRef.current ??= createLazyCollectionLoader(async () => {
+    const result = await loadTemplatesAction();
+    if (!result.ok || !result.templates) {
+      throw new Error(result.error ?? "Unable to load templates.");
+    }
+    return result.templates;
+  });
   const [presetMutation, setPresetMutation] = useState<PresetMutationState | null>(null);
   const [presetError, setPresetError] = useState<string | null>(null);
   const {
@@ -281,6 +316,18 @@ export function DashboardShell({
 
   // Recipe picker state
   const [showRecipePickerModal, setShowRecipePickerModal] = useState(false);
+  const [localRecipes, setLocalRecipes] = useState<RecipeRecord[]>([]);
+  const [recipesLoaded, setRecipesLoaded] = useState(false);
+  const [recipesLoading, setRecipesLoading] = useState(false);
+  const [recipeLoadError, setRecipeLoadError] = useState<string | null>(null);
+  const recipeLoaderRef = useRef<ReturnType<typeof createLazyCollectionLoader<RecipeRecord[]>> | null>(null);
+  recipeLoaderRef.current ??= createLazyCollectionLoader(async () => {
+    const result = await loadRecipesAction();
+    if (!result.ok || !result.recipes) {
+      throw new Error(result.error ?? "Unable to load recipes.");
+    }
+    return result.recipes;
+  });
 
   // Food search state
   const [showSearchModal, setShowSearchModal] = useState(false);
@@ -293,43 +340,8 @@ export function DashboardShell({
   }, []);
 
   useEffect(() => {
-    setLocalRecentCandidates(recentCandidates);
-  }, [recentCandidates]);
-
-  useEffect(() => {
-    if (!clientReady) {
-      return;
-    }
-
-    const controller = new AbortController();
-    const params = new URLSearchParams({
-      date: selectedDate,
-      scope: "core",
-    });
-
-    void fetch(`/api/app/warmup?${params.toString()}`, {
-      cache: "no-store",
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        if (!response.ok) {
-          return null;
-        }
-
-        return (await response.json()) as AppWarmupPayload;
-      })
-      .then((payload) => {
-        if (payload) {
-          setLocalRecentCandidates(payload.recentCandidates);
-        }
-      })
-      .catch(() => undefined);
-
-    return () => controller.abort();
-  }, [clientReady, selectedDate]);
-
-  useEffect(() => {
     setSavedMeals(dailySummary.meals);
+    setLocalMealGroups(dailySummary.mealGroups);
     setDrafts((currentDrafts) => {
       if (selectedDateRef.current !== selectedDate) {
         return dailySummary.meals.map(mealToDraft);
@@ -338,7 +350,7 @@ export function DashboardShell({
       return reconcileDraftsWithSavedMeals(currentDrafts, dailySummary.meals);
     });
     selectedDateRef.current = selectedDate;
-  }, [dailySummary.meals, selectedDate]);
+  }, [dailySummary.mealGroups, dailySummary.meals, selectedDate]);
 
   // Tracks cards that were recently copied to today so the button can give
   // brief visual confirmation before returning to its normal state.
@@ -370,34 +382,15 @@ export function DashboardShell({
   // Quick-add rails
   // ---------------------------------------------------------------------------
 
-  // Build a unified candidate pool: template candidates + recent history candidates
-  const allCandidates = useMemo<QuickAddCandidate[]>(() => {
-    const templateCandidates: QuickAddCandidate[] = localTemplates
-      .filter(canEditAsSingleFoodTemplate)
-      .map((template) => {
-        const totals = getTemplateMacroTotals(template.items);
-        return {
-          label: template.items[0]?.label ?? template.label,
-          proteinG: totals.proteinG,
-          carbsG: totals.carbsG,
-          fatG: totals.fatG,
-          caloriesKcal: totals.caloriesKcal,
-          source: "preset" as const,
-          presetId: template.id,
-        };
-      });
-    return [...templateCandidates, ...localRecentCandidates];
-  }, [localTemplates, localRecentCandidates]);
-
   // Single unified quick-add list: ranked by routine signals, not macro fit.
   const quickAddItems = useMemo(
     () =>
-      rankCandidates(allCandidates, QUICK_ADD_ROUTINE_RANKING_REMAINING, {
+      rankCandidates(quickAddCandidates, QUICK_ADD_ROUTINE_RANKING_REMAINING, {
         limit: 10,
         currentHourUtc: new Date().getUTCHours(),
         referenceDate: todayStr,
       }),
-    [allCandidates, todayStr],
+    [quickAddCandidates, todayStr],
   );
 
   // ---------------------------------------------------------------------------
@@ -494,7 +487,6 @@ export function DashboardShell({
           ),
         );
       }
-      invalidateAppDataCache(getDailyMutationCacheKeys(selectedDate));
       router.refresh();
     });
   }
@@ -529,7 +521,6 @@ export function DashboardShell({
         ...currentDrafts,
         ...entries.map((entry) => mealToDraft(entry)),
       ]);
-      invalidateAppDataCache(getDailyMutationCacheKeys(selectedDate));
       setShowPresetsModal(false);
       router.refresh();
     } finally {
@@ -664,7 +655,6 @@ export function DashboardShell({
         setSavedMeals((meals) => upsertSavedMeal(meals, savedEntry));
       }
 
-      invalidateAppDataCache(getDailyMutationCacheKeys(selectedDate));
       router.refresh();
     } finally {
       setSavingClientId(null);
@@ -699,7 +689,6 @@ export function DashboardShell({
 
       setSavedMeals((meals) => meals.filter((meal) => meal.id !== draft.id));
       removeLocalDraft(clientId);
-      invalidateAppDataCache(getDailyMutationCacheKeys(selectedDate));
       router.refresh();
     });
   }
@@ -748,7 +737,6 @@ export function DashboardShell({
           ),
         );
       }
-      invalidateAppDataCache(getDailyMutationCacheKeys(selectedDate));
       router.refresh();
     });
   }
@@ -821,7 +809,6 @@ export function DashboardShell({
           meal.mealGroupId === groupId ? { ...meal, mealGroupId: null } : meal,
         ),
       );
-      invalidateAppDataCache(getDailyMutationCacheKeys(selectedDate));
       router.refresh();
     } finally {
       setGroupMutationId(null);
@@ -910,7 +897,6 @@ export function DashboardShell({
           [clientId]: result.error ?? "Unable to copy entry to today.",
         }));
       } else {
-        invalidateAppDataCache(getDailyMutationCacheKeys(todayStr));
         // Show a brief "copied" confirmation on the button, then clear it.
         setCopiedCardIds((prev) => new Set([...prev, clientId]));
         setTimeout(() => {
@@ -930,6 +916,50 @@ export function DashboardShell({
     setPresetError(null);
     setPresetInitialKind(initialKind);
     setShowPresetsModal(true);
+    void ensureTemplatesLoaded();
+  }
+
+  async function ensureTemplatesLoaded() {
+    if (templatesLoaded || templatesLoading) {
+      return;
+    }
+
+    setTemplatesLoading(true);
+    setTemplateLoadError(null);
+    try {
+      const templates = await templateLoaderRef.current!.load();
+      setLocalTemplates(templates);
+      setTemplatesLoaded(true);
+    } catch (loadError) {
+      setTemplateLoadError(
+        loadError instanceof Error ? loadError.message : "Unable to load templates.",
+      );
+    }
+    setTemplatesLoading(false);
+  }
+
+  function openRecipePickerModal() {
+    setShowRecipePickerModal(true);
+    void ensureRecipesLoaded();
+  }
+
+  async function ensureRecipesLoaded() {
+    if (recipesLoaded || recipesLoading) {
+      return;
+    }
+
+    setRecipesLoading(true);
+    setRecipeLoadError(null);
+    try {
+      const recipes = await recipeLoaderRef.current!.load();
+      setLocalRecipes(recipes);
+      setRecipesLoaded(true);
+    } catch (loadError) {
+      setRecipeLoadError(
+        loadError instanceof Error ? loadError.message : "Unable to load recipes.",
+      );
+    }
+    setRecipesLoading(false);
   }
 
   function handleComposeAction(
@@ -952,7 +982,7 @@ export function DashboardShell({
         setShowPhotoModal(true);
         break;
       case "recipe":
-        setShowRecipePickerModal(true);
+        openRecipePickerModal();
         break;
     }
   }
@@ -1252,7 +1282,17 @@ export function DashboardShell({
         />
       )}
 
-      {showPresetsModal && (
+      {showPresetsModal && !templatesLoaded && (
+        <CollectionLoadStateModal
+          title="Templates"
+          loading={templatesLoading}
+          error={templateLoadError}
+          onClose={() => setShowPresetsModal(false)}
+          onRetry={() => void ensureTemplatesLoaded()}
+        />
+      )}
+
+      {showPresetsModal && templatesLoaded && (
         <PresetModal
           presets={localTemplates}
           mutation={presetMutation}
@@ -1269,9 +1309,19 @@ export function DashboardShell({
         />
       )}
 
-      {showRecipePickerModal && (
+      {showRecipePickerModal && !recipesLoaded && (
+        <CollectionLoadStateModal
+          title="Pick a Recipe"
+          loading={recipesLoading}
+          error={recipeLoadError}
+          onClose={() => setShowRecipePickerModal(false)}
+          onRetry={() => void ensureRecipesLoaded()}
+        />
+      )}
+
+      {showRecipePickerModal && recipesLoaded && (
         <RecipePickerModal
-          recipes={recipes}
+          recipes={localRecipes}
           onClose={() => setShowRecipePickerModal(false)}
           onSelect={addDraftFromRecipe}
         />
@@ -1289,7 +1339,6 @@ export function DashboardShell({
                 defaultEntryStatus,
               ),
             ]);
-            invalidateAppDataCache(getDailyMutationCacheKeys(selectedDate));
             setShowPhotoModal(false);
           }}
           onSaveAsPreset={(input) => {
@@ -1314,7 +1363,6 @@ export function DashboardShell({
               defaultEntryStatus,
             ),
           ]);
-          invalidateAppDataCache(getDailyMutationCacheKeys(selectedDate));
         }}
         onSaveAsPreset={(input) => {
           handleSavePreset(input);

@@ -173,21 +173,10 @@ pub async fn current_user_from_headers(
     let token = session_token_from_headers(&headers)
         .ok_or_else(|| AppError::Unauthorized("Missing session.".to_string()))?;
     let session = verify_session_token(&state.config, &token)?;
-    let mut user = db::get_user_by_id(&state.db, session.user_id)
+    let user = db::get_user_by_id(&state.db, session.user_id)
         .await?
         .ok_or_else(|| AppError::Unauthorized("Session user no longer exists.".to_string()))?;
-
-    if state
-        .config
-        .admin_owner_emails
-        .iter()
-        .any(|email| email == &user.email.to_lowercase())
-        && user.role != "owner"
-    {
-        user = db::ensure_user_role(&state.db, user.id, "owner").await?;
-    }
-
-    Ok(user)
+    reconcile_configured_owner(&state, user).await
 }
 
 pub async fn authorize_shoo_login(
@@ -211,8 +200,17 @@ pub async fn authorize_shoo_login(
         display_name: claims.name,
         picture_url: claims.picture,
     };
-    let mut user = db::upsert_user_from_shoo_profile(&state.db, &profile).await?;
+    let user = db::upsert_user_from_shoo_profile(&state.db, &profile).await?;
+    let user = reconcile_configured_owner(state, user).await?;
 
+    let session = SessionUser {
+        user_id: user.id,
+        email: user.email.clone(),
+    };
+    Ok((session, user))
+}
+
+async fn reconcile_configured_owner(state: &AppState, user: AppUser) -> AppResult<AppUser> {
     if state
         .config
         .admin_owner_emails
@@ -220,14 +218,9 @@ pub async fn authorize_shoo_login(
         .any(|email| email == &user.email.to_lowercase())
         && user.role != "owner"
     {
-        user = db::ensure_user_role(&state.db, user.id, "owner").await?;
+        return db::ensure_user_role(&state.db, user.id, "owner").await;
     }
-
-    let session = SessionUser {
-        user_id: user.id,
-        email: user.email.clone(),
-    };
-    Ok((session, user))
+    Ok(user)
 }
 
 async fn verify_shoo_token(

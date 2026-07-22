@@ -3,7 +3,6 @@
 import {
   createMealEntry,
   createMealGroup,
-  createPersonalFoodProduct,
   createRecipe,
   createTemplate,
   createTemplateFromDate,
@@ -14,12 +13,12 @@ import {
   deleteRecipe,
   deleteTemplate,
   deleteWeightEntry,
-  getLeaderboardStats,
+  getRecipes,
   getRecipeById,
+  getTemplates,
   getTemplateById,
   markMealEntryStatus,
   applyTemplateToDate,
-  reorderMealGroups,
   saveBarcodeFoodProduct,
   saveUserGoals,
   saveWeightGoal,
@@ -27,17 +26,13 @@ import {
   searchMealEntries,
   updateMealGroup,
   updateMealEntry,
-  updatePersonalFoodProduct,
   updateRecipe,
   updateTemplate,
   updateWeightEntry,
-  isValidDateString,
 } from "@macro-tracker/db";
 import type {
   BarcodeFoodProductInput,
   FoodProduct,
-  FoodProductInput,
-  LeaderboardStats,
   MacroFoodInput,
   MealEntryRecord,
   MealEntryStatus,
@@ -212,15 +207,6 @@ export async function deleteMealGroupAction(
       return { ok: false, error: "Meal group not found." };
     }
     return { ok: true };
-  }, { revalidate: [["/", "page"]] });
-}
-
-export async function reorderMealGroupsAction(
-  input: { orderedIds: string[] },
-): Promise<MealGroupResult> {
-  return runSessionAction(async (sessionUser) => {
-    const groups = await reorderMealGroups(sessionUser.userId, input.orderedIds);
-    return { ok: true, groups };
   }, { revalidate: [["/", "page"]] });
 }
 
@@ -470,6 +456,24 @@ type SaveRecipeInput = {
 
 type SaveRecipeResult = ActionResult & { recipe?: RecipeRecord };
 
+type LoadRecipesResult = ActionResult & { recipes?: RecipeRecord[] };
+
+export async function loadRecipesAction(): Promise<LoadRecipesResult> {
+  return runSessionAction(async (sessionUser) => ({
+    ok: true,
+    recipes: await getRecipes(sessionUser.userId),
+  }));
+}
+
+type LoadTemplatesResult = ActionResult & { templates?: MealTemplate[] };
+
+export async function loadTemplatesAction(): Promise<LoadTemplatesResult> {
+  return runSessionAction(async (sessionUser) => ({
+    ok: true,
+    templates: await getTemplates(sessionUser.userId),
+  }));
+}
+
 export async function saveRecipeAction(
   input: SaveRecipeInput,
 ): Promise<SaveRecipeResult> {
@@ -492,28 +496,6 @@ export async function deleteRecipeAction(
 
     return { ok: true };
   }, { revalidate: [["/recipes", "page"]] });
-}
-
-type SearchMealEntriesResult = ActionResult & { results?: MealEntryRecord[] };
-
-export async function searchMealEntriesAction(
-  input: { query: string },
-): Promise<SearchMealEntriesResult> {
-  return runSessionAction(async (sessionUser) => {
-    const results = await searchMealEntries(sessionUser.userId, input.query);
-    return { ok: true, results };
-  });
-}
-
-type SearchFoodProductsResult = ActionResult & { products?: FoodProduct[] };
-
-export async function searchFoodProductsAction(
-  input: { query: string },
-): Promise<SearchFoodProductsResult> {
-  return runSessionAction(async (sessionUser) => {
-    const products = await searchFoodProducts(sessionUser.userId, input.query);
-    return { ok: true, products };
-  });
 }
 
 type SearchFoodsResult = ActionResult & {
@@ -565,30 +547,6 @@ export async function searchFoodsAction(
 
     return { ok: true, results, products };
   });
-}
-
-type SaveFoodProductResult = ActionResult & { product?: FoodProduct };
-
-export async function createFoodProductAction(
-  input: FoodProductInput,
-): Promise<SaveFoodProductResult> {
-  return runSessionAction(async (sessionUser) => {
-    const product = await createPersonalFoodProduct(sessionUser.userId, input);
-    return { ok: true, product };
-  }, { revalidate: [["/", "layout"]] });
-}
-
-export async function updateFoodProductAction(
-  input: { id: string; product: FoodProductInput },
-): Promise<SaveFoodProductResult> {
-  return runSessionAction(async (sessionUser) => {
-    const product = await updatePersonalFoodProduct(
-      sessionUser.userId,
-      input.id,
-      input.product,
-    );
-    return { ok: true, product };
-  }, { revalidate: [["/", "layout"]] });
 }
 
 type LogRecipePortionInput = {
@@ -650,26 +608,5 @@ export async function saveBarcodeFoodProductAction(
   return runSessionAction(async (sessionUser) => {
     const product = await saveBarcodeFoodProduct(sessionUser.userId, input);
     return { ok: true, product };
-  });
-}
-
-// ---------------------------------------------------------------------------
-// Leaderboard / personal records
-// ---------------------------------------------------------------------------
-
-type FetchLeaderboardResult =
-  | { ok: true; stats: LeaderboardStats }
-  | { ok: false; error: string };
-
-export async function fetchLeaderboardStatsAction(
-  input: { referenceDate: string },
-): Promise<FetchLeaderboardResult> {
-  if (!isValidDateString(input.referenceDate)) {
-    return { ok: false, error: "Invalid reference date." };
-  }
-
-  return runSessionAction(async (sessionUser) => {
-    const stats = await getLeaderboardStats(sessionUser.userId, input.referenceDate);
-    return { ok: true, stats };
   });
 }

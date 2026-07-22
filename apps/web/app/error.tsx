@@ -59,6 +59,7 @@ export default function Error({
             Try again
           </button>
           <Link
+            prefetch={false}
             href="/"
             className="flex-1 rounded-full border border-[var(--color-border-strong)] px-4 py-2 text-sm font-semibold text-[var(--color-muted-strong)] transition hover:text-[var(--color-ink)]"
           >

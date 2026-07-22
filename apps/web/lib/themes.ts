@@ -112,7 +112,7 @@ export const THEMES: ThemeMeta[] = [
 
 export const DEFAULT_THEME: ThemeId = "sandstone";
 
-export const THEME_IDS = THEMES.map((t) => t.id);
+const THEME_IDS = THEMES.map((t) => t.id);
 
 export function isValidTheme(value: string): value is ThemeId {
   return (THEME_IDS as string[]).includes(value);

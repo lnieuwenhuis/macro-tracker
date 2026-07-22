@@ -11,15 +11,10 @@ import {
   saveWeightGoalAction,
   updateWeightEntryAction,
 } from "@/lib/actions";
-import {
-  getGoalsMutationCacheKeys,
-  getWeightMutationCacheKeys,
-} from "@/lib/app-warmup";
 import { formatShortDate } from "@/lib/formatting";
 import type { ProgressTab } from "@/lib/ui-mode";
 import { buildWeightGoalProjection } from "@/lib/weight-trend";
 
-import { invalidateAppDataCache } from "./app-data-cache";
 import { ConfirmDeleteButton } from "./confirm-delete-button";
 import { ExperimentalAppShell, ExperimentalSettingsButton } from "./experimental-app-shell";
 import {
@@ -47,11 +42,9 @@ function toNullableNumber(value: string): number | null {
 
 function GoalsPanel({
   goals,
-  selectedDate,
   initialWeightKg,
 }: {
   goals: MacroGoals;
-  selectedDate: string;
   initialWeightKg: number | null;
 }) {
   const router = useRouter();
@@ -94,7 +87,6 @@ function GoalsPanel({
       }
 
       setSaved(true);
-      invalidateAppDataCache(getGoalsMutationCacheKeys(selectedDate));
       router.refresh();
     });
   }
@@ -364,7 +356,6 @@ function WeightPanel({
     setError(null);
     startTransition(async () => {
       const submittedDate = formDate;
-      const originalDate = editingEntry?.date ?? submittedDate;
       const result = editingEntry
         ? await updateWeightEntryAction({
             id: editingEntry.id,
@@ -386,10 +377,6 @@ function WeightPanel({
       }
 
       resetEntryForm();
-      invalidateAppDataCache([
-        ...getWeightMutationCacheKeys(originalDate),
-        ...getWeightMutationCacheKeys(submittedDate),
-      ]);
       router.refresh();
     });
   }
@@ -409,12 +396,11 @@ function WeightPanel({
         return;
       }
       setGoalSaved(true);
-      invalidateAppDataCache(getWeightMutationCacheKeys(selectedDate));
       router.refresh();
     });
   }
 
-  function handleDeleteEntry(entryId: string, entryDate: string) {
+  function handleDeleteEntry(entryId: string) {
     startTransition(async () => {
       const result = await deleteWeightEntryAction({ id: entryId });
       if (!result.ok) {
@@ -424,7 +410,6 @@ function WeightPanel({
       if (editingEntry?.id === entryId) {
         resetEntryForm();
       }
-      invalidateAppDataCache(getWeightMutationCacheKeys(entryDate));
       router.refresh();
     });
   }
@@ -676,7 +661,7 @@ function WeightPanel({
                   </button>
                   <ConfirmDeleteButton
                     disabled={isPending}
-                    onConfirm={() => handleDeleteEntry(entry.id, entry.date)}
+                    onConfirm={() => handleDeleteEntry(entry.id)}
                     ariaLabel="Delete entry"
                     className="flex h-8 w-8 items-center justify-center rounded-lg text-[var(--color-muted)] transition hover:text-[var(--color-danger)]"
                   >
@@ -764,7 +749,6 @@ export function ProgressShell({
       {activeTab === "goals" ? (
         <GoalsPanel
           goals={goals}
-          selectedDate={selectedDate}
           initialWeightKg={weightData.stats.currentWeight}
         />
       ) : (

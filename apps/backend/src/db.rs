@@ -742,6 +742,28 @@ pub async fn ensure_default_meal_groups(pool: &PgPool, user_id: Uuid) -> AppResu
     Ok(())
 }
 
+async fn meal_groups_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
+    query_json(
+        pool,
+        r#"
+        SELECT coalesce(jsonb_agg(
+          jsonb_build_object(
+            'id', id,
+            'userId', user_id,
+            'label', label,
+            'sortOrder', sort_order,
+            'isDefault', is_default
+          )
+          ORDER BY sort_order, label
+        ), '[]'::jsonb) AS data
+        FROM meal_groups
+        WHERE user_id = $1 AND deleted_at IS NULL
+        "#,
+        &[JsonBind::Uuid(user_id)],
+    )
+    .await
+}
+
 async fn complete_user_onboarding_json(
     pool: &PgPool,
     user_id: Uuid,
@@ -1070,25 +1092,7 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
         "getMealGroups" => {
             let user_id = uuid_arg(&args, "userId")?;
             ensure_default_meal_groups(pool, user_id).await?;
-            query_json(
-                pool,
-                r#"
-                SELECT coalesce(jsonb_agg(
-                  jsonb_build_object(
-                    'id', id,
-                    'userId', user_id,
-                    'label', label,
-                    'sortOrder', sort_order,
-                    'isDefault', is_default
-                  )
-                  ORDER BY sort_order, label
-                ), '[]'::jsonb) AS data
-                FROM meal_groups
-                WHERE user_id = $1 AND deleted_at IS NULL
-                "#,
-                &[JsonBind::Uuid(user_id)],
-            )
-            .await
+            meal_groups_json(pool, user_id).await
         }
         "createMealGroup" => {
             let user_id = uuid_arg(&args, "userId")?;
@@ -1237,25 +1241,7 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
             }
             tx.commit().await?;
             ensure_default_meal_groups(pool, user_id).await?;
-            query_json(
-                pool,
-                r#"
-                SELECT coalesce(jsonb_agg(
-                  jsonb_build_object(
-                    'id', id,
-                    'userId', user_id,
-                    'label', label,
-                    'sortOrder', sort_order,
-                    'isDefault', is_default
-                  )
-                  ORDER BY sort_order, label
-                ), '[]'::jsonb) AS data
-                FROM meal_groups
-                WHERE user_id = $1 AND deleted_at IS NULL
-                "#,
-                &[JsonBind::Uuid(user_id)],
-            )
-            .await
+            meal_groups_json(pool, user_id).await
         }
         "getDailySummary" => {
             let user_id = uuid_arg(&args, "userId")?;
@@ -1496,6 +1482,15 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
                 .unwrap_or(30)
                 .clamp(1, 100) as i32;
             recent_quick_add_json(pool, user_id, limit).await
+        }
+        "getDashboardQuickAddCandidates" => {
+            let user_id = uuid_arg(&args, "userId")?;
+            let limit = args
+                .get("limitPerSource")
+                .and_then(Value::as_i64)
+                .unwrap_or(30)
+                .clamp(1, 30) as i32;
+            dashboard_quick_add_json(pool, user_id, limit).await
         }
         "listRecentMealEntries" => {
             let user_id = uuid_arg(&args, "userId")?;
@@ -2920,10 +2915,10 @@ async fn create_template_from_date_json(
                     item.insert(key.to_string(), value.clone());
                 }
             }
-            if let Some(meal_group_id) = meal.get("mealGroupId").and_then(Value::as_str) {
-                if let Some(label) = group_label_by_id.get(meal_group_id) {
-                    item.insert("mealGroupLabel".to_string(), Value::String(label.clone()));
-                }
+            if let Some(meal_group_id) = meal.get("mealGroupId").and_then(Value::as_str)
+                && let Some(label) = group_label_by_id.get(meal_group_id)
+            {
+                item.insert("mealGroupLabel".to_string(), Value::String(label.clone()));
             }
             Value::Object(item)
         })
@@ -3155,7 +3150,7 @@ async fn save_barcode_food_product_json(
 ) -> AppResult<Value> {
     let mut tx = pool.begin().await?;
     let (_, product) =
-        save_barcode_food_product_with_executor(&mut *tx, user_id, input, test_fault).await?;
+        save_barcode_food_product_with_executor(&mut tx, user_id, input, test_fault).await?;
     tx.commit().await?;
     Ok(product)
 }
@@ -3342,35 +3337,35 @@ async fn list_admin_users_json(
         .get("role")
         .and_then(Value::as_str)
         .filter(|value| *value != "all");
-    if let Some(role) = role {
-        if !matches!(role, "user" | "admin" | "owner") {
-            return Err(AppError::BadRequest("User role is invalid.".to_string()));
-        }
+    if let Some(role) = role
+        && !matches!(role, "user" | "admin" | "owner")
+    {
+        return Err(AppError::BadRequest("User role is invalid.".to_string()));
     }
     let activity = input
         .get("activity")
         .and_then(Value::as_str)
         .filter(|value| *value != "all");
-    if let Some(activity) = activity {
-        if !matches!(activity, "active7" | "inactive7" | "inactive30") {
-            return Err(AppError::BadRequest(
-                "User activity filter is invalid.".to_string(),
-            ));
-        }
+    if let Some(activity) = activity
+        && !matches!(activity, "active7" | "inactive7" | "inactive30")
+    {
+        return Err(AppError::BadRequest(
+            "User activity filter is invalid.".to_string(),
+        ));
     }
     let health = input
         .get("health")
         .and_then(Value::as_str)
         .filter(|value| *value != "all");
-    if let Some(health) = health {
-        if !matches!(
+    if let Some(health) = health
+        && !matches!(
             health,
             "onboarded_no_logs" | "no_goals" | "no_weight_entries" | "heavy_barcode_submitters"
-        ) {
-            return Err(AppError::BadRequest(
-                "User health filter is invalid.".to_string(),
-            ));
-        }
+        )
+    {
+        return Err(AppError::BadRequest(
+            "User health filter is invalid.".to_string(),
+        ));
     }
     let rows = sqlx::query(
         r#"
@@ -3999,7 +3994,7 @@ async fn create_admin_barcode_product_json(
     let actor = require_admin_actor(pool, actor_user_id).await?;
     let mut tx = pool.begin().await?;
     let (product_id, product) =
-        save_barcode_food_product_with_executor(&mut *tx, actor.id, input, None).await?;
+        save_barcode_food_product_with_executor(&mut tx, actor.id, input, None).await?;
     maybe_trigger_test_fault(audit_test_fault, 1)?;
     insert_admin_audit_event_with_executor(
         &mut *tx,
@@ -4548,9 +4543,9 @@ async fn update_food_product_json(
     if !updated {
         return Err(AppError::NotFound("Food product not found.".to_string()));
     }
-    Ok(food_product_json_by_id(pool, user_id, product_id)
+    food_product_json_by_id(pool, user_id, product_id)
         .await?
-        .ok_or_else(|| AppError::NotFound("Food product not found.".to_string()))?)
+        .ok_or_else(|| AppError::NotFound("Food product not found.".to_string()))
 }
 
 async fn create_recipe_json(
@@ -4560,44 +4555,20 @@ async fn create_recipe_json(
     test_fault: Option<&serde_json::Map<String, Value>>,
 ) -> AppResult<Value> {
     let recipe_id = Uuid::new_v4();
-    let label = required_string_with_message(input, "label", "Recipe name is required.")?;
-    let portions = optional_i32(input, "portions").unwrap_or(1);
-    if portions < 1 {
-        return Err(AppError::BadRequest(
-            "Portions must be at least 1.".to_string(),
-        ));
-    }
-    if portions > 999 {
-        return Err(AppError::BadRequest(
-            "Portions must be less than 1000.".to_string(),
-        ));
-    }
-    let total_cooked_weight_g =
-        optional_positive_number(input, "totalCookedWeightG", "Cooked weight")?;
-    let ingredients = input
-        .get("ingredients")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            AppError::BadRequest("A recipe must have at least one ingredient.".to_string())
-        })?;
-    if ingredients.is_empty() {
-        return Err(AppError::BadRequest(
-            "A recipe must have at least one ingredient.".to_string(),
-        ));
-    }
-    validate_item_product_access(pool, user_id, ingredients).await?;
+    let recipe = parse_recipe_input(input)?;
+    validate_item_product_access(pool, user_id, recipe.ingredients).await?;
     let mut tx = pool.begin().await?;
     sqlx::query(
         "INSERT INTO recipes (id, user_id, label, portions, total_cooked_weight_g, updated_at) VALUES ($1, $2, $3, $4, $5, now())",
     )
     .bind(recipe_id)
     .bind(user_id)
-    .bind(label)
-    .bind(portions)
-    .bind(total_cooked_weight_g)
+    .bind(recipe.label)
+    .bind(recipe.portions)
+    .bind(recipe.total_cooked_weight_g)
     .execute(&mut *tx)
     .await?;
-    insert_recipe_ingredients(&mut tx, recipe_id, ingredients, test_fault).await?;
+    insert_recipe_ingredients(&mut tx, recipe_id, recipe.ingredients, test_fault).await?;
     tx.commit().await?;
     recipe_by_id_json(pool, user_id, recipe_id).await
 }
@@ -4609,41 +4580,17 @@ async fn update_recipe_json(
     input: &serde_json::Map<String, Value>,
     test_fault: Option<&serde_json::Map<String, Value>>,
 ) -> AppResult<Value> {
-    let label = required_string_with_message(input, "label", "Recipe name is required.")?;
-    let portions = optional_i32(input, "portions").unwrap_or(1);
-    if portions < 1 {
-        return Err(AppError::BadRequest(
-            "Portions must be at least 1.".to_string(),
-        ));
-    }
-    if portions > 999 {
-        return Err(AppError::BadRequest(
-            "Portions must be less than 1000.".to_string(),
-        ));
-    }
-    let total_cooked_weight_g =
-        optional_positive_number(input, "totalCookedWeightG", "Cooked weight")?;
-    let ingredients = input
-        .get("ingredients")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            AppError::BadRequest("A recipe must have at least one ingredient.".to_string())
-        })?;
-    if ingredients.is_empty() {
-        return Err(AppError::BadRequest(
-            "A recipe must have at least one ingredient.".to_string(),
-        ));
-    }
-    validate_item_product_access(pool, user_id, ingredients).await?;
+    let recipe = parse_recipe_input(input)?;
+    validate_item_product_access(pool, user_id, recipe.ingredients).await?;
     let mut tx = pool.begin().await?;
     let updated = sqlx::query(
         "UPDATE recipes SET label = $3, portions = $4, total_cooked_weight_g = $5, updated_at = now() WHERE user_id = $1 AND id = $2 RETURNING id",
     )
     .bind(user_id)
     .bind(recipe_id)
-    .bind(label)
-    .bind(portions)
-    .bind(total_cooked_weight_g)
+    .bind(recipe.label)
+    .bind(recipe.portions)
+    .bind(recipe.total_cooked_weight_g)
     .fetch_optional(&mut *tx)
     .await?
     .is_some();
@@ -4654,9 +4601,45 @@ async fn update_recipe_json(
         .bind(recipe_id)
         .execute(&mut *tx)
         .await?;
-    insert_recipe_ingredients(&mut tx, recipe_id, ingredients, test_fault).await?;
+    insert_recipe_ingredients(&mut tx, recipe_id, recipe.ingredients, test_fault).await?;
     tx.commit().await?;
     recipe_by_id_json(pool, user_id, recipe_id).await
+}
+
+struct RecipeInput<'a> {
+    label: String,
+    portions: i32,
+    total_cooked_weight_g: Option<f64>,
+    ingredients: &'a [Value],
+}
+
+fn parse_recipe_input(input: &serde_json::Map<String, Value>) -> AppResult<RecipeInput<'_>> {
+    let label = required_string_with_message(input, "label", "Recipe name is required.")?;
+    let portions = optional_i32(input, "portions").unwrap_or(1);
+    if !(1..=999).contains(&portions) {
+        let message = if portions < 1 {
+            "Portions must be at least 1."
+        } else {
+            "Portions must be less than 1000."
+        };
+        return Err(AppError::BadRequest(message.to_string()));
+    }
+    let total_cooked_weight_g =
+        optional_positive_number(input, "totalCookedWeightG", "Cooked weight")?;
+    let ingredients = input
+        .get("ingredients")
+        .and_then(Value::as_array)
+        .filter(|ingredients| !ingredients.is_empty())
+        .ok_or_else(|| {
+            AppError::BadRequest("A recipe must have at least one ingredient.".to_string())
+        })?;
+
+    Ok(RecipeInput {
+        label,
+        portions,
+        total_cooked_weight_g,
+        ingredients,
+    })
 }
 
 async fn insert_recipe_ingredients(
@@ -5032,6 +5015,77 @@ async fn recent_quick_add_json(pool: &PgPool, user_id: Uuid, limit: i32) -> AppR
     .fetch_one(pool)
     .await?;
     Ok(row.try_get("data")?)
+}
+
+async fn template_quick_add_json(pool: &PgPool, user_id: Uuid, limit: i32) -> AppResult<Value> {
+    let row = sqlx::query(
+        r#"
+        WITH single_item_templates AS (
+          SELECT
+            mt.id,
+            mt.updated_at,
+            item.label,
+            item.protein_g,
+            item.carbs_g,
+            item.fat_g,
+            item.calories_kcal
+          FROM meal_templates mt
+          JOIN LATERAL (
+            SELECT
+              count(*) OVER () AS item_count,
+              label,
+              protein_g,
+              carbs_g,
+              fat_g,
+              calories_kcal
+            FROM meal_template_items
+            WHERE template_id = mt.id
+          ) item ON item.item_count = 1
+          WHERE mt.user_id = $1
+            AND mt.type = 'meal'
+            AND mt.deleted_at IS NULL
+          ORDER BY mt.updated_at DESC, mt.id
+          LIMIT $2
+        )
+        SELECT coalesce(jsonb_agg(
+          jsonb_build_object(
+            'label', label,
+            'proteinG', protein_g::float8,
+            'carbsG', carbs_g::float8,
+            'fatG', fat_g::float8,
+            'caloriesKcal', calories_kcal,
+            'source', 'preset',
+            'presetId', id
+          )
+          ORDER BY updated_at DESC, id
+        ), '[]'::jsonb) AS data
+        FROM single_item_templates
+        "#,
+    )
+    .bind(user_id)
+    .bind(limit)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.try_get("data")?)
+}
+
+async fn dashboard_quick_add_json(
+    pool: &PgPool,
+    user_id: Uuid,
+    limit_per_source: i32,
+) -> AppResult<Value> {
+    let (recent, templates) = tokio::try_join!(
+        recent_quick_add_json(pool, user_id, limit_per_source),
+        template_quick_add_json(pool, user_id, limit_per_source),
+    )?;
+    let mut candidates = match templates {
+        Value::Array(values) => values,
+        _ => Vec::new(),
+    };
+    if let Value::Array(values) = recent {
+        candidates.extend(values);
+    }
+    Ok(Value::Array(candidates))
 }
 
 async fn search_meal_entries_json(pool: &PgPool, user_id: Uuid, query: &str) -> AppResult<Value> {
@@ -5514,110 +5568,82 @@ async fn stats_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppR
     Ok(row.try_get("data")?)
 }
 
-fn compute_streaks(sorted_dates: &[NaiveDate], today: NaiveDate) -> (usize, usize) {
-    if sorted_dates.is_empty() {
-        return (0, 0);
-    }
-
-    let date_set = sorted_dates.iter().copied().collect::<HashSet<_>>();
-    let mut current_streak = 0;
-    let mut check_date = today;
-    while date_set.contains(&check_date) {
-        current_streak += 1;
-        check_date -= Duration::days(1);
-    }
-    if current_streak == 0 {
-        check_date = today - Duration::days(1);
-        while date_set.contains(&check_date) {
-            current_streak += 1;
-            check_date -= Duration::days(1);
-        }
-    }
-
-    let mut longest_streak = 1;
-    let mut streak = 1;
-    for pair in sorted_dates.windows(2) {
-        if pair[1] - Duration::days(1) == pair[0] {
-            streak += 1;
-        } else {
-            longest_streak = longest_streak.max(streak);
-            streak = 1;
-        }
-    }
-
-    (current_streak, longest_streak.max(streak))
-}
-
 async fn leaderboard_json(pool: &PgPool, user_id: Uuid, reference_date: &str) -> AppResult<Value> {
     let today = NaiveDate::parse_from_str(reference_date, "%Y-%m-%d")
         .map_err(|_| AppError::BadRequest("referenceDate must be YYYY-MM-DD.".to_string()))?;
-    let rows = sqlx::query(
+    let row = sqlx::query(
         r#"
-        SELECT
-          entry_date,
-          round(sum(calories_kcal)::numeric)::int AS calories_kcal,
-          round(sum(protein_g)::numeric, 1)::float8 AS protein_g,
-          round(sum(carbs_g)::numeric, 1)::float8 AS carbs_g,
-          count(*)::int AS entry_count
-        FROM meal_entries
-        WHERE user_id = $1 AND status = 'eaten'
-        GROUP BY entry_date
-        ORDER BY entry_date
+        WITH daily AS (
+          SELECT
+            entry_date,
+            round(sum(calories_kcal)::numeric)::int AS calories_kcal,
+            round(sum(protein_g)::numeric, 1)::float8 AS protein_g,
+            round(sum(carbs_g)::numeric, 1)::float8 AS carbs_g,
+            count(*)::int AS entry_count
+          FROM meal_entries
+          WHERE user_id = $1 AND status = 'eaten'
+          GROUP BY entry_date
+        ),
+        dated_islands AS (
+          SELECT
+            entry_date,
+            entry_date - row_number() OVER (ORDER BY entry_date)::int AS island
+          FROM daily
+        ),
+        streaks AS (
+          SELECT
+            min(entry_date) AS start_date,
+            max(entry_date) AS end_date,
+            count(*)::int AS streak_length
+          FROM dated_islands
+          GROUP BY island
+        ),
+        streak_summary AS (
+          SELECT
+            coalesce(max(CASE
+              WHEN start_date <= $2 AND end_date >= $2 THEN ($2 - start_date) + 1
+              WHEN end_date = $2 - 1 THEN streak_length
+            END), 0)::int AS current_streak,
+            coalesce(max(streak_length), 0)::int AS longest_streak
+          FROM streaks
+        )
+        SELECT jsonb_build_object(
+          'currentStreak', streak_summary.current_streak,
+          'longestStreak', streak_summary.longest_streak,
+          'totalDaysTracked', (SELECT count(*)::int FROM daily),
+          'bestCalorieDay', (
+            SELECT jsonb_build_object('date', entry_date, 'caloriesKcal', calories_kcal)
+            FROM daily
+            ORDER BY calories_kcal DESC, entry_date ASC
+            LIMIT 1
+          ),
+          'bestProteinDay', (
+            SELECT jsonb_build_object('date', entry_date, 'proteinG', protein_g)
+            FROM daily
+            ORDER BY protein_g DESC, entry_date ASC
+            LIMIT 1
+          ),
+          'bestCarbsDay', (
+            SELECT jsonb_build_object('date', entry_date, 'carbsG', carbs_g)
+            FROM daily
+            ORDER BY carbs_g DESC, entry_date ASC
+            LIMIT 1
+          ),
+          'mostActiveDay', (
+            SELECT jsonb_build_object('date', entry_date, 'entryCount', entry_count)
+            FROM daily
+            ORDER BY entry_count DESC, entry_date ASC
+            LIMIT 1
+          )
+        ) AS data
+        FROM streak_summary
         "#,
     )
     .bind(user_id)
-    .fetch_all(pool)
+    .bind(today)
+    .fetch_one(pool)
     .await?;
-    let sorted_dates = rows
-        .iter()
-        .map(|row| row.try_get::<NaiveDate, _>("entry_date"))
-        .collect::<Result<Vec<_>, _>>()?;
-    let (current_streak, longest_streak) = compute_streaks(&sorted_dates, today);
-
-    let mut best_calorie_day = Value::Null;
-    let mut best_protein_day = Value::Null;
-    let mut best_carbs_day = Value::Null;
-    let mut most_active_day = Value::Null;
-    let mut best_calories = i32::MIN;
-    let mut best_protein = f64::NEG_INFINITY;
-    let mut best_carbs = f64::NEG_INFINITY;
-    let mut most_entries = i32::MIN;
-
-    for row in rows {
-        let date: NaiveDate = row.try_get("entry_date")?;
-        let date = date.to_string();
-        let calories: i32 = row.try_get("calories_kcal")?;
-        let protein: f64 = row.try_get("protein_g")?;
-        let carbs: f64 = row.try_get("carbs_g")?;
-        let entry_count: i32 = row.try_get("entry_count")?;
-
-        if calories > best_calories {
-            best_calories = calories;
-            best_calorie_day = json!({ "date": date, "caloriesKcal": calories });
-        }
-        if protein > best_protein {
-            best_protein = protein;
-            best_protein_day = json!({ "date": date, "proteinG": protein });
-        }
-        if carbs > best_carbs {
-            best_carbs = carbs;
-            best_carbs_day = json!({ "date": date, "carbsG": carbs });
-        }
-        if entry_count > most_entries {
-            most_entries = entry_count;
-            most_active_day = json!({ "date": date, "entryCount": entry_count });
-        }
-    }
-
-    Ok(json!({
-        "currentStreak": current_streak,
-        "longestStreak": longest_streak,
-        "totalDaysTracked": sorted_dates.len(),
-        "bestCalorieDay": best_calorie_day,
-        "bestProteinDay": best_protein_day,
-        "bestCarbsDay": best_carbs_day,
-        "mostActiveDay": most_active_day
-    }))
+    Ok(row.try_get("data")?)
 }
 
 fn row_to_app_user(row: PgRow) -> AppResult<AppUser> {
@@ -6939,6 +6965,185 @@ mod tests {
                 .len(),
             30
         );
+
+        sqlx::query(
+            r#"
+            WITH inserted_templates AS (
+              INSERT INTO meal_templates (id, user_id, type, label, updated_at)
+              SELECT
+                md5('quick-template-' || gs::text || $1::text)::uuid,
+                $1,
+                'meal',
+                'Quick template ' || gs,
+                now() - (gs || ' seconds')::interval
+              FROM generate_series(1, 31) AS gs
+              RETURNING id, label
+            )
+            INSERT INTO meal_template_items (
+              id, template_id, sort_order, label, quantity, unit, serving_multiplier,
+              protein_g, carbs_g, fat_g, calories_kcal
+            )
+            SELECT
+              md5('quick-item-' || id::text)::uuid,
+              id,
+              0,
+              label,
+              1,
+              'serving',
+              1,
+              10,
+              20,
+              5,
+              165
+            FROM inserted_templates
+            "#,
+        )
+        .bind(user_id)
+        .execute(&test_db.pool)
+        .await
+        .expect("quick-add templates should insert");
+
+        let dashboard_results = rpc_json(
+            &test_db.pool,
+            "getDashboardQuickAddCandidates",
+            json!({ "userId": user_id }),
+        )
+        .await
+        .expect("dashboard quick-add candidates should load");
+        let dashboard_results = dashboard_results
+            .as_array()
+            .expect("dashboard quick-add result should be array");
+        assert_eq!(dashboard_results.len(), 60);
+        assert_eq!(
+            dashboard_results
+                .iter()
+                .filter(|candidate| candidate["source"] == "preset")
+                .count(),
+            30
+        );
+        assert_eq!(
+            dashboard_results
+                .iter()
+                .filter(|candidate| candidate["source"] == "recent")
+                .count(),
+            30
+        );
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    async fn leaderboard_handles_empty_grace_gaps_ties_and_large_history() {
+        let Some(test_db) = test_db().await else {
+            eprintln!(
+                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
+            );
+            return;
+        };
+
+        let empty_user = insert_test_user(&test_db.pool).await;
+        let empty = leaderboard_json(&test_db.pool, empty_user, "2026-07-06")
+            .await
+            .expect("empty leaderboard should load");
+        assert_eq!(empty["currentStreak"], 0);
+        assert_eq!(empty["longestStreak"], 0);
+        assert_eq!(empty["totalDaysTracked"], 0);
+        assert_eq!(empty["bestCalorieDay"], Value::Null);
+
+        let streak_user = insert_test_user(&test_db.pool).await;
+        for (index, date) in ["2026-07-01", "2026-07-02", "2026-07-04", "2026-07-05"]
+            .iter()
+            .enumerate()
+        {
+            insert_test_meal_entry(
+                &test_db.pool,
+                streak_user,
+                date,
+                "eaten",
+                "Tied day",
+                index as i32,
+                (10.0, 20.0, 5.0, 165),
+            )
+            .await;
+        }
+        let yesterday = leaderboard_json(&test_db.pool, streak_user, "2026-07-06")
+            .await
+            .expect("yesterday grace leaderboard should load");
+        assert_eq!(yesterday["currentStreak"], 2);
+        assert_eq!(yesterday["longestStreak"], 2);
+        assert_eq!(yesterday["totalDaysTracked"], 4);
+        assert_eq!(yesterday["bestCalorieDay"]["date"], "2026-07-01");
+        assert_eq!(yesterday["bestProteinDay"]["date"], "2026-07-01");
+
+        insert_test_meal_entry(
+            &test_db.pool,
+            streak_user,
+            "2026-07-06",
+            "eaten",
+            "Today",
+            0,
+            (10.0, 20.0, 5.0, 165),
+        )
+        .await;
+        let today = leaderboard_json(&test_db.pool, streak_user, "2026-07-06")
+            .await
+            .expect("today leaderboard should load");
+        assert_eq!(today["currentStreak"], 3);
+        assert_eq!(today["longestStreak"], 3);
+
+        insert_test_meal_entry(
+            &test_db.pool,
+            streak_user,
+            "2026-07-07",
+            "eaten",
+            "Future",
+            0,
+            (10.0, 20.0, 5.0, 165),
+        )
+        .await;
+        let future = leaderboard_json(&test_db.pool, streak_user, "2026-07-06")
+            .await
+            .expect("leaderboard with a future consecutive entry should load");
+        assert_eq!(future["currentStreak"], 3);
+        assert_eq!(future["longestStreak"], 4);
+
+        let large_user = insert_test_user(&test_db.pool).await;
+        sqlx::query(
+            r#"
+            INSERT INTO meal_entries (
+              id, user_id, entry_date, status, label, sort_order,
+              quantity, unit, serving_multiplier,
+              protein_g, carbs_g, fat_g, calories_kcal
+            )
+            SELECT
+              md5(gs::text || $1::text)::uuid,
+              $1,
+              DATE '2000-01-01' + gs,
+              'eaten',
+              'Synthetic history',
+              0,
+              1,
+              'serving',
+              1,
+              10,
+              20,
+              5,
+              165
+            FROM generate_series(0, 4999) AS gs
+            "#,
+        )
+        .bind(large_user)
+        .execute(&test_db.pool)
+        .await
+        .expect("large synthetic history should insert");
+        let last_date =
+            (NaiveDate::from_ymd_opt(2000, 1, 1).unwrap() + Duration::days(4999)).to_string();
+        let large = leaderboard_json(&test_db.pool, large_user, &last_date)
+            .await
+            .expect("large leaderboard should load");
+        assert_eq!(large["currentStreak"], 5000);
+        assert_eq!(large["longestStreak"], 5000);
+        assert_eq!(large["totalDaysTracked"], 5000);
+
         test_db.cleanup().await;
     }
 

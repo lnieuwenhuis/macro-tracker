@@ -1,0 +1,15 @@
+{
+  "threshold": 0.88,
+  "minLines": 12,
+  "minTokens": 80,
+  "reporters": ["console"],
+  "ignore": [
+    "**/tests/**",
+    "**/*.test.*",
+    "**/.next/**",
+    "**/node_modules/**",
+    "**/generated/**",
+    "**/drizzle/**",
+    "**/public/**"
+  ]
+}
