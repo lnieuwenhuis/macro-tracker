@@ -13,7 +13,7 @@ type MacroBarProps = {
   fallbackMax: number;
 };
 
-export function MacroBar({
+function MacroBar({
   label,
   value,
   plannedValue = 0,

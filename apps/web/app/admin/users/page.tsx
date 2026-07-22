@@ -109,6 +109,7 @@ export default async function AdminUsersPage({
                 <tr key={user.id}>
                   <td className="py-3 pr-4">
                     <Link
+                      prefetch={false}
                       href={`/admin/users/${user.id}`}
                       className="font-semibold text-[var(--color-ink)] underline-offset-4 hover:underline"
                     >

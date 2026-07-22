@@ -1,4 +1,4 @@
-export type FloatingMenuPlacement = "above" | "below";
+type FloatingMenuPlacement = "above" | "below";
 
 export type FloatingMenuLayout = {
   placement: FloatingMenuPlacement;

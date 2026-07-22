@@ -12,11 +12,18 @@
     "build": "pnpm --filter @macro-tracker/web build",
     "dev": "pnpm --filter @macro-tracker/web dev",
     "lint": "pnpm --filter @macro-tracker/web lint",
+    "audit:unused": "knip --reporter compact",
+    "audit:duplicates": "jscpd apps/backend/src apps/web packages/db/src --config .jscpd.json",
+    "audit:code": "pnpm audit:unused && pnpm audit:duplicates",
     "test": "pnpm -r --parallel test",
     "typecheck": "pnpm -r typecheck",
     "test:e2e": "pnpm --filter @macro-tracker/web test:e2e",
     "db:generate": "pnpm --filter @macro-tracker/db db:generate",
     "db:migrate": "pnpm --filter @macro-tracker/db db:migrate",
     "db:studio": "pnpm --filter @macro-tracker/db db:studio"
+  },
+  "devDependencies": {
+    "jscpd": "5.0.12",
+    "knip": "6.29.0"
   }
 }

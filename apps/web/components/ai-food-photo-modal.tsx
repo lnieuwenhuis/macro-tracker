@@ -6,6 +6,11 @@ import type {
   AnalyzeFoodPhotoResult,
   FoodPhotoEstimate,
 } from "@/lib/ai-food-photo";
+import {
+  optimizeFoodPhoto,
+  replaceFoodPhotoObjectUrl,
+  setOptimizedFoodPhoto,
+} from "@/lib/image-optimization";
 
 import { CloseButton } from "./close-button";
 import { OverlayPortal, useBodyScrollLock } from "./overlay-portal";
@@ -52,7 +57,9 @@ export function AiFoodPhotoModal({
 }: AiFoodPhotoModalProps) {
   const libraryInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
-  const [imageFile, setImageFile] = useState<File | null>(null);
+  const optimizationSequenceRef = useRef(0);
+  const previewUrlRef = useRef<string | null>(null);
+  const [imageFile, setImageFile] = useState<Blob | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [clarification, setClarification] = useState("");
   const [question, setQuestion] = useState<string | null>(null);
@@ -60,20 +67,26 @@ export function AiFoodPhotoModal({
   const [savedPreset, setSavedPreset] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [isOptimizing, setIsOptimizing] = useState(false);
   useBodyScrollLock();
 
-  useEffect(() => {
-    return () => {
-      if (previewUrl) {
-        URL.revokeObjectURL(previewUrl);
-      }
-    };
-  }, [previewUrl]);
-
-  function handleFileChange(file: File | null) {
-    if (previewUrl) {
-      URL.revokeObjectURL(previewUrl);
+  useEffect(() => () => {
+    optimizationSequenceRef.current += 1;
+    if (previewUrlRef.current) {
+      URL.revokeObjectURL(previewUrlRef.current);
     }
+  }, []);
+
+  function replacePreview(blob: Blob | null) {
+    const nextUrl = replaceFoodPhotoObjectUrl(previewUrlRef.current, blob);
+    previewUrlRef.current = nextUrl;
+    setPreviewUrl(nextUrl);
+  }
+
+  async function handleFileChange(file: File | null) {
+    const sequence = optimizationSequenceRef.current + 1;
+    optimizationSequenceRef.current = sequence;
+    replacePreview(null);
 
     setEstimate(null);
     setQuestion(null);
@@ -83,26 +96,43 @@ export function AiFoodPhotoModal({
 
     if (!file) {
       setImageFile(null);
-      setPreviewUrl(null);
       return;
     }
 
     if (!["image/jpeg", "image/png", "image/webp", "image/gif"].includes(file.type)) {
       setError("Unsupported file format. Use JPEG/JPG, PNG, WebP, or GIF.");
       setImageFile(null);
-      setPreviewUrl(null);
       return;
     }
 
     if (file.size > MAX_IMAGE_BYTES) {
       setError("Image is too large. Use an image under 8 MB.");
       setImageFile(null);
-      setPreviewUrl(null);
       return;
     }
 
-    setImageFile(file);
-    setPreviewUrl(URL.createObjectURL(file));
+    setImageFile(null);
+    setIsOptimizing(true);
+    try {
+      const optimized = await optimizeFoodPhoto(file);
+      if (optimizationSequenceRef.current !== sequence) {
+        return;
+      }
+      setImageFile(optimized);
+      replacePreview(optimized);
+    } catch (optimizationError) {
+      if (optimizationSequenceRef.current === sequence) {
+        setError(
+          optimizationError instanceof Error
+            ? optimizationError.message
+            : "Unable to optimize this image. Try another image.",
+        );
+      }
+    } finally {
+      if (optimizationSequenceRef.current === sequence) {
+        setIsOptimizing(false);
+      }
+    }
   }
 
   async function analyzePhoto() {
@@ -112,7 +142,7 @@ export function AiFoodPhotoModal({
     }
 
     const formData = new FormData();
-    formData.set("image", imageFile);
+    setOptimizedFoodPhoto(formData, imageFile);
     formData.set("clarification", clarification);
 
     setIsAnalyzing(true);
@@ -204,6 +234,7 @@ export function AiFoodPhotoModal({
             <div className="grid grid-cols-2 gap-2">
               <button
                 type="button"
+                disabled={isOptimizing}
                 onClick={() => cameraInputRef.current?.click()}
                 className="rounded-xl bg-[var(--color-accent)] py-2.5 text-sm font-semibold text-white transition hover:-translate-y-0.5"
               >
@@ -211,6 +242,7 @@ export function AiFoodPhotoModal({
               </button>
               <button
                 type="button"
+                disabled={isOptimizing}
                 onClick={() => libraryInputRef.current?.click()}
                 className="rounded-xl border border-[var(--color-accent)] py-2.5 text-sm font-semibold text-[var(--color-accent)] transition hover:-translate-y-0.5"
               >
@@ -322,10 +354,12 @@ export function AiFoodPhotoModal({
                 <button
                   type="button"
                   onClick={analyzePhoto}
-                  disabled={isAnalyzing || !imageFile}
+                  disabled={isAnalyzing || isOptimizing || !imageFile}
                   className="w-full rounded-xl bg-[var(--color-accent)] py-2.5 text-sm font-semibold text-white transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {isAnalyzing
+                  {isOptimizing
+                    ? "Optimizing..."
+                    : isAnalyzing
                     ? "Analyzing..."
                     : question
                       ? "Answer and estimate"

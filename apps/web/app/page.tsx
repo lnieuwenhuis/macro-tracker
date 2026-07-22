@@ -1,4 +1,4 @@
-import { getDailySummary, getRecentQuickAddCandidates, getRecipes, getTemplates, getUserGoals } from "@macro-tracker/db";
+import { getDailySummary, getDashboardQuickAddCandidates, getUserGoals } from "@macro-tracker/db";
 
 import { DashboardShell } from "@/components/dashboard-shell";
 import { normalizeComposeAction } from "@/lib/compose";
@@ -19,26 +19,20 @@ export default async function HomePage({ searchParams }: HomePageProps) {
   const initialComposeAction = normalizeComposeAction(params.compose);
   const initialPresetTemplateKind = normalizePresetTemplateKind(params.templateKind);
 
-  const [dailySummary, goals, templates, recipes, recentCandidates] = await Promise.all([
+  const [dailySummary, goals, quickAddCandidates] = await Promise.all([
     getDailySummary(sessionUser.userId, selectedDate),
     getUserGoals(sessionUser.userId),
-    getTemplates(sessionUser.userId),
-    getRecipes(sessionUser.userId),
-    getRecentQuickAddCandidates(sessionUser.userId),
+    getDashboardQuickAddCandidates(sessionUser.userId),
   ]);
-  const dashboardKey = JSON.stringify({ selectedDate, dailySummary });
 
   return (
     <DashboardShell
-      key={dashboardKey}
       userEmail={userEmail}
       canAccessAdmin={canAccessAdmin}
       selectedDate={selectedDate}
       dailySummary={dailySummary}
       goals={goals}
-      templates={templates}
-      recipes={recipes}
-      recentCandidates={recentCandidates}
+      quickAddCandidates={quickAddCandidates}
       initialComposeAction={initialComposeAction}
       initialPresetTemplateKind={initialPresetTemplateKind}
     />

@@ -14,10 +14,6 @@ import {
   createTemplateFromDateAction,
 } from "@/lib/actions";
 import {
-  getDailyMutationCacheKeys,
-  getTemplateMutationCacheKeys,
-} from "@/lib/app-warmup";
-import {
   getTemplateMacroTotals,
   isDayTemplate,
   isFoodItemTemplate,
@@ -28,7 +24,6 @@ import {
   formatShoppingListText,
 } from "@/lib/shopping-list";
 
-import { invalidateAppDataCache } from "./app-data-cache";
 import { ExperimentalAppShell, ExperimentalSettingsButton } from "./experimental-app-shell";
 import { LibraryHubNav } from "./library-hub-nav";
 import { TransitionLink } from "./transition-link";
@@ -148,7 +143,6 @@ export function PlannerShell({
         return;
       }
 
-      invalidateAppDataCache(getDailyMutationCacheKeys(selectedDate));
       router.refresh();
     });
   }
@@ -174,7 +168,6 @@ export function PlannerShell({
       }
 
       setTemplateLabel("");
-      invalidateAppDataCache(getTemplateMutationCacheKeys());
       router.refresh();
     });
   }

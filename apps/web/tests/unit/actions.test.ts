@@ -3,7 +3,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocked = vi.hoisted(() => ({
   createMealEntry: vi.fn(),
   createMealGroup: vi.fn(),
-  createPersonalFoodProduct: vi.fn(),
   createRecipe: vi.fn(),
   createTemplate: vi.fn(),
   createTemplateFromDate: vi.fn(),
@@ -15,13 +14,10 @@ const mocked = vi.hoisted(() => ({
   deleteRecipe: vi.fn(),
   deleteTemplate: vi.fn(),
   deleteWeightEntry: vi.fn(),
-  getLeaderboardStats: vi.fn(),
   getRecipeById: vi.fn(),
   getTemplateById: vi.fn(),
-  isValidDateString: vi.fn((value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value)),
   markMealEntryStatus: vi.fn(),
   applyTemplateToDate: vi.fn(),
-  reorderMealGroups: vi.fn(),
   saveBarcodeFoodProduct: vi.fn(),
   saveUserGoals: vi.fn(),
   saveWeightGoal: vi.fn(),
@@ -29,7 +25,6 @@ const mocked = vi.hoisted(() => ({
   searchMealEntries: vi.fn(),
   updateMealGroup: vi.fn(),
   updateMealEntry: vi.fn(),
-  updatePersonalFoodProduct: vi.fn(),
   updateRecipe: vi.fn(),
   updateTemplate: vi.fn(),
   updateWeightEntry: vi.fn(),
@@ -40,7 +35,6 @@ const mocked = vi.hoisted(() => ({
 vi.mock("@macro-tracker/db", () => ({
   createMealEntry: mocked.createMealEntry,
   createMealGroup: mocked.createMealGroup,
-  createPersonalFoodProduct: mocked.createPersonalFoodProduct,
   createRecipe: mocked.createRecipe,
   createTemplate: mocked.createTemplate,
   createTemplateFromDate: mocked.createTemplateFromDate,
@@ -52,13 +46,10 @@ vi.mock("@macro-tracker/db", () => ({
   deleteRecipe: mocked.deleteRecipe,
   deleteTemplate: mocked.deleteTemplate,
   deleteWeightEntry: mocked.deleteWeightEntry,
-  getLeaderboardStats: mocked.getLeaderboardStats,
   getRecipeById: mocked.getRecipeById,
   getTemplateById: mocked.getTemplateById,
-  isValidDateString: mocked.isValidDateString,
   markMealEntryStatus: mocked.markMealEntryStatus,
   applyTemplateToDate: mocked.applyTemplateToDate,
-  reorderMealGroups: mocked.reorderMealGroups,
   saveBarcodeFoodProduct: mocked.saveBarcodeFoodProduct,
   saveUserGoals: mocked.saveUserGoals,
   saveWeightGoal: mocked.saveWeightGoal,
@@ -66,7 +57,6 @@ vi.mock("@macro-tracker/db", () => ({
   searchMealEntries: mocked.searchMealEntries,
   updateMealGroup: mocked.updateMealGroup,
   updateMealEntry: mocked.updateMealEntry,
-  updatePersonalFoodProduct: mocked.updatePersonalFoodProduct,
   updateRecipe: mocked.updateRecipe,
   updateTemplate: mocked.updateTemplate,
   updateWeightEntry: mocked.updateWeightEntry,
@@ -86,7 +76,6 @@ import {
   deleteTemplateAction,
   deleteWeightEntryAction,
   completeOnboardingAction,
-  fetchLeaderboardStatsAction,
   logRecipePortionAction,
   saveTemplateAction,
   searchFoodsAction,
@@ -100,32 +89,6 @@ describe("server actions", () => {
       userId: "user-1",
       email: "coach@example.com",
     });
-    mocked.isValidDateString.mockImplementation(
-      (value: string) => /^\d{4}-\d{2}-\d{2}$/.test(value),
-    );
-  });
-
-  it("passes the provided reference date through to leaderboard stats", async () => {
-    mocked.getLeaderboardStats.mockResolvedValue({
-      currentStreak: 3,
-      longestStreak: 7,
-      totalDaysTracked: 10,
-      bestCalorieDay: null,
-      bestProteinDay: null,
-      bestCarbsDay: null,
-      mostActiveDay: null,
-    });
-
-    const result = await fetchLeaderboardStatsAction({
-      referenceDate: "2026-04-20",
-    });
-
-    expect(result).toMatchObject({ ok: true });
-    expect(mocked.requireSessionUser).toHaveBeenCalledTimes(1);
-    expect(mocked.getLeaderboardStats).toHaveBeenCalledWith(
-      "user-1",
-      "2026-04-20",
-    );
   });
 
   it("searches history and products through one authenticated action", async () => {
@@ -231,21 +194,6 @@ describe("server actions", () => {
       products: [],
       error: "Product search failed, but history results are still available.",
     });
-  });
-
-  it("rejects invalid leaderboard reference dates before hitting auth or the db", async () => {
-    mocked.isValidDateString.mockReturnValue(false);
-
-    const result = await fetchLeaderboardStatsAction({
-      referenceDate: "not-a-date",
-    });
-
-    expect(result).toEqual({
-      ok: false,
-      error: "Invalid reference date.",
-    });
-    expect(mocked.requireSessionUser).not.toHaveBeenCalled();
-    expect(mocked.getLeaderboardStats).not.toHaveBeenCalled();
   });
 
   it.each([

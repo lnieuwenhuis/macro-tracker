@@ -12,13 +12,7 @@ import {
   isPgliteConnectionString,
 } from "./postgres-config.js";
 
-export {
-  getPostgresConnectionConfig,
-  getSslConfig,
-  isPgliteConnectionString,
-} from "./postgres-config.js";
-
-export type DatabaseClient =
+type DatabaseClient =
   | NodePgDatabase<typeof schema>
   | PgliteDatabase<typeof schema>;
 
@@ -827,23 +821,12 @@ export async function createDatabaseRuntime(
   };
 }
 
-export function setDatabaseRuntimeForTesting(runtime?: DatabaseRuntime) {
-  globalDatabaseState.__macroTrackerRuntime = runtime
-    ? Promise.resolve(runtime)
-    : undefined;
-}
-
 export async function getDatabaseRuntime() {
   if (!globalDatabaseState.__macroTrackerRuntime) {
     globalDatabaseState.__macroTrackerRuntime = createDatabaseRuntime();
   }
 
   return globalDatabaseState.__macroTrackerRuntime;
-}
-
-export async function getDb() {
-  const runtime = await getDatabaseRuntime();
-  return runtime.db;
 }
 
 export async function closeDatabase() {

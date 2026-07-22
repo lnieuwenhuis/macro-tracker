@@ -66,6 +66,7 @@ export default async function AdminAuditDetailPage({
   return (
     <div className="space-y-6">
       <Link
+        prefetch={false}
         href="/admin/audit"
         className="inline-flex rounded-full border border-[var(--color-border)] px-4 py-2 text-sm font-semibold text-[var(--color-ink)] transition hover:bg-[var(--color-card-muted)]"
       >
