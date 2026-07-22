@@ -720,25 +720,31 @@ pub async fn authenticate_api_token(pool: &PgPool, token: &str) -> AppResult<Val
 
 pub async fn ensure_default_meal_groups(pool: &PgPool, user_id: Uuid) -> AppResult<()> {
     let labels = ["Breakfast", "Lunch", "Dinner", "Snack"];
-    for (index, label) in labels.iter().enumerate() {
-        let id = Uuid::new_v5(
+    let ids = labels.map(|label| {
+        Uuid::new_v5(
             &Uuid::NAMESPACE_URL,
             format!("macro-tracker:meal-group:{user_id}:{label}").as_bytes(),
-        );
-        sqlx::query(
-            r#"
-            INSERT INTO meal_groups (id, user_id, label, sort_order, is_default)
-            VALUES ($1, $2, $3, $4, true)
-            ON CONFLICT (id) DO NOTHING
-            "#,
         )
-        .bind(id)
-        .bind(user_id)
-        .bind(label)
-        .bind(index as i32)
-        .execute(pool)
-        .await?;
-    }
+    });
+    sqlx::query(
+        r#"
+        INSERT INTO meal_groups (id, user_id, label, sort_order, is_default)
+        SELECT
+          defaults.id,
+          $1,
+          defaults.label,
+          (defaults.ordinality - 1)::integer,
+          true
+        FROM unnest($2::uuid[], $3::text[])
+          WITH ORDINALITY AS defaults(id, label, ordinality)
+        ON CONFLICT (id) DO NOTHING
+        "#,
+    )
+    .bind(user_id)
+    .bind(&ids[..])
+    .bind(&labels[..])
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -6317,6 +6323,58 @@ mod tests {
         .await
         .expect("test meal entry should insert");
         entry_id
+    }
+
+    #[tokio::test]
+    async fn ensure_default_meal_groups_creates_all_groups_idempotently() {
+        let Some(test_db) = test_db().await else {
+            eprintln!(
+                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
+            );
+            return;
+        };
+        let user_id = insert_test_user(&test_db.pool).await;
+
+        ensure_default_meal_groups(&test_db.pool, user_id)
+            .await
+            .expect("default meal groups should be created");
+        ensure_default_meal_groups(&test_db.pool, user_id)
+            .await
+            .expect("default meal group creation should be idempotent");
+
+        let groups = sqlx::query(
+            r#"
+            SELECT label, sort_order, is_default
+            FROM meal_groups
+            WHERE user_id = $1
+            ORDER BY sort_order
+            "#,
+        )
+        .bind(user_id)
+        .fetch_all(&test_db.pool)
+        .await
+        .expect("default meal groups should load");
+        let actual = groups
+            .iter()
+            .map(|row| {
+                (
+                    row.try_get::<String, _>("label").unwrap(),
+                    row.try_get::<i32, _>("sort_order").unwrap(),
+                    row.try_get::<bool, _>("is_default").unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            actual,
+            vec![
+                ("Breakfast".to_string(), 0, true),
+                ("Lunch".to_string(), 1, true),
+                ("Dinner".to_string(), 2, true),
+                ("Snack".to_string(), 3, true),
+            ]
+        );
+        test_db.cleanup().await;
     }
 
     #[tokio::test]
