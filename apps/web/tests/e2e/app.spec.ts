@@ -54,6 +54,13 @@ async function addCustomFood(
     page.getByRole("heading", { name: input.label }).last(),
   ).toBeVisible();
   await expect(unsavedCards).toHaveCount(unsavedBefore);
+  const savedCard = page.locator("article").filter({
+    has: page.getByRole("heading", { name: input.label }),
+  }).last();
+  await expect(savedCard.getByPlaceholder("Chicken breast, rice, banana...")).toHaveCount(0);
+  await expect(
+    savedCard.getByRole("button", { name: `Edit details for ${input.label}` }),
+  ).toBeVisible();
 }
 
 type DayTemplateSeedItem = {
@@ -138,6 +145,18 @@ test("allows an allowlisted user to track food items across days", async ({
     fatG: "10",
     caloriesKcal: "370",
   });
+  const yogurtCard = page.locator("article").filter({
+    has: page.getByRole("heading", { name: "Greek yogurt" }),
+  });
+  await yogurtCard
+    .getByRole("button", { name: "Edit details for Greek yogurt" })
+    .click();
+  await yogurtCard.getByLabel("Calories").fill("371");
+  await yogurtCard.getByRole("button", { name: "Update" }).click();
+  await expect(yogurtCard.getByLabel("Calories")).toHaveCount(0);
+  await expect(
+    yogurtCard.getByRole("button", { name: "Edit details for Greek yogurt" }),
+  ).toBeVisible();
 
   await changeSelectedDate(page, "2026-03-19");
   await addCustomFood(page, {

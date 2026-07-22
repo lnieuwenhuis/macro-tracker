@@ -39,7 +39,7 @@ type MealCardProps = {
     field: keyof Omit<MealDraft, "clientId" | "id" | "sortOrder">,
     value: string,
   ) => void;
-  onSave: (clientId: string) => void;
+  onSave: (clientId: string) => Promise<boolean>;
   onDelete: (clientId: string) => void;
   onDuplicate: (clientId: string) => void;
   onGroupChange?: (clientId: string, mealGroupId: string | null) => void;
@@ -126,6 +126,14 @@ export function MealCard({ draft, busy, error, isCopied = false, mealGroups = []
     }
 
     setIsExpanded(true);
+  }
+
+  async function handleSave() {
+    if (await onSave(draft.clientId)) {
+      setMenuOpen(false);
+      setConfirmingDelete(false);
+      setIsExpanded(false);
+    }
   }
 
   return (
@@ -521,7 +529,7 @@ export function MealCard({ draft, busy, error, isCopied = false, mealGroups = []
           <button
             type="button"
             disabled={busy}
-            onClick={() => onSave(draft.clientId)}
+            onClick={() => void handleSave()}
             className="mt-3 w-full rounded-xl bg-[var(--color-accent)] px-4 py-2.5 text-sm font-semibold text-white transition-transform duration-150 hover:-translate-y-0.5 disabled:cursor-wait disabled:opacity-70"
           >
             {busy ? "Saving..." : isSaved ? "Update" : "Save"}
