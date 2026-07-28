@@ -10,8 +10,11 @@ use axum::{
 use base64ct::{Base64, Encoding};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
-use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::{
+    future::Future,
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
+};
 
 const OPENROUTER_CHAT_COMPLETIONS_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const DEFAULT_FOOD_PHOTO_MODEL: &str = "google/gemma-4-26b-a4b-it:free";
@@ -22,6 +25,8 @@ const DEFAULT_FOOD_PHOTO_FALLBACK_MODELS: &[&str] = &[
 ];
 const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 const FOOD_PHOTO_BODY_LIMIT_BYTES: usize = MAX_IMAGE_BYTES + 1024 * 1024;
+const FOOD_PHOTO_SLOT_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
+const FOOD_PHOTO_UPLOAD_TIMEOUT: Duration = Duration::from_secs(15);
 const FOOD_PHOTO_REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
 const BENCHMARK_ROUTE_RUNTIME_BUDGET_MS: u64 = 270_000;
 const BENCHMARK_RUN_LOCK_TTL: Duration = Duration::from_secs(300);
@@ -37,6 +42,77 @@ static FOOD_PHOTO_SLOTS: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
 
 fn food_photo_slots() -> &'static tokio::sync::Semaphore {
     FOOD_PHOTO_SLOTS.get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_FOOD_PHOTO_UPLOADS))
+}
+
+async fn acquire_food_photo_slot(
+    slots: &tokio::sync::Semaphore,
+    wait_timeout: Duration,
+) -> Option<tokio::sync::SemaphorePermit<'_>> {
+    tokio::time::timeout(wait_timeout, slots.acquire())
+        .await
+        .ok()?
+        .ok()
+}
+
+#[derive(Debug)]
+struct FoodPhotoUpload {
+    image: Option<(Bytes, String)>,
+    clarification: String,
+}
+
+async fn read_food_photo_upload(mut multipart: Multipart) -> Result<FoodPhotoUpload, ()> {
+    let mut image = None;
+    let mut clarification = String::new();
+
+    loop {
+        let Some(field) = multipart.next_field().await.map_err(|_| ())? else {
+            break;
+        };
+        let name = field.name().unwrap_or_default().to_string();
+        if name == "clarification" {
+            clarification = field.text().await.map_err(|_| ())?;
+            continue;
+        }
+        if name == "image" {
+            let content_type = field
+                .content_type()
+                .map(str::to_string)
+                .unwrap_or_else(|| "application/octet-stream".to_string());
+            image = Some((field.bytes().await.map_err(|_| ())?, content_type));
+        }
+    }
+
+    Ok(FoodPhotoUpload {
+        image,
+        clarification,
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum FoodPhotoUploadError {
+    Invalid,
+    TimedOut,
+}
+
+async fn await_food_photo_upload<F>(
+    upload: F,
+    upload_timeout: Duration,
+) -> Result<FoodPhotoUpload, FoodPhotoUploadError>
+where
+    F: Future<Output = Result<FoodPhotoUpload, ()>>,
+{
+    match tokio::time::timeout(upload_timeout, upload).await {
+        Ok(Ok(upload)) => Ok(upload),
+        Ok(Err(())) => Err(FoodPhotoUploadError::Invalid),
+        Err(_) => Err(FoodPhotoUploadError::TimedOut),
+    }
+}
+
+fn retryable_food_photo_failure(error: &str) -> Response {
+    legacy_json(
+        StatusCode::SERVICE_UNAVAILABLE,
+        json!({ "ok": false, "error": error, "retryable": true }),
+    )
 }
 
 pub fn router() -> Router<AppState> {
@@ -98,7 +174,7 @@ async fn lookup_barcode(State(state): State<AppState>, Path(barcode): Path<Strin
 async fn food_photo(
     State(state): State<AppState>,
     headers: HeaderMap,
-    mut multipart: Multipart,
+    multipart: Multipart,
 ) -> Response {
     let user = match auth::current_user_from_headers(State(state.clone()), headers).await {
         Ok(user) => user,
@@ -112,44 +188,32 @@ async fn food_photo(
 
     // Held until the response is built, so the permit covers both the buffered
     // upload and the base64 payload derived from it.
-    let _slot = match food_photo_slots().acquire().await {
-        Ok(slot) => slot,
-        Err(_) => {
+    let _slot =
+        match acquire_food_photo_slot(food_photo_slots(), FOOD_PHOTO_SLOT_WAIT_TIMEOUT).await {
+            Some(slot) => slot,
+            None => {
+                return retryable_food_photo_failure("Food photo analysis is unavailable.");
+            }
+        };
+
+    let upload = match await_food_photo_upload(
+        read_food_photo_upload(multipart),
+        FOOD_PHOTO_UPLOAD_TIMEOUT,
+    )
+    .await
+    {
+        Ok(upload) => upload,
+        Err(FoodPhotoUploadError::Invalid) => {
             return legacy_json(
-                StatusCode::SERVICE_UNAVAILABLE,
-                json!({ "ok": false, "error": "Food photo analysis is unavailable.", "retryable": true }),
+                StatusCode::BAD_REQUEST,
+                json!({ "ok": false, "error": "A food photo is required.", "kind": "invalid_image" }),
             );
         }
+        Err(FoodPhotoUploadError::TimedOut) => {
+            return retryable_food_photo_failure("Food photo upload timed out. Please try again.");
+        }
     };
-
-    let mut image: Option<(Bytes, String)> = None;
-    let mut clarification = String::new();
-
-    while let Ok(Some(field)) = multipart.next_field().await {
-        let name = field.name().unwrap_or_default().to_string();
-        if name == "clarification" {
-            clarification = field.text().await.unwrap_or_default();
-            continue;
-        }
-        if name == "image" {
-            let content_type = field
-                .content_type()
-                .map(str::to_string)
-                .unwrap_or_else(|| "application/octet-stream".to_string());
-            let bytes = match field.bytes().await {
-                Ok(bytes) => bytes,
-                Err(_) => {
-                    return legacy_json(
-                        StatusCode::BAD_REQUEST,
-                        json!({ "ok": false, "error": "A food photo is required.", "kind": "invalid_image" }),
-                    );
-                }
-            };
-            image = Some((bytes, content_type));
-        }
-    }
-
-    let Some((image_bytes, mime_type)) = image else {
+    let Some((image_bytes, mime_type)) = upload.image else {
         return legacy_json(
             StatusCode::BAD_REQUEST,
             json!({ "ok": false, "error": "A food photo is required." }),
@@ -160,7 +224,7 @@ async fn food_photo(
         &state,
         image_bytes,
         &mime_type,
-        &clarification,
+        &upload.clarification,
         None,
         &user.id.to_string(),
         false,
@@ -315,18 +379,33 @@ async fn lookup_barcode_provider_chain(state: &AppState, barcode: &str) -> Optio
         return Some(product);
     }
 
-    // The supermarket fallbacks used to run back to back, so a miss on both
-    // could outlast the client's 10s abort and make Jumbo unreachable in
-    // practice. Run them concurrently and still prefer Albert Heijn, so the
-    // selected product is unchanged while the wall clock is the slower of the
-    // two rather than their sum. The cost is one extra Jumbo request on the
-    // Albert-Heijn-hit path.
-    let (albert_heijn, jumbo) = tokio::join!(
+    // Start both supermarket fallbacks together. Albert Heijn keeps priority,
+    // but a hit there returns immediately instead of waiting for Jumbo.
+    prefer_primary_provider(
         lookup_albert_heijn(state, barcode),
-        lookup_jumbo(state, barcode)
-    );
+        lookup_jumbo(state, barcode),
+    )
+    .await
+}
 
-    albert_heijn.or(jumbo)
+async fn prefer_primary_provider<T, Primary, Fallback>(
+    primary: Primary,
+    fallback: Fallback,
+) -> Option<T>
+where
+    Primary: Future<Output = Option<T>>,
+    Fallback: Future<Output = Option<T>>,
+{
+    tokio::pin!(primary);
+    tokio::pin!(fallback);
+
+    tokio::select! {
+        primary_result = &mut primary => match primary_result {
+            Some(value) => Some(value),
+            None => fallback.await,
+        },
+        fallback_result = &mut fallback => primary.await.or(fallback_result),
+    }
 }
 
 async fn lookup_albert_heijn(state: &AppState, barcode: &str) -> Option<Value> {
@@ -1883,6 +1962,64 @@ mod tests {
         state.config.openrouter_model = Some("test/primary:free".to_string());
         state.config.openrouter_fallback_models = Some(models.to_string());
         state
+    }
+
+    #[tokio::test]
+    async fn barcode_provider_race_returns_fast_ah_without_waiting_for_slow_jumbo() {
+        let result = tokio::time::timeout(
+            Duration::from_millis(50),
+            prefer_primary_provider(
+                async { Some(json!("albert_heijn")) },
+                std::future::pending::<Option<Value>>(),
+            ),
+        )
+        .await
+        .expect("a fast Albert Heijn hit should not wait for Jumbo");
+
+        assert_eq!(result, Some(json!("albert_heijn")));
+    }
+
+    #[tokio::test]
+    async fn barcode_provider_race_returns_jumbo_after_ah_miss() {
+        let result =
+            prefer_primary_provider(async { None::<Value> }, async { Some(json!("jumbo")) }).await;
+
+        assert_eq!(result, Some(json!("jumbo")));
+    }
+
+    #[tokio::test]
+    async fn food_photo_capacity_wait_is_bounded_and_recovers_after_release() {
+        let slots = tokio::sync::Semaphore::new(1);
+        let held_slot = slots
+            .acquire()
+            .await
+            .expect("first slot should be available");
+
+        assert!(
+            acquire_food_photo_slot(&slots, Duration::from_millis(10))
+                .await
+                .is_none(),
+            "a request should stop waiting when all slots remain occupied"
+        );
+
+        drop(held_slot);
+        assert!(
+            acquire_food_photo_slot(&slots, Duration::from_millis(50))
+                .await
+                .is_some(),
+            "capacity should be reusable after the in-flight upload releases it"
+        );
+    }
+
+    #[tokio::test]
+    async fn food_photo_upload_deadline_rejects_a_stalled_body_read() {
+        let result = await_food_photo_upload(
+            std::future::pending::<Result<FoodPhotoUpload, ()>>(),
+            Duration::from_millis(10),
+        )
+        .await;
+
+        assert_eq!(result.unwrap_err(), FoodPhotoUploadError::TimedOut);
     }
 
     #[tokio::test]

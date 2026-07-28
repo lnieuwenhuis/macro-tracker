@@ -15,7 +15,7 @@ BEGIN
   BEGIN
     CREATE EXTENSION IF NOT EXISTS pg_trgm;
   EXCEPTION
-    WHEN feature_not_supported OR undefined_file THEN
+    WHEN feature_not_supported OR undefined_file OR insufficient_privilege THEN
       pg_trgm_available := false;
       RAISE NOTICE 'pg_trgm is unavailable; food product search falls back to a sequential scan.';
   END;

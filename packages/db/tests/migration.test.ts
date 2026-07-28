@@ -646,6 +646,142 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PostgreSQL migration regression
     }
   });
 
+  it("keeps food search working when the migration role cannot install pg_trgm", async () => {
+    const databaseUrl = resolveDestructiveTestDatabaseUrl(process.env, {
+      explicitEnvNames: ["TEST_DATABASE_URL"],
+      purpose: "restricted-role trigram migration regression test",
+    });
+    if (!databaseUrl) {
+      throw new Error("TEST_DATABASE_URL is required");
+    }
+
+    const roleName = "macro_tracker_no_trgm_migrator";
+    const postgresRuntime = await createDatabaseRuntime(databaseUrl);
+    const migrationPool = postgresRuntime.migrationPool;
+    if (!migrationPool) {
+      await postgresRuntime.close();
+      throw new Error("PostgreSQL migration pool is required");
+    }
+
+    try {
+      await migrationPool.query(
+        "DROP SCHEMA public CASCADE; DROP SCHEMA IF EXISTS drizzle CASCADE; DROP EXTENSION IF EXISTS pg_trgm; CREATE SCHEMA public",
+      );
+      for (const fileName of migrationFiles.slice(0, -1)) {
+        await applyMigration(postgresRuntime, fileName);
+      }
+
+      await migrationPool.query(`DROP ROLE IF EXISTS "${roleName}"`);
+      await migrationPool.query(`CREATE ROLE "${roleName}" NOLOGIN`);
+      await migrationPool.query(`GRANT USAGE ON SCHEMA public TO "${roleName}"`);
+
+      const restrictedClient = await migrationPool.connect();
+      try {
+        const migrationSql = await readFile(
+          fileURLToPath(
+            new URL("../drizzle/0014_food_product_search_trigram.sql", import.meta.url),
+          ),
+          "utf8",
+        );
+        await restrictedClient.query(`SET ROLE "${roleName}"`);
+        await restrictedClient.query(migrationSql);
+      } finally {
+        await restrictedClient.query("RESET ROLE").catch(() => undefined);
+        restrictedClient.release();
+      }
+
+      const trigramIndexes = await migrationPool.query<{ indexname: string }>(`
+        SELECT indexname
+        FROM pg_indexes
+        WHERE schemaname = 'public'
+          AND indexname IN (
+            'food_products_name_trgm_idx',
+            'food_products_brand_trgm_idx',
+            'food_products_barcode_trgm_idx'
+          )
+      `);
+      expect(trigramIndexes.rows).toEqual([]);
+
+      await migrationPool.query(`
+        INSERT INTO food_products (
+          id,
+          owner_user_id,
+          scope,
+          source,
+          barcode,
+          name,
+          brand,
+          default_serving_quantity,
+          default_serving_unit,
+          protein_per_100,
+          carbs_per_100,
+          fat_per_100,
+          calories_per_100
+        )
+        VALUES
+          (
+            'a1111111-1111-4111-8111-111111111111',
+            NULL,
+            'global',
+            'manual',
+            '8712345000101',
+            'Plain Greek Yogurt',
+            'Macro House',
+            100,
+            'g',
+            10,
+            4,
+            0,
+            56
+          ),
+          (
+            'a2222222-2222-4222-8222-222222222222',
+            NULL,
+            'global',
+            'manual',
+            '8712345000102',
+            'Apple',
+            'Orchard',
+            100,
+            'g',
+            0,
+            14,
+            0,
+            52
+          )
+      `);
+      const searchResult = await migrationPool.query<{ name: string }>(`
+        SELECT name
+        FROM food_products
+        WHERE deleted_at IS NULL
+          AND (
+            name ILIKE '%greek%'
+            OR brand ILIKE '%greek%'
+            OR barcode ILIKE '%greek%'
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM unnest(ARRAY['%greek%', '%macro%']::text[]) AS patterns(pattern)
+            WHERE NOT coalesce(
+              name ILIKE pattern
+              OR brand ILIKE pattern
+              OR barcode ILIKE pattern,
+              false
+            )
+          )
+        ORDER BY name
+      `);
+      expect(searchResult.rows).toEqual([{ name: "Plain Greek Yogurt" }]);
+    } finally {
+      await migrationPool.query(`DROP ROLE IF EXISTS "${roleName}"`).catch(() => undefined);
+      await migrationPool.query(
+        "DROP SCHEMA public CASCADE; DROP SCHEMA IF EXISTS drizzle CASCADE; DROP EXTENSION IF EXISTS pg_trgm; CREATE SCHEMA public",
+      );
+      await migrateDatabase(postgresRuntime);
+      await postgresRuntime.close();
+    }
+  });
+
   it("serializes concurrent migration runners", async () => {
     const databaseUrl = resolveDestructiveTestDatabaseUrl(process.env, {
       explicitEnvNames: ["TEST_DATABASE_URL"],
