@@ -1,7 +1,7 @@
 "use client";
 
 import type { MealEntryStatus, MealGroup, QuantityUnit } from "@macro-tracker/db";
-import { useCallback, useLayoutEffect, useRef, useState } from "react";
+import { memo, useCallback, useLayoutEffect, useRef, useState } from "react";
 
 import {
   getFloatingMenuLayout,
@@ -51,7 +51,7 @@ type MealCardProps = {
 const MENU_BOTTOM_INSET_PX = 112;
 const MENU_VIEWPORT_MARGIN_PX = 8;
 
-export function MealCard({ draft, busy, error, isCopied = false, mealGroups = [], onChange, onSave, onDelete, onDuplicate, onGroupChange, onStatusChange, onCopyToToday, onDiscardChanges }: MealCardProps) {
+function MealCardComponent({ draft, busy, error, isCopied = false, mealGroups = [], onChange, onSave, onDelete, onDuplicate, onGroupChange, onStatusChange, onCopyToToday, onDiscardChanges }: MealCardProps) {
   const isSaved = Boolean(draft.id);
   const [isExpanded, setIsExpanded] = useState(!isSaved);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -539,5 +539,12 @@ export function MealCard({ draft, busy, error, isCopied = false, mealGroups = []
     </article>
   );
 }
+
+/**
+ * A day's log renders one card per entry and every keystroke updates the shared
+ * draft array, so without memoisation editing one card re-renders all of them.
+ * Callers must pass stable callback identities for this to pay off.
+ */
+export const MealCard = memo(MealCardComponent);
 
 export type { MealDraft };

@@ -24,7 +24,46 @@ const migrationFiles = [
   "0011_active_global_barcode_unique.sql",
   "0012_api_tokens.sql",
   "0013_deduplicate_default_meal_groups.sql",
+  "0014_food_product_search_trigram.sql",
 ] as const;
+
+/** Index of `0013_deduplicate_default_meal_groups.sql`, which several tests
+ * apply by hand after seeding the state it is expected to repair. */
+const DEDUPLICATE_DEFAULT_MEAL_GROUPS_INDEX = 13;
+
+/**
+ * Materialise a migrations folder holding only the first `count` migrations,
+ * copying the real journal entries verbatim so a later run against the full
+ * folder resumes from the correct point instead of replaying them.
+ */
+async function createPartialMigrationsFolder(count: number) {
+  const folder = await mkdtemp(join(tmpdir(), "macro-tracker-partial-migrations-"));
+  await mkdir(join(folder, "meta"));
+
+  const journal = JSON.parse(
+    await readFile(
+      fileURLToPath(new URL("../drizzle/meta/_journal.json", import.meta.url)),
+      "utf8",
+    ),
+  ) as { entries: { tag: string }[] };
+  const entries = journal.entries.slice(0, count);
+
+  await writeFile(
+    join(folder, "meta", "_journal.json"),
+    JSON.stringify({ ...journal, entries }),
+  );
+  for (const entry of entries) {
+    await writeFile(
+      join(folder, `${entry.tag}.sql`),
+      await readFile(
+        fileURLToPath(new URL(`../drizzle/${entry.tag}.sql`, import.meta.url)),
+        "utf8",
+      ),
+    );
+  }
+
+  return folder;
+}
 
 async function applyMigration(runtime: DatabaseRuntime, fileName: string) {
   const migrationUrl = new URL(`../drizzle/${fileName}`, import.meta.url);
@@ -42,6 +81,7 @@ async function applyMigration(runtime: DatabaseRuntime, fileName: string) {
 describe("database migrations", () => {
   let runtime: DatabaseRuntime | undefined;
   let tempDir: string | undefined;
+  let partialMigrationsDir: string | undefined;
 
   afterEach(async () => {
     await runtime?.close();
@@ -49,6 +89,10 @@ describe("database migrations", () => {
     if (tempDir) {
       await rm(tempDir, { recursive: true, force: true });
       tempDir = undefined;
+    }
+    if (partialMigrationsDir) {
+      await rm(partialMigrationsDir, { recursive: true, force: true });
+      partialMigrationsDir = undefined;
     }
   });
 
@@ -296,14 +340,15 @@ describe("database migrations", () => {
     });
   });
 
-  it("deduplicates active global barcode products before local bootstrap creates the unique index", async () => {
+  it("deduplicates active global barcode products before the unique index migration", async () => {
     tempDir = await mkdtemp(join(tmpdir(), "macro-tracker-bootstrap-"));
     const connectionString = `file:${tempDir}`;
+    partialMigrationsDir = await createPartialMigrationsFolder(11);
     runtime = await createDatabaseRuntime(connectionString);
 
-    for (const fileName of migrationFiles.slice(0, 11)) {
-      await applyMigration(runtime, fileName);
-    }
+    // Migrate through 0010 with the real migrator so the follow-up run resumes
+    // from recorded state, exercising the same path production upgrades take.
+    await migrateDatabase(runtime, partialMigrationsDir);
 
     await runtime.db.execute(sql.raw(`
       INSERT INTO "food_products" (
@@ -366,16 +411,9 @@ describe("database migrations", () => {
         )
     `));
 
-    await runtime.close();
-    runtime = undefined;
-
-    const previousNodeEnv = process.env.NODE_ENV;
-    process.env.NODE_ENV = "development";
-    try {
-      runtime = await createDatabaseRuntime(connectionString);
-    } finally {
-      process.env.NODE_ENV = previousNodeEnv;
-    }
+    // 0011 adds the active-global-barcode unique index, so it must dedupe the
+    // rows above before the index can be created.
+    await migrateDatabase(runtime);
 
     const productResult = await runtime.db.execute<{
       id: string;
@@ -409,7 +447,10 @@ describe("database migrations", () => {
   it("merges duplicate default meal groups without losing entry assignments", async () => {
     runtime = await createDatabaseRuntime("memory:");
 
-    for (const fileName of migrationFiles.slice(0, -1)) {
+    for (const fileName of migrationFiles.slice(
+      0,
+      DEDUPLICATE_DEFAULT_MEAL_GROUPS_INDEX,
+    )) {
       await applyMigration(runtime, fileName);
     }
 
@@ -546,7 +587,10 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PostgreSQL migration regression
         VALUES ('${userId}', 'rollout_compat_user', 'rollout-compat@example.com')
       `));
 
-      for (const fileName of migrationFiles.slice(8, -1)) {
+      for (const fileName of migrationFiles.slice(
+        8,
+        DEDUPLICATE_DEFAULT_MEAL_GROUPS_INDEX,
+      )) {
         await applyMigration(postgresRuntime, fileName);
       }
 

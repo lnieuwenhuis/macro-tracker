@@ -1,6 +1,6 @@
-import { canAccessAdmin, ensureDateString, getUserById } from "@macro-tracker/db";
+import { canAccessAdmin, ensureDateString } from "@macro-tracker/db";
 
-import { requireOnboardedSessionUser } from "./auth";
+import { requireOnboardedAppUser } from "./auth";
 
 export type DateSearchParams = {
   date?: string;
@@ -9,13 +9,17 @@ export type DateSearchParams = {
 export async function loadOnboardedDateParam<TSearchParams extends DateSearchParams>(
   searchParams: Promise<TSearchParams>,
 ) {
-  const sessionUser = await requireOnboardedSessionUser();
+  const user = await requireOnboardedAppUser();
   const params = await searchParams;
   const selectedDate = ensureDateString(params.date);
 
   return {
     params,
-    sessionUser,
+    user,
+    sessionUser: {
+      userId: user.id,
+      email: user.email,
+    },
     selectedDate,
   };
 }
@@ -23,15 +27,14 @@ export async function loadOnboardedDateParam<TSearchParams extends DateSearchPar
 export async function loadOnboardedPageContext<TSearchParams extends DateSearchParams>(
   searchParams: Promise<TSearchParams>,
 ) {
-  const { params, sessionUser, selectedDate } =
+  const { params, user, sessionUser, selectedDate } =
     await loadOnboardedDateParam(searchParams);
-  const user = await getUserById(sessionUser.userId);
 
   return {
     params,
     sessionUser,
     selectedDate,
-    userEmail: user?.email ?? sessionUser.email,
-    canAccessAdmin: user ? canAccessAdmin(user.role) : false,
+    userEmail: user.email,
+    canAccessAdmin: canAccessAdmin(user.role),
   };
 }

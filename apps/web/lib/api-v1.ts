@@ -1,6 +1,5 @@
 import { backendFetch } from "@macro-tracker/db";
 
-import { getApiV1OpenApi } from "./api-v1-openapi";
 import { createBackendProxyResponse } from "./backend-response";
 
 const CORS_HEADERS = {
@@ -19,10 +18,9 @@ export async function handleApiV1Request(
     return new Response(null, { status: 204, headers: CORS_HEADERS });
   }
 
-  if (method === "GET" && path?.length === 1 && path[0] === "openapi.json") {
-    return Response.json(getApiV1OpenApi(), { headers: CORS_HEADERS });
-  }
-
+  // `openapi.json` is proxied like any other route. The backend serves the
+  // generated contract straight from a compiled-in artifact, so there is no
+  // reason to rebuild an equivalent document here on every request.
   const requestUrl = new URL(request.url);
   const encodedPath = (path ?? []).map(encodeURIComponent).join("/");
   const backendPath = `/api/v1/${encodedPath}${requestUrl.search}`;

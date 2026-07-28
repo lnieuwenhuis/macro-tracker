@@ -1,29 +1,53 @@
 "use client";
 
 import type { DailySummary, MacroGoals, MealEntryRecord, MealEntryStatus, MealGroup, MealTemplate, QuickAddCandidate, RecipeRecord } from "@macro-tracker/db";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { useEffect, useEffectEvent, useMemo, useRef, useState, useTransition } from "react";
 
 import { applyTemplateAction, createMealGroupAction, deleteMealGroupAction, deleteMealEntryAction, loadRecipesAction, loadTemplatesAction, markMealEntryStatusAction, saveMealEntryAction, updateMealGroupAction } from "@/lib/actions";
 import type { ComposeAction } from "@/lib/compose";
-import { computeLiveTotals, rankCandidates } from "@/lib/quick-add";
+import { computeLiveTotalsByStatus, rankCandidates } from "@/lib/quick-add";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
 import type { OpenFoodFactsProduct } from "@/lib/openfoodfacts";
 import type { PresetTemplateKind } from "@/lib/preset-modal-state";
 import { getLocalDateString } from "@/lib/startup-date";
 import { createLazyCollectionLoader } from "@/lib/lazy-collection";
+import { prefetchOnIdle } from "@/lib/idle-prefetch";
 
-import { AiFoodPhotoModal } from "./ai-food-photo-modal";
-import { BarcodeCaptureModals } from "./barcode-capture-modals";
 import { CompactModal } from "./compact-modal";
 import { ExperimentalAppShell } from "./experimental-app-shell";
-import { FoodSearchModal } from "./food-search-modal";
 import { MacroBarGroup } from "./macro-bar";
 import { MealCard, type MealDraft } from "./meal-card";
-import { PresetModal } from "./preset-modal";
 import { QuickAddRail } from "./quick-add-rail";
-import { RecipePickerModal } from "./recipe-picker-modal";
 import { useTemplateMutations } from "./use-template-mutations";
+
+// Modals only mount behind a flag, so keep them out of the log screen's initial
+// bundle. `prefetchModalChunks` below pulls them in once the browser is idle,
+// so opening one still costs nothing at click time.
+const AiFoodPhotoModal = dynamic(() =>
+  import("./ai-food-photo-modal").then((mod) => mod.AiFoodPhotoModal),
+);
+const BarcodeCaptureModals = dynamic(() =>
+  import("./barcode-capture-modals").then((mod) => mod.BarcodeCaptureModals),
+);
+const FoodSearchModal = dynamic(() =>
+  import("./food-search-modal").then((mod) => mod.FoodSearchModal),
+);
+const PresetModal = dynamic(() =>
+  import("./preset-modal").then((mod) => mod.PresetModal),
+);
+const RecipePickerModal = dynamic(() =>
+  import("./recipe-picker-modal").then((mod) => mod.RecipePickerModal),
+);
+
+function prefetchModalChunks() {
+  void import("./ai-food-photo-modal");
+  void import("./barcode-capture-modals");
+  void import("./food-search-modal");
+  void import("./preset-modal");
+  void import("./recipe-picker-modal");
+}
 
 type DashboardShellProps = {
   userEmail: string;
@@ -41,13 +65,6 @@ type PresetMutationState =
   | { type: "save" }
   | { type: "apply"; presetId: string }
   | { type: "update" | "delete"; presetId: string };
-
-const QUICK_ADD_ROUTINE_RANKING_REMAINING = {
-  caloriesKcal: null,
-  proteinG: null,
-  carbsG: null,
-  fatG: null,
-};
 
 function mealToDraft(meal: MealEntryRecord): MealDraft {
   return {
@@ -339,6 +356,8 @@ export function DashboardShell({
     setClientReady(true);
   }, []);
 
+  useEffect(() => prefetchOnIdle(prefetchModalChunks), []);
+
   useEffect(() => {
     setSavedMeals(dailySummary.meals);
     setLocalMealGroups(dailySummary.mealGroups);
@@ -365,15 +384,13 @@ export function DashboardShell({
   // Live totals react to unsaved drafts immediately.
   // ---------------------------------------------------------------------------
 
-  const liveTotals = useMemo(() => computeLiveTotals(drafts), [drafts]);
-  const livePlannedTotals = useMemo(
-    () => computeLiveTotals(drafts, "planned"),
+  const totalsByStatus = useMemo(
+    () => computeLiveTotalsByStatus(drafts),
     [drafts],
   );
-  const liveSkippedTotals = useMemo(
-    () => computeLiveTotals(drafts, "skipped"),
-    [drafts],
-  );
+  const liveTotals = totalsByStatus.eaten;
+  const livePlannedTotals = totalsByStatus.planned;
+  const liveSkippedTotals = totalsByStatus.skipped;
   const todayStr = useMemo(() => getLocalDateString(), []);
   const defaultEntryStatus: MealEntryStatus =
     selectedDate > todayStr ? "planned" : "eaten";
@@ -385,7 +402,7 @@ export function DashboardShell({
   // Single unified quick-add list: ranked by routine signals, not macro fit.
   const quickAddItems = useMemo(
     () =>
-      rankCandidates(quickAddCandidates, QUICK_ADD_ROUTINE_RANKING_REMAINING, {
+      rankCandidates(quickAddCandidates, {
         limit: 10,
         currentHourUtc: new Date().getUTCHours(),
         referenceDate: todayStr,
@@ -822,6 +839,54 @@ export function DashboardShell({
   }
 
   const isViewingToday = selectedDate === todayStr;
+
+  // Meal card callbacks close over draft state, so they get a fresh identity on
+  // every keystroke. Route them through a ref so each card receives a stable
+  // prop and `MealCard`'s memo can skip the cards that did not change -- typing
+  // in one row used to re-render every row on the day.
+  const mealCardHandlersRef = useRef({
+    updateDraft,
+    handleSave,
+    handleDelete,
+    handleDuplicate,
+    handleGroupChange,
+    handleStatusChange,
+    handleCopyToToday,
+    discardDraftChanges,
+  });
+  mealCardHandlersRef.current = {
+    updateDraft,
+    handleSave,
+    handleDelete,
+    handleDuplicate,
+    handleGroupChange,
+    handleStatusChange,
+    handleCopyToToday,
+    discardDraftChanges,
+  };
+
+  const mealCardHandlers = useMemo(
+    () => ({
+      onChange: (...args: Parameters<typeof updateDraft>) =>
+        mealCardHandlersRef.current.updateDraft(...args),
+      onSave: (clientId: string) =>
+        mealCardHandlersRef.current.handleSave(clientId),
+      onDelete: (clientId: string) =>
+        mealCardHandlersRef.current.handleDelete(clientId),
+      onDuplicate: (clientId: string) =>
+        mealCardHandlersRef.current.handleDuplicate(clientId),
+      onGroupChange: (clientId: string, mealGroupId: string | null) =>
+        mealCardHandlersRef.current.handleGroupChange(clientId, mealGroupId),
+      onStatusChange: (clientId: string, status: MealEntryStatus) =>
+        mealCardHandlersRef.current.handleStatusChange(clientId, status),
+      onCopyToToday: (clientId: string) =>
+        mealCardHandlersRef.current.handleCopyToToday(clientId),
+      onDiscardChanges: (clientId: string) =>
+        mealCardHandlersRef.current.discardDraftChanges(clientId),
+    }),
+    [],
+  );
+
   const groupedDraftSections = useMemo(
     () => {
       const knownGroupIds = new Set(localMealGroups.map((group) => group.id));
@@ -1241,14 +1306,16 @@ export function DashboardShell({
                         error={errors[draft.clientId]}
                         isCopied={copiedCardIds.has(draft.clientId)}
                         mealGroups={localMealGroups}
-                        onChange={updateDraft}
-                        onSave={handleSave}
-                        onDelete={handleDelete}
-                        onDuplicate={handleDuplicate}
-                        onGroupChange={handleGroupChange}
-                        onStatusChange={handleStatusChange}
-                        onCopyToToday={isViewingToday ? undefined : handleCopyToToday}
-                        onDiscardChanges={discardDraftChanges}
+                        onChange={mealCardHandlers.onChange}
+                        onSave={mealCardHandlers.onSave}
+                        onDelete={mealCardHandlers.onDelete}
+                        onDuplicate={mealCardHandlers.onDuplicate}
+                        onGroupChange={mealCardHandlers.onGroupChange}
+                        onStatusChange={mealCardHandlers.onStatusChange}
+                        onCopyToToday={
+                          isViewingToday ? undefined : mealCardHandlers.onCopyToToday
+                        }
+                        onDiscardChanges={mealCardHandlers.onDiscardChanges}
                       />
                     );
                   })}
@@ -1353,6 +1420,9 @@ export function DashboardShell({
         />
       )}
 
+      {/* Mirrors the component's own render condition so its chunk stays
+          unloaded until a capture flow actually starts. */}
+      {(showScanner || scanResult || notFoundBarcode) && (
       <BarcodeCaptureModals
         showScanner={showScanner}
         scanResult={scanResult}
@@ -1374,6 +1444,7 @@ export function DashboardShell({
           handleSavePreset(input);
         }}
       />
+      )}
     </>
   );
 }

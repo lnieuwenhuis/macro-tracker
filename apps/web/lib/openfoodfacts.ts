@@ -35,14 +35,15 @@ export async function lookupBarcode(
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10_000);
 
-  // Respect an externally provided signal as well
-  signal?.addEventListener("abort", () => controller.abort(), { once: true });
+  // Respect an externally provided signal as well. Detached in `finally`,
+  // otherwise a long-lived caller signal keeps every controller reachable.
+  const abortFromCaller = () => controller.abort();
+  signal?.addEventListener("abort", abortFromCaller, { once: true });
 
   try {
     const response = await fetch(`/api/barcode/${encodeURIComponent(barcode)}`, {
       signal: controller.signal,
     });
-    clearTimeout(timeoutId);
 
     if (!response.ok) {
       return { found: false, barcode };
@@ -71,7 +72,9 @@ export async function lookupBarcode(
       },
     };
   } catch {
-    clearTimeout(timeoutId);
     return { found: false, barcode };
+  } finally {
+    clearTimeout(timeoutId);
+    signal?.removeEventListener("abort", abortFromCaller);
   }
 }

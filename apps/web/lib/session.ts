@@ -9,8 +9,19 @@ import { getRequestProtocol } from "./request";
 export const SESSION_COOKIE_NAME = "mt_session";
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
 
+// Signing and verifying both run on every request, so cache the encoded secret
+// instead of allocating a TextEncoder and a fresh Uint8Array each time. Keyed
+// by secret so a changed env value is still picked up.
+let cachedSessionKey: { secret: string; key: Uint8Array } | null = null;
+
 function getSessionKey() {
-  return new TextEncoder().encode(getServerEnv().sessionSecret);
+  const secret = getServerEnv().sessionSecret;
+
+  if (cachedSessionKey?.secret !== secret) {
+    cachedSessionKey = { secret, key: new TextEncoder().encode(secret) };
+  }
+
+  return cachedSessionKey.key;
 }
 
 export function shouldUseSecureCookies() {

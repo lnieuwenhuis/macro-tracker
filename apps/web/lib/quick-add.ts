@@ -13,32 +13,69 @@ function parseDraftValue(value: string): number {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function emptyTotals() {
+  return { proteinG: 0, carbsG: 0, fatG: 0, caloriesKcal: 0 };
+}
+
+function roundTotals(totals: MacroNumbers): MacroNumbers {
+  return {
+    proteinG: Math.round(totals.proteinG * 10) / 10,
+    carbsG: Math.round(totals.carbsG * 10) / 10,
+    fatG: Math.round(totals.fatG * 10) / 10,
+    caloriesKcal: Math.round(totals.caloriesKcal),
+  };
+}
+
 /** Compute macro totals from the current draft array (unsaved edits included). */
 export function computeLiveTotals(
   drafts: MealDraft[],
   status: MealEntryStatus = "eaten",
 ): MacroNumbers {
-  let proteinG = 0;
-  let carbsG = 0;
-  let fatG = 0;
-  let caloriesKcal = 0;
+  const totals = emptyTotals();
 
   for (const draft of drafts) {
     if (draft.status !== status) {
       continue;
     }
 
-    proteinG += parseDraftValue(draft.proteinG);
-    carbsG += parseDraftValue(draft.carbsG);
-    fatG += parseDraftValue(draft.fatG);
-    caloriesKcal += parseDraftValue(draft.caloriesKcal);
+    totals.proteinG += parseDraftValue(draft.proteinG);
+    totals.carbsG += parseDraftValue(draft.carbsG);
+    totals.fatG += parseDraftValue(draft.fatG);
+    totals.caloriesKcal += parseDraftValue(draft.caloriesKcal);
+  }
+
+  return roundTotals(totals);
+}
+
+/**
+ * Totals for every status in one pass. The dashboard needs all three at once,
+ * which previously meant walking the draft array three times.
+ */
+export function computeLiveTotalsByStatus(
+  drafts: MealDraft[],
+): Record<MealEntryStatus, MacroNumbers> {
+  const totals: Record<MealEntryStatus, MacroNumbers> = {
+    eaten: emptyTotals(),
+    planned: emptyTotals(),
+    skipped: emptyTotals(),
+  };
+
+  for (const draft of drafts) {
+    const bucket = totals[draft.status];
+    if (!bucket) {
+      continue;
+    }
+
+    bucket.proteinG += parseDraftValue(draft.proteinG);
+    bucket.carbsG += parseDraftValue(draft.carbsG);
+    bucket.fatG += parseDraftValue(draft.fatG);
+    bucket.caloriesKcal += parseDraftValue(draft.caloriesKcal);
   }
 
   return {
-    proteinG: Math.round(proteinG * 10) / 10,
-    carbsG: Math.round(carbsG * 10) / 10,
-    fatG: Math.round(fatG * 10) / 10,
-    caloriesKcal: Math.round(caloriesKcal),
+    eaten: roundTotals(totals.eaten),
+    planned: roundTotals(totals.planned),
+    skipped: roundTotals(totals.skipped),
   };
 }
 
@@ -253,12 +290,10 @@ function scoreCandidate(
 /**
  * Rank a mixed pool of preset + recent candidates.
  * Uses likelihood-to-log signals: time-of-day habits, recent use, observed
- * repeat frequency, and original input order. Remaining macros are accepted for
- * API compatibility but do not affect recommendation ranking.
+ * repeat frequency, and original input order.
  */
 export function rankCandidates(
   candidates: QuickAddCandidate[],
-  _remaining: RemainingMacros,
   options: RankCandidatesOptions = {},
 ): QuickAddCandidate[] {
   const {

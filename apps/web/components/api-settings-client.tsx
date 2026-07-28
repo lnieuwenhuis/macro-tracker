@@ -97,15 +97,18 @@ export function getVisibleApiTokens(
   return [stateRecord, ...tokens];
 }
 
+// Built once rather than per token row; Intl constructors are costly.
+const tokenDateFormat = new Intl.DateTimeFormat(undefined, {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+
 function formatDate(value: string | null) {
   if (!value) {
     return "Never";
   }
 
-  return new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(new Date(value));
+  return tokenDateFormat.format(new Date(value));
 }
 
 export function ApiSettingsClient({ tokens, scopes }: ApiSettingsClientProps) {

@@ -28,6 +28,17 @@ const BENCHMARK_RUN_LOCK_TTL: Duration = Duration::from_secs(300);
 
 static BENCHMARK_LOCK: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
 
+/// Each in-flight photo holds the decoded upload plus its base64 data URL, so
+/// peak footprint is a multiple of `MAX_IMAGE_BYTES` per request. Cap how many
+/// can be resident at once; excess requests wait rather than all buffering
+/// concurrently.
+const MAX_CONCURRENT_FOOD_PHOTO_UPLOADS: usize = 4;
+static FOOD_PHOTO_SLOTS: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+
+fn food_photo_slots() -> &'static tokio::sync::Semaphore {
+    FOOD_PHOTO_SLOTS.get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_FOOD_PHOTO_UPLOADS))
+}
+
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/barcode/{barcode}", get(lookup_barcode))
@@ -95,6 +106,18 @@ async fn food_photo(
             return legacy_json(
                 StatusCode::UNAUTHORIZED,
                 json!({ "ok": false, "error": "Unauthorized." }),
+            );
+        }
+    };
+
+    // Held until the response is built, so the permit covers both the buffered
+    // upload and the base64 payload derived from it.
+    let _slot = match food_photo_slots().acquire().await {
+        Ok(slot) => slot,
+        Err(_) => {
+            return legacy_json(
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({ "ok": false, "error": "Food photo analysis is unavailable.", "retryable": true }),
             );
         }
     };
@@ -286,13 +309,24 @@ async fn lookup_open_food_facts(state: &AppState, barcode: &str) -> Option<Value
 }
 
 async fn lookup_barcode_provider_chain(state: &AppState, barcode: &str) -> Option<Value> {
+    // OpenFoodFacts stays a standalone first hop: it covers most barcodes, and
+    // keeping it alone means a hit costs exactly one outbound request.
     if let Some(product) = lookup_open_food_facts(state, barcode).await {
         return Some(product);
     }
-    if let Some(product) = lookup_albert_heijn(state, barcode).await {
-        return Some(product);
-    }
-    lookup_jumbo(state, barcode).await
+
+    // The supermarket fallbacks used to run back to back, so a miss on both
+    // could outlast the client's 10s abort and make Jumbo unreachable in
+    // practice. Run them concurrently and still prefer Albert Heijn, so the
+    // selected product is unchanged while the wall clock is the slower of the
+    // two rather than their sum. The cost is one extra Jumbo request on the
+    // Albert-Heijn-hit path.
+    let (albert_heijn, jumbo) = tokio::join!(
+        lookup_albert_heijn(state, barcode),
+        lookup_jumbo(state, barcode)
+    );
+
+    albert_heijn.or(jumbo)
 }
 
 async fn lookup_albert_heijn(state: &AppState, barcode: &str) -> Option<Value> {
