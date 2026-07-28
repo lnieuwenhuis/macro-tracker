@@ -2,7 +2,7 @@
 
 import type { MacroGoals, WeightEntryRecord, WeightPageData } from "@macro-tracker/db";
 import { useRouter } from "next/navigation";
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
 
 import {
   deleteWeightEntryAction,
@@ -178,12 +178,83 @@ function formatTrendLabel(value: WeightPageData["stats"]["trendDirection"]) {
   return "No trend yet";
 }
 
-function WeightTrendChart({ weightData }: { weightData: WeightPageData }) {
+const CHART_WIDTH = 320;
+const CHART_HEIGHT = 128;
+const CHART_PADDING_X = 18;
+const CHART_PADDING_Y = 14;
+const CHART_PLOT_WIDTH = CHART_WIDTH - CHART_PADDING_X * 2;
+const CHART_PLOT_HEIGHT = CHART_HEIGHT - CHART_PADDING_Y * 2;
+
+/**
+ * Project the weight history into chart space. Returns `null` when there is
+ * not enough history to draw a trend.
+ */
+function buildWeightTrendGeometry(weightData: WeightPageData) {
   const entries = [...weightData.entries].sort((a, b) =>
     a.date.localeCompare(b.date),
   );
 
   if (entries.length < 2) {
+    return null;
+  }
+
+  const minTime = new Date(entries[0]!.date).getTime();
+  const maxTime = new Date(entries[entries.length - 1]!.date).getTime();
+
+  // A single pass rather than `Math.min(...weights)`: spreading pushes one
+  // argument per logged weight onto the stack, which a long history can grow
+  // past the engine's argument limit.
+  let minWeight = Number.POSITIVE_INFINITY;
+  let maxWeight = Number.NEGATIVE_INFINITY;
+  for (const entry of entries) {
+    if (entry.weightKg < minWeight) minWeight = entry.weightKg;
+    if (entry.weightKg > maxWeight) maxWeight = entry.weightKg;
+  }
+  if (weightData.goalWeightKg != null) {
+    minWeight = Math.min(minWeight, weightData.goalWeightKg);
+    maxWeight = Math.max(maxWeight, weightData.goalWeightKg);
+  }
+  if (minWeight === maxWeight) {
+    minWeight -= 0.5;
+    maxWeight += 0.5;
+  }
+
+  const timeSpan = Math.max(1, maxTime - minTime);
+  const weightSpan = Math.max(0.1, maxWeight - minWeight);
+
+  // Each point is placed once; the polyline and the markers both read it back
+  // instead of re-parsing every date a second time.
+  const points = entries.map((entry) => ({
+    id: entry.id,
+    x:
+      CHART_PADDING_X +
+      ((new Date(entry.date).getTime() - minTime) / timeSpan) * CHART_PLOT_WIDTH,
+    y:
+      CHART_PADDING_Y +
+      ((maxWeight - entry.weightKg) / weightSpan) * CHART_PLOT_HEIGHT,
+  }));
+
+  return {
+    points,
+    polyline: points
+      .map((point) => `${point.x.toFixed(1)},${point.y.toFixed(1)}`)
+      .join(" "),
+    goalY:
+      weightData.goalWeightKg != null
+        ? CHART_PADDING_Y +
+          ((maxWeight - weightData.goalWeightKg) / weightSpan) *
+            CHART_PLOT_HEIGHT
+        : null,
+  };
+}
+
+function WeightTrendChart({ weightData }: { weightData: WeightPageData }) {
+  const geometry = useMemo(
+    () => buildWeightTrendGeometry(weightData),
+    [weightData],
+  );
+
+  if (!geometry) {
     return (
       <div className="flex aspect-[2.7/1] items-center justify-center rounded-2xl border border-dashed border-[var(--color-border-strong)] bg-[var(--color-shell-panel)] text-sm text-[var(--color-muted)]">
         Log two entries to draw a trend.
@@ -191,57 +262,23 @@ function WeightTrendChart({ weightData }: { weightData: WeightPageData }) {
     );
   }
 
-  const width = 320;
-  const height = 128;
-  const paddingX = 18;
-  const paddingY = 14;
-  const minTime = new Date(entries[0]!.date).getTime();
-  const maxTime = new Date(entries[entries.length - 1]!.date).getTime();
-  const weights = [
-    ...entries.map((entry) => entry.weightKg),
-    ...(weightData.goalWeightKg != null ? [weightData.goalWeightKg] : []),
-  ];
-  let minWeight = Math.min(...weights);
-  let maxWeight = Math.max(...weights);
-  if (minWeight === maxWeight) {
-    minWeight -= 0.5;
-    maxWeight += 0.5;
-  }
-  const timeSpan = Math.max(1, maxTime - minTime);
-  const weightSpan = Math.max(0.1, maxWeight - minWeight);
-  const plotWidth = width - paddingX * 2;
-  const plotHeight = height - paddingY * 2;
-  const points = entries
-    .map((entry) => {
-      const x =
-        paddingX +
-        ((new Date(entry.date).getTime() - minTime) / timeSpan) * plotWidth;
-      const y =
-        paddingY + ((maxWeight - entry.weightKg) / weightSpan) * plotHeight;
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(" ");
-  const goalY =
-    weightData.goalWeightKg != null
-      ? paddingY +
-        ((maxWeight - weightData.goalWeightKg) / weightSpan) * plotHeight
-      : null;
+  const { points, polyline, goalY } = geometry;
 
   return (
     <svg
-      viewBox={`0 0 ${width} ${height}`}
+      viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`}
       role="img"
       aria-label="Weight trend chart"
       className="aspect-[2.7/1] w-full rounded-2xl border border-[var(--color-border)] bg-[var(--color-app-bg)]"
     >
       {[0, 1, 2].map((line) => {
-        const y = paddingY + (plotHeight / 2) * line;
+        const y = CHART_PADDING_Y + (CHART_PLOT_HEIGHT / 2) * line;
         return (
           <line
             key={line}
-            x1={paddingX}
+            x1={CHART_PADDING_X}
             y1={y}
-            x2={width - paddingX}
+            x2={CHART_WIDTH - CHART_PADDING_X}
             y2={y}
             stroke="var(--color-border)"
             strokeWidth="1"
@@ -250,9 +287,9 @@ function WeightTrendChart({ weightData }: { weightData: WeightPageData }) {
       })}
       {goalY != null ? (
         <line
-          x1={paddingX}
+          x1={CHART_PADDING_X}
           y1={goalY}
-          x2={width - paddingX}
+          x2={CHART_WIDTH - CHART_PADDING_X}
           y2={goalY}
           stroke="var(--color-success)"
           strokeDasharray="4 4"
@@ -260,29 +297,22 @@ function WeightTrendChart({ weightData }: { weightData: WeightPageData }) {
         />
       ) : null}
       <polyline
-        points={points}
+        points={polyline}
         fill="none"
         stroke="var(--color-accent)"
         strokeLinecap="round"
         strokeLinejoin="round"
         strokeWidth="3"
       />
-      {entries.map((entry) => {
-        const x =
-          paddingX +
-          ((new Date(entry.date).getTime() - minTime) / timeSpan) * plotWidth;
-        const y =
-          paddingY + ((maxWeight - entry.weightKg) / weightSpan) * plotHeight;
-        return (
-          <circle
-            key={entry.id}
-            cx={x}
-            cy={y}
-            r="3"
-            fill="var(--color-accent)"
-          />
-        );
-      })}
+      {points.map((point) => (
+        <circle
+          key={point.id}
+          cx={point.x}
+          cy={point.y}
+          r="3"
+          fill="var(--color-accent)"
+        />
+      ))}
     </svg>
   );
 }

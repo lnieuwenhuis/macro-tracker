@@ -112,39 +112,16 @@ export async function saveMealEntryAction(
   input: SaveMealEntryInput,
 ): Promise<SaveMealEntryResult> {
   return runSessionAction(async (sessionUser) => {
-    const entry = input.id
-      ? await updateMealEntry(sessionUser.userId, input.id, {
-          date: input.date,
-          mealGroupId: input.mealGroupId,
-          status: input.status,
-          productId: input.productId,
-          label: input.label,
-          sortOrder: input.sortOrder ?? 0,
-          quantity: input.quantity,
-          unit: input.unit,
-          servingMultiplier: input.servingMultiplier,
-          proteinG: input.proteinG,
-          carbsG: input.carbsG,
-          fatG: input.fatG,
-          caloriesKcal: input.caloriesKcal,
-          clientMutationId: input.clientMutationId,
+    // Both paths take the same payload; only `sortOrder` differs, because an
+    // update must pin a concrete position while a create may let the backend
+    // append.
+    const { id, sortOrder, ...fields } = input;
+    const entry = id
+      ? await updateMealEntry(sessionUser.userId, id, {
+          ...fields,
+          sortOrder: sortOrder ?? 0,
         })
-      : await createMealEntry(sessionUser.userId, {
-          date: input.date,
-          mealGroupId: input.mealGroupId,
-          status: input.status,
-          productId: input.productId,
-          label: input.label,
-          sortOrder: input.sortOrder,
-          quantity: input.quantity,
-          unit: input.unit,
-          servingMultiplier: input.servingMultiplier,
-          proteinG: input.proteinG,
-          carbsG: input.carbsG,
-          fatG: input.fatG,
-          caloriesKcal: input.caloriesKcal,
-          clientMutationId: input.clientMutationId,
-        });
+      : await createMealEntry(sessionUser.userId, { ...fields, sortOrder });
 
     return { ok: true, entry };
   }, { revalidate: [["/", "page"]] });
