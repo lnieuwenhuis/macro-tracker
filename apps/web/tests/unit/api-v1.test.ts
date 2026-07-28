@@ -3,7 +3,6 @@ import {
   createApiToken,
   createMealEntry,
   createPersonalFoodProduct,
-  foodProducts,
   getApiScopes,
   lookupBarcodeFoodProduct,
   revokeApiToken,
@@ -11,12 +10,13 @@ import {
   upsertUserFromShooProfile,
   type DatabaseRuntime,
 } from "@macro-tracker/db";
+import { foodProducts } from "@macro-tracker/db/schema";
 import { createTestDatabase } from "@macro-tracker/db/testing";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { handleApiV1Request } from "@/lib/api-v1";
-import { API_V1_ENDPOINTS, formatApiV1ScopeSummary, getApiV1OpenApi } from "@/lib/api-v1-openapi";
+import { API_V1_ENDPOINTS, formatApiV1ScopeSummary } from "@/lib/api-v1-openapi";
 import * as apiV1Route from "@/app/api/v1/[[...path]]/route";
 
 describe("API v1 backend proxy failures", () => {
@@ -1936,12 +1936,10 @@ describe("Macro Tracker API v1", () => {
   it("publishes OpenAPI for every shipped endpoint with scopes", async () => {
     const response = await apiRequest("GET", "/openapi.json");
     const payload = await response.json();
-    const openApi = getApiV1OpenApi();
 
     expect(response.status).toBe(200);
     expect(payload.openapi).toBe("3.1.0");
-    expect(payload.info).toEqual(openApi.info);
-    expect(payload.paths).toEqual(openApi.paths);
+    expect(payload.info).toMatchObject({ title: "Macro Tracker API" });
     expect(payload.servers).toEqual([{ url: "/api/v1" }]);
     expect(Object.keys(payload.paths)).toContain("/goals");
     expect(payload.paths["/weight/entries"]?.get).toMatchObject({

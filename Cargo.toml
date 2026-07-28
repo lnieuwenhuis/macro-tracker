@@ -1,3 +1,11 @@
 [workspace]
 members = ["apps/backend"]
 resolver = "3"
+
+[profile.release]
+# Cross-crate inlining and a single codegen unit trade build time for a faster,
+# smaller binary. Unwinding is deliberately left on: Tokio isolates a panicking
+# request handler to its own task, and `panic = "abort"` would escalate that
+# into a process-wide crash.
+lto = "thin"
+codegen-units = 1

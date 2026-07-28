@@ -3,7 +3,6 @@ import {
   createAdminBarcodeProduct,
   createTemplate,
   ensureUserRole,
-  foodProducts,
   getAdminAuditEventById,
   getAdminUserDetail,
   getAdminBarcodeProductById,
@@ -21,6 +20,7 @@ import {
   upsertUserFromShooProfile,
   type DatabaseRuntime,
 } from "../src";
+import { foodProducts } from "../src/schema";
 import { createTestDatabase } from "../src/testing";
 import { eq, sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";

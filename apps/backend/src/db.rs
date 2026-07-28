@@ -6,7 +6,7 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Row, postgres::PgRow};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 #[derive(Clone, Debug)]
@@ -295,6 +295,7 @@ CREATE INDEX IF NOT EXISTS meal_template_items_product_idx ON meal_template_item
 
 const DRIZZLE_MIGRATION_JOURNAL: &str =
     include_str!("../../../packages/db/drizzle/meta/_journal.json");
+const DEFAULT_MEAL_GROUP_LABELS: [&str; 4] = ["Breakfast", "Lunch", "Dinner", "Snack"];
 const REQUIRED_TABLES: &[&str] = &[
     "users",
     "api_tokens",
@@ -720,7 +721,45 @@ pub async fn authenticate_api_token(pool: &PgPool, token: &str) -> AppResult<Val
 }
 
 pub async fn ensure_default_meal_groups(pool: &PgPool, user_id: Uuid) -> AppResult<()> {
+    // Read paths call this on every dashboard load to lazily backfill accounts
+    // that predate onboarding-time provisioning. Once all four deterministic
+    // groups exist and are active the provisioning statement is a guaranteed
+    // no-op -- the INSERT fully conflicts and the restore UPDATE requires
+    // `deleted_at IS NOT NULL` -- so probe first and skip the write entirely.
+    if default_meal_groups_are_active(pool, user_id).await? {
+        return Ok(());
+    }
+
     ensure_default_meal_groups_with_executor(pool, user_id).await
+}
+
+fn default_meal_group_ids(user_id: Uuid) -> [Uuid; DEFAULT_MEAL_GROUP_LABELS.len()] {
+    DEFAULT_MEAL_GROUP_LABELS.map(|label| {
+        Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("macro-tracker:meal-group:{user_id}:{label}").as_bytes(),
+        )
+    })
+}
+
+async fn default_meal_groups_are_active(pool: &PgPool, user_id: Uuid) -> AppResult<bool> {
+    let ids = default_meal_group_ids(user_id);
+    let active: i64 = sqlx::query(
+        r#"
+        SELECT count(*)::bigint AS active
+        FROM meal_groups
+        WHERE user_id = $1
+          AND id = ANY($2::uuid[])
+          AND deleted_at IS NULL
+        "#,
+    )
+    .bind(user_id)
+    .bind(&ids[..])
+    .fetch_one(pool)
+    .await?
+    .try_get("active")?;
+
+    Ok(active == DEFAULT_MEAL_GROUP_LABELS.len() as i64)
 }
 
 async fn ensure_default_meal_groups_with_executor<'e, E>(
@@ -730,13 +769,8 @@ async fn ensure_default_meal_groups_with_executor<'e, E>(
 where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
-    let labels = ["Breakfast", "Lunch", "Dinner", "Snack"];
-    let ids = labels.map(|label| {
-        Uuid::new_v5(
-            &Uuid::NAMESPACE_URL,
-            format!("macro-tracker:meal-group:{user_id}:{label}").as_bytes(),
-        )
-    });
+    let labels = DEFAULT_MEAL_GROUP_LABELS;
+    let ids = default_meal_group_ids(user_id);
     sqlx::query(
         r#"
         WITH defaults AS (
@@ -1722,7 +1756,12 @@ async fn query_json(pool: &PgPool, sql: &str, binds: &[JsonBind]) -> AppResult<V
 async fn daily_summary_json(pool: &PgPool, user_id: Uuid, date: &str) -> AppResult<Value> {
     let row = sqlx::query(
         r#"
-        WITH meals AS (
+        WITH day_entries AS (
+          SELECT *
+          FROM meal_entries
+          WHERE user_id = $1 AND entry_date = $2::date
+        ),
+        meals AS (
           SELECT coalesce(jsonb_agg(
             jsonb_build_object(
               'id', me.id,
@@ -1745,13 +1784,12 @@ async fn daily_summary_json(pool: &PgPool, user_id: Uuid, date: &str) -> AppResu
             )
             ORDER BY coalesce(mg.sort_order, 999), me.sort_order, me.created_at, me.id
           ), '[]'::jsonb) AS data
-          FROM meal_entries me
+          FROM day_entries me
           LEFT JOIN meal_groups mg ON mg.id = me.meal_group_id
           LEFT JOIN food_products fp
             ON fp.id = me.product_id
             AND fp.deleted_at IS NULL
             AND (fp.owner_user_id = me.user_id OR fp.owner_user_id IS NULL)
-          WHERE me.user_id = $1 AND me.entry_date = $2::date
         ),
         groups AS (
           SELECT coalesce(jsonb_agg(
@@ -1781,8 +1819,7 @@ async fn daily_summary_json(pool: &PgPool, user_id: Uuid, date: &str) -> AppResu
             coalesce(sum(carbs_g) FILTER (WHERE status = 'skipped'), 0)::float8 AS skipped_carbs_g,
             coalesce(sum(fat_g) FILTER (WHERE status = 'skipped'), 0)::float8 AS skipped_fat_g,
             coalesce(sum(calories_kcal) FILTER (WHERE status = 'skipped'), 0)::int AS skipped_calories_kcal
-          FROM meal_entries
-          WHERE user_id = $1 AND entry_date = $2::date
+          FROM day_entries
         )
         SELECT jsonb_build_object(
           'date', $2::text,
@@ -1818,9 +1855,27 @@ async fn daily_summary_json(pool: &PgPool, user_id: Uuid, date: &str) -> AppResu
 }
 
 async fn templates_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
+    templates_json_filtered(pool, user_id, None).await
+}
+
+/// Shared shape for the template list and single-template reads. Passing a
+/// `template_id` narrows both the outer select and the item aggregation to one
+/// row, so by-id lookups stay indexed instead of building the whole collection.
+async fn templates_json_filtered(
+    pool: &PgPool,
+    user_id: Uuid,
+    template_id: Option<Uuid>,
+) -> AppResult<Value> {
     let row = sqlx::query(
         r#"
-        WITH item_data AS (
+        WITH visible_templates AS (
+          SELECT id, user_id, type, label, notes, created_at, updated_at
+          FROM meal_templates
+          WHERE user_id = $1
+            AND deleted_at IS NULL
+            AND ($2::uuid IS NULL OR id = $2::uuid)
+        ),
+        item_data AS (
           SELECT
             template_id,
             jsonb_agg(
@@ -1842,6 +1897,7 @@ async fn templates_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
               ORDER BY sort_order, created_at, id
             ) AS items
           FROM meal_template_items
+          WHERE template_id IN (SELECT id FROM visible_templates)
           GROUP BY template_id
         )
         SELECT coalesce(jsonb_agg(
@@ -1857,21 +1913,37 @@ async fn templates_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
           )
           ORDER BY mt.updated_at DESC, mt.created_at DESC
         ), '[]'::jsonb) AS data
-        FROM meal_templates mt
+        FROM visible_templates mt
         LEFT JOIN item_data ON item_data.template_id = mt.id
-        WHERE mt.user_id = $1 AND mt.deleted_at IS NULL
         "#,
     )
     .bind(user_id)
+    .bind(template_id)
     .fetch_one(pool)
     .await?;
     Ok(row.try_get("data")?)
 }
 
 async fn recipes_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
+    recipes_json_filtered(pool, user_id, None).await
+}
+
+/// Shared shape for the recipe list and single-recipe reads. See
+/// [`templates_json_filtered`] for why the id filter lives in SQL.
+async fn recipes_json_filtered(
+    pool: &PgPool,
+    user_id: Uuid,
+    recipe_id: Option<Uuid>,
+) -> AppResult<Value> {
     let row = sqlx::query(
         r#"
-        WITH ingredient_data AS (
+        WITH visible_recipes AS (
+          SELECT id, user_id, label, portions, total_cooked_weight_g, created_at, updated_at
+          FROM recipes
+          WHERE user_id = $1
+            AND ($2::uuid IS NULL OR id = $2::uuid)
+        ),
+        ingredient_data AS (
           SELECT
             recipe_id,
             jsonb_agg(
@@ -1896,6 +1968,7 @@ async fn recipes_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
             coalesce(sum(fat_g), 0)::float8 AS fat_g,
             coalesce(sum(calories_kcal), 0)::int AS calories_kcal
           FROM recipe_ingredients
+          WHERE recipe_id IN (SELECT id FROM visible_recipes)
           GROUP BY recipe_id
         )
         SELECT coalesce(jsonb_agg(
@@ -1921,12 +1994,12 @@ async fn recipes_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
           )
           ORDER BY r.updated_at DESC, r.created_at DESC
         ), '[]'::jsonb) AS data
-        FROM recipes r
+        FROM visible_recipes r
         LEFT JOIN ingredient_data ON ingredient_data.recipe_id = r.id
-        WHERE r.user_id = $1
         "#,
     )
     .bind(user_id)
+    .bind(recipe_id)
     .fetch_one(pool)
     .await?;
     Ok(row.try_get("data")?)
@@ -1980,6 +2053,17 @@ async fn search_food_products_json(pool: &PgPool, user_id: Uuid, query: &str) ->
           WHERE
             deleted_at IS NULL
             AND (owner_user_id = $1 OR owner_user_id IS NULL)
+            -- Redundant by construction: the NOT EXISTS below already requires
+            -- every pattern to match one of these columns, so requiring it of
+            -- the first pattern cannot change the result set. Spelling it out
+            -- gives the planner an indexable OR that the pg_trgm indexes from
+            -- migration 0014 can serve as a bitmap scan, instead of sequentially
+            -- scanning the whole shared catalog.
+            AND (
+              name ILIKE $3 ESCAPE '\'
+              OR brand ILIKE $3 ESCAPE '\'
+              OR barcode ILIKE $3 ESCAPE '\'
+            )
             AND NOT EXISTS (
               SELECT 1
               FROM unnest($2::text[]) AS patterns(pattern)
@@ -2002,7 +2086,8 @@ async fn search_food_products_json(pool: &PgPool, user_id: Uuid, query: &str) ->
         "#,
     )
     .bind(user_id)
-    .bind(patterns)
+    .bind(&patterns)
+    .bind(&patterns[0])
     .fetch_one(pool)
     .await?;
     Ok(row.try_get("data")?)
@@ -2103,24 +2188,6 @@ where
     row.map(|row| row.try_get("data"))
         .transpose()
         .map_err(Into::into)
-}
-
-async fn assert_food_product_access(
-    pool: &PgPool,
-    user_id: Uuid,
-    product_id: Option<Uuid>,
-) -> AppResult<()> {
-    let Some(product_id) = product_id else {
-        return Ok(());
-    };
-    if food_product_json_by_id(pool, user_id, product_id)
-        .await?
-        .is_some()
-    {
-        Ok(())
-    } else {
-        Err(AppError::NotFound("Food product not found.".to_string()))
-    }
 }
 
 fn nutrition_for_product(
@@ -2236,28 +2303,30 @@ fn nutrition_for_product(
     )
 }
 
+/// A meal entry after validation, ready to be written. Previously returned as a
+/// fourteen-element tuple whose `String`, `f64`, and `Option<Uuid>` fields were
+/// distinguished only by position.
+struct NormalizedMealEntry {
+    date: String,
+    meal_group_id: Option<Uuid>,
+    status: String,
+    product_id: Option<Uuid>,
+    label: String,
+    sort_order: i32,
+    quantity: f64,
+    unit: String,
+    serving_multiplier: f64,
+    macros: MacroValues,
+    client_mutation_id: Option<String>,
+}
+
 async fn normalize_meal_input(
     pool: &PgPool,
     user_id: Uuid,
     input: &serde_json::Map<String, Value>,
     default_sort_order: i32,
     recalculate_product_macros: bool,
-) -> AppResult<(
-    String,
-    Option<Uuid>,
-    String,
-    Option<Uuid>,
-    String,
-    i32,
-    f64,
-    String,
-    f64,
-    f64,
-    f64,
-    f64,
-    i32,
-    Option<String>,
-)> {
+) -> AppResult<NormalizedMealEntry> {
     let date = required_string(input, "date")?;
     let meal_group_id = optional_uuid(input, "mealGroupId")?;
     assert_meal_group_access(pool, user_id, meal_group_id).await?;
@@ -2309,42 +2378,36 @@ async fn normalize_meal_input(
             &macros,
             "Meal name is required.",
         )?;
-        return Ok((
+        return Ok(NormalizedMealEntry {
             date,
             meal_group_id,
             status,
-            Some(product_id),
+            product_id: Some(product_id),
             label,
             sort_order,
             quantity,
             unit,
             serving_multiplier,
-            macros.protein,
-            macros.carbs,
-            macros.fat,
-            calories,
+            macros,
             client_mutation_id,
-        ));
+        });
     }
 
     let values = normalize_meal_food_values(input, sort_order, "Meal name is required.")?;
 
-    Ok((
+    Ok(NormalizedMealEntry {
         date,
         meal_group_id,
         status,
-        values.product_id,
-        values.label,
+        product_id: values.product_id,
+        label: values.label,
         sort_order,
-        values.quantity,
-        values.unit,
-        values.serving_multiplier,
-        values.macros.protein,
-        values.macros.carbs,
-        values.macros.fat,
-        values.macros.calories,
+        quantity: values.quantity,
+        unit: values.unit,
+        serving_multiplier: values.serving_multiplier,
+        macros: values.macros,
         client_mutation_id,
-    ))
+    })
 }
 
 async fn create_meal_entry_json(
@@ -2361,22 +2424,7 @@ async fn create_meal_entry_json(
     .fetch_one(pool)
     .await?;
     let next_sort_order: i32 = row.try_get("sort_order")?;
-    let (
-        date,
-        meal_group_id,
-        status,
-        product_id,
-        label,
-        sort_order,
-        quantity,
-        unit,
-        serving_multiplier,
-        protein,
-        carbs,
-        fat,
-        calories,
-        client_mutation_id,
-    ) = normalize_meal_input(pool, user_id, input, next_sort_order, true).await?;
+    let entry = normalize_meal_input(pool, user_id, input, next_sort_order, true).await?;
 
     let id = Uuid::new_v4();
     let inserted = sqlx::query(
@@ -2395,20 +2443,20 @@ async fn create_meal_entry_json(
     )
     .bind(id)
     .bind(user_id)
-    .bind(date)
-    .bind(meal_group_id)
-    .bind(status)
-    .bind(product_id)
-    .bind(label)
-    .bind(sort_order)
-    .bind(quantity)
-    .bind(unit)
-    .bind(serving_multiplier)
-    .bind(protein)
-    .bind(carbs)
-    .bind(fat)
-    .bind(calories)
-    .bind(client_mutation_id.as_deref())
+    .bind(&entry.date)
+    .bind(entry.meal_group_id)
+    .bind(&entry.status)
+    .bind(entry.product_id)
+    .bind(&entry.label)
+    .bind(entry.sort_order)
+    .bind(entry.quantity)
+    .bind(&entry.unit)
+    .bind(entry.serving_multiplier)
+    .bind(entry.macros.protein)
+    .bind(entry.macros.carbs)
+    .bind(entry.macros.fat)
+    .bind(entry.macros.calories)
+    .bind(entry.client_mutation_id.as_deref())
     .fetch_optional(pool)
     .await?;
 
@@ -2417,7 +2465,7 @@ async fn create_meal_entry_json(
         return meal_entry_json(pool, user_id, created_id).await;
     }
 
-    if let Some(client_mutation_id) = client_mutation_id {
+    if let Some(client_mutation_id) = entry.client_mutation_id {
         let existing = sqlx::query(
             "SELECT id FROM meal_entries WHERE user_id = $1 AND client_mutation_id = $2",
         )
@@ -2480,22 +2528,8 @@ async fn update_meal_entry_json(
         }
         merged_obj.insert(key.clone(), value.clone());
     }
-    let (
-        date,
-        meal_group_id,
-        status,
-        product_id,
-        label,
-        sort_order,
-        quantity,
-        unit,
-        serving_multiplier,
-        protein,
-        carbs,
-        fat,
-        calories,
-        client_mutation_id,
-    ) = normalize_meal_input(pool, user_id, merged_obj, 0, recalculate_product_macros).await?;
+    let entry =
+        normalize_meal_input(pool, user_id, merged_obj, 0, recalculate_product_macros).await?;
 
     sqlx::query(
         r#"
@@ -2521,20 +2555,20 @@ async fn update_meal_entry_json(
     )
     .bind(user_id)
     .bind(entry_id)
-    .bind(date)
-    .bind(meal_group_id)
-    .bind(status)
-    .bind(product_id)
-    .bind(label)
-    .bind(sort_order)
-    .bind(quantity)
-    .bind(unit)
-    .bind(serving_multiplier)
-    .bind(protein)
-    .bind(carbs)
-    .bind(fat)
-    .bind(calories)
-    .bind(client_mutation_id.as_deref())
+    .bind(&entry.date)
+    .bind(entry.meal_group_id)
+    .bind(&entry.status)
+    .bind(entry.product_id)
+    .bind(&entry.label)
+    .bind(entry.sort_order)
+    .bind(entry.quantity)
+    .bind(&entry.unit)
+    .bind(entry.serving_multiplier)
+    .bind(entry.macros.protein)
+    .bind(entry.macros.carbs)
+    .bind(entry.macros.fat)
+    .bind(entry.macros.calories)
+    .bind(entry.client_mutation_id.as_deref())
     .execute(pool)
     .await?;
 
@@ -2578,6 +2612,57 @@ async fn meal_entry_json(pool: &PgPool, user_id: Uuid, entry_id: Uuid) -> AppRes
     Ok(row
         .ok_or_else(|| AppError::NotFound("Meal entry not found.".to_string()))?
         .try_get("data")?)
+}
+
+/// Read back a batch of freshly written entries in one round trip, preserving
+/// the caller's id order via `WITH ORDINALITY`.
+async fn meal_entries_json_by_ids(
+    pool: &PgPool,
+    user_id: Uuid,
+    entry_ids: &[Uuid],
+) -> AppResult<Value> {
+    if entry_ids.is_empty() {
+        return Ok(Value::Array(Vec::new()));
+    }
+
+    let row = sqlx::query(
+        r#"
+        SELECT coalesce(jsonb_agg(
+          jsonb_build_object(
+            'id', me.id,
+            'userId', me.user_id,
+            'date', me.entry_date,
+            'mealGroupId', me.meal_group_id,
+            'status', me.status,
+            'productId', CASE WHEN fp.id IS NULL THEN NULL ELSE me.product_id END,
+            'label', me.label,
+            'sortOrder', me.sort_order,
+            'quantity', me.quantity::float8,
+            'unit', me.unit,
+            'servingMultiplier', me.serving_multiplier::float8,
+            'proteinG', me.protein_g::float8,
+            'carbsG', me.carbs_g::float8,
+            'fatG', me.fat_g::float8,
+            'caloriesKcal', me.calories_kcal,
+            'clientMutationId', me.client_mutation_id,
+            'sourceLabel', fp.name
+          )
+          ORDER BY requested.ordinality
+        ), '[]'::jsonb) AS data
+        FROM unnest($2::uuid[]) WITH ORDINALITY AS requested(id, ordinality)
+        JOIN meal_entries me ON me.id = requested.id AND me.user_id = $1
+        LEFT JOIN food_products fp
+          ON fp.id = me.product_id
+          AND fp.deleted_at IS NULL
+          AND (fp.owner_user_id = me.user_id OR fp.owner_user_id IS NULL)
+        "#,
+    )
+    .bind(user_id)
+    .bind(entry_ids)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(row.try_get("data")?)
 }
 
 async fn create_template_json(
@@ -2667,37 +2752,112 @@ async fn insert_template_items(
     template_id: Uuid,
     items: &[Value],
 ) -> AppResult<()> {
+    if items.is_empty() {
+        return Ok(());
+    }
+
+    let mut rows = TemplateItemColumns::with_capacity(items.len());
     for (index, item) in items.iter().enumerate() {
         let item = item
             .as_object()
             .ok_or_else(|| AppError::BadRequest("Template item must be an object.".to_string()))?;
         let values = normalize_meal_food_values(item, index as i32, "Meal name is required.")?;
-        sqlx::query(
-            r#"
-            INSERT INTO meal_template_items (
-              id, template_id, product_id, meal_group_label, sort_order, label,
-              quantity, unit, serving_multiplier, protein_g, carbs_g, fat_g, calories_kcal
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-            "#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(template_id)
-        .bind(values.product_id)
-        .bind(trim_optional_string(item, "mealGroupLabel").as_deref())
-        .bind(index as i32)
-        .bind(values.label)
-        .bind(values.quantity)
-        .bind(values.unit)
-        .bind(values.serving_multiplier)
-        .bind(values.macros.protein)
-        .bind(values.macros.carbs)
-        .bind(values.macros.fat)
-        .bind(values.macros.calories)
-        .execute(&mut **tx)
-        .await?;
+        rows.push(
+            index as i32,
+            trim_optional_string(item, "mealGroupLabel"),
+            values,
+        );
     }
+
+    sqlx::query(
+        r#"
+        INSERT INTO meal_template_items (
+          id, template_id, product_id, meal_group_label, sort_order, label,
+          quantity, unit, serving_multiplier, protein_g, carbs_g, fat_g, calories_kcal
+        )
+        SELECT
+          id, $1, product_id, meal_group_label, sort_order, label,
+          quantity, unit, serving_multiplier, protein_g, carbs_g, fat_g, calories_kcal
+        FROM unnest(
+          $2::uuid[], $3::uuid[], $4::text[], $5::int[], $6::text[],
+          $7::float8[], $8::text[], $9::float8[], $10::float8[], $11::float8[],
+          $12::float8[], $13::int[]
+        ) AS items(
+          id, product_id, meal_group_label, sort_order, label,
+          quantity, unit, serving_multiplier, protein_g, carbs_g, fat_g, calories_kcal
+        )
+        "#,
+    )
+    .bind(template_id)
+    .bind(&rows.ids)
+    .bind(&rows.product_ids)
+    .bind(&rows.meal_group_labels)
+    .bind(&rows.sort_orders)
+    .bind(&rows.labels)
+    .bind(&rows.quantities)
+    .bind(&rows.units)
+    .bind(&rows.serving_multipliers)
+    .bind(&rows.proteins)
+    .bind(&rows.carbs)
+    .bind(&rows.fats)
+    .bind(&rows.calories)
+    .execute(&mut **tx)
+    .await?;
+
     Ok(())
+}
+
+/// Column-major staging buffer for a multi-row `unnest` insert. Template items
+/// and recipe ingredients share every column except `meal_group_label`, which
+/// recipe rows leave empty.
+#[derive(Default)]
+struct TemplateItemColumns {
+    ids: Vec<Uuid>,
+    product_ids: Vec<Option<Uuid>>,
+    meal_group_labels: Vec<Option<String>>,
+    sort_orders: Vec<i32>,
+    labels: Vec<String>,
+    quantities: Vec<f64>,
+    units: Vec<String>,
+    serving_multipliers: Vec<f64>,
+    proteins: Vec<f64>,
+    carbs: Vec<f64>,
+    fats: Vec<f64>,
+    calories: Vec<i32>,
+}
+
+impl TemplateItemColumns {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            ids: Vec::with_capacity(capacity),
+            product_ids: Vec::with_capacity(capacity),
+            meal_group_labels: Vec::with_capacity(capacity),
+            sort_orders: Vec::with_capacity(capacity),
+            labels: Vec::with_capacity(capacity),
+            quantities: Vec::with_capacity(capacity),
+            units: Vec::with_capacity(capacity),
+            serving_multipliers: Vec::with_capacity(capacity),
+            proteins: Vec::with_capacity(capacity),
+            carbs: Vec::with_capacity(capacity),
+            fats: Vec::with_capacity(capacity),
+            calories: Vec::with_capacity(capacity),
+        }
+    }
+
+    fn push(&mut self, sort_order: i32, meal_group_label: Option<String>, values: MealFoodValues) {
+        self.ids.push(Uuid::new_v4());
+        self.product_ids.push(values.product_id);
+        self.meal_group_labels.push(meal_group_label);
+        self.sort_orders.push(sort_order);
+        self.labels.push(values.label);
+        self.quantities.push(values.quantity);
+        self.units.push(values.unit);
+        self.serving_multipliers.push(values.serving_multiplier);
+        self.proteins.push(values.macros.protein);
+        self.carbs.push(values.macros.carbs);
+        self.fats.push(values.macros.fat);
+        self.calories.push(values.macros.calories);
+    }
 }
 
 async fn validate_item_product_access(
@@ -2705,25 +2865,122 @@ async fn validate_item_product_access(
     user_id: Uuid,
     items: &[Value],
 ) -> AppResult<()> {
+    let mut product_ids = Vec::new();
     for item in items {
         let item = item
             .as_object()
             .ok_or_else(|| AppError::BadRequest("Item must be an object.".to_string()))?;
-        assert_food_product_access(pool, user_id, optional_uuid(item, "productId")?).await?;
+        if let Some(product_id) = optional_uuid(item, "productId")? {
+            product_ids.push(product_id);
+        }
     }
-    Ok(())
+
+    assert_food_products_accessible(pool, user_id, &product_ids).await
+}
+
+/// Resolve access for a whole item list in one round trip. The per-item variant
+/// issued a query each, which made template and recipe writes scale their
+/// latency with item count.
+async fn assert_food_products_accessible(
+    pool: &PgPool,
+    user_id: Uuid,
+    product_ids: &[Uuid],
+) -> AppResult<()> {
+    let requested = product_ids.iter().copied().collect::<HashSet<_>>();
+    if requested.is_empty() {
+        return Ok(());
+    }
+
+    let accessible: i64 = sqlx::query(
+        r#"
+        SELECT count(*)::bigint AS accessible
+        FROM (SELECT DISTINCT unnest($2::uuid[]) AS id) AS requested
+        WHERE EXISTS (
+          SELECT 1
+          FROM food_products
+          WHERE food_products.id = requested.id
+            AND food_products.deleted_at IS NULL
+            AND (food_products.owner_user_id = $1 OR food_products.owner_user_id IS NULL)
+        )
+        "#,
+    )
+    .bind(user_id)
+    .bind(product_ids)
+    .fetch_one(pool)
+    .await?
+    .try_get("accessible")?;
+
+    if accessible == requested.len() as i64 {
+        Ok(())
+    } else {
+        Err(AppError::NotFound("Food product not found.".to_string()))
+    }
 }
 
 async fn template_by_id_json(pool: &PgPool, user_id: Uuid, template_id: Uuid) -> AppResult<Value> {
-    let all = templates_json(pool, user_id).await?;
-    all.as_array()
-        .and_then(|items| {
-            items.iter().find(|item| {
-                item.get("id").and_then(Value::as_str) == Some(&template_id.to_string())
-            })
-        })
-        .cloned()
+    first_json_item(templates_json_filtered(pool, user_id, Some(template_id)).await?)
         .ok_or_else(|| AppError::NotFound("Template not found.".to_string()))
+}
+
+/// Take ownership of the single row a filtered collection query returned.
+fn first_json_item(value: Value) -> Option<Value> {
+    match value {
+        Value::Array(items) => items.into_iter().next(),
+        _ => None,
+    }
+}
+
+/// Maps a template's `mealGroupLabel` onto the user's live meal groups. An
+/// exact match wins when it is unambiguous; otherwise a unique
+/// case-insensitive match is accepted. Ambiguous labels stay ungrouped.
+struct MealGroupLabelIndex {
+    exact: HashMap<String, (Uuid, usize)>,
+    case_insensitive: HashMap<String, (Uuid, usize)>,
+}
+
+impl MealGroupLabelIndex {
+    async fn load(pool: &PgPool, user_id: Uuid) -> AppResult<Self> {
+        let rows = sqlx::query(
+            "SELECT id, label FROM meal_groups WHERE user_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(user_id)
+        .fetch_all(pool)
+        .await?;
+
+        let mut index = Self {
+            exact: HashMap::with_capacity(rows.len()),
+            case_insensitive: HashMap::with_capacity(rows.len()),
+        };
+        for row in rows {
+            let label: String = row.try_get("label")?;
+            let id: Uuid = row.try_get("id")?;
+            index
+                .case_insensitive
+                .entry(label.to_lowercase())
+                .and_modify(|entry| entry.1 += 1)
+                .or_insert((id, 1));
+            index
+                .exact
+                .entry(label)
+                .and_modify(|entry| entry.1 += 1)
+                .or_insert((id, 1));
+        }
+        Ok(index)
+    }
+
+    fn resolve(&self, label: &str) -> Option<Uuid> {
+        match self.exact.get(label) {
+            Some((id, 1)) => return Some(*id),
+            // An ambiguous exact match never falls through to the looser pass.
+            Some(_) => return None,
+            None => {}
+        }
+
+        match self.case_insensitive.get(&label.to_lowercase()) {
+            Some((id, 1)) => Some(*id),
+            _ => None,
+        }
+    }
 }
 
 async fn apply_template_json(
@@ -2746,19 +3003,7 @@ async fn apply_template_json(
         .and_then(Value::as_array)
         .ok_or_else(|| AppError::BadRequest("Template items missing.".to_string()))?;
     validate_item_product_access(pool, user_id, items).await?;
-    let meal_groups =
-        sqlx::query("SELECT id, label FROM meal_groups WHERE user_id = $1 AND deleted_at IS NULL")
-            .bind(user_id)
-            .fetch_all(pool)
-            .await?
-            .into_iter()
-            .map(|row| {
-                Ok((
-                    row.try_get::<String, _>("label")?,
-                    row.try_get::<Uuid, _>("id")?,
-                ))
-            })
-            .collect::<Result<Vec<_>, sqlx::Error>>()?;
+    let meal_groups = MealGroupLabelIndex::load(pool, user_id).await?;
     let row = sqlx::query(
         "SELECT coalesce(max(sort_order), -1) + 1 AS sort_order FROM meal_entries WHERE user_id = $1 AND entry_date = $2::date",
     )
@@ -2776,28 +3021,7 @@ async fn apply_template_json(
         let meal_group_id = item
             .get("mealGroupLabel")
             .and_then(Value::as_str)
-            .and_then(|label| {
-                let exact = meal_groups
-                    .iter()
-                    .filter(|(group_label, _)| group_label == label)
-                    .map(|(_, id)| *id)
-                    .collect::<Vec<_>>();
-                if exact.len() == 1 {
-                    return exact.first().copied();
-                }
-                if !exact.is_empty() {
-                    return None;
-                }
-                let lowercase_label = label.to_lowercase();
-                let case_insensitive = meal_groups
-                    .iter()
-                    .filter(|(group_label, _)| group_label.to_lowercase() == lowercase_label)
-                    .map(|(_, id)| *id)
-                    .collect::<Vec<_>>();
-                (case_insensitive.len() == 1)
-                    .then(|| case_insensitive.first().copied())
-                    .flatten()
-            });
+            .and_then(|label| meal_groups.resolve(label));
         if let Some(meal_group_id) = meal_group_id {
             meal.insert("mealGroupId".to_string(), json!(meal_group_id));
         }
@@ -2811,24 +3035,8 @@ async fn apply_template_json(
 
     let mut tx = pool.begin().await?;
     let mut created_ids = Vec::new();
-    for (index, meal) in normalized.into_iter().enumerate() {
+    for (index, entry) in normalized.into_iter().enumerate() {
         maybe_trigger_test_fault(test_fault, index + 1)?;
-        let (
-            date,
-            meal_group_id,
-            status,
-            product_id,
-            label,
-            sort_order,
-            quantity,
-            unit,
-            serving_multiplier,
-            protein,
-            carbs,
-            fat,
-            calories,
-            client_mutation_id,
-        ) = meal;
         let id = Uuid::new_v4();
         let inserted = sqlx::query(
             r#"
@@ -2846,26 +3054,26 @@ async fn apply_template_json(
         )
         .bind(id)
         .bind(user_id)
-        .bind(date)
-        .bind(meal_group_id)
-        .bind(status)
-        .bind(product_id)
-        .bind(label)
-        .bind(sort_order)
-        .bind(quantity)
-        .bind(unit)
-        .bind(serving_multiplier)
-        .bind(protein)
-        .bind(carbs)
-        .bind(fat)
-        .bind(calories)
-        .bind(client_mutation_id.as_deref())
+        .bind(&entry.date)
+        .bind(entry.meal_group_id)
+        .bind(&entry.status)
+        .bind(entry.product_id)
+        .bind(&entry.label)
+        .bind(entry.sort_order)
+        .bind(entry.quantity)
+        .bind(&entry.unit)
+        .bind(entry.serving_multiplier)
+        .bind(entry.macros.protein)
+        .bind(entry.macros.carbs)
+        .bind(entry.macros.fat)
+        .bind(entry.macros.calories)
+        .bind(entry.client_mutation_id.as_deref())
         .fetch_optional(&mut *tx)
         .await?;
 
         if let Some(row) = inserted {
             created_ids.push(row.try_get::<Uuid, _>("id")?);
-        } else if let Some(client_mutation_id) = client_mutation_id {
+        } else if let Some(client_mutation_id) = entry.client_mutation_id {
             let existing = sqlx::query(
                 "SELECT id FROM meal_entries WHERE user_id = $1 AND client_mutation_id = $2",
             )
@@ -2882,11 +3090,7 @@ async fn apply_template_json(
     }
     tx.commit().await?;
 
-    let mut created = Vec::new();
-    for id in created_ids {
-        created.push(meal_entry_json(pool, user_id, id).await?);
-    }
-    Ok(Value::Array(created))
+    meal_entries_json_by_ids(pool, user_id, &created_ids).await
 }
 
 async fn create_template_from_date_json(
@@ -4669,7 +4873,14 @@ async fn insert_recipe_ingredients(
     ingredients: &[Value],
     test_fault: Option<&serde_json::Map<String, Value>>,
 ) -> AppResult<()> {
+    if ingredients.is_empty() {
+        return Ok(());
+    }
+
+    let mut rows = TemplateItemColumns::with_capacity(ingredients.len());
     for (index, ingredient) in ingredients.iter().enumerate() {
+        // Kept per item so injected faults still abort at the same ingredient;
+        // the surrounding transaction rolls back either way.
         maybe_trigger_test_fault(test_fault, index + 1)?;
         let ingredient = ingredient.as_object().ok_or_else(|| {
             AppError::BadRequest("Recipe ingredient must be an object.".to_string())
@@ -4679,42 +4890,48 @@ async fn insert_recipe_ingredients(
             index as i32,
             &format!("Ingredient {} name is required.", index + 1),
         )?;
-        sqlx::query(
-            r#"
-            INSERT INTO recipe_ingredients (
-              id, recipe_id, product_id, sort_order, label, quantity, unit,
-              serving_multiplier, protein_g, carbs_g, fat_g, calories_kcal
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-            "#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(recipe_id)
-        .bind(values.product_id)
-        .bind(index as i32)
-        .bind(values.label)
-        .bind(values.quantity)
-        .bind(values.unit)
-        .bind(values.serving_multiplier)
-        .bind(values.macros.protein)
-        .bind(values.macros.carbs)
-        .bind(values.macros.fat)
-        .bind(values.macros.calories)
-        .execute(&mut **tx)
-        .await?;
+        rows.push(index as i32, None, values);
     }
+
+    sqlx::query(
+        r#"
+        INSERT INTO recipe_ingredients (
+          id, recipe_id, product_id, sort_order, label, quantity, unit,
+          serving_multiplier, protein_g, carbs_g, fat_g, calories_kcal
+        )
+        SELECT
+          id, $1, product_id, sort_order, label, quantity, unit,
+          serving_multiplier, protein_g, carbs_g, fat_g, calories_kcal
+        FROM unnest(
+          $2::uuid[], $3::uuid[], $4::int[], $5::text[], $6::float8[],
+          $7::text[], $8::float8[], $9::float8[], $10::float8[], $11::float8[],
+          $12::int[]
+        ) AS ingredients(
+          id, product_id, sort_order, label, quantity, unit,
+          serving_multiplier, protein_g, carbs_g, fat_g, calories_kcal
+        )
+        "#,
+    )
+    .bind(recipe_id)
+    .bind(&rows.ids)
+    .bind(&rows.product_ids)
+    .bind(&rows.sort_orders)
+    .bind(&rows.labels)
+    .bind(&rows.quantities)
+    .bind(&rows.units)
+    .bind(&rows.serving_multipliers)
+    .bind(&rows.proteins)
+    .bind(&rows.carbs)
+    .bind(&rows.fats)
+    .bind(&rows.calories)
+    .execute(&mut **tx)
+    .await?;
+
     Ok(())
 }
 
 async fn recipe_by_id_json(pool: &PgPool, user_id: Uuid, recipe_id: Uuid) -> AppResult<Value> {
-    let all = recipes_json(pool, user_id).await?;
-    all.as_array()
-        .and_then(|items| {
-            items.iter().find(|item| {
-                item.get("id").and_then(Value::as_str) == Some(recipe_id.to_string().as_str())
-            })
-        })
-        .cloned()
+    first_json_item(recipes_json_filtered(pool, user_id, Some(recipe_id)).await?)
         .ok_or_else(|| AppError::NotFound("Recipe not found.".to_string()))
 }
 
@@ -5344,48 +5561,27 @@ async fn stats_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppR
           FROM users
           WHERE id = $1
         ),
-        eaten AS (
-          SELECT
-            entry_date,
-            sum(protein_g)::float8 AS protein_g,
-            sum(carbs_g)::float8 AS carbs_g,
-            sum(fat_g)::float8 AS fat_g,
-            sum(calories_kcal)::int AS calories_kcal
-          FROM meal_entries
-          WHERE user_id = $1 AND status = 'eaten'
-          GROUP BY entry_date
-        ),
-        planned AS (
-          SELECT
-            entry_date,
-            sum(protein_g)::float8 AS protein_g,
-            sum(carbs_g)::float8 AS carbs_g,
-            sum(fat_g)::float8 AS fat_g,
-            sum(calories_kcal)::int AS calories_kcal
-          FROM meal_entries
-          WHERE user_id = $1 AND status = 'planned'
-            AND entry_date <= $2::date
-          GROUP BY entry_date
-        ),
-        dates AS (
-          SELECT entry_date FROM eaten
-          UNION
-          SELECT entry_date FROM planned
-        ),
+        -- One pass over the user's entries; `FILTER` splits eaten from planned
+        -- so the eaten/planned aggregates no longer scan the table twice and
+        -- then re-`UNION` their dates back together.
         daily AS (
           SELECT
-            dates.entry_date,
-            coalesce(eaten.protein_g, 0) AS protein_g,
-            coalesce(eaten.carbs_g, 0) AS carbs_g,
-            coalesce(eaten.fat_g, 0) AS fat_g,
-            coalesce(eaten.calories_kcal, 0) AS calories_kcal,
-            coalesce(planned.protein_g, 0) AS planned_protein_g,
-            coalesce(planned.carbs_g, 0) AS planned_carbs_g,
-            coalesce(planned.fat_g, 0) AS planned_fat_g,
-            coalesce(planned.calories_kcal, 0) AS planned_calories_kcal
-          FROM dates
-          LEFT JOIN eaten ON eaten.entry_date = dates.entry_date
-          LEFT JOIN planned ON planned.entry_date = dates.entry_date
+            entry_date,
+            coalesce(sum(protein_g) FILTER (WHERE status = 'eaten'), 0)::float8 AS protein_g,
+            coalesce(sum(carbs_g) FILTER (WHERE status = 'eaten'), 0)::float8 AS carbs_g,
+            coalesce(sum(fat_g) FILTER (WHERE status = 'eaten'), 0)::float8 AS fat_g,
+            coalesce(sum(calories_kcal) FILTER (WHERE status = 'eaten'), 0)::int AS calories_kcal,
+            coalesce(sum(protein_g) FILTER (WHERE status = 'planned' AND entry_date <= $2::date), 0)::float8 AS planned_protein_g,
+            coalesce(sum(carbs_g) FILTER (WHERE status = 'planned' AND entry_date <= $2::date), 0)::float8 AS planned_carbs_g,
+            coalesce(sum(fat_g) FILTER (WHERE status = 'planned' AND entry_date <= $2::date), 0)::float8 AS planned_fat_g,
+            coalesce(sum(calories_kcal) FILTER (WHERE status = 'planned' AND entry_date <= $2::date), 0)::int AS planned_calories_kcal
+          FROM meal_entries
+          WHERE user_id = $1
+            AND (
+              status = 'eaten'
+              OR (status = 'planned' AND entry_date <= $2::date)
+            )
+          GROUP BY entry_date
         ),
         eaten_days AS (
           SELECT *

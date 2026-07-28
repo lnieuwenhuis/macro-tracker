@@ -58,7 +58,12 @@ export async function requireSessionUser() {
   return user;
 }
 
-export async function requireOnboardedSessionUser() {
+/**
+ * Resolve the full onboarded account. Callers that also need the role or email
+ * should use this rather than pairing `requireOnboardedSessionUser` with a
+ * second `getUserById`, which costs an extra backend round trip per render.
+ */
+export async function requireOnboardedAppUser() {
   const user = await getCurrentAppUser();
 
   if (!user) {
@@ -68,6 +73,12 @@ export async function requireOnboardedSessionUser() {
   if (!user.onboardingCompletedAt) {
     redirect("/onboarding");
   }
+
+  return user;
+}
+
+export async function requireOnboardedSessionUser() {
+  const user = await requireOnboardedAppUser();
 
   return {
     userId: user.id,

@@ -24,6 +24,13 @@ function roleStyles(role: AdminRole) {
   return "bg-[var(--color-card-muted)] text-[var(--color-muted-strong)]";
 }
 
+// Constructing an Intl formatter is expensive relative to formatting with one,
+// and this runs per row in admin tables. Build it once.
+const adminTimestampFormat = new Intl.DateTimeFormat("en-US", {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
+
 export function formatAdminTimestamp(value: string) {
   const date = new Date(value);
 
@@ -31,10 +38,7 @@ export function formatAdminTimestamp(value: string) {
     return value;
   }
 
-  return new Intl.DateTimeFormat("en-US", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(date);
+  return adminTimestampFormat.format(date);
 }
 
 export function AdminRoleBadge({ role }: { role: AdminRole }) {
