@@ -3,7 +3,7 @@
 import type { DailySummary, MacroGoals, MealEntryRecord, MealEntryStatus, MealGroup, MealTemplate, QuickAddCandidate, RecipeRecord } from "@macro-tracker/db";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
-import { useEffect, useEffectEvent, useMemo, useRef, useState, useTransition } from "react";
+import { useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, useTransition } from "react";
 
 import { applyTemplateAction, createMealGroupAction, deleteMealGroupAction, deleteMealEntryAction, loadRecipesAction, loadTemplatesAction, markMealEntryStatusAction, saveMealEntryAction, updateMealGroupAction } from "@/lib/actions";
 import type { ComposeAction } from "@/lib/compose";
@@ -42,11 +42,13 @@ const RecipePickerModal = dynamic(() =>
 );
 
 function prefetchModalChunks() {
-  void import("./ai-food-photo-modal");
-  void import("./barcode-capture-modals");
-  void import("./food-search-modal");
-  void import("./preset-modal");
-  void import("./recipe-picker-modal");
+  void Promise.allSettled([
+    import("./ai-food-photo-modal"),
+    import("./barcode-capture-modals"),
+    import("./food-search-modal"),
+    import("./preset-modal"),
+    import("./recipe-picker-modal"),
+  ]);
 }
 
 type DashboardShellProps = {
@@ -854,16 +856,18 @@ export function DashboardShell({
     handleCopyToToday,
     discardDraftChanges,
   });
-  mealCardHandlersRef.current = {
-    updateDraft,
-    handleSave,
-    handleDelete,
-    handleDuplicate,
-    handleGroupChange,
-    handleStatusChange,
-    handleCopyToToday,
-    discardDraftChanges,
-  };
+  useLayoutEffect(() => {
+    mealCardHandlersRef.current = {
+      updateDraft,
+      handleSave,
+      handleDelete,
+      handleDuplicate,
+      handleGroupChange,
+      handleStatusChange,
+      handleCopyToToday,
+      discardDraftChanges,
+    };
+  });
 
   const mealCardHandlers = useMemo(
     () => ({
