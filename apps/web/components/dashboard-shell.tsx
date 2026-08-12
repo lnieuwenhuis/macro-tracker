@@ -25,20 +25,31 @@ import { useTemplateMutations } from "./use-template-mutations";
 // Modals only mount behind a flag, so keep them out of the log screen's initial
 // bundle. `prefetchModalChunks` below pulls them in once the browser is idle,
 // so opening one still costs nothing at click time.
-const AiFoodPhotoModal = dynamic(() =>
-  import("./ai-food-photo-modal").then((mod) => mod.AiFoodPhotoModal),
+//
+// The `loading` option is load-bearing even though it renders nothing: without
+// it (or `ssr: false`) next/dynamic emits no Suspense boundary of its own, so
+// the first open suspends up to the route-level loading.tsx and the whole page
+// swaps to the skeleton and remounts. It must stay an inline object literal —
+// the bundler analyzes dynamic() options statically and rejects a shared const.
+const AiFoodPhotoModal = dynamic(
+  () => import("./ai-food-photo-modal").then((mod) => mod.AiFoodPhotoModal),
+  { loading: () => null },
 );
-const BarcodeCaptureModals = dynamic(() =>
-  import("./barcode-capture-modals").then((mod) => mod.BarcodeCaptureModals),
+const BarcodeCaptureModals = dynamic(
+  () => import("./barcode-capture-modals").then((mod) => mod.BarcodeCaptureModals),
+  { loading: () => null },
 );
-const FoodSearchModal = dynamic(() =>
-  import("./food-search-modal").then((mod) => mod.FoodSearchModal),
+const FoodSearchModal = dynamic(
+  () => import("./food-search-modal").then((mod) => mod.FoodSearchModal),
+  { loading: () => null },
 );
-const PresetModal = dynamic(() =>
-  import("./preset-modal").then((mod) => mod.PresetModal),
+const PresetModal = dynamic(
+  () => import("./preset-modal").then((mod) => mod.PresetModal),
+  { loading: () => null },
 );
-const RecipePickerModal = dynamic(() =>
-  import("./recipe-picker-modal").then((mod) => mod.RecipePickerModal),
+const RecipePickerModal = dynamic(
+  () => import("./recipe-picker-modal").then((mod) => mod.RecipePickerModal),
+  { loading: () => null },
 );
 
 function prefetchModalChunks() {
