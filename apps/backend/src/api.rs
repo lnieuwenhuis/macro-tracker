@@ -1545,7 +1545,10 @@ mod tests {
             .unwrap_or_default()
             .to_string();
         assert!(allow.contains("GET"), "unexpected Allow header: {allow}");
-        assert!(allow.contains("OPTIONS"), "unexpected Allow header: {allow}");
+        assert!(
+            allow.contains("OPTIONS"),
+            "unexpected Allow header: {allow}"
+        );
 
         let payload = read_json_body(response).await;
         assert_eq!(payload["error"]["code"], json!("method_not_allowed"));
@@ -1751,7 +1754,10 @@ mod tests {
         ];
 
         for path in paths {
-            let owned = path.iter().map(|part| (*part).to_string()).collect::<Vec<_>>();
+            let owned = path
+                .iter()
+                .map(|part| (*part).to_string())
+                .collect::<Vec<_>>();
             let endpoint = endpoint_for(&owned)
                 .unwrap_or_else(|| panic!("no endpoint registered for {path:?}"));
 

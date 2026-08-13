@@ -6028,7 +6028,9 @@ pub(crate) fn ensure_date_string(value: &str) -> AppResult<()> {
     if well_formed {
         Ok(())
     } else {
-        Err(AppError::BadRequest("Date must use YYYY-MM-DD.".to_string()))
+        Err(AppError::BadRequest(
+            "Date must use YYYY-MM-DD.".to_string(),
+        ))
     }
 }
 
@@ -8184,7 +8186,10 @@ mod tests {
 
     #[test]
     fn goal_weight_is_bounded_after_rounding() {
-        assert_eq!(validate_goal_weight_kg(None).expect("none is allowed"), None);
+        assert_eq!(
+            validate_goal_weight_kg(None).expect("none is allowed"),
+            None
+        );
         assert_eq!(
             validate_goal_weight_kg(Some(72.456)).expect("valid"),
             Some(72.46)

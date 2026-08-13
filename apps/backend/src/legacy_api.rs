@@ -53,8 +53,7 @@ const BARCODE_LOOKUP_SLOT_WAIT_TIMEOUT: Duration = Duration::from_secs(3);
 static BARCODE_LOOKUP_SLOTS: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
 
 fn barcode_lookup_slots() -> &'static tokio::sync::Semaphore {
-    BARCODE_LOOKUP_SLOTS
-        .get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_BARCODE_LOOKUPS))
+    BARCODE_LOOKUP_SLOTS.get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_BARCODE_LOOKUPS))
 }
 
 /// Largest provider response we will buffer. Without this, `response.json()`

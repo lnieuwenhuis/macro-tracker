@@ -106,7 +106,8 @@ impl Config {
             openrouter_api_key: read_value(&mut read, "OPENROUTER_API_KEY"),
             openrouter_model: read_value(&mut read, "OPENROUTER_MODEL"),
             openrouter_fallback_models: read_value(&mut read, "OPENROUTER_FALLBACK_MODELS"),
-            openrouter_model_timeout_ms: match read_value(&mut read, "OPENROUTER_MODEL_TIMEOUT_MS") {
+            openrouter_model_timeout_ms: match read_value(&mut read, "OPENROUTER_MODEL_TIMEOUT_MS")
+            {
                 None => None,
                 Some(value) => Some(value.parse().with_context(|| {
                     "OPENROUTER_MODEL_TIMEOUT_MS must be a non-negative integer".to_string()
