@@ -39,20 +39,27 @@ pub fn build_http_client() -> reqwest::Result<reqwest::Client> {
         .build()
 }
 
-/// Applied to the data routes. The AI routes are deliberately excluded — they
-/// carry their own (much longer) deadlines and semaphores.
+/// Applied to the internal RPC and health routes.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const POSTGRES_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 fn build_router(state: AppState) -> Router {
     Router::new()
+        // `/api/v1` enforces its own deadline inside the handler so a timeout
+        // still returns the documented JSON envelope and CORS headers, which a
+        // transport-level layer cannot do.
         .nest("/api/v1", api::router())
-        .nest("/internal", routes::internal_router())
-        .route("/health", axum::routing::get(routes::health))
-        .layer(TimeoutLayer::with_status_code(
-            axum::http::StatusCode::GATEWAY_TIMEOUT,
-            REQUEST_TIMEOUT,
-        ))
+        .merge(
+            Router::new()
+                .nest("/internal", routes::internal_router())
+                .route("/health", axum::routing::get(routes::health))
+                .layer(TimeoutLayer::with_status_code(
+                    axum::http::StatusCode::GATEWAY_TIMEOUT,
+                    REQUEST_TIMEOUT,
+                )),
+        )
+        // The AI routes are deliberately excluded — they carry their own (much
+        // longer) deadlines and semaphores.
         .merge(legacy_api::router())
         .layer(TraceLayer::new_for_http())
         .with_state(state)

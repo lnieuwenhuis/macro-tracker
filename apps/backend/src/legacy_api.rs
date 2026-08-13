@@ -219,10 +219,24 @@ async fn lookup_barcode(
     }
 
     match lookup_barcode_provider_chain(&state, &barcode).await {
-        Some(product) => legacy_json(StatusCode::OK, json!({ "found": true, "product": product })),
-        None => legacy_json(
+        BarcodeLookup::Found(product) => {
+            legacy_json(StatusCode::OK, json!({ "found": true, "product": product }))
+        }
+        BarcodeLookup::NotFound => legacy_json(
             StatusCode::OK,
             json!({ "found": false, "barcode": barcode }),
+        ),
+        // Overload is not evidence that the product is missing. Reporting it as
+        // a miss would send the user off to re-enter a product that may well
+        // exist.
+        BarcodeLookup::Busy => legacy_json(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({
+                "found": false,
+                "barcode": barcode,
+                "error": "Barcode lookup is busy. Please try again.",
+                "retryable": true
+            }),
         ),
     }
 }
@@ -428,29 +442,46 @@ async fn lookup_open_food_facts(state: &AppState, barcode: &str) -> Option<Value
     }))
 }
 
-async fn lookup_barcode_provider_chain(state: &AppState, barcode: &str) -> Option<Value> {
+/// Distinguishes "the catalogue does not have it" from "we could not ask".
+#[derive(Debug)]
+enum BarcodeLookup {
+    Found(Value),
+    NotFound,
+    /// The concurrency limiter was saturated; the caller should retry.
+    Busy,
+}
+
+async fn lookup_barcode_provider_chain(state: &AppState, barcode: &str) -> BarcodeLookup {
     // Held for the whole fan-out; dropped when this future returns.
-    let _slot = tokio::time::timeout(
+    let slot = tokio::time::timeout(
         BARCODE_LOOKUP_SLOT_WAIT_TIMEOUT,
         barcode_lookup_slots().acquire(),
     )
-    .await
-    .ok()?
-    .ok()?;
+    .await;
+
+    let _slot = match slot {
+        Ok(Ok(permit)) => permit,
+        // Timed out waiting, or the semaphore was closed.
+        Ok(Err(_)) | Err(_) => return BarcodeLookup::Busy,
+    };
 
     // OpenFoodFacts stays a standalone first hop: it covers most barcodes, and
     // keeping it alone means a hit costs exactly one outbound request.
     if let Some(product) = lookup_open_food_facts(state, barcode).await {
-        return Some(product);
+        return BarcodeLookup::Found(product);
     }
 
     // Start both supermarket fallbacks together. Albert Heijn keeps priority,
     // but a hit there returns immediately instead of waiting for Jumbo.
-    prefer_primary_provider(
+    match prefer_primary_provider(
         lookup_albert_heijn(state, barcode),
         lookup_jumbo(state, barcode),
     )
     .await
+    {
+        Some(product) => BarcodeLookup::Found(product),
+        None => BarcodeLookup::NotFound,
+    }
 }
 
 async fn prefer_primary_provider<T, Primary, Fallback>(
@@ -2393,6 +2424,33 @@ mod tests {
         assert_eq!(payload["product"]["source"], json!("albert_heijn"));
         assert_eq!(payload["product"]["name"], json!("AH Test Product"));
         assert_eq!(payload["product"]["proteinG"], json!(4.2));
+    }
+
+    #[tokio::test]
+    async fn barcode_lookup_reports_saturation_as_busy_not_as_a_miss() {
+        // Drain every permit so the next acquisition times out. Reporting that
+        // as `found: false` would send the user off to re-enter a product that
+        // may well exist.
+        let slots = barcode_lookup_slots();
+        let held = slots
+            .acquire_many(MAX_CONCURRENT_BARCODE_LOOKUPS as u32)
+            .await
+            .expect("permits should be available");
+
+        let state = test_state(None);
+        let outcome = tokio::time::timeout(
+            BARCODE_LOOKUP_SLOT_WAIT_TIMEOUT + Duration::from_secs(2),
+            lookup_barcode_provider_chain(&state, "8712345678901"),
+        )
+        .await
+        .expect("the chain must give up rather than block");
+
+        assert!(
+            matches!(outcome, BarcodeLookup::Busy),
+            "expected Busy, got {outcome:?}"
+        );
+
+        drop(held);
     }
 
     #[tokio::test]

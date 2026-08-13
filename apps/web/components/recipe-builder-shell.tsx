@@ -414,7 +414,11 @@ export function RecipeBuilderShell({
         </ModalChunkDismissProvider>
       )}
 
-      <ModalChunkDismissProvider onDismiss={dismissBarcodeCapture}>
+      {/* Mirrors the component's own render condition so its chunk stays
+          unloaded — and its full-screen loading backdrop unrendered — until a
+          capture flow actually starts. */}
+      {(showScanner || scanResult || notFoundBarcode) && (
+        <ModalChunkDismissProvider onDismiss={dismissBarcodeCapture}>
       <BarcodeCaptureModals
         showScanner={showScanner}
         scanResult={scanResult}
@@ -443,7 +447,8 @@ export function RecipeBuilderShell({
           handleSavePreset(input);
         }}
       />
-      </ModalChunkDismissProvider>
+        </ModalChunkDismissProvider>
+      )}
     </>
   );
 

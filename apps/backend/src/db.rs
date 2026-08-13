@@ -919,15 +919,23 @@ async fn complete_onboarding_setup_json(
             .ok_or_else(|| AppError::BadRequest("goals is required.".to_string()))?,
     )
     .map_err(invalid_payload("goals"))?;
+    // Onboarding writes the goal columns directly rather than through
+    // `save_user_goals`, so the domain check has to be applied here too —
+    // otherwise an oversized macro reaches `numeric(6, 1)` and rolls the whole
+    // onboarding transaction back with a 500.
+    validate_macro_goals(&goals)?;
     let goal_weight_kg = match input.get("goalWeightKg") {
         None | Some(Value::Null) => None,
         Some(value) => validate_goal_weight_kg(Some(value.as_f64().ok_or_else(|| {
             AppError::BadRequest("goalWeightKg must be a non-negative number.".to_string())
         })?))?,
     };
+    // Normalized up front, with the same rules the standalone weight endpoint
+    // uses: a zero weight or a value that only overflows after rounding must
+    // fail as a bad request, not as a database error mid-transaction.
     let current_weight = match input.get("currentWeight") {
         None | Some(Value::Null) => None,
-        Some(Value::Object(weight)) => Some(weight.clone()),
+        Some(Value::Object(weight)) => Some(normalize_weight_entry_input(weight)?),
         Some(_) => {
             return Err(AppError::BadRequest(
                 "currentWeight must be an object.".to_string(),
@@ -993,10 +1001,10 @@ async fn complete_onboarding_setup_json(
         )
         .bind(id)
         .bind(user_id)
-        .bind(required_date(weight, "date")?)
-        .bind(required_f64(weight, "weightKg")?)
-        .bind(optional_f64(weight, "bodyFatPct"))
-        .bind(weight.get("notes").and_then(Value::as_str))
+        .bind(&weight.date)
+        .bind(weight.weight_kg)
+        .bind(weight.body_fat_pct)
+        .bind(weight.notes.as_deref())
         .execute(&mut *tx)
         .await?;
     }
@@ -8110,6 +8118,70 @@ mod tests {
         assert_eq!(revision_count, 0);
 
         test_db.cleanup().await;
+    }
+
+    #[test]
+    fn macro_goals_are_bounded_to_the_column_domain() {
+        assert!(
+            validate_macro_goals(&MacroGoals {
+                protein_g: Some(150.0),
+                carbs_g: Some(250.0),
+                fat_g: Some(70.0),
+                calories_kcal: Some(2200),
+            })
+            .is_ok()
+        );
+
+        // numeric(6, 1) overflows past 99_999.9. Onboarding writes these
+        // columns directly, so the check has to reject before the UPDATE.
+        assert!(
+            validate_macro_goals(&MacroGoals {
+                protein_g: Some(1e30),
+                carbs_g: None,
+                fat_g: None,
+                calories_kcal: None,
+            })
+            .is_err()
+        );
+        assert!(
+            validate_macro_goals(&MacroGoals {
+                protein_g: Some(-1.0),
+                carbs_g: None,
+                fat_g: None,
+                calories_kcal: None,
+            })
+            .is_err()
+        );
+        assert!(
+            validate_macro_goals(&MacroGoals {
+                protein_g: None,
+                carbs_g: None,
+                fat_g: None,
+                calories_kcal: Some(-5),
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn onboarding_weight_normalization_rejects_zero_and_post_rounding_overflow() {
+        let weight = |value: Value| {
+            serde_json::Map::from_iter([
+                ("date".to_string(), json!("2026-01-15")),
+                ("weightKg".to_string(), value),
+            ])
+        };
+
+        assert!(normalize_weight_entry_input(&weight(json!(72.5))).is_ok());
+        assert!(normalize_weight_entry_input(&weight(json!(0))).is_err());
+        assert!(normalize_weight_entry_input(&weight(json!(-1))).is_err());
+        assert!(normalize_weight_entry_input(&weight(json!(1e30))).is_err());
+        // Rounds up into overflow for numeric(5, 2).
+        assert!(normalize_weight_entry_input(&weight(json!(999.995))).is_err());
+        // The date is validated on this path too.
+        let mut infinity_date = weight(json!(72.5));
+        infinity_date.insert("date".to_string(), json!("infinity"));
+        assert!(normalize_weight_entry_input(&infinity_date).is_err());
     }
 
     #[test]

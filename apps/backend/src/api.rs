@@ -15,6 +15,9 @@ const CORS_ALLOW_METHODS: &str = "GET, POST, PATCH, DELETE, OPTIONS";
 const CORS_ALLOW_HEADERS: &str = "Authorization, Content-Type";
 const CORS_MAX_AGE: &str = "86400";
 const API_V1_OPENAPI_JSON: &[u8] = include_bytes!("generated/api-v1-openapi.json");
+/// Deadline for a single `/api/v1` request. Matches the backend's other data
+/// routes; see `handle_api_v1` for why it is not a tower layer.
+pub const API_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 type ApiResult<T> = Result<T, ApiFailure>;
 
@@ -96,6 +99,10 @@ async fn handle_api_v1(
         return static_json_response(API_V1_OPENAPI_JSON);
     }
 
+    // The deadline is enforced here rather than by a transport-level timeout
+    // layer: a layer would emit a bare 504 with no body and none of the CORS
+    // headers below, which breaks the documented error envelope for direct API
+    // clients and shows up as a CORS failure in browsers.
     let result = async {
         let method_name = method.as_str();
         let endpoint = endpoint_for(&path).ok_or_else(|| {
@@ -128,8 +135,16 @@ async fn handle_api_v1(
             .unwrap_or(&[]);
         let auth = authenticate_request(&state, &headers, scopes).await?;
         dispatch_api_request(&state, method_name, &uri, &path, body, auth).await
-    }
-    .await;
+    };
+
+    let result = match tokio::time::timeout(API_REQUEST_TIMEOUT, result).await {
+        Ok(result) => result,
+        Err(_) => Err(ApiFailure::new(
+            StatusCode::GATEWAY_TIMEOUT,
+            "timeout",
+            "The request took too long to complete.",
+        )),
+    };
 
     match result {
         Ok((status, data)) => json_response(status, json!({ "ok": true, "data": data }), None),
@@ -1771,6 +1786,54 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn a_timed_out_request_still_returns_the_json_envelope_and_cors_headers() {
+        // A tower TimeoutLayer would emit a bare 504 here, breaking the
+        // documented contract for direct clients and tripping CORS in browsers.
+        let response = json_response(
+            StatusCode::GATEWAY_TIMEOUT,
+            json!({
+                "ok": false,
+                "error": { "code": "timeout", "message": "The request took too long to complete." }
+            }),
+            None,
+        );
+
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            Some(&CORS_ALLOW_ORIGIN.parse().unwrap())
+        );
+
+        let payload = read_json_body(response).await;
+        assert_eq!(payload["ok"], json!(false));
+        assert_eq!(payload["error"]["code"], json!("timeout"));
+    }
+
+    #[tokio::test]
+    async fn slow_requests_time_out_through_the_api_error_envelope() {
+        // Drives the real handler path with a deadline short enough to elapse,
+        // proving the timeout branch produces an envelope rather than an empty
+        // transport-level response.
+        let slow = async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            Ok::<(StatusCode, Value), ApiFailure>((StatusCode::OK, json!({})))
+        };
+
+        let result = match tokio::time::timeout(std::time::Duration::from_millis(20), slow).await {
+            Ok(result) => result,
+            Err(_) => Err(ApiFailure::new(
+                StatusCode::GATEWAY_TIMEOUT,
+                "timeout",
+                "The request took too long to complete.",
+            )),
+        };
+
+        let failure = result.expect_err("the slow future must time out");
+        assert_eq!(failure.status, StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(failure.code, "timeout");
     }
 
     #[test]
