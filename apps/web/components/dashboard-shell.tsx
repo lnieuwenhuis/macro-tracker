@@ -16,10 +16,14 @@ import { createLazyCollectionLoader } from "@/lib/lazy-collection";
 import { prefetchOnIdle } from "@/lib/idle-prefetch";
 
 import { CompactModal } from "./compact-modal";
-import { OverlayPortal } from "./overlay-portal";
 import { ExperimentalAppShell } from "./experimental-app-shell";
 import { MacroBarGroup } from "./macro-bar";
 import { MealCard, type MealDraft } from "./meal-card";
+import {
+  ModalChunkDismissProvider,
+  ModalChunkFallback,
+  OverlayBackdropFallback,
+} from "./modal-chunk-fallback";
 import { QuickAddRail } from "./quick-add-rail";
 import { useTemplateMutations } from "./use-template-mutations";
 
@@ -56,30 +60,6 @@ const RecipePickerModal = dynamic(
   () => import("./recipe-picker-modal").then((mod) => mod.RecipePickerModal),
   { loading: () => <ModalChunkFallback title="Pick a Recipe" /> },
 );
-
-// Close is a no-op in these fallbacks: the real modal takes over within a
-// frame or two, and its own close handler applies from then on.
-function ModalChunkFallback({ title }: { title: string }) {
-  return (
-    <CompactModal ariaLabel={title} title={title} onClose={() => {}}>
-      <div className="py-8 text-center">
-        <p className="text-sm text-[var(--color-muted)]">Loading…</p>
-      </div>
-    </CompactModal>
-  );
-}
-
-// For the photo and barcode flows, which render their own full-screen shells.
-function OverlayBackdropFallback() {
-  return (
-    <OverlayPortal>
-      <div
-        className="fixed inset-0 z-40 bg-black/40 backdrop-blur-[2px]"
-        aria-hidden="true"
-      />
-    </OverlayPortal>
-  );
-}
 
 function prefetchModalChunks() {
   void Promise.allSettled([
@@ -421,6 +401,12 @@ export function DashboardShell({
   const [showScanner, setShowScanner] = useState(false);
   const [scanResult, setScanResult] = useState<OpenFoodFactsProduct | null>(null);
   const [notFoundBarcode, setNotFoundBarcode] = useState<string | null>(null);
+
+  function dismissBarcodeCapture() {
+    setShowScanner(false);
+    setScanResult(null);
+    setNotFoundBarcode(null);
+  }
 
   // ---------------------------------------------------------------------------
   // Live totals react to unsaved drafts immediately.
@@ -1034,6 +1020,11 @@ export function DashboardShell({
     void ensureTemplatesLoaded();
   }
 
+  function dismissPresetModal() {
+    setPresetError(null);
+    setShowPresetsModal(false);
+  }
+
   async function ensureTemplatesLoaded() {
     if (templatesLoaded || templatesLoading) {
       return;
@@ -1387,16 +1378,18 @@ export function DashboardShell({
       </ExperimentalAppShell>
 
       {showSearchModal && (
-        <FoodSearchModal
-          onClose={() => setShowSearchModal(false)}
-          onEntrySaved={handleSearchEntrySaved}
-          onViewDate={(date) => {
-            setShowSearchModal(false);
-            const href = `/?date=${date}`;
-            prepareNavigationMotion(href, "day-jump");
-            router.push(href);
-          }}
-        />
+        <ModalChunkDismissProvider onDismiss={() => setShowSearchModal(false)}>
+          <FoodSearchModal
+            onClose={() => setShowSearchModal(false)}
+            onEntrySaved={handleSearchEntrySaved}
+            onViewDate={(date) => {
+              setShowSearchModal(false);
+              const href = `/?date=${date}`;
+              prepareNavigationMotion(href, "day-jump");
+              router.push(href);
+            }}
+          />
+        </ModalChunkDismissProvider>
       )}
 
       {showPresetsModal && !templatesLoaded && (
@@ -1410,20 +1403,19 @@ export function DashboardShell({
       )}
 
       {showPresetsModal && templatesLoaded && (
-        <PresetModal
-          presets={localTemplates}
-          mutation={presetMutation}
-          errorMessage={presetError}
-          initialKind={presetInitialKind}
-          onClose={() => {
-            setPresetError(null);
-            setShowPresetsModal(false);
-          }}
-          onSelect={addDraftFromPreset}
-          onSave={handleSavePreset}
-          onUpdate={handleUpdatePreset}
-          onDelete={handleDeletePreset}
-        />
+        <ModalChunkDismissProvider onDismiss={dismissPresetModal}>
+          <PresetModal
+            presets={localTemplates}
+            mutation={presetMutation}
+            errorMessage={presetError}
+            initialKind={presetInitialKind}
+            onClose={dismissPresetModal}
+            onSelect={addDraftFromPreset}
+            onSave={handleSavePreset}
+            onUpdate={handleUpdatePreset}
+            onDelete={handleDeletePreset}
+          />
+        </ModalChunkDismissProvider>
       )}
 
       {showRecipePickerModal && !recipesLoaded && (
@@ -1437,57 +1429,65 @@ export function DashboardShell({
       )}
 
       {showRecipePickerModal && recipesLoaded && (
-        <RecipePickerModal
-          recipes={localRecipes}
-          onClose={() => setShowRecipePickerModal(false)}
-          onSelect={addDraftFromRecipe}
-        />
+        <ModalChunkDismissProvider
+          onDismiss={() => setShowRecipePickerModal(false)}
+        >
+          <RecipePickerModal
+            recipes={localRecipes}
+            onClose={() => setShowRecipePickerModal(false)}
+            onSelect={addDraftFromRecipe}
+          />
+        </ModalChunkDismissProvider>
       )}
 
       {showPhotoModal && (
-        <AiFoodPhotoModal
-          onClose={() => setShowPhotoModal(false)}
-          onAddToLog={(macros) => {
-            setDrafts((currentDrafts) => [
-              ...currentDrafts,
-              createDraftFromMacroSelection(
-                macros,
-                getNextSortOrder(currentDrafts),
-                defaultEntryStatus,
-              ),
-            ]);
-            setShowPhotoModal(false);
-          }}
-          onSaveAsPreset={(input) => {
-            handleSavePreset(input);
-          }}
-        />
+        <ModalChunkDismissProvider onDismiss={() => setShowPhotoModal(false)}>
+          <AiFoodPhotoModal
+            onClose={() => setShowPhotoModal(false)}
+            onAddToLog={(macros) => {
+              setDrafts((currentDrafts) => [
+                ...currentDrafts,
+                createDraftFromMacroSelection(
+                  macros,
+                  getNextSortOrder(currentDrafts),
+                  defaultEntryStatus,
+                ),
+              ]);
+              setShowPhotoModal(false);
+            }}
+            onSaveAsPreset={(input) => {
+              handleSavePreset(input);
+            }}
+          />
+        </ModalChunkDismissProvider>
       )}
 
       {/* Mirrors the component's own render condition so its chunk stays
           unloaded until a capture flow actually starts. */}
       {(showScanner || scanResult || notFoundBarcode) && (
-      <BarcodeCaptureModals
-        showScanner={showScanner}
-        scanResult={scanResult}
-        notFoundBarcode={notFoundBarcode}
-        setShowScanner={setShowScanner}
-        setScanResult={setScanResult}
-        setNotFoundBarcode={setNotFoundBarcode}
-        onAddToLog={(macros) => {
-          setDrafts((currentDrafts) => [
-            ...currentDrafts,
-            createDraftFromMacroSelection(
-              macros,
-              getNextSortOrder(currentDrafts),
-              defaultEntryStatus,
-            ),
-          ]);
-        }}
-        onSaveAsPreset={(input) => {
-          handleSavePreset(input);
-        }}
-      />
+        <ModalChunkDismissProvider onDismiss={dismissBarcodeCapture}>
+          <BarcodeCaptureModals
+            showScanner={showScanner}
+            scanResult={scanResult}
+            notFoundBarcode={notFoundBarcode}
+            setShowScanner={setShowScanner}
+            setScanResult={setScanResult}
+            setNotFoundBarcode={setNotFoundBarcode}
+            onAddToLog={(macros) => {
+              setDrafts((currentDrafts) => [
+                ...currentDrafts,
+                createDraftFromMacroSelection(
+                  macros,
+                  getNextSortOrder(currentDrafts),
+                  defaultEntryStatus,
+                ),
+              ]);
+            }}
+            onSaveAsPreset={(input) => {
+              handleSavePreset(input);
+            }}
+          />
+        </ModalChunkDismissProvider>
       )}
     </>
   );
