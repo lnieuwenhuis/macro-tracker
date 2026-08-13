@@ -21,6 +21,30 @@ function getCacheMaxMemorySize() {
 
 const isDev = process.env.NODE_ENV === "development";
 
+export const DEFAULT_SHOO_BASE_URL = "https://shoo.dev";
+
+/**
+ * Origin the browser talks to directly during sign-in.
+ *
+ * `@shoojs/auth` runs the code-for-token exchange **in the browser**
+ * (`fetch("<shooBaseUrl>/token")`) and re-checks the session against
+ * `/session/check`, so the identity provider has to be in `connect-src`.
+ *
+ * NOTE: `headers()` is evaluated at build time and baked into the routes
+ * manifest, so `SHOO_BASE_URL` must be present in the **build** environment,
+ * not just at runtime. `buildContentSecurityPolicy` is exported and covered by
+ * a unit test so this cannot silently regress again.
+ */
+export function getShooConnectOrigin(
+  shooBaseUrl = process.env.SHOO_BASE_URL ?? DEFAULT_SHOO_BASE_URL,
+) {
+  try {
+    return new URL(shooBaseUrl).origin;
+  } catch {
+    return new URL(DEFAULT_SHOO_BASE_URL).origin;
+  }
+}
+
 /**
  * Defence-in-depth. There is no known XSS here (no `dangerouslySetInnerHTML`,
  * no `eval`, `httpOnly` + `SameSite=Lax` cookies), so this exists to bound the
@@ -28,29 +52,43 @@ const isDev = process.env.NODE_ENV === "development";
  *
  * `script-src` keeps `'unsafe-inline'` because the theme and timezone
  * bootstraps run `beforeInteractive`, alongside Next's own inline RSC payload.
- * Tightening that to a nonce requires `proxy.ts` and forces every route to
- * render dynamically — worth doing, but it needs a browser verification pass
- * first, so it is deliberately not bundled into this change.
+ * Tightening that to a nonce requires a per-request nonce in `proxy.ts` and
+ * forces every route to render dynamically — worth doing, but it needs a
+ * browser verification pass first.
  *
  * `img-src https:` covers supermarket product thumbnails; `blob:` covers the
  * camera preview and the AI photo preview.
+ *
+ * `form-action` is deliberately **absent**. Chromium enforces it across the
+ * whole redirect chain, and this app's forms are all POST-then-redirect —
+ * signing out (`/api/auth/logout` → `/login`) and every admin server action
+ * that calls `redirect()`. With `form-action 'self'` those submissions are
+ * blocked outright and the page silently stays put. The directive only guards
+ * against form-jacking to an external origin, and no form here takes a
+ * caller-supplied action, so the trade is not worth a broken sign-out.
  */
-const contentSecurityPolicy = [
-  "default-src 'self'",
-  `script-src 'self' 'unsafe-inline'${isDev ? " 'unsafe-eval'" : ""}`,
-  "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' blob: data: https:",
-  "font-src 'self' data:",
-  "connect-src 'self'",
-  "media-src 'self' blob:",
-  "worker-src 'self' blob:",
-  "manifest-src 'self'",
-  "object-src 'none'",
-  "base-uri 'self'",
-  "form-action 'self'",
-  "frame-ancestors 'none'",
-  "upgrade-insecure-requests",
-].join("; ");
+export function buildContentSecurityPolicy(
+  shooOrigin = getShooConnectOrigin(),
+  dev = isDev,
+) {
+  return [
+    "default-src 'self'",
+    `script-src 'self' 'unsafe-inline'${dev ? " 'unsafe-eval'" : ""}`,
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' blob: data: https:",
+    "font-src 'self' data:",
+    `connect-src 'self' ${shooOrigin}`,
+    "media-src 'self' blob:",
+    "worker-src 'self' blob:",
+    "manifest-src 'self'",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "frame-ancestors 'none'",
+    "upgrade-insecure-requests",
+  ].join("; ");
+}
+
+const contentSecurityPolicy = buildContentSecurityPolicy();
 
 const securityHeaders = [
   { key: "Content-Security-Policy", value: contentSecurityPolicy },
