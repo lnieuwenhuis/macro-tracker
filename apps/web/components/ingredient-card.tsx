@@ -1,6 +1,7 @@
 "use client";
 
 import type { QuantityUnit } from "@macro-tracker/db";
+import { memo } from "react";
 
 import { NumberInputField } from "./number-input-field";
 
@@ -25,7 +26,9 @@ type IngredientCardProps = {
   onDuplicate: (clientId: string) => void;
 };
 
-export function IngredientCard({
+// Memoized to match MealCard: editing one ingredient otherwise re-renders the
+// whole list.
+export const IngredientCard = memo(function IngredientCard({
   draft,
   disabled,
   onChange,
@@ -196,6 +199,6 @@ export function IngredientCard({
       </div>
     </article>
   );
-}
+});
 
 export type { IngredientDraft };

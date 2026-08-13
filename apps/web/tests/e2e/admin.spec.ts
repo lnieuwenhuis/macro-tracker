@@ -29,7 +29,10 @@ async function ensureAdminUser(
   const roleSelect = page.locator('select[name="role"]');
   if ((await roleSelect.inputValue()) !== "admin") {
     await roleSelect.selectOption("admin");
+    // Role changes are irreversible, so the submit button arms on the first
+    // click and only submits on the second.
     await page.getByRole("button", { name: "Update role" }).click();
+    await page.getByRole("button", { name: "Tap again to change role" }).click();
     await page.waitForURL(/saved=role/);
     await expect(page.getByText("Role updated.")).toBeVisible();
   }

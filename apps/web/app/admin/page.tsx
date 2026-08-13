@@ -14,7 +14,7 @@ import { requireAdminUser } from "@/lib/auth";
 
 export default async function AdminDashboardPage() {
   const adminUser = await requireAdminUser();
-  const dashboard = await getAdminDashboardData();
+  const dashboard = await getAdminDashboardData(adminUser.id);
 
   return (
     <div className="space-y-6">

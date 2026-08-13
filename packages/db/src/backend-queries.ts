@@ -82,8 +82,26 @@ export async function getUserById(userId: string, ..._ignored: unknown[]) {
   return backendRpc<AppUser | null>("getUserById", { userId });
 }
 
-export async function ensureUserRole(userId: string, role: AdminRole, ..._ignored: unknown[]) {
-  return backendRpc<AppUser>("ensureUserRole", { userId, role });
+/**
+ * Promotes a user to owner only if the *backend's* `ADMIN_OWNER_EMAILS` lists
+ * their address. The role is decided server-side, so this is not a general
+ * role-assignment primitive.
+ */
+export async function reconcileConfiguredOwner(userId: string, ..._ignored: unknown[]) {
+  return backendRpc<AppUser>("reconcileConfiguredOwner", { userId });
+}
+
+/**
+ * Assigns an arbitrary role. Rejected unless the backend was started with
+ * `BACKEND_ENABLE_TEST_ROUTES=true`; only the Playwright test-session route
+ * uses it.
+ */
+export async function ensureUserRoleForTesting(
+  userId: string,
+  role: AdminRole,
+  ..._ignored: unknown[]
+) {
+  return backendRpc<AppUser>("ensureUserRoleForTesting", { userId, role });
 }
 
 export async function createApiToken(
@@ -456,36 +474,61 @@ export async function getDashboardQuickAddCandidates(
   });
 }
 
-export async function getAdminDashboardData(..._ignored: unknown[]) {
-  return backendRpc<AdminDashboardData>("getAdminDashboardData");
+// Admin reads take the acting user so the backend can enforce the role in the
+// data layer. Passing it is not optional: the Next.js layout guard alone does
+// not survive client-side navigation.
+export async function getAdminDashboardData(actorUserId: string, ..._ignored: unknown[]) {
+  return backendRpc<AdminDashboardData>("getAdminDashboardData", { actorUserId });
 }
 
-export async function getAdminUserHealthSummary(..._ignored: unknown[]) {
-  return backendRpc<AdminUserHealthSummary>("getAdminUserHealthSummary");
+export async function getAdminUserHealthSummary(actorUserId: string, ..._ignored: unknown[]) {
+  return backendRpc<AdminUserHealthSummary>("getAdminUserHealthSummary", { actorUserId });
 }
 
-export async function listAdminUsers(input = {}, ..._ignored: unknown[]) {
-  return backendRpc<AdminUserListPage>("listAdminUsers", { input });
+export async function listAdminUsers(actorUserId: string, input = {}, ..._ignored: unknown[]) {
+  return backendRpc<AdminUserListPage>("listAdminUsers", { actorUserId, input });
 }
 
-export async function getAdminUserDetail(userId: string, ..._ignored: unknown[]) {
-  return backendRpc<AdminUserDetail | null>("getAdminUserDetail", { userId });
+export async function getAdminUserDetail(
+  actorUserId: string,
+  userId: string,
+  ..._ignored: unknown[]
+) {
+  return backendRpc<AdminUserDetail | null>("getAdminUserDetail", { actorUserId, userId });
 }
 
 export async function setUserRole(actorUserId: string, targetUserId: string, nextRole: AdminRole, ..._ignored: unknown[]) {
   return backendRpc<AppUser>("setUserRole", { actorUserId, targetUserId, nextRole });
 }
 
-export async function listAdminBarcodeProducts(input = {}, ..._ignored: unknown[]) {
-  return backendRpc<AdminBarcodeListPage>("listAdminBarcodeProducts", { input });
+export async function listAdminBarcodeProducts(
+  actorUserId: string,
+  input = {},
+  ..._ignored: unknown[]
+) {
+  return backendRpc<AdminBarcodeListPage>("listAdminBarcodeProducts", { actorUserId, input });
 }
 
-export async function listAdminBarcodeReviewQueue(input = {}, ..._ignored: unknown[]) {
-  return backendRpc<AdminBarcodeReviewQueuePage>("listAdminBarcodeReviewQueue", { input });
+export async function listAdminBarcodeReviewQueue(
+  actorUserId: string,
+  input = {},
+  ..._ignored: unknown[]
+) {
+  return backendRpc<AdminBarcodeReviewQueuePage>("listAdminBarcodeReviewQueue", {
+    actorUserId,
+    input,
+  });
 }
 
-export async function getAdminBarcodeProductById(barcodeProductId: string, ..._ignored: unknown[]) {
-  return backendRpc<FoodProduct | null>("getAdminBarcodeProductById", { barcodeProductId });
+export async function getAdminBarcodeProductById(
+  actorUserId: string,
+  barcodeProductId: string,
+  ..._ignored: unknown[]
+) {
+  return backendRpc<FoodProduct | null>("getAdminBarcodeProductById", {
+    actorUserId,
+    barcodeProductId,
+  });
 }
 
 export async function createAdminBarcodeProduct(
@@ -531,10 +574,21 @@ export async function restoreAdminBarcodeProduct(
   });
 }
 
-export async function listAdminAuditEvents(input = {}, ..._ignored: unknown[]) {
-  return backendRpc<AdminAuditListPage>("listAdminAuditEvents", { input });
+export async function listAdminAuditEvents(
+  actorUserId: string,
+  input = {},
+  ..._ignored: unknown[]
+) {
+  return backendRpc<AdminAuditListPage>("listAdminAuditEvents", { actorUserId, input });
 }
 
-export async function getAdminAuditEventById(eventId: string, ..._ignored: unknown[]) {
-  return backendRpc<AdminAuditEventDetail | null>("getAdminAuditEventById", { eventId });
+export async function getAdminAuditEventById(
+  actorUserId: string,
+  eventId: string,
+  ..._ignored: unknown[]
+) {
+  return backendRpc<AdminAuditEventDetail | null>("getAdminAuditEventById", {
+    actorUserId,
+    eventId,
+  });
 }

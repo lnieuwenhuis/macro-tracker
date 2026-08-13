@@ -44,6 +44,43 @@ fn food_photo_slots() -> &'static tokio::sync::Semaphore {
     FOOD_PHOTO_SLOTS.get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_FOOD_PHOTO_UPLOADS))
 }
 
+/// Barcode lookups fan out to up to five upstream requests, each of which
+/// buffers a JSON body. Bound how many lookups may be in flight at once so a
+/// burst cannot multiply into unbounded concurrent reads against the
+/// supermarket APIs (which rate-limit by source IP).
+const MAX_CONCURRENT_BARCODE_LOOKUPS: usize = 8;
+const BARCODE_LOOKUP_SLOT_WAIT_TIMEOUT: Duration = Duration::from_secs(3);
+static BARCODE_LOOKUP_SLOTS: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+
+fn barcode_lookup_slots() -> &'static tokio::sync::Semaphore {
+    BARCODE_LOOKUP_SLOTS.get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_BARCODE_LOOKUPS))
+}
+
+/// Largest provider response we will buffer. Without this, `response.json()`
+/// reads whatever the upstream sends straight into memory.
+const MAX_PROVIDER_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+
+/// Reads a JSON body with a hard byte budget, returning `None` if the upstream
+/// exceeds it (or sends something that is not JSON).
+async fn read_capped_json(mut response: reqwest::Response) -> Option<Value> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_PROVIDER_RESPONSE_BYTES as u64)
+    {
+        return None;
+    }
+
+    let mut buffer: Vec<u8> = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if buffer.len() + chunk.len() > MAX_PROVIDER_RESPONSE_BYTES {
+            return None;
+        }
+        buffer.extend_from_slice(&chunk);
+    }
+
+    serde_json::from_slice(&buffer).ok()
+}
+
 async fn acquire_food_photo_slot(
     slots: &tokio::sync::Semaphore,
     wait_timeout: Duration,
@@ -125,7 +162,26 @@ pub fn router() -> Router<AppState> {
         .route("/api/admin/ai-model-benchmark", post(admin_benchmark))
 }
 
-async fn lookup_barcode(State(state): State<AppState>, Path(barcode): Path<String>) -> Response {
+async fn lookup_barcode(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(barcode): Path<String>,
+) -> Response {
+    // Every cache miss fans out to as many as five upstream requests, so this
+    // has to sit behind a session gate — otherwise the backend is an open
+    // amplifier for anyone who can reach it. The signature check is enough
+    // here: the lookup itself is not user-scoped, so loading the user record
+    // would only add a query to every scan.
+    let authenticated = auth::session_token_from_headers(&headers)
+        .and_then(|token| auth::verify_session_token(&state.config, &token).ok())
+        .is_some();
+    if !authenticated {
+        return legacy_json(
+            StatusCode::UNAUTHORIZED,
+            json!({ "found": false, "barcode": barcode, "error": "Authentication required." }),
+        );
+    }
+
     if barcode.len() < 4 || barcode.len() > 20 {
         return legacy_json(
             StatusCode::BAD_REQUEST,
@@ -163,10 +219,24 @@ async fn lookup_barcode(State(state): State<AppState>, Path(barcode): Path<Strin
     }
 
     match lookup_barcode_provider_chain(&state, &barcode).await {
-        Some(product) => legacy_json(StatusCode::OK, json!({ "found": true, "product": product })),
-        None => legacy_json(
+        BarcodeLookup::Found(product) => {
+            legacy_json(StatusCode::OK, json!({ "found": true, "product": product }))
+        }
+        BarcodeLookup::NotFound => legacy_json(
             StatusCode::OK,
             json!({ "found": false, "barcode": barcode }),
+        ),
+        // Overload is not evidence that the product is missing. Reporting it as
+        // a miss would send the user off to re-enter a product that may well
+        // exist.
+        BarcodeLookup::Busy => legacy_json(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({
+                "found": false,
+                "barcode": barcode,
+                "error": "Barcode lookup is busy. Please try again.",
+                "retryable": true
+            }),
         ),
     }
 }
@@ -338,7 +408,7 @@ async fn lookup_open_food_facts(state: &AppState, barcode: &str) -> Option<Value
     if !response.status().is_success() {
         return None;
     }
-    let data: Value = response.json().await.ok()?;
+    let data: Value = read_capped_json(response).await?;
     if data.get("status").and_then(Value::as_i64) != Some(1) {
         return None;
     }
@@ -372,20 +442,46 @@ async fn lookup_open_food_facts(state: &AppState, barcode: &str) -> Option<Value
     }))
 }
 
-async fn lookup_barcode_provider_chain(state: &AppState, barcode: &str) -> Option<Value> {
+/// Distinguishes "the catalogue does not have it" from "we could not ask".
+#[derive(Debug)]
+enum BarcodeLookup {
+    Found(Value),
+    NotFound,
+    /// The concurrency limiter was saturated; the caller should retry.
+    Busy,
+}
+
+async fn lookup_barcode_provider_chain(state: &AppState, barcode: &str) -> BarcodeLookup {
+    // Held for the whole fan-out; dropped when this future returns.
+    let slot = tokio::time::timeout(
+        BARCODE_LOOKUP_SLOT_WAIT_TIMEOUT,
+        barcode_lookup_slots().acquire(),
+    )
+    .await;
+
+    let _slot = match slot {
+        Ok(Ok(permit)) => permit,
+        // Timed out waiting, or the semaphore was closed.
+        Ok(Err(_)) | Err(_) => return BarcodeLookup::Busy,
+    };
+
     // OpenFoodFacts stays a standalone first hop: it covers most barcodes, and
     // keeping it alone means a hit costs exactly one outbound request.
     if let Some(product) = lookup_open_food_facts(state, barcode).await {
-        return Some(product);
+        return BarcodeLookup::Found(product);
     }
 
     // Start both supermarket fallbacks together. Albert Heijn keeps priority,
     // but a hit there returns immediately instead of waiting for Jumbo.
-    prefer_primary_provider(
+    match prefer_primary_provider(
         lookup_albert_heijn(state, barcode),
         lookup_jumbo(state, barcode),
     )
     .await
+    {
+        Some(product) => BarcodeLookup::Found(product),
+        None => BarcodeLookup::NotFound,
+    }
 }
 
 async fn prefer_primary_provider<T, Primary, Fallback>(
@@ -431,7 +527,7 @@ async fn lookup_albert_heijn(state: &AppState, barcode: &str) -> Option<Value> {
     if !response.status().is_success() {
         return None;
     }
-    let search_data: Value = response.json().await.ok()?;
+    let search_data: Value = read_capped_json(response).await?;
     let product = first_albert_heijn_product(&search_data)?;
 
     let name = string_field(product, &["title", "description"]).unwrap_or("Unknown product");
@@ -460,7 +556,7 @@ async fn lookup_albert_heijn(state: &AppState, barcode: &str) -> Option<Value> {
         )
         .await
             && response.status().is_success()
-            && let Ok(detail) = response.json::<Value>().await
+            && let Some(detail) = read_capped_json(response).await
             && let Some(macros) = parse_albert_heijn_nutrients(
                 detail
                     .get("nutritionInfo")
@@ -512,10 +608,8 @@ async fn get_albert_heijn_token(state: &AppState) -> Option<String> {
     if !response.status().is_success() {
         return None;
     }
-    response
-        .json::<Value>()
-        .await
-        .ok()?
+    read_capped_json(response)
+        .await?
         .get("access_token")
         .and_then(Value::as_str)
         .filter(|token| !token.is_empty())
@@ -543,7 +637,7 @@ async fn lookup_jumbo(state: &AppState, barcode: &str) -> Option<Value> {
     if !response.status().is_success() {
         return None;
     }
-    let search_data: Value = response.json().await.ok()?;
+    let search_data: Value = read_capped_json(response).await?;
     let product = search_data
         .get("products")
         .and_then(|products| products.get("data"))
@@ -578,7 +672,7 @@ async fn lookup_jumbo(state: &AppState, barcode: &str) -> Option<Value> {
         )
         .await
             && response.status().is_success()
-            && let Ok(detail) = response.json::<Value>().await
+            && let Some(detail) = read_capped_json(response).await
             && let Some(macros) = parse_jumbo_nutrients(
                 get_path(&detail, &["product", "data", "nutritionInfo"])
                     .or_else(|| get_path(&detail, &["product", "data", "nutrients"]))
@@ -852,8 +946,9 @@ async fn analyze_food_photo_url_with_limits(
         request_timeout,
     } = limits;
     let Some(api_key) = state.config.openrouter_api_key.as_deref() else {
+        tracing::error!("OPENROUTER_API_KEY is not configured on the server");
         return photo_failure(
-            "OPENROUTER_API_KEY is not configured on the server.",
+            "Photo analysis is not available on this server.",
             "missing_api_key",
             None,
             None,
@@ -925,7 +1020,7 @@ async fn analyze_food_photo_url_with_limits(
                 }
                 let kind = classify_food_photo_failure(&error, Some(status));
                 let retryable = is_retryable_openrouter_error(&error, Some(status));
-                let failure = photo_failure(&error, kind, Some(status), Some(retryable));
+                let failure = upstream_photo_failure(&error, kind, Some(status), retryable);
                 if !retryable {
                     return failure;
                 }
@@ -940,7 +1035,7 @@ async fn analyze_food_photo_url_with_limits(
                     {
                         let kind = classify_food_photo_failure(message, None);
                         let retryable = is_retryable_openrouter_error(message, None);
-                        let failure = photo_failure(message, kind, None, Some(retryable));
+                        let failure = upstream_photo_failure(message, kind, None, retryable);
                         if !retryable {
                             return failure;
                         }
@@ -964,7 +1059,7 @@ async fn analyze_food_photo_url_with_limits(
                             .unwrap_or("The AI provider returned an error.");
                         let kind = classify_food_photo_failure(error, None);
                         let retryable = is_retryable_openrouter_error(error, None);
-                        let failure = photo_failure(error, kind, None, Some(retryable));
+                        let failure = upstream_photo_failure(error, kind, None, retryable);
                         if !retryable {
                             return failure;
                         }
@@ -1004,8 +1099,12 @@ async fn analyze_food_photo_url_with_limits(
                         return food_photo_timeout_failure(request_timeout);
                     }
                     let retryable = error.is_timeout();
-                    let failure =
-                        photo_failure(&error.to_string(), "provider_error", None, Some(retryable));
+                    let failure = upstream_photo_failure(
+                        &error.to_string(),
+                        "provider_error",
+                        None,
+                        retryable,
+                    );
                     if !retryable {
                         return failure;
                     }
@@ -1565,7 +1664,9 @@ impl Drop for BenchmarkLockGuard {
 
 fn acquire_benchmark_lock() -> Option<BenchmarkLockGuard> {
     let lock = BENCHMARK_LOCK.get_or_init(|| Mutex::new(None));
-    let mut active = lock.lock().expect("benchmark lock poisoned");
+    // Poison recovery: the guarded value is a plain expiry stamp, so a panic
+    // elsewhere must not permanently wedge the benchmark route.
+    let mut active = lock.lock().unwrap_or_else(|error| error.into_inner());
     if active.is_some_and(|expires_at| expires_at > Instant::now()) {
         return None;
     }
@@ -1575,11 +1676,59 @@ fn acquire_benchmark_lock() -> Option<BenchmarkLockGuard> {
 
 fn release_benchmark_lock() {
     let lock = BENCHMARK_LOCK.get_or_init(|| Mutex::new(None));
-    *lock.lock().expect("benchmark lock poisoned") = None;
+    *lock.lock().unwrap_or_else(|error| error.into_inner()) = None;
 }
 
 fn legacy_json(status: StatusCode, body: Value) -> Response {
     (status, Json(body)).into_response()
+}
+
+/// Copy shown to the user for an upstream (OpenRouter) failure.
+///
+/// The provider's own message is never forwarded: it can carry
+/// `metadata.raw`, `provider_name`, and — for a misconfigured deployment —
+/// details of *our* server-side problem dressed up as the caller's fault.
+fn public_provider_message(kind: &str) -> &'static str {
+    match kind {
+        "provider_quota" => "Photo analysis is temporarily unavailable. Please try again later.",
+        "provider_rate_limit" => "Photo analysis is busy right now. Please try again in a minute.",
+        "provider_image_access" => "That image could not be read. Try taking the photo again.",
+        "unsupported_model" => "Photo analysis is temporarily unavailable. Please try again later.",
+        _ => "Photo analysis failed. Please try again.",
+    }
+}
+
+/// Status *we* own for an upstream failure. The provider's status is logged,
+/// never reflected: a provider 401 (our key) or 402 (our credits) must not
+/// reach the browser as an authentication or payment error.
+fn public_provider_status(kind: &str) -> u16 {
+    match kind {
+        "provider_rate_limit" => 429,
+        _ => 502,
+    }
+}
+
+/// Builds a failure from an upstream response, logging the raw provider text
+/// and exposing only the stable `kind` plus server-owned copy and status.
+fn upstream_photo_failure(
+    provider_error: &str,
+    kind: &str,
+    provider_status: Option<u16>,
+    retryable: bool,
+) -> Value {
+    tracing::warn!(
+        provider_status = ?provider_status,
+        kind,
+        provider_error,
+        "food photo provider request failed"
+    );
+
+    photo_failure(
+        public_provider_message(kind),
+        kind,
+        Some(public_provider_status(kind)),
+        Some(retryable),
+    )
 }
 
 fn photo_failure(
@@ -1828,6 +1977,7 @@ mod tests {
         let provider_base_url = provider_base_url.unwrap_or("http://127.0.0.1:1");
         Config {
             allow_insecure_internal_auth: true,
+            enable_test_routes: false,
             app_url: "http://localhost:3000".to_string(),
             backend_internal_secret: None,
             database_url: "postgres://postgres:***@127.0.0.1:1/macro_tracker".to_string(),
@@ -1856,6 +2006,19 @@ mod tests {
                 .expect("test pool should be created lazily"),
             http: reqwest::Client::new(),
         }
+    }
+
+    fn session_cookie(state: &AppState) -> String {
+        let token = auth::create_session_token(
+            &state.config,
+            &crate::types::SessionUser {
+                user_id: uuid::Uuid::new_v4(),
+                email: "barcode-test@example.com".to_string(),
+            },
+        )
+        .expect("session token should sign");
+
+        format!("{}={token}", auth::SESSION_COOKIE_NAME)
     }
 
     async fn spawn_barcode_provider_stub() -> String {
@@ -2047,9 +2210,15 @@ mod tests {
         .await;
 
         assert_eq!(stub.requests.load(Ordering::SeqCst), 1);
-        assert_eq!(result["statusCode"], json!(401));
+        // The provider's 401 is our misconfiguration, not the caller's: it must
+        // surface as a server-owned 502 with none of the upstream text.
+        assert_eq!(result["statusCode"], json!(502));
         assert_eq!(result["retryable"], json!(false));
-        assert_eq!(result["error"], json!("Invalid API key."));
+        assert_eq!(
+            result["error"],
+            json!("Photo analysis failed. Please try again.")
+        );
+        assert!(!result.to_string().contains("Invalid API key"));
     }
 
     #[tokio::test]
@@ -2228,12 +2397,15 @@ mod tests {
     #[tokio::test]
     async fn barcode_route_falls_back_to_albert_heijn_after_open_food_facts_miss() {
         let base_url = spawn_barcode_provider_stub().await;
-        let app = router().with_state(test_state(Some(&base_url)));
+        let state = test_state(Some(&base_url));
+        let cookie = session_cookie(&state);
+        let app = router().with_state(state);
         let response = app
             .oneshot(
                 Request::builder()
                     .method("GET")
                     .uri("/api/barcode/8712345678901")
+                    .header("cookie", cookie)
                     .body(Body::empty())
                     .expect("request should build"),
             )
@@ -2252,6 +2424,71 @@ mod tests {
         assert_eq!(payload["product"]["source"], json!("albert_heijn"));
         assert_eq!(payload["product"]["name"], json!("AH Test Product"));
         assert_eq!(payload["product"]["proteinG"], json!(4.2));
+    }
+
+    #[tokio::test]
+    async fn barcode_lookup_reports_saturation_as_busy_not_as_a_miss() {
+        // Drain every permit so the next acquisition times out. Reporting that
+        // as `found: false` would send the user off to re-enter a product that
+        // may well exist.
+        let slots = barcode_lookup_slots();
+        let held = slots
+            .acquire_many(MAX_CONCURRENT_BARCODE_LOOKUPS as u32)
+            .await
+            .expect("permits should be available");
+
+        let state = test_state(None);
+        let outcome = tokio::time::timeout(
+            BARCODE_LOOKUP_SLOT_WAIT_TIMEOUT + Duration::from_secs(2),
+            lookup_barcode_provider_chain(&state, "8712345678901"),
+        )
+        .await
+        .expect("the chain must give up rather than block");
+
+        assert!(
+            matches!(outcome, BarcodeLookup::Busy),
+            "expected Busy, got {outcome:?}"
+        );
+
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn barcode_route_rejects_requests_without_a_session() {
+        let app = router().with_state(test_state(None));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/barcode/8712345678901")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn barcode_route_rejects_a_forged_session_cookie() {
+        let app = router().with_state(test_state(None));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/barcode/8712345678901")
+                    .header(
+                        "cookie",
+                        format!("{}=not-a-real-token", auth::SESSION_COOKIE_NAME),
+                    )
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }
 

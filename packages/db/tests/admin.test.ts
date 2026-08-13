@@ -2,7 +2,7 @@ import {
   completeOnboardingSetup,
   createAdminBarcodeProduct,
   createTemplate,
-  ensureUserRole,
+  ensureUserRoleForTesting,
   getAdminAuditEventById,
   getAdminUserDetail,
   getAdminBarcodeProductById,
@@ -63,8 +63,8 @@ describe("admin queries", () => {
     adminId = admin.id;
     userId = user.id;
 
-    await ensureUserRole(ownerId, "owner", runtime.db);
-    await ensureUserRole(adminId, "admin", runtime.db);
+    await ensureUserRoleForTesting(ownerId, "owner", runtime.db);
+    await ensureUserRoleForTesting(adminId, "admin", runtime.db);
   });
 
   afterEach(async () => {
@@ -80,6 +80,7 @@ describe("admin queries", () => {
     ).rejects.toThrow("last owner");
 
     const audit = await listAdminAuditEvents(
+      ownerId,
       {
         targetType: "user",
         targetId: userId,
@@ -98,6 +99,7 @@ describe("admin queries", () => {
 
   it("filters admin user listings by role", async () => {
     const adminUsers = await listAdminUsers(
+      ownerId,
       {
         role: "admin",
         pageSize: 25,
@@ -146,7 +148,7 @@ describe("admin queries", () => {
       );
     }
 
-    const health = await getAdminUserHealthSummary(runtime.db);
+    const health = await getAdminUserHealthSummary(ownerId, runtime.db);
     const counts = new Map(
       health.segments.map((segment) => [segment.id, segment.count]),
     );
@@ -159,17 +161,17 @@ describe("admin queries", () => {
     expect(counts.get("heavy_barcode_submitters")).toBe(1);
 
     await expect(
-      listAdminUsers({ health: "onboarded_no_logs", pageSize: 25 }, runtime.db),
+      listAdminUsers(ownerId, { health: "onboarded_no_logs", pageSize: 25 }, runtime.db),
     ).resolves.toMatchObject({
       items: [{ email: "user@example.com" }],
     });
     await expect(
-      listAdminUsers({ health: "heavy_barcode_submitters", pageSize: 25 }, runtime.db),
+      listAdminUsers(ownerId, { health: "heavy_barcode_submitters", pageSize: 25 }, runtime.db),
     ).resolves.toMatchObject({
       items: [{ email: "admin@example.com" }],
     });
     await expect(
-      listAdminUsers({ activity: "inactive30", pageSize: 25 }, runtime.db),
+      listAdminUsers(ownerId, { activity: "inactive30", pageSize: 25 }, runtime.db),
     ).resolves.toMatchObject({
       items: [{ email: "admin@example.com" }],
     });
@@ -253,6 +255,7 @@ describe("admin queries", () => {
     expect(await searchFoodProducts(userId, "Deluxe", runtime.db)).toEqual([]);
 
     const deletedOnly = await listAdminBarcodeProducts(
+      adminId,
       {
         status: "deleted",
         pageSize: 25,
@@ -277,10 +280,11 @@ describe("admin queries", () => {
       },
     ]);
 
-    const detail = await getAdminBarcodeProductById(created.id, runtime.db);
+    const detail = await getAdminBarcodeProductById(adminId, created.id, runtime.db);
     expect(detail?.deletedAt).toBeNull();
 
     const audit = await listAdminAuditEvents(
+      ownerId,
       {
         targetType: "food_product",
         targetId: created.id,
@@ -298,7 +302,7 @@ describe("admin queries", () => {
     const updateEvent = audit.items.find(
       (item) => item.action === "barcode.updated",
     );
-    const auditDetail = await getAdminAuditEventById(updateEvent!.id, runtime.db);
+    const auditDetail = await getAdminAuditEventById(ownerId, updateEvent!.id, runtime.db);
     expect(auditDetail?.details).toMatchObject({
       before: {
         name: "Admin Peanut Butter",
@@ -439,6 +443,7 @@ describe("admin queries", () => {
     );
 
     const queue = await listAdminBarcodeReviewQueue(
+      adminId,
       {
         pageSize: 25,
       },
@@ -496,6 +501,7 @@ describe("admin queries", () => {
     ).rejects.toThrow("That barcode already exists.");
 
     const stillDeleted = await getAdminBarcodeProductById(
+      adminId,
       deletedOriginal.id,
       runtime.db,
     );
@@ -571,7 +577,7 @@ describe("admin queries", () => {
       ),
     ).rejects.toThrow("That barcode already exists.");
 
-    expect(await getAdminBarcodeProductById(other.id, runtime.db)).toMatchObject({
+    expect(await getAdminBarcodeProductById(adminId, other.id, runtime.db)).toMatchObject({
       barcode: "9900000000102",
     });
   });
@@ -761,7 +767,7 @@ describe("admin queries", () => {
       id: active.id,
       name: "Active Masking Guard Food",
     });
-    expect(await getAdminBarcodeProductById(other.id, runtime.db)).toMatchObject({
+    expect(await getAdminBarcodeProductById(adminId, other.id, runtime.db)).toMatchObject({
       barcode: "9900000000302",
     });
   });
@@ -792,7 +798,7 @@ describe("admin queries", () => {
       runtime.db,
     );
 
-    const detail = await getAdminUserDetail(userId, runtime.db);
+    const detail = await getAdminUserDetail(adminId, userId, runtime.db);
     const template = detail?.recentTemplates.find(
       (item) => item.label === "Two item day",
     );

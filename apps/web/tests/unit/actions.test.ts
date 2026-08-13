@@ -266,6 +266,7 @@ describe("server actions", () => {
       const result = await logRecipePortionAction({
         recipeId: "recipe-1",
         date: "2026-05-10",
+        status: "eaten",
         gramsConsumed,
       });
 

@@ -6,9 +6,12 @@ import { useState, useTransition } from "react";
 
 import { completeOnboardingAction } from "@/lib/actions";
 import {
+  convertWeight,
   normalizeOnboardingWeightKg,
   parsePositiveNumber,
 } from "@/lib/onboarding-weight";
+import { formatMacroValue } from "@/lib/numbers";
+import { getLocalDateString } from "@/lib/startup-date";
 
 import {
   MacroCalculatorPanel,
@@ -20,7 +23,6 @@ import { ThemePicker } from "./theme-toggle";
 
 type OnboardingShellProps = {
   userEmail: string;
-  currentDate: string;
   preferredWeightUnit: WeightUnit;
 };
 
@@ -54,7 +56,6 @@ function OnboardingNumberInput({
 
 export function OnboardingShell({
   userEmail,
-  currentDate,
   preferredWeightUnit,
 }: OnboardingShellProps) {
   const router = useRouter();
@@ -72,6 +73,23 @@ export function OnboardingShell({
   const [templateFat, setTemplateFat] = useState("");
   const [templateCalories, setTemplateCalories] = useState("");
   const [error, setError] = useState<string | null>(null);
+
+  function changeUnit(nextUnit: WeightUnit) {
+    if (nextUnit === unit) {
+      return;
+    }
+
+    const convert = (value: string) => {
+      const parsed = parsePositiveNumber(value);
+      return parsed == null
+        ? value
+        : formatMacroValue(convertWeight(parsed, unit, nextUnit));
+    };
+
+    setCurrentWeight(convert);
+    setGoalWeight(convert);
+    setUnit(nextUnit);
+  }
 
   function applyCalculatedTargets(targets: MacroTargetDraft) {
     setCalories(String(targets.caloriesKcal));
@@ -93,6 +111,10 @@ export function OnboardingShell({
             caloriesKcal: Math.round(Number(templateCalories) || 0),
           }
         : null;
+
+      // Resolved here rather than during the server render so the first
+      // weigh-in lands on the user's own calendar day.
+      const currentDate = getLocalDateString();
 
       const result = await completeOnboardingAction({
         preferredWeightUnit: unit,
@@ -155,7 +177,7 @@ export function OnboardingShell({
                 </span>
                 <select
                   value={unit}
-                  onChange={(event) => setUnit(event.target.value as WeightUnit)}
+                  onChange={(event) => changeUnit(event.target.value as WeightUnit)}
                   className="w-full rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-3 py-2.5 text-sm font-semibold text-[var(--color-ink)] outline-none focus:border-[var(--color-accent)]"
                 >
                   <option value="kg">kg</option>

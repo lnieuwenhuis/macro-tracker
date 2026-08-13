@@ -1,15 +1,13 @@
 import type { MealTemplate, MealTemplateItem } from "@macro-tracker/db";
 
+import { roundToSingleDecimal } from "./numbers";
+
 export type TemplateMacroTotals = {
   proteinG: number;
   carbsG: number;
   fatG: number;
   caloriesKcal: number;
 };
-
-function roundToSingleDecimal(value: number) {
-  return Math.round(value * 10) / 10;
-}
 
 export function getTemplateMacroTotals(
   items: Pick<

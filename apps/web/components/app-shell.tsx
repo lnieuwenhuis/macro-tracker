@@ -17,10 +17,10 @@ import {
 } from "@/lib/navigation-motion";
 import { getLocalDateString, getStartupDateRedirect } from "@/lib/startup-date";
 
-import { ExperimentalProfileSheet } from "./experimental-profile-sheet";
+import { ProfileSheet } from "./profile-sheet";
 import { TransitionLink } from "./transition-link";
 
-type ExperimentalAppShellProps = {
+type AppShellProps = {
   userEmail: string;
   canAccessAdmin: boolean;
   selectedDate: string;
@@ -32,7 +32,7 @@ type ExperimentalAppShellProps = {
   children: ReactNode;
 };
 
-export function ExperimentalAppShell({
+export function AppShell({
   userEmail,
   canAccessAdmin,
   selectedDate,
@@ -41,7 +41,7 @@ export function ExperimentalAppShell({
   onComposeAction,
   topBar,
   children,
-}: ExperimentalAppShellProps) {
+}: AppShellProps) {
   const pathname = usePathname();
   const router = useRouter();
   const [isPending, startNavigation] = useTransition();
@@ -218,7 +218,7 @@ export function ExperimentalAppShell({
                       </TransitionLink>
                     </div>
                   </div>
-                  <ExperimentalSettingsButton
+                  <SettingsButton
                     onClick={() => setProfileOpen(true)}
                     className="shrink-0"
                   />
@@ -242,7 +242,7 @@ export function ExperimentalAppShell({
 
               {!showDateNavigation && !topBar ? (
                 <div className="mb-3 flex justify-end">
-                  <ExperimentalSettingsButton onClick={() => setProfileOpen(true)} />
+                  <SettingsButton onClick={() => setProfileOpen(true)} />
                 </div>
               ) : null}
               {children}
@@ -272,7 +272,7 @@ export function ExperimentalAppShell({
         </div>
       ) : null}
 
-      <ExperimentalProfileSheet
+      <ProfileSheet
         open={profileOpen}
         userEmail={userEmail}
         canAccessAdmin={canAccessAdmin}
@@ -283,7 +283,7 @@ export function ExperimentalAppShell({
   );
 }
 
-export function ExperimentalSettingsButton({
+export function SettingsButton({
   onClick,
   className = "",
 }: {

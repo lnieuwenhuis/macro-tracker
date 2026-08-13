@@ -11,6 +11,7 @@ import {
   AdminSection,
   formatAdminTimestamp,
 } from "@/components/admin-ui";
+import { requireAdminUser } from "@/lib/auth";
 
 type AdminBarcodeReviewPageProps = {
   searchParams: Promise<{
@@ -30,9 +31,10 @@ const reasonLabels: Record<AdminBarcodeReviewReason, string> = {
 export default async function AdminBarcodeReviewPage({
   searchParams,
 }: AdminBarcodeReviewPageProps) {
+  const adminUser = await requireAdminUser();
   const params = await searchParams;
   const page = Number(params.page ?? "1");
-  const queue = await listAdminBarcodeReviewQueue({
+  const queue = await listAdminBarcodeReviewQueue(adminUser.id, {
     page: Number.isFinite(page) ? page : 1,
     pageSize: 25,
   });

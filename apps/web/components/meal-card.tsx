@@ -189,7 +189,7 @@ function MealCardComponent({ draft, busy, error, isCopied = false, mealGroups = 
               type="button"
               disabled={busy}
               onClick={toggleExpanded}
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[var(--color-muted)] transition hover:bg-[var(--color-card-muted)] hover:text-[var(--color-ink)] disabled:opacity-50"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-[var(--color-muted)] transition hover:bg-[var(--color-card-muted)] hover:text-[var(--color-ink)] disabled:opacity-50"
               aria-label={`${isExpanded ? "Collapse" : "Edit details for"} ${heading}`}
               aria-expanded={isExpanded}
             >
@@ -225,7 +225,7 @@ function MealCardComponent({ draft, busy, error, isCopied = false, mealGroups = 
 
                 setMenuOpen(true);
               }}
-              className="flex h-8 w-8 items-center justify-center rounded-lg text-[var(--color-muted)] transition hover:bg-[var(--color-card-muted)] hover:text-[var(--color-ink)] disabled:opacity-50"
+              className="flex h-11 w-11 items-center justify-center rounded-lg text-[var(--color-muted)] transition hover:bg-[var(--color-card-muted)] hover:text-[var(--color-ink)] disabled:opacity-50"
               aria-label={`More actions for ${heading}`}
               aria-haspopup="menu"
               aria-expanded={menuOpen}

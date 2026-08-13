@@ -60,11 +60,17 @@ describe("admin server actions", () => {
     });
   });
 
-  it("maps active global barcode unique constraint errors to the admin duplicate message", async () => {
+  function backendError(code: string, message: string) {
+    const error = new Error(message);
+    error.name = "BackendError";
+    return Object.assign(error, { code, status: 409 });
+  }
+
+  it("surfaces the backend duplicate-barcode conflict message", async () => {
+    // The Rust backend masks the raw constraint name and returns a typed
+    // conflict, so the mapping has to key off `error.code`.
     mocked.createAdminBarcodeProduct.mockRejectedValue(
-      new Error(
-        'duplicate key value violates unique constraint "food_products_active_global_barcode_key"',
-      ),
+      backendError("conflict", "That barcode already exists."),
     );
 
     await expect(createAdminBarcodeProductAction(buildBarcodeFormData())).rejects.toThrow(
@@ -75,5 +81,24 @@ describe("admin server actions", () => {
       "/admin/barcodes?error=That%20barcode%20already%20exists.",
     );
     expect(mocked.revalidatePath).not.toHaveBeenCalled();
+  });
+
+  it("replaces internal backend failures with a generic message", async () => {
+    mocked.createAdminBarcodeProduct.mockRejectedValue(
+      backendError(
+        "internal_error",
+        "createAdminBarcodeProduct failed: serde error at line 3 column 18",
+      ),
+    );
+
+    await expect(
+      createAdminBarcodeProductAction(buildBarcodeFormData()),
+    ).rejects.toThrow(/redirect:\/admin\/barcodes\?error=/);
+
+    const [destination] = mocked.redirect.mock.calls.at(-1) ?? [];
+    expect(destination).not.toContain("serde");
+    expect(decodeURIComponent(String(destination))).toContain(
+      "Unable to save this change right now.",
+    );
   });
 });

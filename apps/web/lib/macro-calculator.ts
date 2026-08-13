@@ -1,6 +1,4 @@
-function roundToSingleDecimal(value: number) {
-  return Math.round(value * 10) / 10;
-}
+import { roundToSingleDecimal } from "./numbers";
 
 export function getWeeklyWeightChangeEstimateKg(calorieAdjustmentKcal: number) {
   return roundToSingleDecimal(Math.abs(calorieAdjustmentKcal) * 7 / 7700);

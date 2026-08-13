@@ -30,6 +30,8 @@ env:
   APP_URL: http://localhost:3000
   SESSION_SECRET: macro-tracker-ci-session-secret-32-chars
   SHOO_BASE_URL: https://shoo.dev
+  # Enables the test-only role-assignment RPC the Playwright session route needs.
+  BACKEND_ENABLE_TEST_ROUTES: true
 
 jobs:
   backend:
@@ -121,7 +123,8 @@ jobs:
 
       - name: Smoke backend health
         run: |
-          cargo run -p macro-tracker-backend > backend.log 2>&1 &
+          # `test-faults` powers the rollback assertions in the db/web suites.
+          cargo run -p macro-tracker-backend --features test-faults > backend.log 2>&1 &
           for attempt in {1..180}; do
             if curl -fsS "$BACKEND_URL/health"; then
               exit 0
@@ -178,7 +181,8 @@ jobs:
 
       - name: Start Rust backend
         run: |
-          cargo run -p macro-tracker-backend > backend.log 2>&1 &
+          # `test-faults` powers the rollback assertions in the db/web suites.
+          cargo run -p macro-tracker-backend --features test-faults > backend.log 2>&1 &
           for attempt in {1..180}; do
             if curl -fsS "$BACKEND_URL/health"; then
               exit 0
@@ -238,7 +242,8 @@ jobs:
 
       - name: Start Rust backend
         run: |
-          cargo run -p macro-tracker-backend > backend.log 2>&1 &
+          # `test-faults` powers the rollback assertions in the db/web suites.
+          cargo run -p macro-tracker-backend --features test-faults > backend.log 2>&1 &
           for attempt in {1..180}; do
             if curl -fsS "$BACKEND_URL/health"; then
               exit 0
@@ -298,7 +303,8 @@ jobs:
 
       - name: Start Rust backend
         run: |
-          cargo run -p macro-tracker-backend > backend.log 2>&1 &
+          # `test-faults` powers the rollback assertions in the db/web suites.
+          cargo run -p macro-tracker-backend --features test-faults > backend.log 2>&1 &
           for attempt in {1..180}; do
             if curl -fsS "$BACKEND_URL/health"; then
               exit 0
@@ -377,7 +383,8 @@ jobs:
 
       - name: Start Rust backend
         run: |
-          cargo run -p macro-tracker-backend > backend.log 2>&1 &
+          # `test-faults` powers the rollback assertions in the db/web suites.
+          cargo run -p macro-tracker-backend --features test-faults > backend.log 2>&1 &
           for attempt in {1..180}; do
             if curl -fsS "$BACKEND_URL/health"; then
               exit 0

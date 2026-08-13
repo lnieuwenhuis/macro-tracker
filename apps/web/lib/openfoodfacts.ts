@@ -13,9 +13,16 @@ export type OpenFoodFactsProduct = {
   source?: "openfoodfacts" | "albert_heijn" | "jumbo" | "custom";
 };
 
+/**
+ * `reason` distinguishes a genuine catalogue miss from "we could not ask".
+ * Without it a backend outage was presented to the user as "product not
+ * found", which invites them to re-enter a product that already exists.
+ */
+export type BarcodeLookupFailureReason = "not_found" | "unavailable";
+
 export type OpenFoodFactsResult =
   | { found: true; product: OpenFoodFactsProduct }
-  | { found: false; barcode: string };
+  | { found: false; barcode: string; reason: BarcodeLookupFailureReason };
 
 /**
  * Look up a barcode via our server-side API route.
@@ -46,13 +53,16 @@ export async function lookupBarcode(
     });
 
     if (!response.ok) {
-      return { found: false, barcode };
+      console.error(
+        `Barcode lookup for ${barcode} failed with status ${response.status}`,
+      );
+      return { found: false, barcode, reason: "unavailable" };
     }
 
     const data = await response.json();
 
     if (!data.found || !data.product) {
-      return { found: false, barcode };
+      return { found: false, barcode, reason: "not_found" };
     }
 
     return {
@@ -71,8 +81,10 @@ export async function lookupBarcode(
         source: data.product.source ?? "openfoodfacts",
       },
     };
-  } catch {
-    return { found: false, barcode };
+  } catch (error) {
+    // A network error or an abort is not evidence that the product is missing.
+    console.error(`Barcode lookup for ${barcode} could not complete`, error);
+    return { found: false, barcode, reason: "unavailable" };
   } finally {
     clearTimeout(timeoutId);
     signal?.removeEventListener("abort", abortFromCaller);

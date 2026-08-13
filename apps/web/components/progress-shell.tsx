@@ -1,6 +1,11 @@
 "use client";
 
-import type { MacroGoals, WeightEntryRecord, WeightPageData } from "@macro-tracker/db";
+import type {
+  MacroGoals,
+  WeightEntryRecord,
+  WeightPageData,
+  WeightUnit,
+} from "@macro-tracker/db";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState, useTransition } from "react";
 
@@ -12,11 +17,12 @@ import {
   updateWeightEntryAction,
 } from "@/lib/actions";
 import { formatShortDate } from "@/lib/formatting";
-import type { ProgressTab } from "@/lib/ui-mode";
+import { convertWeight } from "@/lib/onboarding-weight";
+import type { ProgressTab } from "@/lib/progress-tab";
 import { buildWeightGoalProjection } from "@/lib/weight-trend";
 
 import { ConfirmDeleteButton } from "./confirm-delete-button";
-import { ExperimentalAppShell, ExperimentalSettingsButton } from "./experimental-app-shell";
+import { AppShell, SettingsButton } from "./app-shell";
 import {
   MacroCalculatorPanel,
   formatMacroInputValue,
@@ -31,7 +37,22 @@ type ProgressShellProps = {
   goals: MacroGoals;
   weightData: WeightPageData;
   initialTab: ProgressTab;
+  weightUnit: WeightUnit;
 };
+
+/**
+ * Weights are stored in kg. The user's chosen unit was collected at onboarding
+ * and then never used again, so someone who picked pounds saw kg everywhere.
+ * Display and input both go through these two helpers.
+ */
+function toDisplayWeight(weightKg: number, unit: WeightUnit) {
+  return convertWeight(weightKg, "kg", unit);
+}
+
+function formatWeight(weightKg: number | null | undefined, unit: WeightUnit) {
+  if (weightKg == null) return "-";
+  return `${toDisplayWeight(weightKg, unit)} ${unit}`;
+}
 
 function toNullableNumber(value: string): number | null {
   const trimmed = value.trim();
@@ -166,9 +187,11 @@ function GoalsPanel({
   );
 }
 
-function formatWeightChange(value: number | null) {
+function formatWeightChange(value: number | null, unit: WeightUnit) {
   if (value == null) return "-";
-  return `${value > 0 ? "+" : ""}${value.toFixed(1)} kg`;
+  // A delta converts linearly, so the same factor applies.
+  const converted = toDisplayWeight(value, unit);
+  return `${converted > 0 ? "+" : ""}${converted.toFixed(1)} ${unit}`;
 }
 
 function formatTrendLabel(value: WeightPageData["stats"]["trendDirection"]) {
@@ -184,6 +207,10 @@ const CHART_PADDING_X = 18;
 const CHART_PADDING_Y = 14;
 const CHART_PLOT_WIDTH = CHART_WIDTH - CHART_PADDING_X * 2;
 const CHART_PLOT_HEIGHT = CHART_HEIGHT - CHART_PADDING_Y * 2;
+
+/** Mirrors the backend limit so a long note fails in the field, not with an
+ * opaque server error. */
+const WEIGHT_NOTES_MAX_LENGTH = 500;
 
 /**
  * Project the weight history into chart space. Returns `null` when there is
@@ -226,6 +253,7 @@ function buildWeightTrendGeometry(weightData: WeightPageData) {
   // instead of re-parsing every date a second time.
   const points = entries.map((entry) => ({
     id: entry.id,
+    entry,
     x:
       CHART_PADDING_X +
       ((new Date(entry.date).getTime() - minTime) / timeSpan) * CHART_PLOT_WIDTH,
@@ -248,7 +276,13 @@ function buildWeightTrendGeometry(weightData: WeightPageData) {
   };
 }
 
-function WeightTrendChart({ weightData }: { weightData: WeightPageData }) {
+function WeightTrendChart({
+  weightData,
+  unit,
+}: {
+  weightData: WeightPageData;
+  unit: WeightUnit;
+}) {
   const geometry = useMemo(
     () => buildWeightTrendGeometry(weightData),
     [weightData],
@@ -263,12 +297,27 @@ function WeightTrendChart({ weightData }: { weightData: WeightPageData }) {
   }
 
   const { points, polyline, goalY } = geometry;
+  // A bare "Weight trend chart" label carries no data at all for a screen
+  // reader; summarise the series instead.
+  const first = points[0]?.entry;
+  const last = points[points.length - 1]?.entry;
+  const chartLabel = [
+    `Weight trend over ${points.length} entries`,
+    first && last
+      ? `from ${formatWeight(first.weightKg, unit)} on ${formatShortDate(first.date)} to ${formatWeight(last.weightKg, unit)} on ${formatShortDate(last.date)}`
+      : null,
+    weightData.goalWeightKg != null
+      ? `goal ${formatWeight(weightData.goalWeightKg, unit)}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
 
   return (
     <svg
       viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`}
       role="img"
-      aria-label="Weight trend chart"
+      aria-label={chartLabel}
       className="aspect-[2.7/1] w-full rounded-2xl border border-[var(--color-border)] bg-[var(--color-app-bg)]"
     >
       {[0, 1, 2].map((line) => {
@@ -320,9 +369,11 @@ function WeightTrendChart({ weightData }: { weightData: WeightPageData }) {
 function WeightPanel({
   selectedDate,
   weightData,
+  unit,
 }: {
   selectedDate: string;
   weightData: WeightPageData;
+  unit: WeightUnit;
 }) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
@@ -331,8 +382,11 @@ function WeightPanel({
   const [bodyFatPct, setBodyFatPct] = useState("");
   const [notes, setNotes] = useState("");
   const [editingEntry, setEditingEntry] = useState<WeightEntryRecord | null>(null);
+  // Held in the *display* unit; converted back to kg on save.
   const [goalWeightKg, setGoalWeightKg] = useState(
-    weightData.goalWeightKg != null ? String(weightData.goalWeightKg) : "",
+    weightData.goalWeightKg != null
+      ? String(toDisplayWeight(weightData.goalWeightKg, unit))
+      : "",
   );
   const [error, setError] = useState<string | null>(null);
   const [goalSaved, setGoalSaved] = useState(false);
@@ -352,7 +406,7 @@ function WeightPanel({
 
   function handleStartEdit(entry: WeightEntryRecord) {
     setFormDate(entry.date);
-    setWeightKg(String(entry.weightKg));
+    setWeightKg(String(toDisplayWeight(entry.weightKg, unit)));
     setBodyFatPct(entry.bodyFatPct != null ? String(entry.bodyFatPct) : "");
     setNotes(entry.notes ?? "");
     setEditingEntry(entry);
@@ -386,17 +440,18 @@ function WeightPanel({
     setError(null);
     startTransition(async () => {
       const submittedDate = formDate;
+      const weightInKg = convertWeight(parsedWeight, unit, "kg");
       const result = editingEntry
         ? await updateWeightEntryAction({
             id: editingEntry.id,
             date: submittedDate,
-            weightKg: parsedWeight,
+            weightKg: weightInKg,
             bodyFatPct: parsedBodyFat,
             notes: notes.trim() || null,
           })
         : await saveWeightEntryAction({
             date: submittedDate,
-            weightKg: parsedWeight,
+            weightKg: weightInKg,
             bodyFatPct: parsedBodyFat,
             notes: notes.trim() || null,
           });
@@ -420,7 +475,9 @@ function WeightPanel({
 
     setError(null);
     startTransition(async () => {
-      const result = await saveWeightGoalAction({ goalWeightKg: parsedGoal });
+      const result = await saveWeightGoalAction({
+        goalWeightKg: parsedGoal == null ? null : convertWeight(parsedGoal, unit, "kg"),
+      });
       if (!result.ok) {
         setError(result.error ?? "Unable to save goal weight.");
         return;
@@ -465,25 +522,25 @@ function WeightPanel({
         <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-4">
           <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--color-muted-strong)]">Current</p>
           <p className="mt-1.5 text-2xl font-bold text-[var(--color-ink)]">
-            {stats.currentWeight != null ? `${stats.currentWeight} kg` : "-"}
+            {formatWeight(stats.currentWeight, unit)}
           </p>
         </div>
         <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-4">
           <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--color-muted-strong)]">7-day</p>
           <p className="mt-1.5 text-2xl font-bold text-[var(--color-ink)]">
-            {formatWeightChange(stats.weekChange)}
+            {formatWeightChange(stats.weekChange, unit)}
           </p>
         </div>
         <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-4">
           <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--color-muted-strong)]">30-day</p>
           <p className="mt-1.5 text-2xl font-bold text-[var(--color-ink)]">
-            {formatWeightChange(stats.monthChange)}
+            {formatWeightChange(stats.monthChange, unit)}
           </p>
         </div>
         <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-4">
           <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--color-muted-strong)]">Goal delta</p>
           <p className="mt-1.5 text-2xl font-bold text-[var(--color-ink)]">
-            {formatWeightChange(projection.goalDeltaKg)}
+            {formatWeightChange(projection.goalDeltaKg, unit)}
           </p>
         </div>
       </div>
@@ -502,11 +559,11 @@ function WeightPanel({
               </div>
               {weightData.goalWeightKg != null ? (
                 <span className="rounded-full bg-[var(--color-success)]/10 px-3 py-1 text-xs font-semibold text-[var(--color-success)]">
-                  Goal {weightData.goalWeightKg} kg
+                  Goal {formatWeight(weightData.goalWeightKg, unit)}
                 </span>
               ) : null}
             </div>
-            <WeightTrendChart weightData={weightData} />
+            <WeightTrendChart weightData={weightData} unit={unit} />
           </div>
           <div className="grid gap-3 lg:w-64">
             <div className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-app-bg)] p-4">
@@ -524,7 +581,7 @@ function WeightPanel({
                 </p>
                 <p className="mt-2 text-sm font-bold text-[var(--color-ink)]">
                   {projection.weeklyRateKg != null
-                    ? `${projection.weeklyRateKg > 0 ? "+" : ""}${projection.weeklyRateKg} kg/wk`
+                    ? `${formatWeightChange(projection.weeklyRateKg, unit)}/wk`
                     : "-"}
                 </p>
               </div>
@@ -571,7 +628,7 @@ function WeightPanel({
             />
           </label>
           <label>
-            <span className="mb-1 block text-xs text-[var(--color-muted)]">Weight (kg)</span>
+            <span className="mb-1 block text-xs text-[var(--color-muted)]">Weight ({unit})</span>
             <input
               type="number"
               inputMode="decimal"
@@ -597,6 +654,7 @@ function WeightPanel({
             <input
               type="text"
               value={notes}
+              maxLength={WEIGHT_NOTES_MAX_LENGTH}
               onChange={(event) => setNotes(event.target.value)}
               className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-app-bg)] px-3 py-2.5 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
             />
@@ -618,7 +676,7 @@ function WeightPanel({
         </h3>
         <div className="flex items-end gap-3">
           <label className="flex-1">
-            <span className="mb-1 block text-xs text-[var(--color-muted)]">Target (kg)</span>
+            <span className="mb-1 block text-xs text-[var(--color-muted)]">Target ({unit})</span>
             <input
               type="number"
               inputMode="decimal"
@@ -661,7 +719,7 @@ function WeightPanel({
               >
                 <div className="min-w-0 flex-1">
                   <p className="text-sm font-semibold text-[var(--color-ink)]">
-                    {entry.weightKg} kg
+                    {formatWeight(entry.weightKg, unit)}
                     {entry.bodyFatPct != null ? (
                       <span className="ml-3 text-xs font-normal text-[var(--color-muted)]">
                         {entry.bodyFatPct}% bf
@@ -678,7 +736,7 @@ function WeightPanel({
                     type="button"
                     disabled={isPending}
                     onClick={() => handleStartEdit(entry)}
-                    className={`flex h-8 w-8 items-center justify-center rounded-lg transition ${
+                    className={`flex h-11 w-11 items-center justify-center rounded-lg transition ${
                       editingEntry?.id === entry.id
                         ? "bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
                         : "text-[var(--color-muted)] hover:text-[var(--color-accent)]"
@@ -693,7 +751,7 @@ function WeightPanel({
                     disabled={isPending}
                     onConfirm={() => handleDeleteEntry(entry.id)}
                     ariaLabel="Delete entry"
-                    className="flex h-8 w-8 items-center justify-center rounded-lg text-[var(--color-muted)] transition hover:text-[var(--color-danger)]"
+                    className="flex h-11 w-11 items-center justify-center rounded-lg text-[var(--color-muted)] transition hover:text-[var(--color-danger)]"
                   >
                     <svg width="15" height="15" viewBox="0 0 15 15" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
                       <line x1="3" y1="3" x2="12" y2="12" />
@@ -717,6 +775,7 @@ export function ProgressShell({
   goals,
   weightData,
   initialTab,
+  weightUnit,
 }: ProgressShellProps) {
   const router = useRouter();
   const [activeTab, setActiveTab] = useState<ProgressTab>(initialTab);
@@ -733,7 +792,7 @@ export function ProgressShell({
   }
 
   return (
-    <ExperimentalAppShell
+    <AppShell
       userEmail={userEmail}
       canAccessAdmin={canAccessAdmin}
       selectedDate={selectedDate}
@@ -772,7 +831,7 @@ export function ProgressShell({
               })}
             </div>
           </section>
-          <ExperimentalSettingsButton onClick={openSettings} />
+          <SettingsButton onClick={openSettings} />
         </div>
       )}
     >
@@ -782,8 +841,8 @@ export function ProgressShell({
           initialWeightKg={weightData.stats.currentWeight}
         />
       ) : (
-        <WeightPanel selectedDate={selectedDate} weightData={weightData} />
+        <WeightPanel selectedDate={selectedDate} weightData={weightData} unit={weightUnit} />
       )}
-    </ExperimentalAppShell>
+    </AppShell>
   );
 }

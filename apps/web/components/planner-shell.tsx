@@ -24,7 +24,7 @@ import {
   formatShoppingListText,
 } from "@/lib/shopping-list";
 
-import { ExperimentalAppShell, ExperimentalSettingsButton } from "./experimental-app-shell";
+import { AppShell, SettingsButton } from "./app-shell";
 import { LibraryHubNav } from "./library-hub-nav";
 import { TransitionLink } from "./transition-link";
 
@@ -199,7 +199,7 @@ export function PlannerShell({
   }
 
   return (
-    <ExperimentalAppShell
+    <AppShell
       userEmail={userEmail}
       canAccessAdmin={canAccessAdmin}
       selectedDate={selectedDate}
@@ -215,7 +215,7 @@ export function PlannerShell({
               Apply templates as planned entries for the selected day.
             </p>
           </div>
-          <ExperimentalSettingsButton onClick={openSettings} />
+          <SettingsButton onClick={openSettings} />
         </div>
       )}
     >
@@ -460,6 +460,6 @@ export function PlannerShell({
           </section>
         )}
       </div>
-    </ExperimentalAppShell>
+    </AppShell>
   );
 }

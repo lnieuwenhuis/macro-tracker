@@ -7,8 +7,8 @@ import type { ComposeAction } from "@/lib/compose";
 import { getLocalDateString } from "@/lib/startup-date";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
 
-import { ExperimentalAddSheet } from "./experimental-add-sheet";
-import { ExperimentalBottomNav } from "./experimental-bottom-nav";
+import { AddSheet } from "./add-sheet";
+import { BottomNav } from "./bottom-nav";
 
 const APP_PATHNAMES = [
   "/",
@@ -41,7 +41,7 @@ function pathnameToActiveTab(
   return "log";
 }
 
-export function ExperimentalLayoutNav() {
+export function LayoutNav() {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const router = useRouter();
@@ -82,7 +82,7 @@ export function ExperimentalLayoutNav() {
     <>
       <div className="pointer-events-none fixed inset-x-0 bottom-0 z-30 px-4 pb-[calc(0.75rem+env(safe-area-inset-bottom))]">
         <div className="mx-auto w-full max-w-3xl">
-          <ExperimentalBottomNav
+          <BottomNav
             activeTab={activeTab}
             selectedDate={selectedDate}
             onAdd={() => setAddSheetOpen(true)}
@@ -90,7 +90,7 @@ export function ExperimentalLayoutNav() {
         </div>
       </div>
 
-      <ExperimentalAddSheet
+      <AddSheet
         open={addSheetOpen}
         onClose={() => setAddSheetOpen(false)}
         onSelect={handleAddSelection}

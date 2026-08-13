@@ -9,6 +9,8 @@ import {
 } from "@/lib/api-token-actions";
 import type { ApiScope, ApiTokenRecord } from "@macro-tracker/db";
 
+import { ConfirmSubmitButton } from "./confirm-delete-button";
+
 type ApiSettingsClientProps = {
   tokens: ApiTokenRecord[];
   scopes: ApiScope[];
@@ -330,12 +332,13 @@ export function ApiSettingsClient({ tokens, scopes }: ApiSettingsClientProps) {
                   ) : (
                     <form action={revokeApiTokenAction}>
                       <input type="hidden" name="tokenId" value={token.id} />
-                      <button
-                        type="submit"
+                      <ConfirmSubmitButton
+                        confirmLabel="Tap again to revoke"
                         className="rounded-md border border-[var(--color-danger)] px-3 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-[var(--color-danger)] transition hover:bg-[var(--color-danger)] hover:text-white"
+                        armedClassName="rounded-md border border-[var(--color-danger)] bg-[var(--color-danger)] px-3 py-2 text-xs font-semibold uppercase tracking-[0.12em] text-white transition"
                       >
                         Revoke
-                      </button>
+                      </ConfirmSubmitButton>
                     </form>
                   )}
                 </div>

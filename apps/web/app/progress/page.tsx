@@ -2,7 +2,7 @@ import { getUserGoals, getWeightPageData } from "@macro-tracker/db";
 
 import { ProgressShell } from "@/components/progress-shell";
 import { loadOnboardedPageContext } from "@/lib/page-context";
-import { normalizeProgressTab } from "@/lib/ui-mode";
+import { normalizeProgressTab } from "@/lib/progress-tab";
 
 type ProgressPageProps = {
   searchParams: Promise<{
@@ -12,8 +12,14 @@ type ProgressPageProps = {
 };
 
 export default async function ProgressPage({ searchParams }: ProgressPageProps) {
-  const { params, sessionUser, selectedDate, userEmail, canAccessAdmin } =
-    await loadOnboardedPageContext(searchParams);
+  const {
+    params,
+    sessionUser,
+    selectedDate,
+    userEmail,
+    canAccessAdmin,
+    preferredWeightUnit,
+  } = await loadOnboardedPageContext(searchParams);
   const initialTab = normalizeProgressTab(params.tab);
 
   const [goals, weightData] = await Promise.all([
@@ -29,6 +35,7 @@ export default async function ProgressPage({ searchParams }: ProgressPageProps) 
       goals={goals}
       weightData={weightData}
       initialTab={initialTab}
+      weightUnit={preferredWeightUnit}
     />
   );
 }

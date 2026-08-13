@@ -3,7 +3,7 @@
 import type { DailySummary, MacroGoals, MealEntryRecord, MealEntryStatus, MealGroup, MealTemplate, QuickAddCandidate, RecipeRecord } from "@macro-tracker/db";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
-import { useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, useTransition } from "react";
+import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, useTransition } from "react";
 
 import { applyTemplateAction, createMealGroupAction, deleteMealGroupAction, deleteMealEntryAction, loadRecipesAction, loadTemplatesAction, markMealEntryStatusAction, saveMealEntryAction, updateMealGroupAction } from "@/lib/actions";
 import type { ComposeAction } from "@/lib/compose";
@@ -12,14 +12,19 @@ import { prepareNavigationMotion } from "@/lib/navigation-motion";
 import type { OpenFoodFactsProduct } from "@/lib/openfoodfacts";
 import type { PresetTemplateKind } from "@/lib/preset-modal-state";
 import { getLocalDateString } from "@/lib/startup-date";
+import { createClientMutationIdStore } from "@/lib/client-mutation-id";
 import { createLazyCollectionLoader } from "@/lib/lazy-collection";
 import { prefetchOnIdle } from "@/lib/idle-prefetch";
 
 import { CompactModal } from "./compact-modal";
-import { OverlayPortal } from "./overlay-portal";
-import { ExperimentalAppShell } from "./experimental-app-shell";
+import { AppShell } from "./app-shell";
 import { MacroBarGroup } from "./macro-bar";
 import { MealCard, type MealDraft } from "./meal-card";
+import {
+  ModalChunkDismissProvider,
+  ModalChunkFallback,
+  OverlayBackdropFallback,
+} from "./modal-chunk-fallback";
 import { QuickAddRail } from "./quick-add-rail";
 import { useTemplateMutations } from "./use-template-mutations";
 
@@ -56,30 +61,6 @@ const RecipePickerModal = dynamic(
   () => import("./recipe-picker-modal").then((mod) => mod.RecipePickerModal),
   { loading: () => <ModalChunkFallback title="Pick a Recipe" /> },
 );
-
-// Close is a no-op in these fallbacks: the real modal takes over within a
-// frame or two, and its own close handler applies from then on.
-function ModalChunkFallback({ title }: { title: string }) {
-  return (
-    <CompactModal ariaLabel={title} title={title} onClose={() => {}}>
-      <div className="py-8 text-center">
-        <p className="text-sm text-[var(--color-muted)]">Loading…</p>
-      </div>
-    </CompactModal>
-  );
-}
-
-// For the photo and barcode flows, which render their own full-screen shells.
-function OverlayBackdropFallback() {
-  return (
-    <OverlayPortal>
-      <div
-        className="fixed inset-0 z-40 bg-black/40 backdrop-blur-[2px]"
-        aria-hidden="true"
-      />
-    </OverlayPortal>
-  );
-}
 
 function prefetchModalChunks() {
   void Promise.allSettled([
@@ -239,12 +220,14 @@ function mealDraftToSaveInput(
     includeSortOrder = true,
     mealGroupId = draft.mealGroupId ?? null,
     status = draft.status,
+    clientMutationId,
   }: {
     date: string;
     includeId?: boolean;
     includeSortOrder?: boolean;
     mealGroupId?: string | null;
     status?: MealEntryStatus;
+    clientMutationId?: string;
   },
 ): Parameters<typeof saveMealEntryAction>[0] {
   const input: Parameters<typeof saveMealEntryAction>[0] = {
@@ -267,6 +250,10 @@ function mealDraftToSaveInput(
   }
   if (includeSortOrder) {
     input.sortOrder = draft.sortOrder;
+  }
+  // Only creates need deduping; an update is already addressed by its id.
+  if (!input.id && clientMutationId) {
+    input.clientMutationId = clientMutationId;
   }
 
   return input;
@@ -325,6 +312,8 @@ export function DashboardShell({
 }: DashboardShellProps) {
   const router = useRouter();
   const composeHandledRef = useRef<string | null>(null);
+  // Survives re-renders so a repeat tap reuses the same idempotency key.
+  const mutationIds = useRef(createClientMutationIdStore());
   const selectedDateRef = useRef(selectedDate);
   const [clientReady, setClientReady] = useState(false);
   const [drafts, setDrafts] = useState<MealDraft[]>(() =>
@@ -421,6 +410,12 @@ export function DashboardShell({
   const [showScanner, setShowScanner] = useState(false);
   const [scanResult, setScanResult] = useState<OpenFoodFactsProduct | null>(null);
   const [notFoundBarcode, setNotFoundBarcode] = useState<string | null>(null);
+
+  function dismissBarcodeCapture() {
+    setShowScanner(false);
+    setScanResult(null);
+    setNotFoundBarcode(null);
+  }
 
   // ---------------------------------------------------------------------------
   // Live totals react to unsaved drafts immediately.
@@ -609,16 +604,21 @@ export function DashboardShell({
   }
 
   /** Source-agnostic: tap any quick-add card to open a prefilled draft (no auto-save). */
-  function addDraftFromCandidate(candidate: QuickAddCandidate) {
-    setDrafts((currentDrafts) => [
-      ...currentDrafts,
-      createDraftFromCandidate(
-        candidate,
-        getNextSortOrder(currentDrafts),
-        defaultEntryStatus,
-      ),
-    ]);
-  }
+  // `useCallback` so the memoized QuickAddCard can actually skip re-renders —
+  // a fresh function identity each render would defeat the memo.
+  const addDraftFromCandidate = useCallback(
+    (candidate: QuickAddCandidate) => {
+      setDrafts((currentDrafts) => [
+        ...currentDrafts,
+        createDraftFromCandidate(
+          candidate,
+          getNextSortOrder(currentDrafts),
+          defaultEntryStatus,
+        ),
+      ]);
+    },
+    [defaultEntryStatus],
+  );
 
   function handleSearchEntrySaved(entry: MealEntryRecord) {
     if (entry.date !== selectedDate) {
@@ -690,9 +690,17 @@ export function DashboardShell({
 
     setSavingClientId(clientId);
     try {
+      const mutationKey = `draft:${clientId}:${selectedDate}`;
       const result = await saveMealEntryAction(
-        mealDraftToSaveInput(draft, { date: selectedDate }),
+        mealDraftToSaveInput(draft, {
+          date: selectedDate,
+          clientMutationId: mutationIds.current.take(mutationKey),
+        }),
       );
+
+      if (result.ok) {
+        mutationIds.current.settle(mutationKey);
+      }
 
       if (!result.ok) {
         setErrors((currentErrors) => ({
@@ -997,6 +1005,7 @@ export function DashboardShell({
     const draft = drafts.find((d) => d.clientId === clientId);
     if (!draft) return;
 
+    const mutationKey = `copy:${draft.id ?? clientId}:${todayStr}`;
     setActiveMutation(clientId);
     beginMutation(async () => {
       const result = await saveMealEntryAction(mealDraftToSaveInput(draft, {
@@ -1004,7 +1013,12 @@ export function DashboardShell({
         includeId: false,
         includeSortOrder: false,
         status: "eaten",
+        clientMutationId: mutationIds.current.take(mutationKey),
       }));
+
+      if (result.ok) {
+        mutationIds.current.settle(mutationKey);
+      }
 
       if (!result.ok) {
         setErrors((currentErrors) => ({
@@ -1032,6 +1046,11 @@ export function DashboardShell({
     setPresetInitialKind(initialKind);
     setShowPresetsModal(true);
     void ensureTemplatesLoaded();
+  }
+
+  function dismissPresetModal() {
+    setPresetError(null);
+    setShowPresetsModal(false);
   }
 
   async function ensureTemplatesLoaded() {
@@ -1374,7 +1393,7 @@ export function DashboardShell({
 
   return (
     <>
-      <ExperimentalAppShell
+      <AppShell
         userEmail={userEmail}
         canAccessAdmin={canAccessAdmin}
         selectedDate={selectedDate}
@@ -1384,19 +1403,21 @@ export function DashboardShell({
         onComposeAction={handleComposeAction}
       >
         {content}
-      </ExperimentalAppShell>
+      </AppShell>
 
       {showSearchModal && (
-        <FoodSearchModal
-          onClose={() => setShowSearchModal(false)}
-          onEntrySaved={handleSearchEntrySaved}
-          onViewDate={(date) => {
-            setShowSearchModal(false);
-            const href = `/?date=${date}`;
-            prepareNavigationMotion(href, "day-jump");
-            router.push(href);
-          }}
-        />
+        <ModalChunkDismissProvider onDismiss={() => setShowSearchModal(false)}>
+          <FoodSearchModal
+            onClose={() => setShowSearchModal(false)}
+            onEntrySaved={handleSearchEntrySaved}
+            onViewDate={(date) => {
+              setShowSearchModal(false);
+              const href = `/?date=${date}`;
+              prepareNavigationMotion(href, "day-jump");
+              router.push(href);
+            }}
+          />
+        </ModalChunkDismissProvider>
       )}
 
       {showPresetsModal && !templatesLoaded && (
@@ -1410,20 +1431,19 @@ export function DashboardShell({
       )}
 
       {showPresetsModal && templatesLoaded && (
-        <PresetModal
-          presets={localTemplates}
-          mutation={presetMutation}
-          errorMessage={presetError}
-          initialKind={presetInitialKind}
-          onClose={() => {
-            setPresetError(null);
-            setShowPresetsModal(false);
-          }}
-          onSelect={addDraftFromPreset}
-          onSave={handleSavePreset}
-          onUpdate={handleUpdatePreset}
-          onDelete={handleDeletePreset}
-        />
+        <ModalChunkDismissProvider onDismiss={dismissPresetModal}>
+          <PresetModal
+            presets={localTemplates}
+            mutation={presetMutation}
+            errorMessage={presetError}
+            initialKind={presetInitialKind}
+            onClose={dismissPresetModal}
+            onSelect={addDraftFromPreset}
+            onSave={handleSavePreset}
+            onUpdate={handleUpdatePreset}
+            onDelete={handleDeletePreset}
+          />
+        </ModalChunkDismissProvider>
       )}
 
       {showRecipePickerModal && !recipesLoaded && (
@@ -1437,57 +1457,65 @@ export function DashboardShell({
       )}
 
       {showRecipePickerModal && recipesLoaded && (
-        <RecipePickerModal
-          recipes={localRecipes}
-          onClose={() => setShowRecipePickerModal(false)}
-          onSelect={addDraftFromRecipe}
-        />
+        <ModalChunkDismissProvider
+          onDismiss={() => setShowRecipePickerModal(false)}
+        >
+          <RecipePickerModal
+            recipes={localRecipes}
+            onClose={() => setShowRecipePickerModal(false)}
+            onSelect={addDraftFromRecipe}
+          />
+        </ModalChunkDismissProvider>
       )}
 
       {showPhotoModal && (
-        <AiFoodPhotoModal
-          onClose={() => setShowPhotoModal(false)}
-          onAddToLog={(macros) => {
-            setDrafts((currentDrafts) => [
-              ...currentDrafts,
-              createDraftFromMacroSelection(
-                macros,
-                getNextSortOrder(currentDrafts),
-                defaultEntryStatus,
-              ),
-            ]);
-            setShowPhotoModal(false);
-          }}
-          onSaveAsPreset={(input) => {
-            handleSavePreset(input);
-          }}
-        />
+        <ModalChunkDismissProvider onDismiss={() => setShowPhotoModal(false)}>
+          <AiFoodPhotoModal
+            onClose={() => setShowPhotoModal(false)}
+            onAddToLog={(macros) => {
+              setDrafts((currentDrafts) => [
+                ...currentDrafts,
+                createDraftFromMacroSelection(
+                  macros,
+                  getNextSortOrder(currentDrafts),
+                  defaultEntryStatus,
+                ),
+              ]);
+              setShowPhotoModal(false);
+            }}
+            onSaveAsPreset={(input) => {
+              handleSavePreset(input);
+            }}
+          />
+        </ModalChunkDismissProvider>
       )}
 
       {/* Mirrors the component's own render condition so its chunk stays
           unloaded until a capture flow actually starts. */}
       {(showScanner || scanResult || notFoundBarcode) && (
-      <BarcodeCaptureModals
-        showScanner={showScanner}
-        scanResult={scanResult}
-        notFoundBarcode={notFoundBarcode}
-        setShowScanner={setShowScanner}
-        setScanResult={setScanResult}
-        setNotFoundBarcode={setNotFoundBarcode}
-        onAddToLog={(macros) => {
-          setDrafts((currentDrafts) => [
-            ...currentDrafts,
-            createDraftFromMacroSelection(
-              macros,
-              getNextSortOrder(currentDrafts),
-              defaultEntryStatus,
-            ),
-          ]);
-        }}
-        onSaveAsPreset={(input) => {
-          handleSavePreset(input);
-        }}
-      />
+        <ModalChunkDismissProvider onDismiss={dismissBarcodeCapture}>
+          <BarcodeCaptureModals
+            showScanner={showScanner}
+            scanResult={scanResult}
+            notFoundBarcode={notFoundBarcode}
+            setShowScanner={setShowScanner}
+            setScanResult={setScanResult}
+            setNotFoundBarcode={setNotFoundBarcode}
+            onAddToLog={(macros) => {
+              setDrafts((currentDrafts) => [
+                ...currentDrafts,
+                createDraftFromMacroSelection(
+                  macros,
+                  getNextSortOrder(currentDrafts),
+                  defaultEntryStatus,
+                ),
+              ]);
+            }}
+            onSaveAsPreset={(input) => {
+              handleSavePreset(input);
+            }}
+          />
+        </ModalChunkDismissProvider>
       )}
     </>
   );

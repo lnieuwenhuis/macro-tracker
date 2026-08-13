@@ -11,4 +11,3 @@ export {
 // `@macro-tracker/db/schema` directly from migrations and tests that need the
 // table definitions.
 export * from "./types";
-export * from "./validators";

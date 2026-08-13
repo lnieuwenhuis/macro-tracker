@@ -3,7 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 
 import { lookupBarcode, type OpenFoodFactsProduct } from "@/lib/openfoodfacts";
-import { OverlayPortal, useBodyScrollLock } from "./overlay-portal";
+import { ModalSurface } from "./modal-surface";
+import { OverlayPortal } from "./overlay-portal";
 
 type ScannerStatus = "loading" | "scanning" | "looking-up" | "error";
 
@@ -31,7 +32,6 @@ export function BarcodeScanner({
 
   const [status, setStatus] = useState<ScannerStatus>("loading");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  useBodyScrollLock();
 
   useEffect(() => {
     stoppedRef.current = false;
@@ -76,12 +76,22 @@ export function BarcodeScanner({
 
               if (lookupResult.found) {
                 onScanRef.current(lookupResult.product);
+              } else if (lookupResult.reason === "unavailable") {
+                // Not a catalogue miss: say the lookup failed rather than
+                // sending the user off to re-enter a product that may exist.
+                setStatus("error");
+                setErrorMessage(
+                  "Could not reach the product database. Check your connection and try again.",
+                );
               } else {
                 onNotFoundRef.current(lookupResult.barcode);
               }
             } catch {
               if (!stoppedRef.current) {
-                onNotFoundRef.current(barcode);
+                setStatus("error");
+                setErrorMessage(
+                  "Could not reach the product database. Check your connection and try again.",
+                );
               }
             }
           },
@@ -115,7 +125,11 @@ export function BarcodeScanner({
 
   return (
     <OverlayPortal>
-      <div className="fixed inset-0 z-50 bg-black">
+      <ModalSurface
+        ariaLabel="Barcode scanner"
+        onClose={onClose}
+        className="fixed inset-0 z-50 bg-black outline-none"
+      >
         {/* Full-screen camera feed */}
         <video
           ref={videoRef}
@@ -148,7 +162,11 @@ export function BarcodeScanner({
           </div>
 
           {/* Status text sits just below the scanning frame */}
-          <div className="mt-8 flex min-h-[56px] flex-col items-center gap-3 px-8 text-center">
+          <div
+            role="status"
+            aria-live="polite"
+            className="mt-8 flex min-h-[56px] flex-col items-center gap-3 px-8 text-center"
+          >
             {status === "loading" && (
               <p className="text-sm text-white/60">Starting camera…</p>
             )}
@@ -164,6 +182,8 @@ export function BarcodeScanner({
             )}
             {status === "error" && (
               <>
+                {/* Fixed light red, not --color-danger: this overlay is always
+                    black, so the themed token can drop below contrast. */}
                 <p className="text-sm text-red-400">
                   {errorMessage ?? "Could not access camera."}
                 </p>
@@ -183,7 +203,7 @@ export function BarcodeScanner({
         <button
           type="button"
           onClick={onClose}
-          className="absolute right-4 top-[calc(1rem+env(safe-area-inset-top))] z-20 flex h-10 w-10 items-center justify-center rounded-full bg-white/20 text-white transition hover:bg-white/30"
+          className="absolute right-4 top-[calc(1rem+env(safe-area-inset-top))] z-20 flex h-11 w-11 items-center justify-center rounded-full bg-white/20 text-white transition hover:bg-white/30"
           aria-label="Close scanner"
         >
           <svg
@@ -199,7 +219,7 @@ export function BarcodeScanner({
             <line x1="14" y1="4" x2="4" y2="14" />
           </svg>
         </button>
-      </div>
+      </ModalSurface>
     </OverlayPortal>
   );
 }
