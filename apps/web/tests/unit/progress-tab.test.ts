@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { normalizeComposeAction } from "@/lib/compose";
-import { normalizeProgressTab } from "@/lib/ui-mode";
+import { normalizeProgressTab } from "@/lib/progress-tab";
 
 describe("compose + progress helpers", () => {
   it("normalizes progress tabs", () => {

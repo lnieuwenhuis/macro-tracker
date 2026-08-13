@@ -11,6 +11,7 @@ import {
   AdminSection,
 } from "@/components/admin-ui";
 import { createAdminBarcodeProductAction } from "@/lib/admin-actions";
+import { requireAdminUser } from "@/lib/auth";
 
 type AdminBarcodesPageProps = {
   searchParams: Promise<{
@@ -25,12 +26,13 @@ type AdminBarcodesPageProps = {
 export default async function AdminBarcodesPage({
   searchParams,
 }: AdminBarcodesPageProps) {
+  const adminUser = await requireAdminUser();
   const params = await searchParams;
   const page = Number(params.page ?? "1");
   const q = params.q ?? "";
   const status = params.status ?? "all";
   const submitter = params.submitter ?? "";
-  const result = await listAdminBarcodeProducts({
+  const result = await listAdminBarcodeProducts(adminUser.id, {
     q,
     status: status === "active" || status === "deleted" ? status : "all",
     submitter,

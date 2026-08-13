@@ -9,7 +9,8 @@ type CloseButtonProps = {
 export function CloseButton({
   label = "Close",
   disabled,
-  className = "flex h-8 w-8 items-center justify-center rounded-lg text-[var(--color-muted)] transition hover:text-[var(--color-ink)]",
+  // 44px: WCAG 2.5.8 minimum for a phone-first app.
+  className = "flex h-11 w-11 items-center justify-center rounded-lg text-[var(--color-muted)] transition hover:text-[var(--color-ink)]",
   iconSize = 16,
   onClick,
 }: CloseButtonProps) {

@@ -1,6 +1,7 @@
 "use client";
 
 import type { QuickAddCandidate } from "@macro-tracker/db";
+import { memo } from "react";
 
 type QuickAddRailProps = {
   items: QuickAddCandidate[];
@@ -8,7 +9,9 @@ type QuickAddRailProps = {
   emptyState?: React.ReactNode;
 };
 
-function QuickAddCard({
+// Memoized to match MealCard: a parent re-render (a quantity edit, say)
+// otherwise re-renders every card in the rail.
+const QuickAddCard = memo(function QuickAddCard({
   candidate,
   onAdd,
 }: {
@@ -41,7 +44,7 @@ function QuickAddCard({
       </div>
     </button>
   );
-}
+});
 
 export function QuickAddRail({ items, onAdd, emptyState }: QuickAddRailProps) {
   if (items.length === 0) {

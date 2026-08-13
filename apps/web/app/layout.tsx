@@ -3,10 +3,14 @@ import { Fraunces, Space_Grotesk } from "next/font/google";
 import Script from "next/script";
 import { Suspense } from "react";
 
-import { ExperimentalLayoutNav } from "@/components/experimental-layout-nav";
+import { LayoutNav } from "@/components/layout-nav";
 import { OfflineBanner } from "@/components/offline-banner";
 import { OrientationLock } from "@/components/orientation-lock";
 import { ServiceWorkerRegister } from "@/components/service-worker-register";
+import {
+  TIMEZONE_COOKIE_MAX_AGE_SECONDS,
+  TIMEZONE_COOKIE_NAME,
+} from "@/lib/timezone";
 
 import "./globals.css";
 
@@ -23,8 +27,6 @@ const fraunces = Fraunces({
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
-  maximumScale: 1,
-  userScalable: false,
 };
 
 export const metadata: Metadata = {
@@ -57,6 +59,23 @@ const themeInitScript = `
   } catch (e) {}
 `;
 
+// Runs while the initial HTML is parsed, so the zone is already on the cookie
+// jar for every subsequent request — including the RSC fetches a client-side
+// navigation makes. Server code can then resolve the user's own calendar day.
+const timeZoneInitScript = `
+  try {
+    var tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (tz) {
+      var encoded = encodeURIComponent(tz);
+      if (document.cookie.split("; ").indexOf(${JSON.stringify(TIMEZONE_COOKIE_NAME)} + "=" + encoded) === -1) {
+        document.cookie = ${JSON.stringify(TIMEZONE_COOKIE_NAME)} + "=" + encoded
+          + "; path=/; max-age=${TIMEZONE_COOKIE_MAX_AGE_SECONDS}; samesite=lax"
+          + (location.protocol === "https:" ? "; secure" : "");
+      }
+    }
+  } catch (e) {}
+`;
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -72,11 +91,14 @@ export default function RootLayout({
         <Script id="theme-init" strategy="beforeInteractive">
           {themeInitScript}
         </Script>
+        <Script id="timezone-init" strategy="beforeInteractive">
+          {timeZoneInitScript}
+        </Script>
         <OrientationLock />
         <ServiceWorkerRegister />
         <OfflineBanner />
         <Suspense fallback={null}>
-          <ExperimentalLayoutNav />
+          <LayoutNav />
         </Suspense>
         {children}
       </body>

@@ -680,41 +680,35 @@ async fn dispatch_api_request(
             } else if patch.contains_key("date") {
                 return Err(bad_request("Date must use YYYY-MM-DD."));
             }
-            let entries = rpc(state, "getWeightEntries", json!({ "userId": auth.user_id })).await?;
-            let existing = entries
-                .as_array()
-                .and_then(|items| {
-                    items.iter().find(|item| {
-                        item.get("id").and_then(Value::as_str) == Some(entry_id.as_str())
-                    })
-                })
-                .cloned()
-                .ok_or_else(|| {
-                    ApiFailure::new(
-                        StatusCode::NOT_FOUND,
-                        "not_found",
-                        "Weight entry not found.",
-                    )
-                })?;
+            let existing = rpc(
+                state,
+                "getWeightEntryById",
+                json!({ "userId": auth.user_id, "entryId": entry_id }),
+            )
+            .await?;
+            if existing.is_null() {
+                return Err(ApiFailure::new(
+                    StatusCode::NOT_FOUND,
+                    "not_found",
+                    "Weight entry not found.",
+                ));
+            }
             let mut merged = require_object(existing)?;
             for (key, value) in patch {
                 merged.insert(key, value);
             }
             let date = require_string_field(&merged, "date", "Date must use YYYY-MM-DD.")?;
             require_date(&date)?;
-            match rpc(
+            // The unique-violation is already translated into `weight_conflict()`
+            // by `api_failure_from_app_error`, so there is nothing to re-check
+            // here.
+            let value = rpc(
                 state,
                 "updateWeightEntry",
                 json!({ "userId": auth.user_id, "entryId": entry_id, "input": merged }),
             )
-            .await
-            {
-                Ok(value) => Ok((StatusCode::OK, value)),
-                Err(error) if error.message.contains("weight_entries_user_date_key") => {
-                    Err(weight_conflict())
-                }
-                Err(error) => Err(error),
-            }
+            .await?;
+            Ok((StatusCode::OK, value))
         }
         (Some("weight"), Some("entries"), Some(entry_id), "DELETE") => {
             let deleted = rpc(
@@ -1008,19 +1002,9 @@ fn require_string_field(
 }
 
 fn require_date(value: &str) -> ApiResult<()> {
-    let valid = value.len() == 10
-        && value.as_bytes()[4] == b'-'
-        && value.as_bytes()[7] == b'-'
-        && value
-            .chars()
-            .enumerate()
-            .all(|(index, ch)| index == 4 || index == 7 || ch.is_ascii_digit())
-        && chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok();
-    if valid {
-        Ok(())
-    } else {
-        Err(bad_request("Date must use YYYY-MM-DD."))
-    }
+    // Same rule the internal RPC path enforces, so both entry points agree on
+    // what a date is.
+    crate::db::ensure_date_string(value).map_err(|_| bad_request("Date must use YYYY-MM-DD."))
 }
 
 fn require_uuid(value: &str) -> ApiResult<String> {
@@ -1331,6 +1315,9 @@ fn insufficient_scope(scope: &'static str) -> ApiFailure {
     )
 }
 
+/// Named once: the mapping below and the DB schema have to agree on it.
+const WEIGHT_ENTRY_DATE_CONSTRAINT: &str = "weight_entries_user_date_key";
+
 fn weight_conflict() -> ApiFailure {
     ApiFailure::new(
         StatusCode::CONFLICT,
@@ -1348,38 +1335,32 @@ fn internal_error() -> ApiFailure {
 }
 
 fn api_failure_from_app_error(error: AppError) -> ApiFailure {
+    // Everything the backend already classifies is taken straight from
+    // `AppError`, so the status/code strings live in exactly one place. Only
+    // the two genuine API-surface divergences are spelled out.
     match error {
-        AppError::BadRequest(message) => bad_request(message),
+        // The public API authenticates with Bearer tokens, so an auth failure
+        // is reported as `invalid_token` rather than the internal
+        // `unauthorized`.
         AppError::Unauthorized(message) => {
             ApiFailure::new(StatusCode::UNAUTHORIZED, "invalid_token", message)
         }
-        AppError::Forbidden(message) => {
-            ApiFailure::new(StatusCode::FORBIDDEN, "forbidden", message)
-        }
-        AppError::NotFound(message) => ApiFailure::new(StatusCode::NOT_FOUND, "not_found", message),
-        AppError::Conflict(message) => ApiFailure::new(StatusCode::CONFLICT, "conflict", message),
-        AppError::Sqlx(error) => {
-            if error
+        AppError::Sqlx(ref sqlx_error)
+            if sqlx_error
                 .as_database_error()
                 .and_then(|db| db.constraint())
-                .is_some_and(|constraint| constraint == "weight_entries_user_date_key")
-            {
-                weight_conflict()
-            } else {
-                tracing::error!(error = ?error, "API v1 storage failure");
-                internal_error()
-            }
+                .is_some_and(|constraint| constraint == WEIGHT_ENTRY_DATE_CONSTRAINT) =>
+        {
+            weight_conflict()
         }
-        AppError::Json(error) => {
-            tracing::error!(error = ?error, "API v1 JSON failure");
-            internal_error()
-        }
-        AppError::Anyhow(error) => {
+        AppError::Sqlx(_) | AppError::Json(_) | AppError::Anyhow(_) => {
             tracing::error!(error = ?error, "API v1 failure");
             internal_error()
         }
-        AppError::Upstream(message) => {
-            ApiFailure::new(StatusCode::BAD_GATEWAY, "upstream_error", message)
+        _ => {
+            let status = error.status();
+            let code = error.api_code();
+            ApiFailure::new(status, code, error.to_string())
         }
     }
 }
@@ -1455,6 +1436,7 @@ mod tests {
         AppState {
             config: crate::config::Config {
                 allow_insecure_internal_auth: false,
+                enable_test_routes: false,
                 app_url: "http://localhost:3000".to_string(),
                 backend_internal_secret: Some("internal-secret-with-at-least-32-chars".to_string()),
                 database_url: "postgres://postgres:***@127.0.0.1:5432/macro_tracker".to_string(),
@@ -1514,5 +1496,283 @@ mod tests {
             json!([])
         );
         assert!(payload["paths"].get("/goals").is_some());
+    }
+
+    // --- Router shape -------------------------------------------------------
+
+    async fn read_json_body(response: Response) -> Value {
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body should collect")
+            .to_bytes();
+        serde_json::from_slice(&body).expect("body should be JSON")
+    }
+
+    async fn call(method: &str, uri: &str, bearer: Option<&str>) -> Response {
+        let mut builder = Request::builder().method(method).uri(uri);
+        if let Some(bearer) = bearer {
+            builder = builder.header(header::AUTHORIZATION, bearer);
+        }
+
+        router()
+            .with_state(test_state())
+            .oneshot(builder.body(Body::empty()).expect("request should build"))
+            .await
+            .expect("request should complete")
+    }
+
+    #[tokio::test]
+    async fn unknown_routes_return_the_error_envelope() {
+        let response = call("GET", "/does-not-exist", None).await;
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let payload = read_json_body(response).await;
+        assert_eq!(payload["ok"], json!(false));
+        assert_eq!(payload["error"]["code"], json!("not_found"));
+    }
+
+    #[tokio::test]
+    async fn known_routes_reject_unsupported_methods_before_authenticating() {
+        let response = call("DELETE", "/goals", None).await;
+
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        let allow = response
+            .headers()
+            .get(header::ALLOW)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(allow.contains("GET"), "unexpected Allow header: {allow}");
+        assert!(allow.contains("OPTIONS"), "unexpected Allow header: {allow}");
+
+        let payload = read_json_body(response).await;
+        assert_eq!(payload["error"]["code"], json!("method_not_allowed"));
+    }
+
+    #[tokio::test]
+    async fn preflight_succeeds_without_a_token() {
+        let response = call("OPTIONS", "/goals", None).await;
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            Some(&CORS_ALLOW_ORIGIN.parse().unwrap())
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_and_malformed_bearer_tokens_are_reported_distinctly() {
+        let missing = call("GET", "/goals", None).await;
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            read_json_body(missing).await["error"]["code"],
+            json!("missing_token")
+        );
+
+        let malformed = call("GET", "/goals", Some("Token abc")).await;
+        assert_eq!(malformed.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            read_json_body(malformed).await["error"]["code"],
+            json!("malformed_token")
+        );
+    }
+
+    #[test]
+    fn auth_error_maps_every_backend_reason() {
+        assert_eq!(auth_error("expired").0, "expired_token");
+        assert_eq!(auth_error("revoked").0, "revoked_token");
+        assert_eq!(auth_error("malformed").0, "malformed_token");
+        assert_eq!(auth_error("missing").0, "missing_token");
+        assert_eq!(auth_error("anything-else").0, "invalid_token");
+    }
+
+    // --- Validation ---------------------------------------------------------
+
+    #[test]
+    fn require_date_matches_the_internal_rpc_rule() {
+        assert!(require_date("2026-01-15").is_ok());
+        assert!(require_date("2024-02-29").is_ok());
+
+        for invalid in [
+            "",
+            "2026-1-5",
+            "26-01-15",
+            "2026-13-01",
+            "2026-02-30",
+            // Postgres would accept all three as `date` input.
+            "infinity",
+            "today",
+            "epoch",
+        ] {
+            assert!(
+                require_date(invalid).is_err(),
+                "expected {invalid:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn require_uuid_rejects_non_uuid_path_parameters() {
+        assert!(require_uuid("not-a-uuid").is_err());
+        let uuid = Uuid::new_v4().to_string();
+        assert_eq!(require_uuid(&uuid).expect("valid uuid"), uuid);
+    }
+
+    #[test]
+    fn merge_goals_keeps_omitted_fields_and_clears_explicit_nulls() {
+        let merged = merge_goals(
+            json!({ "caloriesKcal": 2200, "proteinG": 150, "carbsG": 250, "fatG": 70 }),
+            json!({ "proteinG": 180, "fatG": null }),
+        )
+        .expect("patch should merge");
+
+        assert_eq!(merged["caloriesKcal"], json!(2200));
+        assert_eq!(merged["proteinG"].as_f64(), Some(180.0));
+        assert_eq!(merged["carbsG"], json!(250));
+        assert_eq!(merged["fatG"], Value::Null);
+    }
+
+    #[test]
+    fn merge_goals_rejects_invalid_numbers() {
+        let current = json!({ "caloriesKcal": 2000, "proteinG": 150, "carbsG": 200, "fatG": 60 });
+
+        for patch in [
+            json!({ "proteinG": -1 }),
+            json!({ "proteinG": "150" }),
+            json!({ "caloriesKcal": 2000.5 }),
+        ] {
+            assert!(
+                merge_goals(current.clone(), patch.clone()).is_err(),
+                "expected {patch} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn read_json_rejects_a_malformed_body() {
+        assert!(read_json(&Bytes::from_static(b"{ not json")).is_err());
+        assert!(read_json(&Bytes::from_static(b"{}")).is_ok());
+    }
+
+    #[test]
+    fn require_object_rejects_non_objects() {
+        assert!(require_object(json!([1, 2, 3])).is_err());
+        assert!(require_object(json!("string")).is_err());
+        assert!(require_object(json!({ "a": 1 })).is_ok());
+    }
+
+    // --- Error mapping ------------------------------------------------------
+
+    #[test]
+    fn app_errors_map_onto_the_public_status_and_code() {
+        let cases = [
+            (
+                AppError::BadRequest("nope".into()),
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+            ),
+            (
+                AppError::Forbidden("nope".into()),
+                StatusCode::FORBIDDEN,
+                "forbidden",
+            ),
+            (
+                AppError::NotFound("nope".into()),
+                StatusCode::NOT_FOUND,
+                "not_found",
+            ),
+            (
+                AppError::Conflict("nope".into()),
+                StatusCode::CONFLICT,
+                "conflict",
+            ),
+            (
+                AppError::Upstream("nope".into()),
+                StatusCode::BAD_GATEWAY,
+                "upstream_error",
+            ),
+        ];
+
+        for (error, status, code) in cases {
+            let failure = api_failure_from_app_error(error);
+            assert_eq!(failure.status, status);
+            assert_eq!(failure.code, code);
+        }
+    }
+
+    #[test]
+    fn unauthorized_is_reported_as_invalid_token_on_the_public_api() {
+        let failure = api_failure_from_app_error(AppError::Unauthorized("nope".into()));
+        assert_eq!(failure.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(failure.code, "invalid_token");
+    }
+
+    #[test]
+    fn internal_failures_never_leak_their_message() {
+        let failure = api_failure_from_app_error(AppError::Anyhow(anyhow::anyhow!(
+            "connection to postgres://user:secret@db.internal failed"
+        )));
+
+        assert_eq!(failure.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(failure.code, "internal_error");
+        assert!(!failure.message.contains("postgres://"));
+    }
+
+    // --- Scope contract -----------------------------------------------------
+
+    #[test]
+    fn every_shipped_endpoint_declares_scopes_for_each_method() {
+        let paths: &[&[&str]] = &[
+            &["me"],
+            &["goals"],
+            &["days", "2026-01-15"],
+            &["days", "2026-01-15", "entries"],
+            &["meal-entries", "id"],
+            &["meal-entries", "id", "status"],
+            &["meal-groups"],
+            &["meal-groups", "reorder"],
+            &["meal-groups", "id"],
+            &["foods"],
+            &["foods", "search"],
+            &["foods", "id"],
+            &["barcodes", "8712345678901"],
+            &["templates"],
+            &["templates", "from-day"],
+            &["templates", "id"],
+            &["templates", "id", "apply"],
+            &["recipes"],
+            &["recipes", "id"],
+            &["recipes", "id", "log"],
+            &["weight"],
+            &["weight", "entries"],
+            &["weight", "entries", "id"],
+        ];
+
+        for path in paths {
+            let owned = path.iter().map(|part| (*part).to_string()).collect::<Vec<_>>();
+            let endpoint = endpoint_for(&owned)
+                .unwrap_or_else(|| panic!("no endpoint registered for {path:?}"));
+
+            for method in endpoint.methods {
+                assert!(
+                    endpoint
+                        .scopes
+                        .iter()
+                        .any(|(candidate, _)| candidate == method),
+                    "{path:?} {method} declares no scopes"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_paths_have_no_endpoint() {
+        assert!(endpoint_for(&["nope".to_string()]).is_none());
+        assert!(
+            endpoint_for(&["goals".to_string(), "extra".to_string()]).is_none(),
+            "trailing segments must not resolve"
+        );
     }
 }

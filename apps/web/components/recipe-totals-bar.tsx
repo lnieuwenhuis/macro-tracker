@@ -1,5 +1,7 @@
 "use client";
 
+import { roundToSingleDecimal } from "@/lib/numbers";
+
 type RecipeTotalsBarProps = {
   totalProteinG: number;
   totalCarbsG: number;
@@ -9,7 +11,7 @@ type RecipeTotalsBarProps = {
 };
 
 function round1(value: number) {
-  return Math.round(value * 10) / 10;
+  return roundToSingleDecimal(value);
 }
 
 export function RecipeTotalsBar({

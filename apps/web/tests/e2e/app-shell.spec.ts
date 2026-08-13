@@ -3,7 +3,7 @@ import { Buffer } from "node:buffer";
 
 import { createTestSession, testRouteHeaders, uniqueTestEmail } from "./test-users";
 
-async function enableExperimentalUi(page: Page) {
+async function expectAppShellReady(page: Page) {
   await expect(page.getByRole("button", { name: "Open settings" })).toBeVisible();
 }
 
@@ -15,14 +15,14 @@ test("canonical app navigation and settings are visible", async ({ page }, testI
   await expect(page.getByRole("link", { name: "Food Log" })).toBeVisible();
   await expect(page.getByRole("link", { name: "Progress" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Add food" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Library" })).toHaveAttribute(
+  await expect(page.getByRole("link", { name: "Food Library" })).toHaveAttribute(
     "href",
     "/library?date=2026-03-19",
   );
   await expect(page.getByRole("link", { name: "Summary" })).toBeVisible();
   await expect(page.getByText("Your Records")).toHaveCount(0);
 
-  await page.getByRole("link", { name: "Library" }).click();
+  await page.getByRole("link", { name: "Food Library" }).click();
   await expect(page).toHaveURL(/\/library\?date=2026-03-19$/);
   const libraryHub = page.getByRole("navigation", { name: "Food library sections" });
   await expect(libraryHub.getByRole("link", { name: /Food Library/ })).toHaveAttribute(
@@ -49,16 +49,16 @@ test("canonical app navigation and settings are visible", async ({ page }, testI
   await expect(page.getByRole("link", { name: /Days/ })).toBeVisible();
 
   await page.getByRole("button", { name: "Open settings" }).click();
-  await expect(page.getByText("Theme", { exact: true })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Food Library", exact: true })).toHaveAttribute(
-    "href",
-    "/library?date=2026-03-19",
-  );
-  await expect(page.getByRole("link", { name: "Meal Planner", exact: true })).toHaveAttribute(
-    "href",
-    "/planner?date=2026-03-19",
-  );
-  await expect(page.getByRole("button", { name: "Sign out" })).toBeVisible();
+  // Scoped to the dialog: the bottom nav also links to "Food Library".
+  const settingsSheet = page.getByRole("dialog", { name: "Settings" });
+  await expect(settingsSheet.getByText("Theme", { exact: true })).toBeVisible();
+  await expect(
+    settingsSheet.getByRole("link", { name: "Food Library", exact: true }),
+  ).toHaveAttribute("href", "/library?date=2026-03-19");
+  await expect(
+    settingsSheet.getByRole("link", { name: "Meal Planner", exact: true }),
+  ).toHaveAttribute("href", "/planner?date=2026-03-19");
+  await expect(settingsSheet.getByRole("button", { name: "Sign out" })).toBeVisible();
   await expect(page.getByRole("switch", { name: /Legacy UI/i })).toHaveCount(0);
 });
 
@@ -114,7 +114,7 @@ test("keeps low meal action menus above the bottom controls", async ({ page }, t
   }));
 
   await createTestSession(page, uniqueTestEmail("user", testInfo));
-  await enableExperimentalUi(page);
+  await expectAppShellReady(page);
   const seedResult = await page.evaluate(
     async ({ headers, items, templateLabel }) => {
       const response = await fetch("/api/test/templates", {
@@ -176,7 +176,7 @@ test("keeps the empty food template tab selectable when only day templates exist
   const selectedDate = "2035-07-01";
 
   await createTestSession(page, uniqueTestEmail("setup", testInfo));
-  await enableExperimentalUi(page);
+  await expectAppShellReady(page);
   const seedResult = await page.evaluate(async ({ headers, templateLabel }) => {
     const response = await fetch("/api/test/templates", {
       method: "POST",
@@ -243,11 +243,11 @@ test("keeps the empty food template tab selectable when only day templates exist
   await expect(modal.getByRole("button", { name: "Save new template" })).toBeVisible();
 });
 
-test("experimental mode supports the bottom add flow and merged progress routes", async ({
+test("the app shell supports the bottom add flow and merged progress routes", async ({
   page,
 }, testInfo) => {
   await createTestSession(page, uniqueTestEmail("user", testInfo));
-  await enableExperimentalUi(page);
+  await expectAppShellReady(page);
 
   await page.goto("/summary?date=2026-03-19");
   await expect(page.getByRole("link", { name: "Summary" })).toHaveAttribute(

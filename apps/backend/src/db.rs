@@ -628,7 +628,50 @@ pub async fn get_user_goals(pool: &PgPool, user_id: Uuid) -> AppResult<MacroGoal
     })
 }
 
+/// Goal macros land in `numeric(6, 1)` and the goal weight in `numeric(5, 2)`,
+/// so both need the column domain enforced before the UPDATE rather than after
+/// Postgres raises numeric-field-overflow.
+fn validate_macro_goals(goals: &MacroGoals) -> AppResult<()> {
+    for (key, value) in [
+        ("proteinG", goals.protein_g),
+        ("carbsG", goals.carbs_g),
+        ("fatG", goals.fat_g),
+    ] {
+        if let Some(value) = value
+            && (!value.is_finite() || value < 0.0 || value > MAX_MACRO_GRAMS)
+        {
+            return Err(AppError::BadRequest(format!(
+                "{key} must be between 0 and {MAX_MACRO_GRAMS}."
+            )));
+        }
+    }
+    if let Some(value) = goals.calories_kcal
+        && value < 0
+    {
+        return Err(AppError::BadRequest(
+            "caloriesKcal must be a non-negative integer.".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_goal_weight_kg(value: Option<f64>) -> AppResult<Option<f64>> {
+    match value {
+        None => Ok(None),
+        Some(value) => {
+            let rounded = round2(value);
+            if !rounded.is_finite() || rounded < 0.0 || rounded >= 1000.0 {
+                return Err(AppError::BadRequest(
+                    "goalWeightKg must be between 0 and 1000 kg.".to_string(),
+                ));
+            }
+            Ok(Some(rounded))
+        }
+    }
+}
+
 pub async fn save_user_goals(pool: &PgPool, user_id: Uuid, goals: MacroGoals) -> AppResult<()> {
+    validate_macro_goals(&goals)?;
     sqlx::query(
         r#"
         UPDATE users
@@ -686,20 +729,16 @@ pub async fn authenticate_api_token(pool: &PgPool, token: &str) -> AppResult<Val
         return Ok(json!({ "ok": false, "reason": "expired" }));
     }
     let id: Uuid = row.try_get("id")?;
-    sqlx::query(
+    // `RETURNING` instead of a follow-up SELECT. The throttle means the UPDATE
+    // matches no row most of the time, in which case the row already read
+    // above is current.
+    let refreshed = sqlx::query(
         r#"
         UPDATE api_tokens
         SET last_used_at = now()
         WHERE id = $1
           AND (last_used_at IS NULL OR last_used_at < now() - interval '5 minutes')
-        "#,
-    )
-    .bind(id)
-    .execute(pool)
-    .await?;
-    let refreshed = sqlx::query(
-        r#"
-        SELECT
+        RETURNING
           id,
           user_id,
           token_prefix,
@@ -709,14 +748,12 @@ pub async fn authenticate_api_token(pool: &PgPool, token: &str) -> AppResult<Val
           last_used_at,
           expires_at,
           revoked_at
-        FROM api_tokens
-        WHERE id = $1
         "#,
     )
     .bind(id)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await?;
-    let record = api_token_row_json(&refreshed)?;
+    let record = api_token_row_json(refreshed.as_ref().unwrap_or(&row))?;
     Ok(json!({ "ok": true, "token": record }))
 }
 
@@ -881,16 +918,12 @@ async fn complete_onboarding_setup_json(
             .cloned()
             .ok_or_else(|| AppError::BadRequest("goals is required.".to_string()))?,
     )
-    .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    .map_err(invalid_payload("goals"))?;
     let goal_weight_kg = match input.get("goalWeightKg") {
         None | Some(Value::Null) => None,
-        Some(value) => value
-            .as_f64()
-            .filter(|weight| weight.is_finite() && *weight >= 0.0)
-            .ok_or_else(|| {
-                AppError::BadRequest("goalWeightKg must be a non-negative number.".to_string())
-            })
-            .map(Some)?,
+        Some(value) => validate_goal_weight_kg(Some(value.as_f64().ok_or_else(|| {
+            AppError::BadRequest("goalWeightKg must be a non-negative number.".to_string())
+        })?))?,
     };
     let current_weight = match input.get("currentWeight") {
         None | Some(Value::Null) => None,
@@ -960,7 +993,7 @@ async fn complete_onboarding_setup_json(
         )
         .bind(id)
         .bind(user_id)
-        .bind(required_string(weight, "date")?)
+        .bind(required_date(weight, "date")?)
         .bind(required_f64(weight, "weightKg")?)
         .bind(optional_f64(weight, "bodyFatPct"))
         .bind(weight.get("notes").and_then(Value::as_str))
@@ -1045,7 +1078,7 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
                     .cloned()
                     .ok_or_else(|| AppError::BadRequest("profile is required.".to_string()))?,
             )
-            .map_err(|error| AppError::BadRequest(error.to_string()))?;
+            .map_err(invalid_payload("profile"))?;
             Ok(serde_json::to_value(
                 upsert_user_from_shoo_profile(pool, &profile).await?,
             )?)
@@ -1053,16 +1086,6 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
         "getUserById" => {
             let user_id = uuid_arg(&args, "userId")?;
             Ok(serde_json::to_value(get_user_by_id(pool, user_id).await?)?)
-        }
-        "ensureUserRole" => {
-            let user_id = uuid_arg(&args, "userId")?;
-            let role = string_arg(&args, "role")?;
-            if !matches!(role.as_str(), "user" | "admin" | "owner") {
-                return Err(AppError::BadRequest("User role is invalid.".to_string()));
-            }
-            Ok(serde_json::to_value(
-                ensure_user_role(pool, user_id, &role).await?,
-            )?)
         }
         "getUserGoals" => {
             let user_id = uuid_arg(&args, "userId")?;
@@ -1075,7 +1098,7 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
                     .cloned()
                     .ok_or_else(|| AppError::BadRequest("goals is required.".to_string()))?,
             )
-            .map_err(|error| AppError::BadRequest(error.to_string()))?;
+            .map_err(invalid_payload("goals"))?;
             save_user_goals(pool, user_id, goals).await?;
             Ok(json!(null))
         }
@@ -1284,30 +1307,36 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
                     "orderedIds must include each active meal group exactly once.".to_string(),
                 ));
             }
-            for (index, id) in ordered_ids.iter().enumerate() {
-                sqlx::query(
-                    "UPDATE meal_groups SET sort_order = $3, updated_at = now() WHERE user_id = $1 AND id = $2",
-                )
-                .bind(user_id)
-                .bind(id)
-                .bind(index as i32)
-                .execute(&mut *tx)
-                .await?;
-            }
+            // One statement rather than one per group: a drag-to-reorder used
+            // to cost a round trip per row.
+            let sort_orders: Vec<i32> = (0..ordered_ids.len() as i32).collect();
+            sqlx::query(
+                r#"
+                UPDATE meal_groups
+                SET sort_order = ordering.sort_order, updated_at = now()
+                FROM unnest($2::uuid[], $3::int[]) AS ordering(id, sort_order)
+                WHERE meal_groups.user_id = $1 AND meal_groups.id = ordering.id
+                "#,
+            )
+            .bind(user_id)
+            .bind(&ordered_ids)
+            .bind(&sort_orders)
+            .execute(&mut *tx)
+            .await?;
             tx.commit().await?;
             ensure_default_meal_groups(pool, user_id).await?;
             meal_groups_json(pool, user_id).await
         }
         "getDailySummary" => {
             let user_id = uuid_arg(&args, "userId")?;
-            let date = string_arg(&args, "date")?;
+            let date = date_arg(&args, "date")?;
             ensure_default_meal_groups(pool, user_id).await?;
             daily_summary_json(pool, user_id, &date).await
         }
         "getDashboardData" => {
             let user_id = uuid_arg(&args, "userId")?;
             let selected_date =
-                string_arg(&args, "selectedDate").or_else(|_| string_arg(&args, "date"))?;
+                date_arg(&args, "selectedDate").or_else(|_| date_arg(&args, "date"))?;
             ensure_default_meal_groups(pool, user_id).await?;
             let daily_summary = daily_summary_json(pool, user_id, &selected_date).await?;
             let period_averages = period_averages_json(pool, user_id, &selected_date).await?;
@@ -1474,6 +1503,13 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
             let user_id = uuid_arg(&args, "userId")?;
             weight_entries_json(pool, user_id).await
         }
+        // Fetches one row instead of the account's whole weight history, which
+        // the PATCH handler used to load and linear-scan.
+        "getWeightEntryById" => {
+            let user_id = uuid_arg(&args, "userId")?;
+            let entry_id = uuid_arg(&args, "entryId")?;
+            weight_entry_by_id_json(pool, user_id, entry_id).await
+        }
         "getWeightGoal" => {
             let user_id = uuid_arg(&args, "userId")?;
             let row = sqlx::query(
@@ -1487,7 +1523,7 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
         }
         "saveWeightGoal" => {
             let user_id = uuid_arg(&args, "userId")?;
-            let goal = args.get("goalWeightKg").and_then(Value::as_f64);
+            let goal = validate_goal_weight_kg(args.get("goalWeightKg").and_then(Value::as_f64))?;
             sqlx::query("UPDATE users SET goal_weight_kg = $2 WHERE id = $1")
                 .bind(user_id)
                 .bind(goal)
@@ -1497,7 +1533,7 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
         }
         "getWeightPageData" => {
             let user_id = uuid_arg(&args, "userId")?;
-            let selected_date = string_arg(&args, "selectedDate")?;
+            let selected_date = date_arg(&args, "selectedDate")?;
             weight_page_data_json(pool, user_id, &selected_date).await
         }
         "createWeightEntry" => {
@@ -1558,8 +1594,8 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
         }
         "getRecentDailyOverviews" => {
             let user_id = uuid_arg(&args, "userId")?;
-            let selected_date = string_arg(&args, "selectedDate")
-                .or_else(|_| string_arg(&args, "date"))
+            let selected_date = date_arg(&args, "selectedDate")
+                .or_else(|_| date_arg(&args, "date"))
                 .unwrap_or_else(|_| Utc::now().date_naive().to_string());
             let days = args
                 .get("days")
@@ -1576,20 +1612,20 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
         "getPeriodAverages" => {
             let user_id = uuid_arg(&args, "userId")?;
             let selected_date =
-                string_arg(&args, "selectedDate").or_else(|_| string_arg(&args, "date"))?;
+                date_arg(&args, "selectedDate").or_else(|_| date_arg(&args, "date"))?;
             period_averages_json(pool, user_id, &selected_date).await
         }
         "getStatsPageData" => {
             let user_id = uuid_arg(&args, "userId")?;
-            let today = string_arg(&args, "today")
-                .or_else(|_| string_arg(&args, "referenceDate"))
+            let today = date_arg(&args, "today")
+                .or_else(|_| date_arg(&args, "referenceDate"))
                 .unwrap_or_else(|_| Utc::now().date_naive().to_string());
             stats_page_data_json(pool, user_id, &today).await
         }
         "getLeaderboardStats" => {
             let user_id = uuid_arg(&args, "userId")?;
-            let reference_date = string_arg(&args, "referenceDate")
-                .or_else(|_| string_arg(&args, "today"))
+            let reference_date = date_arg(&args, "referenceDate")
+                .or_else(|_| date_arg(&args, "today"))
                 .unwrap_or_else(|_| Utc::now().date_naive().to_string());
             leaderboard_json(pool, user_id, &reference_date).await
         }
@@ -1619,13 +1655,26 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
                 test_fault_arg(&args, "barcode_food_product_revision").cloned();
             save_barcode_food_product_json(pool, user_id, input, revision_test_fault.as_ref()).await
         }
-        "getAdminDashboardData" => admin_dashboard_json(pool).await,
-        "getAdminUserHealthSummary" => admin_user_health_summary_json(pool).await,
+        // Admin reads take an actor and enforce the role here, in the data
+        // layer. Relying on the Next.js layout guard alone left a
+        // stale-privilege window: Partial Rendering does not re-run a layout on
+        // client navigation, so a just-demoted admin could still load every
+        // account's PII from an already-open tab.
+        "getAdminDashboardData" => {
+            require_admin_actor(pool, uuid_arg(&args, "actorUserId")?).await?;
+            admin_dashboard_json(pool).await
+        }
+        "getAdminUserHealthSummary" => {
+            require_admin_actor(pool, uuid_arg(&args, "actorUserId")?).await?;
+            admin_user_health_summary_json(pool).await
+        }
         "listAdminUsers" => {
+            require_admin_actor(pool, uuid_arg(&args, "actorUserId")?).await?;
             let input = optional_object_arg(&args, "input");
             list_admin_users_json(pool, input).await
         }
         "getAdminUserDetail" => {
+            require_admin_actor(pool, uuid_arg(&args, "actorUserId")?).await?;
             let user_id = uuid_arg(&args, "userId")?;
             get_admin_user_detail_json(pool, user_id).await
         }
@@ -1644,14 +1693,17 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
             .await
         }
         "listAdminBarcodeProducts" => {
+            require_admin_actor(pool, uuid_arg(&args, "actorUserId")?).await?;
             let input = optional_object_arg(&args, "input");
             list_admin_barcode_products_json(pool, input, false).await
         }
         "listAdminBarcodeReviewQueue" => {
+            require_admin_actor(pool, uuid_arg(&args, "actorUserId")?).await?;
             let input = optional_object_arg(&args, "input");
             list_admin_barcode_products_json(pool, input, true).await
         }
         "getAdminBarcodeProductById" => {
+            require_admin_actor(pool, uuid_arg(&args, "actorUserId")?).await?;
             let product_id = uuid_arg(&args, "barcodeProductId")?;
             Ok(admin_food_product_by_id_json(pool, product_id)
                 .await?
@@ -1711,10 +1763,12 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
             .await
         }
         "listAdminAuditEvents" => {
+            require_admin_actor(pool, uuid_arg(&args, "actorUserId")?).await?;
             let input = optional_object_arg(&args, "input");
             list_admin_audit_events_json(pool, input).await
         }
         "getAdminAuditEventById" => {
+            require_admin_actor(pool, uuid_arg(&args, "actorUserId")?).await?;
             let event_id = uuid_arg(&args, "eventId")?;
             get_admin_audit_event_json(pool, event_id).await
         }
@@ -2006,6 +2060,7 @@ async fn recipes_json_filtered(
 }
 
 async fn search_food_products_json(pool: &PgPool, user_id: Uuid, query: &str) -> AppResult<Value> {
+    validate_search_query(query)?;
     let patterns = search_like_patterns(query);
     if patterns.is_empty() {
         return Ok(Value::Array(Vec::new()));
@@ -2093,9 +2148,31 @@ async fn search_food_products_json(pool: &PgPool, user_id: Uuid, query: &str) ->
     Ok(row.try_get("data")?)
 }
 
+/// Longest search string accepted. The SQL runs three ILIKEs per pattern per
+/// candidate row, so an uncapped query makes the scan cost quadratic in
+/// attacker-controlled input.
+pub(crate) const MAX_SEARCH_QUERY_LENGTH: usize = 128;
+/// Most whitespace-separated terms accepted from one query.
+pub(crate) const MAX_SEARCH_TERMS: usize = 8;
+
+fn validate_search_query(query: &str) -> AppResult<()> {
+    if query.chars().count() > MAX_SEARCH_QUERY_LENGTH {
+        return Err(AppError::BadRequest(format!(
+            "Search query must be at most {MAX_SEARCH_QUERY_LENGTH} characters."
+        )));
+    }
+    if query.split_whitespace().count() > MAX_SEARCH_TERMS {
+        return Err(AppError::BadRequest(format!(
+            "Search query must have at most {MAX_SEARCH_TERMS} terms."
+        )));
+    }
+    Ok(())
+}
+
 fn search_like_patterns(query: &str) -> Vec<String> {
     query
         .split_whitespace()
+        .take(MAX_SEARCH_TERMS)
         .map(|word| format!("%{}%", escape_like_pattern(word)))
         .collect()
 }
@@ -2327,7 +2404,7 @@ async fn normalize_meal_input(
     default_sort_order: i32,
     recalculate_product_macros: bool,
 ) -> AppResult<NormalizedMealEntry> {
-    let date = required_string(input, "date")?;
+    let date = required_date(input, "date")?;
     let meal_group_id = optional_uuid(input, "mealGroupId")?;
     assert_meal_group_access(pool, user_id, meal_group_id).await?;
     let product_id = optional_uuid(input, "productId")?;
@@ -2415,7 +2492,7 @@ async fn create_meal_entry_json(
     user_id: Uuid,
     input: &serde_json::Map<String, Value>,
 ) -> AppResult<Value> {
-    let date = required_string(input, "date")?;
+    let date = required_date(input, "date")?;
     let row = sqlx::query(
         "SELECT coalesce(max(sort_order), -1) + 1 AS sort_order FROM meal_entries WHERE user_id = $1 AND entry_date = $2::date",
     )
@@ -2991,7 +3068,7 @@ async fn apply_template_json(
 ) -> AppResult<Value> {
     let template_id = optional_uuid(input, "templateId")?
         .ok_or_else(|| AppError::BadRequest("templateId is required.".to_string()))?;
-    let date = required_string(input, "date")?;
+    let date = required_date(input, "date")?;
     let status = input
         .get("status")
         .and_then(Value::as_str)
@@ -3098,7 +3175,7 @@ async fn create_template_from_date_json(
     user_id: Uuid,
     input: &serde_json::Map<String, Value>,
 ) -> AppResult<Value> {
-    let date = required_string(input, "date")?;
+    let date = required_date(input, "date")?;
     let template_type = required_string(input, "type")?;
     let label = required_string(input, "label")?;
     let summary = daily_summary_json(pool, user_id, &date).await?;
@@ -3686,12 +3763,20 @@ async fn get_admin_user_detail_json(pool: &PgPool, user_id: Uuid) -> AppResult<V
     .bind(user_id)
     .fetch_one(pool)
     .await?;
-    let recent_recipes = recipes_json(pool, user_id).await?;
-    let recent_templates = templates_json(pool, user_id).await?;
-    let recent_weights = weight_entries_json(pool, user_id).await?;
+    // Independent reads, so total latency should be their max rather than
+    // their sum.
+    let (recent_recipes, recent_templates, recent_weights, goals, recent_meals, recent_barcodes) =
+        tokio::try_join!(
+            recipes_json(pool, user_id),
+            templates_json(pool, user_id),
+            weight_entries_json(pool, user_id),
+            get_user_goals(pool, user_id),
+            list_recent_meal_entries_json(pool, user_id, 10, false),
+            recent_barcode_submissions_json(pool, user_id, 10),
+        )?;
     Ok(json!({
         "user": user,
-        "goals": get_user_goals(pool, user_id).await?,
+        "goals": goals,
         "counts": {
             "mealEntries": counts.try_get::<i32, _>("meal_entries")?,
             "weightEntries": counts.try_get::<i32, _>("weight_entries")?,
@@ -3699,11 +3784,11 @@ async fn get_admin_user_detail_json(pool: &PgPool, user_id: Uuid) -> AppResult<V
             "templates": counts.try_get::<i32, _>("templates")?,
             "barcodeSubmissions": counts.try_get::<i32, _>("barcode_submissions")?
         },
-        "recentMeals": list_recent_meal_entries_json(pool, user_id, 10, false).await?,
+        "recentMeals": recent_meals,
         "recentWeights": recent_weights.as_array().cloned().unwrap_or_default().into_iter().rev().take(10).collect::<Vec<_>>(),
         "recentRecipes": recent_recipes.as_array().cloned().unwrap_or_default().into_iter().take(10).collect::<Vec<_>>(),
         "recentTemplates": recent_templates.as_array().cloned().unwrap_or_default().into_iter().take(10).collect::<Vec<_>>(),
-        "recentBarcodeSubmissions": recent_barcode_submissions_json(pool, user_id, 10).await?
+        "recentBarcodeSubmissions": recent_barcodes
     }))
 }
 
@@ -5205,7 +5290,10 @@ async fn recent_quick_add_json(pool: &PgPool, user_id: Uuid, limit: i32) -> AppR
         habit_buckets AS (
           SELECT
             food_key,
-            floor(extract(hour from created_at) / 3)::int AS bucket,
+            -- Pinned to UTC: the client compares this against a UTC hour, and
+            -- `extract(hour from timestamptz)` would otherwise resolve in
+            -- whatever the session TimeZone GUC happens to be.
+            floor(extract(hour from created_at AT TIME ZONE 'UTC') / 3)::int AS bucket,
             count(*)::int AS habit_count
           FROM history
           GROUP BY food_key, bucket
@@ -5327,6 +5415,7 @@ async fn dashboard_quick_add_json(
 }
 
 async fn search_meal_entries_json(pool: &PgPool, user_id: Uuid, query: &str) -> AppResult<Value> {
+    validate_search_query(query)?;
     let patterns = search_like_patterns(query);
     if patterns.is_empty() {
         return Ok(Value::Array(Vec::new()));
@@ -5597,13 +5686,23 @@ async fn stats_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppR
             coalesce(sum(calories_kcal), 0)::int AS total_calories_kcal
           FROM eaten_days
         ),
-        rolling AS (
+        rolling_7 AS (
           SELECT
             CASE WHEN count(*) = 0 THEN 0 ELSE round((sum(protein_g) / count(*))::numeric, 1)::float8 END AS protein_g,
             CASE WHEN count(*) = 0 THEN 0 ELSE round((sum(carbs_g) / count(*))::numeric, 1)::float8 END AS carbs_g,
             CASE WHEN count(*) = 0 THEN 0 ELSE round((sum(fat_g) / count(*))::numeric, 1)::float8 END AS fat_g,
             CASE WHEN count(*) = 0 THEN 0 ELSE round(sum(calories_kcal)::numeric / count(*))::int END AS calories_kcal
           FROM eaten_days
+          WHERE entry_date >= $2::date - interval '6 days' AND entry_date <= $2::date
+        ),
+        rolling_30 AS (
+          SELECT
+            CASE WHEN count(*) = 0 THEN 0 ELSE round((sum(protein_g) / count(*))::numeric, 1)::float8 END AS protein_g,
+            CASE WHEN count(*) = 0 THEN 0 ELSE round((sum(carbs_g) / count(*))::numeric, 1)::float8 END AS carbs_g,
+            CASE WHEN count(*) = 0 THEN 0 ELSE round((sum(fat_g) / count(*))::numeric, 1)::float8 END AS fat_g,
+            CASE WHEN count(*) = 0 THEN 0 ELSE round(sum(calories_kcal)::numeric / count(*))::int END AS calories_kcal
+          FROM eaten_days
+          WHERE entry_date >= $2::date - interval '29 days' AND entry_date <= $2::date
         ),
         goal_hits AS (
           SELECT
@@ -5748,8 +5847,8 @@ async fn stats_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppR
           ),
           'macroConsistency', jsonb_build_object('calorieAvgAbsoluteDeviation', macro_consistency.calorie_avg_absolute_deviation, 'score', macro_consistency.score),
           'rollingAverages', jsonb_build_object(
-            'days7', jsonb_build_object('proteinG', rolling.protein_g, 'carbsG', rolling.carbs_g, 'fatG', rolling.fat_g, 'caloriesKcal', rolling.calories_kcal),
-            'days30', jsonb_build_object('proteinG', rolling.protein_g, 'carbsG', rolling.carbs_g, 'fatG', rolling.fat_g, 'caloriesKcal', rolling.calories_kcal)
+            'days7', jsonb_build_object('proteinG', rolling_7.protein_g, 'carbsG', rolling_7.carbs_g, 'fatG', rolling_7.fat_g, 'caloriesKcal', rolling_7.calories_kcal),
+            'days30', jsonb_build_object('proteinG', rolling_30.protein_g, 'carbsG', rolling_30.carbs_g, 'fatG', rolling_30.fat_g, 'caloriesKcal', rolling_30.calories_kcal)
           ),
           'estimatedEnergyBalance', jsonb_build_object(
             'averageDailyDeltaKcal', energy_balance.average_daily_delta_kcal,
@@ -5765,7 +5864,8 @@ async fn stats_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppR
           )
         ) AS data
         FROM totals
-        CROSS JOIN rolling
+        CROSS JOIN rolling_7
+        CROSS JOIN rolling_30
         CROSS JOIN goal_hits
         CROSS JOIN user_goals
         CROSS JOIN daily_totals
@@ -5893,11 +5993,49 @@ fn uuid_arg(args: &Value, key: &str) -> AppResult<Uuid> {
         })
 }
 
+/// Rejects a malformed payload without echoing serde's message, which names
+/// struct fields and byte offsets.
+fn invalid_payload(field: &'static str) -> impl Fn(serde_json::Error) -> AppError {
+    move |error| {
+        tracing::debug!(error = ?error, field, "rejected malformed rpc payload");
+        AppError::BadRequest(format!("{field} is invalid."))
+    }
+}
+
 fn string_arg(args: &Value, key: &str) -> AppResult<String> {
     args.get(key)
         .and_then(Value::as_str)
         .map(str::to_string)
         .ok_or_else(|| AppError::BadRequest(format!("{key} is required.")))
+}
+
+/// Rejects anything that is not a literal `YYYY-MM-DD` calendar date.
+///
+/// Postgres accepts `infinity`, `today` and `epoch` as `date` input, so an
+/// unvalidated string can be stored and then fail to re-parse on every
+/// subsequent read — permanently breaking the page that reads it.
+pub(crate) fn ensure_date_string(value: &str) -> AppResult<()> {
+    let bytes = value.as_bytes();
+    let well_formed = bytes.len() == 10
+        && bytes[4] == b'-'
+        && bytes[7] == b'-'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| index == 4 || index == 7 || byte.is_ascii_digit())
+        && NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok();
+
+    if well_formed {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest("Date must use YYYY-MM-DD.".to_string()))
+    }
+}
+
+fn date_arg(args: &Value, key: &str) -> AppResult<String> {
+    let value = string_arg(args, key)?;
+    ensure_date_string(&value)?;
+    Ok(value)
 }
 
 fn object_arg<'a>(args: &'a Value, key: &str) -> AppResult<&'a serde_json::Map<String, Value>> {
@@ -5913,8 +6051,13 @@ fn optional_object_arg<'a>(args: &'a Value, key: &str) -> &'a serde_json::Map<St
         .unwrap_or_else(|| EMPTY.get_or_init(serde_json::Map::new))
 }
 
+/// Forced-failure injection for rollback tests.
+///
+/// Gated on an explicit cargo feature rather than `debug_assertions`: a
+/// debug-profile deploy would otherwise expose fault injection to anyone
+/// holding the internal secret.
 fn test_fault_arg<'a>(args: &'a Value, kind: &str) -> Option<&'a serde_json::Map<String, Value>> {
-    if !cfg!(debug_assertions) {
+    if !cfg!(any(test, feature = "test-faults")) {
         return None;
     }
     let fault = args.get("testFault")?.as_object()?;
@@ -6010,6 +6153,11 @@ fn normalize_positive_number(
             "{field_name} must be a positive number."
         )));
     }
+    if value > MAX_QUANTITY {
+        return Err(AppError::BadRequest(format!(
+            "{field_name} must be at most {MAX_QUANTITY}."
+        )));
+    }
     Ok(round2(value))
 }
 
@@ -6044,9 +6192,9 @@ fn normalize_macros(
     calories_key: &str,
 ) -> AppResult<MacroValues> {
     Ok(MacroValues {
-        protein: round1(required_f64(input, protein_key)?),
-        carbs: round1(required_f64(input, carbs_key)?),
-        fat: round1(required_f64(input, fat_key)?),
+        protein: round1(required_f64_bounded(input, protein_key, MAX_MACRO_GRAMS)?),
+        carbs: round1(required_f64_bounded(input, carbs_key, MAX_MACRO_GRAMS)?),
+        fat: round1(required_f64_bounded(input, fat_key, MAX_MACRO_GRAMS)?),
         calories: required_i32(input, calories_key)?,
     })
 }
@@ -6193,7 +6341,11 @@ fn normalize_food_product_input(
 fn normalize_weight_entry_input(
     input: &serde_json::Map<String, Value>,
 ) -> AppResult<WeightEntryValues> {
+    // Rounded before the bound check: `weight_kg` lands in a `numeric(5, 2)`
+    // column, so a value that only overflows *after* rounding (999.995) has to
+    // be rejected too.
     let weight_kg = optional_f64(input, "weightKg")
+        .map(round2)
         .filter(|value| value.is_finite() && *value > 0.0)
         .ok_or_else(|| AppError::BadRequest("Weight must be a positive number.".to_string()))?;
     if weight_kg >= 1000.0 {
@@ -6210,7 +6362,7 @@ fn normalize_weight_entry_input(
         ));
     }
     Ok(WeightEntryValues {
-        date: required_string(input, "date")?,
+        date: required_date(input, "date")?,
         weight_kg: round2(weight_kg),
         body_fat_pct: body_fat_pct.map(round1),
         notes: trim_optional_string(input, "notes"),
@@ -6227,6 +6379,12 @@ fn required_string(input: &serde_json::Map<String, Value>, key: &str) -> AppResu
         .ok_or_else(|| AppError::BadRequest(format!("{key} is required.")))
 }
 
+fn required_date(input: &serde_json::Map<String, Value>, key: &str) -> AppResult<String> {
+    let value = required_string(input, key)?;
+    ensure_date_string(&value)?;
+    Ok(value)
+}
+
 fn optional_uuid(input: &serde_json::Map<String, Value>, key: &str) -> AppResult<Option<Uuid>> {
     match input.get(key) {
         None | Some(Value::Null) => Ok(None),
@@ -6239,11 +6397,16 @@ fn optional_uuid(input: &serde_json::Map<String, Value>, key: &str) -> AppResult
 }
 
 fn optional_f64(input: &serde_json::Map<String, Value>, key: &str) -> Option<f64> {
-    input.get(key).and_then(|value| match value {
-        Value::Number(number) => number.as_f64(),
-        Value::String(value) => value.parse().ok(),
-        _ => None,
-    })
+    input
+        .get(key)
+        .and_then(|value| match value {
+            Value::Number(number) => number.as_f64(),
+            // `"inf"`/`"NaN"`/`"-inf"` all parse successfully into f64, so the
+            // finiteness check below is what keeps them out.
+            Value::String(value) => value.parse().ok(),
+            _ => None,
+        })
+        .filter(|value: &f64| value.is_finite())
 }
 
 fn optional_i32(input: &serde_json::Map<String, Value>, key: &str) -> Option<i32> {
@@ -6254,10 +6417,31 @@ fn optional_i32(input: &serde_json::Map<String, Value>, key: &str) -> Option<i32
     })
 }
 
+/// Widest value a `numeric(6, 1)` column accepts. Anything larger reaches the
+/// INSERT and comes back as a Postgres numeric-field-overflow — a 500 for what
+/// is really a client input error.
+pub(crate) const MAX_MACRO_GRAMS: f64 = 99_999.9;
+/// Widest value a `numeric(8, 2)` column accepts.
+pub(crate) const MAX_QUANTITY: f64 = 999_999.99;
+
 fn required_f64(input: &serde_json::Map<String, Value>, key: &str) -> AppResult<f64> {
     optional_f64(input, key)
         .filter(|value| value.is_finite() && *value >= 0.0)
         .ok_or_else(|| AppError::BadRequest(format!("{key} must be a non-negative number.")))
+}
+
+fn required_f64_bounded(
+    input: &serde_json::Map<String, Value>,
+    key: &str,
+    max: f64,
+) -> AppResult<f64> {
+    let value = required_f64(input, key)?;
+    if value > max {
+        return Err(AppError::BadRequest(format!(
+            "{key} must be at most {max}."
+        )));
+    }
+    Ok(value)
 }
 
 fn required_i32(input: &serde_json::Map<String, Value>, key: &str) -> AppResult<i32> {
@@ -7924,6 +8108,107 @@ mod tests {
         assert_eq!(revision_count, 0);
 
         test_db.cleanup().await;
+    }
+
+    #[test]
+    fn ensure_date_string_rejects_postgres_special_dates() {
+        assert!(ensure_date_string("2026-01-15").is_ok());
+        assert!(ensure_date_string("2024-02-29").is_ok());
+
+        for invalid in [
+            "",
+            "2026-1-5",
+            "26-01-15",
+            "2026-13-01",
+            "2026-02-30",
+            "2026-01-15T00:00:00Z",
+            // Postgres accepts all of these as `date` input, stores them, and
+            // then fails to re-parse on read — permanently breaking the page.
+            "infinity",
+            "-infinity",
+            "today",
+            "yesterday",
+            "epoch",
+            "now",
+        ] {
+            assert!(
+                ensure_date_string(invalid).is_err(),
+                "expected {invalid:?} to be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn required_date_rejects_special_dates_on_the_rpc_path() {
+        let payload = serde_json::Map::from_iter([("date".to_string(), json!("infinity"))]);
+        assert!(required_date(&payload, "date").is_err());
+
+        let payload = serde_json::Map::from_iter([("date".to_string(), json!("2026-01-15"))]);
+        assert_eq!(
+            required_date(&payload, "date").expect("valid date"),
+            "2026-01-15"
+        );
+    }
+
+    #[test]
+    fn optional_f64_rejects_non_finite_strings() {
+        for raw in ["inf", "-inf", "NaN", "infinity"] {
+            let payload = serde_json::Map::from_iter([("weightKg".to_string(), json!(raw))]);
+            assert_eq!(
+                optional_f64(&payload, "weightKg"),
+                None,
+                "expected {raw:?} to be rejected"
+            );
+        }
+
+        let payload = serde_json::Map::from_iter([("weightKg".to_string(), json!("72.5"))]);
+        assert_eq!(optional_f64(&payload, "weightKg"), Some(72.5));
+    }
+
+    #[test]
+    fn macros_are_bounded_to_the_column_domain() {
+        // numeric(6, 1) overflows past 99_999.9; without this bound the INSERT
+        // raises numeric-field-overflow and the caller gets a 500.
+        let payload = meal_payload(&[("proteinG", json!(1e30))]);
+        assert!(normalize_meal_food_values(&payload, 0, "Meal name is required.").is_err());
+
+        let payload = meal_payload(&[("proteinG", json!(MAX_MACRO_GRAMS))]);
+        assert!(normalize_meal_food_values(&payload, 0, "Meal name is required.").is_ok());
+    }
+
+    #[test]
+    fn quantities_are_bounded_to_the_column_domain() {
+        let payload = meal_payload(&[("quantity", json!(1e12))]);
+        assert!(normalize_meal_food_values(&payload, 0, "Meal name is required.").is_err());
+    }
+
+    #[test]
+    fn goal_weight_is_bounded_after_rounding() {
+        assert_eq!(validate_goal_weight_kg(None).expect("none is allowed"), None);
+        assert_eq!(
+            validate_goal_weight_kg(Some(72.456)).expect("valid"),
+            Some(72.46)
+        );
+        assert!(validate_goal_weight_kg(Some(-1.0)).is_err());
+        assert!(validate_goal_weight_kg(Some(1e30)).is_err());
+        // Rounds up into overflow for numeric(5, 2), so it must be rejected.
+        assert!(validate_goal_weight_kg(Some(999.995)).is_err());
+    }
+
+    #[test]
+    fn search_queries_are_capped() {
+        assert!(validate_search_query("chicken breast").is_ok());
+        assert!(validate_search_query(&"a".repeat(MAX_SEARCH_QUERY_LENGTH)).is_ok());
+        assert!(validate_search_query(&"a".repeat(MAX_SEARCH_QUERY_LENGTH + 1)).is_err());
+
+        let too_many_terms = vec!["term"; MAX_SEARCH_TERMS + 1].join(" ");
+        assert!(validate_search_query(&too_many_terms).is_err());
+    }
+
+    #[test]
+    fn search_like_patterns_never_exceed_the_term_cap() {
+        let query = vec!["term"; 100].join(" ");
+        assert_eq!(search_like_patterns(&query).len(), MAX_SEARCH_TERMS);
     }
 
     #[test]

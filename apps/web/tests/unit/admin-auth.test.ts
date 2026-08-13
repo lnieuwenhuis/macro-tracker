@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocked = vi.hoisted(() => ({
   getSessionUserFromCookies: vi.fn(),
   getUserById: vi.fn(),
-  ensureUserRole: vi.fn(),
+  reconcileConfiguredOwner: vi.fn(),
   redirect: vi.fn((url: string) => {
     throw new Error(`redirect:${url}`);
   }),
@@ -18,7 +18,7 @@ vi.mock("@/lib/session", () => ({
 
 vi.mock("@macro-tracker/db", () => ({
   getUserById: mocked.getUserById,
-  ensureUserRole: mocked.ensureUserRole,
+  reconcileConfiguredOwner: mocked.reconcileConfiguredOwner,
   canAccessAdmin: (role: string) => role === "admin" || role === "owner",
   isOwnerRole: (role: string) => role === "owner",
 }));
@@ -77,12 +77,12 @@ describe("admin auth helpers", () => {
       email: "owner@example.com",
     });
     mocked.getUserById.mockResolvedValue(buildUser());
-    mocked.ensureUserRole.mockResolvedValue(buildUser({ role: "owner" }));
+    mocked.reconcileConfiguredOwner.mockResolvedValue(buildUser({ role: "owner" }));
 
     const user = await getCurrentAppUser();
 
     expect(user?.role).toBe("owner");
-    expect(mocked.ensureUserRole).toHaveBeenCalledWith("user-1", "owner");
+    expect(mocked.reconcileConfiguredOwner).toHaveBeenCalledWith("user-1");
   });
 
   it("returns notFound for non-admin users hitting admin routes", async () => {

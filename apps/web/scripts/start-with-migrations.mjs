@@ -3,10 +3,6 @@ import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { drizzle } from "drizzle-orm/node-postgres";
-import { migrate } from "drizzle-orm/node-postgres/migrator";
-import { Pool } from "pg";
-
 import {
   getPostgresConnectionConfig,
   isPgliteConnectionString,
@@ -37,9 +33,18 @@ async function runMigrationsIfNeeded() {
     return;
   }
 
+  // Imported lazily: the backend owns migrations, so the normal startup path
+  // must not pull an ORM and a Postgres driver into the frontend process.
+  // These are only reachable when LEGACY_FRONTEND_RUN_MIGRATIONS is set.
+  const [{ drizzle }, { migrate }, { default: pg }] = await Promise.all([
+    import("drizzle-orm/node-postgres"),
+    import("drizzle-orm/node-postgres/migrator"),
+    import("pg"),
+  ]);
+
   const scriptDir = dirname(fileURLToPath(import.meta.url));
   const migrationsFolder = resolve(scriptDir, "../../../packages/db/drizzle");
-  const pool = new Pool(getStartupMigrationConnectionConfig(connectionString));
+  const pool = new pg.Pool(getStartupMigrationConnectionConfig(connectionString));
 
   try {
     console.info("Running database migrations before Next.js startup");

@@ -46,9 +46,10 @@ export function getServerEnv(): ServerEnv {
     isProduction ? undefined : "http://localhost:3000",
   );
   const appOrigin = new URL(appUrl).origin;
-  const sessionSecret = isProduction
-    ? readRequiredEnv("SESSION_SECRET")
-    : readRequiredEnv("SESSION_SECRET", "macro-tracker-dev-session-secret");
+  // Required unconditionally. It used to fall back to a repo-visible literal
+  // outside production, which meant one mis-set NODE_ENV made every HS256
+  // session forgeable.
+  const sessionSecret = readRequiredEnv("SESSION_SECRET");
 
   cachedEnv = {
     appUrl,
@@ -57,9 +58,10 @@ export function getServerEnv(): ServerEnv {
     ),
     sessionSecret,
     shooBaseUrl: process.env.SHOO_BASE_URL ?? "https://shoo.dev",
-    enableTestRoutes:
-      process.env.NODE_ENV === "test" ||
-      process.env.ENABLE_TEST_ROUTES === "true",
+    // Explicit opt-in only. Deriving this from NODE_ENV coupled
+    // arbitrary-session test routes to an environment variable that is easy to
+    // set wrong.
+    enableTestRoutes: process.env.ENABLE_TEST_ROUTES === "true",
     testRoutesSecret: process.env.TEST_ROUTES_SECRET,
     adminOwnerEmails: parseCsvList(process.env.ADMIN_OWNER_EMAILS),
   };

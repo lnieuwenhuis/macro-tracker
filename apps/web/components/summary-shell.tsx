@@ -2,7 +2,7 @@
 
 import type { MacroGoals, PeriodAverage, StatsPageData } from "@macro-tracker/db";
 
-import { ExperimentalAppShell, ExperimentalSettingsButton } from "./experimental-app-shell";
+import { AppShell, SettingsButton } from "./app-shell";
 import { StatsPanels } from "./stats-shell";
 import { SummaryCard } from "./summary-card";
 
@@ -52,7 +52,7 @@ export function SummaryShell({
   );
 
   return (
-    <ExperimentalAppShell
+    <AppShell
       userEmail={userEmail}
       canAccessAdmin={canAccessAdmin}
       selectedDate={selectedDate}
@@ -65,11 +65,11 @@ export function SummaryShell({
               Macro Trends
             </h2>
           </div>
-          <ExperimentalSettingsButton onClick={openSettings} />
+          <SettingsButton onClick={openSettings} />
         </div>
       )}
     >
       {content}
-    </ExperimentalAppShell>
+    </AppShell>
   );
 }

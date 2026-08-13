@@ -9,7 +9,11 @@ export default defineConfig({
     },
   },
   test: {
+    // Node by default; component tests opt into jsdom with the
+    // `@vitest-environment jsdom` docblock so the rest of the suite keeps its
+    // faster environment.
     environment: "node",
-    include: ["tests/unit/**/*.test.ts"],
+    setupFiles: ["./tests/setup-dom.ts"],
+    include: ["tests/unit/**/*.test.ts", "tests/unit/**/*.test.tsx"],
   },
 });

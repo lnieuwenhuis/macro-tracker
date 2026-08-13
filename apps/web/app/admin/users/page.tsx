@@ -11,6 +11,7 @@ import {
   AdminSection,
   formatAdminTimestamp,
 } from "@/components/admin-ui";
+import { requireAdminUser } from "@/lib/auth";
 
 type AdminUsersPageProps = {
   searchParams: Promise<{
@@ -25,13 +26,14 @@ type AdminUsersPageProps = {
 export default async function AdminUsersPage({
   searchParams,
 }: AdminUsersPageProps) {
+  const adminUser = await requireAdminUser();
   const params = await searchParams;
   const page = Number(params.page ?? "1");
   const role = params.role ?? "all";
   const activity = params.activity ?? "all";
   const health = params.health ?? "all";
   const q = params.q ?? "";
-  const result = await listAdminUsers({
+  const result = await listAdminUsers(adminUser.id, {
     q,
     role: role === "user" || role === "admin" || role === "owner" ? role : "all",
     activity:

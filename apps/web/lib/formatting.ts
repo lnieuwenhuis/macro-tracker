@@ -1,15 +1,14 @@
 import { addDays, format, parseISO, subDays } from "date-fns";
 
+// Re-exported so display code keeps importing formatting helpers from one place.
+export { formatMacroValue } from "./numbers";
+
 export function formatSelectedDate(value: string) {
   return format(parseISO(value), "EEEE, d MMMM");
 }
 
 export function formatShortDate(value: string) {
   return format(parseISO(value), "d MMM");
-}
-
-export function formatMacroValue(value: number) {
-  return Number.isInteger(value) ? String(value) : value.toFixed(1);
 }
 
 export function formatPeriodRange(startDate: string, endDate: string) {

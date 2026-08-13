@@ -1,16 +1,23 @@
 import type { WeightUnit } from "@macro-tracker/db";
 
+import { parsePositiveNumber, roundToTwoDecimals } from "./numbers";
+
 const POUNDS_PER_KG = 2.2046226218;
 
-function roundToTwoDecimals(value: number) {
-  return Math.round(value * 100) / 100;
-}
+export { parsePositiveNumber };
 
-export function parsePositiveNumber(value: string): number | null {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const parsed = Number(trimmed);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+export function convertWeight(
+  value: number,
+  from: WeightUnit,
+  to: WeightUnit,
+): number {
+  if (from === to) {
+    return value;
+  }
+
+  return roundToTwoDecimals(
+    to === "lb" ? value * POUNDS_PER_KG : value / POUNDS_PER_KG,
+  );
 }
 
 export function normalizeOnboardingWeightKg(

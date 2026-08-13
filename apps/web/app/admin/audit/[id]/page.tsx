@@ -48,9 +48,9 @@ function buildDiffRows(
 export default async function AdminAuditDetailPage({
   params,
 }: AdminAuditDetailPageProps) {
-  await requireOwnerUser();
+  const ownerUser = await requireOwnerUser();
   const { id } = await params;
-  const event = await getAdminAuditEventById(id);
+  const event = await getAdminAuditEventById(ownerUser.id, id);
 
   if (!event) {
     notFound();

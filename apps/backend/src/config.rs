@@ -12,6 +12,9 @@ const MIN_SECRET_LENGTH: usize = 32;
 pub struct Config {
     pub allow_insecure_internal_auth: bool,
     pub app_url: String,
+    /// Gates the test-only role-assignment RPC. Deliberately its own flag
+    /// rather than a build profile, so a debug deploy cannot enable it.
+    pub enable_test_routes: bool,
     pub backend_internal_secret: Option<String>,
     pub database_url: String,
     pub port: u16,
@@ -78,30 +81,55 @@ impl Config {
         Ok(Self {
             allow_insecure_internal_auth: allow_insecure_local,
             app_url,
+            enable_test_routes: parse_env_bool(
+                read_value(&mut read, "BACKEND_ENABLE_TEST_ROUTES").as_deref(),
+            ),
             backend_internal_secret,
             database_url,
-            port: read_value(&mut read, "PORT")
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(4000),
-            postgres_pool_max: read_value(&mut read, "POSTGRES_POOL_MAX")
-                .and_then(|value| value.parse().ok())
-                .unwrap_or(3),
+            port: parse_bounded(read_value(&mut read, "PORT"), "PORT", 4000, 1, u16::MAX)?,
+            postgres_pool_max: parse_bounded(
+                read_value(&mut read, "POSTGRES_POOL_MAX"),
+                "POSTGRES_POOL_MAX",
+                3,
+                1,
+                256,
+            )?,
             session_secret,
-            shoo_base_url: read_value(&mut read, "SHOO_BASE_URL")
-                .unwrap_or_else(|| "https://shoo.dev".to_string()),
+            shoo_base_url: parse_https_base_url(
+                read_value(&mut read, "SHOO_BASE_URL"),
+                "SHOO_BASE_URL",
+                "https://shoo.dev",
+                allow_insecure_local,
+            )?,
             trusted_origins,
             admin_owner_emails: parse_csv_lower(read_value(&mut read, "ADMIN_OWNER_EMAILS")),
             openrouter_api_key: read_value(&mut read, "OPENROUTER_API_KEY"),
             openrouter_model: read_value(&mut read, "OPENROUTER_MODEL"),
             openrouter_fallback_models: read_value(&mut read, "OPENROUTER_FALLBACK_MODELS"),
-            openrouter_model_timeout_ms: read_value(&mut read, "OPENROUTER_MODEL_TIMEOUT_MS")
-                .and_then(|value| value.parse().ok()),
-            open_food_facts_base_url: read_value(&mut read, "OPEN_FOOD_FACTS_BASE_URL")
-                .unwrap_or_else(|| "https://world.openfoodfacts.org".to_string()),
-            albert_heijn_base_url: read_value(&mut read, "ALBERT_HEIJN_BASE_URL")
-                .unwrap_or_else(|| "https://api.ah.nl".to_string()),
-            jumbo_base_url: read_value(&mut read, "JUMBO_BASE_URL")
-                .unwrap_or_else(|| "https://mobileapi.jumbo.com".to_string()),
+            openrouter_model_timeout_ms: match read_value(&mut read, "OPENROUTER_MODEL_TIMEOUT_MS") {
+                None => None,
+                Some(value) => Some(value.parse().with_context(|| {
+                    "OPENROUTER_MODEL_TIMEOUT_MS must be a non-negative integer".to_string()
+                })?),
+            },
+            open_food_facts_base_url: parse_https_base_url(
+                read_value(&mut read, "OPEN_FOOD_FACTS_BASE_URL"),
+                "OPEN_FOOD_FACTS_BASE_URL",
+                "https://world.openfoodfacts.org",
+                allow_insecure_local,
+            )?,
+            albert_heijn_base_url: parse_https_base_url(
+                read_value(&mut read, "ALBERT_HEIJN_BASE_URL"),
+                "ALBERT_HEIJN_BASE_URL",
+                "https://api.ah.nl",
+                allow_insecure_local,
+            )?,
+            jumbo_base_url: parse_https_base_url(
+                read_value(&mut read, "JUMBO_BASE_URL"),
+                "JUMBO_BASE_URL",
+                "https://mobileapi.jumbo.com",
+                allow_insecure_local,
+            )?,
         })
     }
 
@@ -267,6 +295,70 @@ fn parse_csv_lower(value: Option<String>) -> Vec<String> {
         .collect()
 }
 
+/// Parses a numeric setting, failing loudly instead of silently falling back.
+///
+/// A typo in `POSTGRES_POOL_MAX` used to collapse to the default, and `=0` to a
+/// zero-permit pool where every query 500s after waiting out the acquire
+/// timeout.
+fn parse_bounded<T>(
+    value: Option<String>,
+    name: &str,
+    default: T,
+    min: T,
+    max: T,
+) -> anyhow::Result<T>
+where
+    T: FromStr + PartialOrd + std::fmt::Display + Copy,
+    <T as FromStr>::Err: std::fmt::Display,
+{
+    let Some(raw) = value else {
+        return Ok(default);
+    };
+
+    let parsed: T = raw
+        .trim()
+        .parse()
+        .map_err(|error| anyhow::anyhow!("{name} must be a number: {error}"))?;
+
+    if parsed < min || parsed > max {
+        bail!("{name} must be between {min} and {max}, got {parsed}");
+    }
+
+    Ok(parsed)
+}
+
+/// Provider base URLs are load-bearing: `SHOO_BASE_URL` is both the JWKS fetch
+/// origin and the JWT issuer allowlist, so an `http://` value would silently
+/// downgrade login-token verification.
+fn parse_https_base_url(
+    value: Option<String>,
+    name: &str,
+    default: &str,
+    allow_insecure_local: bool,
+) -> anyhow::Result<String> {
+    let raw = value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default.to_string());
+
+    let parsed = url::Url::parse(&raw).with_context(|| format!("{name} must be a valid URL"))?;
+
+    match parsed.scheme() {
+        "https" => {}
+        "http" if allow_insecure_local => {}
+        "http" => bail!(
+            "{name} must use https. Set {ALLOW_INSECURE_LOCAL_BACKEND_ENV}=true only for local test backends."
+        ),
+        scheme => bail!("{name} must use http or https, got {scheme}"),
+    }
+
+    if !parsed.has_host() {
+        bail!("{name} must include a host");
+    }
+
+    Ok(raw)
+}
+
 fn parse_origin_list(value: Option<String>) -> anyhow::Result<Vec<String>> {
     value
         .unwrap_or_default()
@@ -293,6 +385,49 @@ mod tests {
             .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
             .collect::<HashMap<_, _>>();
         Config::from_env_reader(|name| env.get(name).cloned())
+    }
+
+    #[test]
+    fn numeric_config_fails_loudly_instead_of_silently_defaulting() {
+        let mut values = production_values();
+        values.push(("POSTGRES_POOL_MAX", "abc"));
+        let error = config_from(&values).expect_err("a non-numeric pool max must fail");
+        assert!(error.to_string().contains("POSTGRES_POOL_MAX"));
+
+        let mut values = production_values();
+        values.push(("POSTGRES_POOL_MAX", "0"));
+        let error = config_from(&values).expect_err("a zero-permit pool must fail");
+        assert!(error.to_string().contains("between 1"));
+
+        let mut values = production_values();
+        values.push(("PORT", "0"));
+        assert!(config_from(&values).is_err(), "port 0 must be rejected");
+    }
+
+    #[test]
+    fn provider_base_urls_must_be_https_outside_local_mode() {
+        let mut values = production_values();
+        values.push(("SHOO_BASE_URL", "http://shoo.local"));
+        let error = config_from(&values).expect_err("an http issuer must fail");
+        assert!(error.to_string().contains("SHOO_BASE_URL"));
+
+        let mut values = production_values();
+        values.push(("JUMBO_BASE_URL", "not-a-url"));
+        assert!(
+            config_from(&values).is_err(),
+            "a malformed provider URL must be rejected"
+        );
+    }
+
+    #[test]
+    fn backend_test_routes_are_disabled_unless_explicitly_enabled() {
+        let config = config_from(&production_values()).expect("config should build");
+        assert!(!config.enable_test_routes);
+
+        let mut values = production_values();
+        values.push(("BACKEND_ENABLE_TEST_ROUTES", "true"));
+        let config = config_from(&values).expect("config should build");
+        assert!(config.enable_test_routes);
     }
 
     fn production_values() -> Vec<(&'static str, &'static str)> {

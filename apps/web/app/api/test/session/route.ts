@@ -1,6 +1,6 @@
 import {
   completeUserOnboarding,
-  ensureUserRole,
+  ensureUserRoleForTesting,
   setUserOnboardingForTesting,
   upsertUserFromShooProfile,
 } from "@macro-tracker/db";
@@ -52,7 +52,7 @@ async function createTestSessionResponse(
     },
   );
   if (testLoginBase === "owner") {
-    await ensureUserRole(user.id, "owner");
+    await ensureUserRoleForTesting(user.id, "owner");
   }
   if (options.onboarded) {
     await completeUserOnboarding(user.id, { preferredWeightUnit: "kg" });

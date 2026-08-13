@@ -154,7 +154,7 @@ export function AddFoodButton({
       <button
         type="button"
         onClick={() => setOpen(!open)}
-        className="flex h-9 w-9 items-center justify-center rounded-full bg-[var(--color-accent)] text-white shadow-md transition hover:-translate-y-0.5"
+        className="flex h-11 w-11 items-center justify-center rounded-full bg-[var(--color-accent)] text-white shadow-md transition hover:-translate-y-0.5"
         aria-label="Add food"
         aria-expanded={open}
       >

@@ -10,6 +10,7 @@ import {
 } from "@/lib/food-search-state";
 import { formatSelectedDate } from "@/lib/formatting";
 import { buildMealEntryCopyInput } from "@/lib/meal-entry-copy";
+import { createClientMutationIdStore } from "@/lib/client-mutation-id";
 import { getLocalDateString } from "@/lib/startup-date";
 import { CompactModal } from "./compact-modal";
 
@@ -29,6 +30,7 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
   const [copyingId, setCopyingId] = useState<string | null>(null);
   const [copiedIds, setCopiedIds] = useState<Set<string>>(new Set());
   const inputRef = useRef<HTMLInputElement>(null);
+  const mutationIds = useRef(createClientMutationIdStore());
 
   const todayStr = useMemo(() => getLocalDateString(), []);
   const trimmedQuery = normalizeFoodSearchQuery(query);
@@ -93,14 +95,17 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
   }, [trimmedQuery]);
 
   async function handleCopyToToday(entry: MealEntryRecord) {
+    const mutationKey = `history:${entry.id}:${todayStr}`;
     setCopyingId(entry.id);
     setError(null);
     try {
-      const result = await saveMealEntryAction(
-        buildMealEntryCopyInput(entry, todayStr),
-      );
+      const result = await saveMealEntryAction({
+        ...buildMealEntryCopyInput(entry, todayStr),
+        clientMutationId: mutationIds.current.take(mutationKey),
+      });
 
       if (result.ok) {
+        mutationIds.current.settle(mutationKey);
         if (result.entry) {
           onEntrySaved?.(result.entry);
         }
@@ -122,6 +127,7 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
   }
 
   async function handleAddProduct(product: FoodProduct) {
+    const mutationKey = `product:${product.id}:${todayStr}`;
     setCopyingId(product.id);
     setError(null);
     try {
@@ -133,6 +139,7 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
       const result = await saveMealEntryAction({
         date: todayStr,
         status: "eaten",
+        clientMutationId: mutationIds.current.take(mutationKey),
         productId: product.id,
         label: product.brand ? `${product.name} (${product.brand})` : product.name,
         quantity,
@@ -144,6 +151,7 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
       });
 
       if (result.ok) {
+        mutationIds.current.settle(mutationKey);
         if (result.entry) {
           onEntrySaved?.(result.entry);
         }

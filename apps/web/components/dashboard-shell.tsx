@@ -3,7 +3,7 @@
 import type { DailySummary, MacroGoals, MealEntryRecord, MealEntryStatus, MealGroup, MealTemplate, QuickAddCandidate, RecipeRecord } from "@macro-tracker/db";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
-import { useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, useTransition } from "react";
+import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, useTransition } from "react";
 
 import { applyTemplateAction, createMealGroupAction, deleteMealGroupAction, deleteMealEntryAction, loadRecipesAction, loadTemplatesAction, markMealEntryStatusAction, saveMealEntryAction, updateMealGroupAction } from "@/lib/actions";
 import type { ComposeAction } from "@/lib/compose";
@@ -12,11 +12,12 @@ import { prepareNavigationMotion } from "@/lib/navigation-motion";
 import type { OpenFoodFactsProduct } from "@/lib/openfoodfacts";
 import type { PresetTemplateKind } from "@/lib/preset-modal-state";
 import { getLocalDateString } from "@/lib/startup-date";
+import { createClientMutationIdStore } from "@/lib/client-mutation-id";
 import { createLazyCollectionLoader } from "@/lib/lazy-collection";
 import { prefetchOnIdle } from "@/lib/idle-prefetch";
 
 import { CompactModal } from "./compact-modal";
-import { ExperimentalAppShell } from "./experimental-app-shell";
+import { AppShell } from "./app-shell";
 import { MacroBarGroup } from "./macro-bar";
 import { MealCard, type MealDraft } from "./meal-card";
 import {
@@ -219,12 +220,14 @@ function mealDraftToSaveInput(
     includeSortOrder = true,
     mealGroupId = draft.mealGroupId ?? null,
     status = draft.status,
+    clientMutationId,
   }: {
     date: string;
     includeId?: boolean;
     includeSortOrder?: boolean;
     mealGroupId?: string | null;
     status?: MealEntryStatus;
+    clientMutationId?: string;
   },
 ): Parameters<typeof saveMealEntryAction>[0] {
   const input: Parameters<typeof saveMealEntryAction>[0] = {
@@ -247,6 +250,10 @@ function mealDraftToSaveInput(
   }
   if (includeSortOrder) {
     input.sortOrder = draft.sortOrder;
+  }
+  // Only creates need deduping; an update is already addressed by its id.
+  if (!input.id && clientMutationId) {
+    input.clientMutationId = clientMutationId;
   }
 
   return input;
@@ -305,6 +312,8 @@ export function DashboardShell({
 }: DashboardShellProps) {
   const router = useRouter();
   const composeHandledRef = useRef<string | null>(null);
+  // Survives re-renders so a repeat tap reuses the same idempotency key.
+  const mutationIds = useRef(createClientMutationIdStore());
   const selectedDateRef = useRef(selectedDate);
   const [clientReady, setClientReady] = useState(false);
   const [drafts, setDrafts] = useState<MealDraft[]>(() =>
@@ -595,16 +604,21 @@ export function DashboardShell({
   }
 
   /** Source-agnostic: tap any quick-add card to open a prefilled draft (no auto-save). */
-  function addDraftFromCandidate(candidate: QuickAddCandidate) {
-    setDrafts((currentDrafts) => [
-      ...currentDrafts,
-      createDraftFromCandidate(
-        candidate,
-        getNextSortOrder(currentDrafts),
-        defaultEntryStatus,
-      ),
-    ]);
-  }
+  // `useCallback` so the memoized QuickAddCard can actually skip re-renders —
+  // a fresh function identity each render would defeat the memo.
+  const addDraftFromCandidate = useCallback(
+    (candidate: QuickAddCandidate) => {
+      setDrafts((currentDrafts) => [
+        ...currentDrafts,
+        createDraftFromCandidate(
+          candidate,
+          getNextSortOrder(currentDrafts),
+          defaultEntryStatus,
+        ),
+      ]);
+    },
+    [defaultEntryStatus],
+  );
 
   function handleSearchEntrySaved(entry: MealEntryRecord) {
     if (entry.date !== selectedDate) {
@@ -676,9 +690,17 @@ export function DashboardShell({
 
     setSavingClientId(clientId);
     try {
+      const mutationKey = `draft:${clientId}:${selectedDate}`;
       const result = await saveMealEntryAction(
-        mealDraftToSaveInput(draft, { date: selectedDate }),
+        mealDraftToSaveInput(draft, {
+          date: selectedDate,
+          clientMutationId: mutationIds.current.take(mutationKey),
+        }),
       );
+
+      if (result.ok) {
+        mutationIds.current.settle(mutationKey);
+      }
 
       if (!result.ok) {
         setErrors((currentErrors) => ({
@@ -983,6 +1005,7 @@ export function DashboardShell({
     const draft = drafts.find((d) => d.clientId === clientId);
     if (!draft) return;
 
+    const mutationKey = `copy:${draft.id ?? clientId}:${todayStr}`;
     setActiveMutation(clientId);
     beginMutation(async () => {
       const result = await saveMealEntryAction(mealDraftToSaveInput(draft, {
@@ -990,7 +1013,12 @@ export function DashboardShell({
         includeId: false,
         includeSortOrder: false,
         status: "eaten",
+        clientMutationId: mutationIds.current.take(mutationKey),
       }));
+
+      if (result.ok) {
+        mutationIds.current.settle(mutationKey);
+      }
 
       if (!result.ok) {
         setErrors((currentErrors) => ({
@@ -1365,7 +1393,7 @@ export function DashboardShell({
 
   return (
     <>
-      <ExperimentalAppShell
+      <AppShell
         userEmail={userEmail}
         canAccessAdmin={canAccessAdmin}
         selectedDate={selectedDate}
@@ -1375,7 +1403,7 @@ export function DashboardShell({
         onComposeAction={handleComposeAction}
       >
         {content}
-      </ExperimentalAppShell>
+      </AppShell>
 
       {showSearchModal && (
         <ModalChunkDismissProvider onDismiss={() => setShowSearchModal(false)}>

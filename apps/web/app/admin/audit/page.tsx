@@ -16,10 +16,10 @@ type AdminAuditPageProps = {
 export default async function AdminAuditPage({
   searchParams,
 }: AdminAuditPageProps) {
-  await requireOwnerUser();
+  const ownerUser = await requireOwnerUser();
   const params = await searchParams;
   const page = Number(params.page ?? "1");
-  const audit = await listAdminAuditEvents({
+  const audit = await listAdminAuditEvents(ownerUser.id, {
     page: Number.isFinite(page) ? page : 1,
     pageSize: 25,
   });

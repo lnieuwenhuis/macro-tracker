@@ -50,14 +50,8 @@ async function proveDismissalStaysClosed({
 
     return createElement(
       ModalChunkDismissProvider,
-      {
-        onDismiss: () => setOpen(false),
-        children: createElement(
-          Suspense,
-          { fallback },
-          createElement(LazyModal),
-        ),
-      },
+      { onDismiss: () => setOpen(false) },
+      createElement(Suspense, { fallback }, createElement(LazyModal)),
     );
   }
 

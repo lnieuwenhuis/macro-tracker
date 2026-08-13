@@ -13,7 +13,8 @@ import {
 } from "@/lib/image-optimization";
 
 import { CloseButton } from "./close-button";
-import { OverlayPortal, useBodyScrollLock } from "./overlay-portal";
+import { ModalSurface } from "./modal-surface";
+import { OverlayPortal } from "./overlay-portal";
 
 type AiFoodPhotoModalProps = {
   onClose: () => void;
@@ -68,7 +69,6 @@ export function AiFoodPhotoModal({
   const [error, setError] = useState<string | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isOptimizing, setIsOptimizing] = useState(false);
-  useBodyScrollLock();
 
   useEffect(() => () => {
     optimizationSequenceRef.current += 1;
@@ -197,7 +197,12 @@ export function AiFoodPhotoModal({
             }
           }}
         />
-        <div className="relative z-10 mx-4 mb-4 w-full max-w-sm rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] shadow-2xl sm:mb-0">
+        <ModalSurface
+          ariaLabel="Estimate from photo"
+          onClose={onClose}
+          dismissable={!isAnalyzing}
+          className="relative z-10 mx-4 mb-4 w-full max-w-sm rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] shadow-2xl outline-none sm:mb-0"
+        >
           <div className="flex items-center justify-between border-b border-[var(--color-border)] px-5 py-4">
             <div>
               <h3 className="text-base font-bold text-[var(--color-ink)]">
@@ -223,7 +228,7 @@ export function AiFoodPhotoModal({
                 // eslint-disable-next-line @next/next/no-img-element
                 <img
                   src={previewUrl}
-                  alt=""
+                  alt="The food photo you selected, ready to analyse"
                   className="h-full w-full object-cover"
                 />
               ) : (
@@ -344,7 +349,7 @@ export function AiFoodPhotoModal({
             ) : null}
 
             {error ? (
-              <p className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600 dark:bg-red-950/30 dark:text-red-400">
+              <p className="rounded-lg bg-[color-mix(in_srgb,var(--color-danger)_12%,transparent)] px-3 py-2 text-xs text-[var(--color-danger)]">
                 {error}
               </p>
             ) : null}
@@ -389,7 +394,7 @@ export function AiFoodPhotoModal({
               )}
             </div>
           </div>
-        </div>
+        </ModalSurface>
       </div>
     </OverlayPortal>
   );
