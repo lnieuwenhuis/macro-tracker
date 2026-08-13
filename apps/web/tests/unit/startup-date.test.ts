@@ -49,3 +49,28 @@ describe("getStartupDateRedirect", () => {
     ).toBe("2026-04-02");
   });
 });
+
+describe("startup redirect is a one-shot", () => {
+  it("would bounce a user-picked day back to today if it re-ran mid-navigation", () => {
+    // Reproduces the race the mount guard exists to prevent: after picking a
+    // day, the pushed URL has not landed yet, so `window.location.search` still
+    // has no `date` while `selectedDate` already holds the new day.
+    expect(
+      getStartupDateRedirect({
+        requestedDate: null,
+        selectedDate: "2026-03-17",
+        localDate: "2026-08-13",
+      }),
+    ).toBe("2026-08-13");
+  });
+
+  it("is a no-op once the pushed URL has landed", () => {
+    expect(
+      getStartupDateRedirect({
+        requestedDate: "2026-03-17",
+        selectedDate: "2026-03-17",
+        localDate: "2026-08-13",
+      }),
+    ).toBeNull();
+  });
+});

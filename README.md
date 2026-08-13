@@ -116,7 +116,7 @@ Useful optional environment variables:
 | Variable | Use |
 | --- | --- |
 | `APP_TRUSTED_ORIGINS` | Extra comma-separated origins that are allowed during auth flows. |
-| `SHOO_BASE_URL` | Alternate Shoo base URL. Defaults to `https://shoo.dev`. |
+| `SHOO_BASE_URL` | Alternate Shoo base URL. Defaults to `https://shoo.dev`. Must also be set in the **build** environment: the Content-Security-Policy is baked in at build time and has to allow the browser to reach this origin for the sign-in token exchange. |
 | `ADMIN_OWNER_EMAILS` | Comma-separated emails that should get owner-level admin access. |
 | `POSTGRES_POOL_MAX` | Optional PostgreSQL pool cap. Defaults to `3` for small deployments. |
 | `POSTGRES_POOL_IDLE_TIMEOUT_MS` | Optional idle timeout for pooled PostgreSQL clients. Defaults to `10000`. |
