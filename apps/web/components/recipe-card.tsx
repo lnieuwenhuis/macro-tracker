@@ -2,7 +2,7 @@
 
 import type { MealEntryStatus, RecipeRecord } from "@macro-tracker/db";
 import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
+import { memo, useState, useTransition } from "react";
 
 import { deleteRecipeAction, logRecipePortionAction, saveRecipeAction } from "@/lib/actions";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
@@ -15,7 +15,11 @@ type RecipeCardProps = {
   selectedDate: string;
 };
 
-export function RecipeCard({ recipe, selectedDate }: RecipeCardProps) {
+// Memoized to match MealCard: a parent re-render otherwise walks every card.
+export const RecipeCard = memo(function RecipeCard({
+  recipe,
+  selectedDate,
+}: RecipeCardProps) {
   const router = useRouter();
   const [isExpanded, setIsExpanded] = useState(false);
   const [isPending, startTransition] = useTransition();
@@ -325,4 +329,4 @@ export function RecipeCard({ recipe, selectedDate }: RecipeCardProps) {
       )}
     </article>
   );
-}
+});

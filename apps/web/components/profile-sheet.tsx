@@ -5,11 +5,16 @@ import { useRef } from "react";
 import { APP_VERSION_LABEL } from "@/lib/app-version";
 
 import { CloseButton } from "./close-button";
-import { OverlayPortal, useBodyScrollLock, useDismissableLayer } from "./overlay-portal";
+import {
+  OverlayPortal,
+  useBodyScrollLock,
+  useDismissableLayer,
+  useFocusTrap,
+} from "./overlay-portal";
 import { ThemePicker } from "./theme-toggle";
 import { TransitionLink } from "./transition-link";
 
-type ExperimentalProfileSheetProps = {
+type ProfileSheetProps = {
   open: boolean;
   userEmail: string;
   canAccessAdmin: boolean;
@@ -17,16 +22,17 @@ type ExperimentalProfileSheetProps = {
   onClose: () => void;
 };
 
-export function ExperimentalProfileSheet({
+export function ProfileSheet({
   open,
   userEmail,
   canAccessAdmin,
   selectedDate,
   onClose,
-}: ExperimentalProfileSheetProps) {
+}: ProfileSheetProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   useBodyScrollLock(open);
   useDismissableLayer({ active: open, layerRef: panelRef, onDismiss: onClose });
+  useFocusTrap(open, panelRef);
 
   if (!open) {
     return null;
@@ -39,7 +45,11 @@ export function ExperimentalProfileSheet({
         <div className="absolute inset-y-0 right-0 flex w-full justify-end">
           <div
             ref={panelRef}
-            className="flex h-full w-[23rem] max-w-[88vw] flex-col border-l border-[var(--color-border)] bg-[var(--color-surface-strong)] px-5 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-[calc(1rem+env(safe-area-inset-top))] shadow-2xl"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Settings"
+            tabIndex={-1}
+            className="flex h-full w-[23rem] max-w-[88vw] flex-col border-l border-[var(--color-border)] bg-[var(--color-surface-strong)] px-5 pb-[calc(1rem+env(safe-area-inset-bottom))] pt-[calc(1rem+env(safe-area-inset-top))] shadow-2xl outline-none"
           >
             <div className="flex items-center justify-between gap-3 border-b border-[var(--color-border)] pb-4">
               <div>
@@ -52,7 +62,7 @@ export function ExperimentalProfileSheet({
               </div>
               <CloseButton
                 onClick={onClose}
-                className="flex h-9 w-9 items-center justify-center rounded-full text-[var(--color-muted)] transition hover:bg-[var(--color-card-muted)] hover:text-[var(--color-ink)]"
+                className="flex h-11 w-11 items-center justify-center rounded-full text-[var(--color-muted)] transition hover:bg-[var(--color-card-muted)] hover:text-[var(--color-ink)]"
                 label="Close settings"
               />
             </div>

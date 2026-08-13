@@ -5,9 +5,14 @@ import { useRef } from "react";
 import type { ComposeAction } from "@/lib/compose";
 
 import { CloseButton } from "./close-button";
-import { OverlayPortal, useBodyScrollLock, useDismissableLayer } from "./overlay-portal";
+import {
+  OverlayPortal,
+  useBodyScrollLock,
+  useDismissableLayer,
+  useFocusTrap,
+} from "./overlay-portal";
 
-type ExperimentalAddSheetProps = {
+type AddSheetProps = {
   open: boolean;
   onClose: () => void;
   onSelect: (action: ComposeAction) => void;
@@ -85,11 +90,11 @@ const ACTIONS: Array<{
   },
 ];
 
-export function ExperimentalAddSheet({
+export function AddSheet({
   open,
   onClose,
   onSelect,
-}: ExperimentalAddSheetProps) {
+}: AddSheetProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   useBodyScrollLock(open);
   useDismissableLayer({
@@ -105,6 +110,7 @@ export function ExperimentalAddSheet({
       }
     },
   });
+  useFocusTrap(open, panelRef);
 
   if (!open) {
     return null;
@@ -117,7 +123,11 @@ export function ExperimentalAddSheet({
         <div className="absolute inset-x-0 bottom-0 px-4 pb-[calc(1rem+env(safe-area-inset-bottom))]">
           <div
             ref={panelRef}
-            className="mx-auto w-full max-w-3xl rounded-[2rem] border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5 shadow-[0_30px_80px_rgba(0,0,0,0.24)]"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Add to food log"
+            tabIndex={-1}
+            className="mx-auto w-full max-w-3xl rounded-[2rem] border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5 shadow-[0_30px_80px_rgba(0,0,0,0.24)] outline-none"
           >
             <div className="mb-4 flex items-center justify-between gap-3">
               <div>

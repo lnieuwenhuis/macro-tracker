@@ -6,7 +6,7 @@ import { TransitionLink } from "./transition-link";
 
 type Tab = "log" | "progress" | "recipes" | "summary";
 
-type ExperimentalBottomNavProps = {
+type BottomNavProps = {
   activeTab: Tab;
   selectedDate: string;
   onAdd: () => void;
@@ -26,11 +26,11 @@ const TAB_ORDER: Record<Tab, number> = {
   summary: 3,
 };
 
-export function ExperimentalBottomNav({
+export function BottomNav({
   activeTab,
   selectedDate,
   onAdd,
-}: ExperimentalBottomNavProps) {
+}: BottomNavProps) {
   const items: NavItem[] = [
     {
       id: "log",
@@ -58,7 +58,7 @@ export function ExperimentalBottomNav({
     },
     {
       id: "recipes",
-      label: "Library",
+      label: "Food Library",
       href: `/library?date=${selectedDate}`,
       icon: (
         <svg width="17" height="17" viewBox="0 0 17 17" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">

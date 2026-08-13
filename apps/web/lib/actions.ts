@@ -43,9 +43,9 @@ import type {
 } from "@macro-tracker/db";
 import { revalidatePath } from "next/cache";
 
+import { ActionError, toActionError } from "./action-errors";
 import { requireSessionUser } from "./auth";
 import { buildRecipePortionMealEntryInput } from "./recipe-portion";
-import { getLocalDateString } from "./startup-date";
 
 type ActionResult = {
   ok: boolean;
@@ -60,18 +60,6 @@ type SaveMealEntryInput = {
   sortOrder?: number;
   clientMutationId?: string | null;
 } & MacroFoodInput;
-
-function toActionError(error: unknown) {
-  if (!(error instanceof Error)) {
-    return "Something went wrong.";
-  }
-
-  if (error.message.includes("Failed query:")) {
-    return "Unable to save this change right now. Sign in again if the issue persists.";
-  }
-
-  return error.message;
-}
 
 type SessionUser = Awaited<ReturnType<typeof requireSessionUser>>;
 type RevalidateTarget = readonly [path: string, type?: "page" | "layout"];
@@ -529,7 +517,11 @@ export async function searchFoodsAction(
 type LogRecipePortionInput = {
   recipeId: string;
   date: string;
-  status?: MealEntryStatus;
+  /**
+   * Required: only the browser knows the user's calendar day, so planned-vs-
+   * eaten has to be decided there rather than from the server clock.
+   */
+  status: MealEntryStatus;
   portionCount?: number;
   gramsConsumed?: number | null;
 };
@@ -540,7 +532,7 @@ export async function logRecipePortionAction(
   return runSessionAction(async (sessionUser) => {
     const recipe = await getRecipeById(sessionUser.userId, input.recipeId);
     if (!recipe) {
-      throw new Error("Recipe not found.");
+      throw new ActionError("Recipe not found.");
     }
 
     const portionCount =
@@ -552,7 +544,7 @@ export async function logRecipePortionAction(
       gramsConsumed != null &&
       (!Number.isFinite(gramsConsumed) || gramsConsumed <= 0)
     ) {
-      throw new Error("Grams consumed must be greater than 0.");
+      throw new ActionError("Grams consumed must be greater than 0.");
     }
 
     await createMealEntry(
@@ -563,7 +555,6 @@ export async function logRecipePortionAction(
         portionCount,
         recipe,
         status: input.status,
-        today: getLocalDateString(),
       }),
     );
 

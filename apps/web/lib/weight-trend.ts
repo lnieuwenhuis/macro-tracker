@@ -2,6 +2,8 @@ import { addDays, format, parseISO } from "date-fns";
 
 import type { WeightPageData } from "@macro-tracker/db";
 
+import { roundToSingleDecimal } from "./numbers";
+
 export type WeightGoalProjection = {
   status:
     | "insufficient_data"
@@ -22,10 +24,6 @@ export type WeightGoalProjection = {
 const GOAL_EPSILON_KG = 0.1;
 const RATE_EPSILON_KG_PER_WEEK = 0.05;
 const RECENT_TREND_WINDOW_DAYS = 30;
-
-function roundToSingleDecimal(value: number) {
-  return Math.round(value * 10) / 10;
-}
 
 function roundToTwoDecimals(value: number) {
   return Math.round(value * 100) / 100;

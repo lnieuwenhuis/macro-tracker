@@ -684,7 +684,8 @@ input::placeholder {
 @media (prefers-reduced-motion: reduce) {
   .macro-screen-stage,
   .macro-loading-shell,
-  .macro-loading-block::after {
+  .macro-loading-block::after,
+  .scan-line {
     animation: none !important;
   }
 
@@ -693,4 +694,17 @@ input::placeholder {
     transform: none;
     filter: none;
   }
+}
+
+/* Visually hidden, still announced. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
 }

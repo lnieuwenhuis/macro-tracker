@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname, useRouter } from "next/navigation";
-import { type ReactNode, useEffect, useMemo, useState, useTransition } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState, useTransition } from "react";
 
 import type { ComposeAction } from "@/lib/compose";
 import {
@@ -17,10 +17,10 @@ import {
 } from "@/lib/navigation-motion";
 import { getLocalDateString, getStartupDateRedirect } from "@/lib/startup-date";
 
-import { ExperimentalProfileSheet } from "./experimental-profile-sheet";
+import { ProfileSheet } from "./profile-sheet";
 import { TransitionLink } from "./transition-link";
 
-type ExperimentalAppShellProps = {
+type AppShellProps = {
   userEmail: string;
   canAccessAdmin: boolean;
   selectedDate: string;
@@ -32,7 +32,7 @@ type ExperimentalAppShellProps = {
   children: ReactNode;
 };
 
-export function ExperimentalAppShell({
+export function AppShell({
   userEmail,
   canAccessAdmin,
   selectedDate,
@@ -41,7 +41,7 @@ export function ExperimentalAppShell({
   onComposeAction,
   topBar,
   children,
-}: ExperimentalAppShellProps) {
+}: AppShellProps) {
   const pathname = usePathname();
   const router = useRouter();
   const [isPending, startNavigation] = useTransition();
@@ -61,7 +61,21 @@ export function ExperimentalAppShell({
   const outerMotion = isDayMotion ? "none" : screenMotion;
   const contentMotion = isDayMotion ? screenMotion : "none";
 
+  // Runs once, on mount. This is the *startup* correction for a cold load
+  // whose server render predates the timezone cookie; re-running it on every
+  // `selectedDate` change made it race with the router. Picking a date pushes
+  // the new URL inside a transition, so for a moment `window.location.search`
+  // still holds the previous query while `selectedDate` already holds the new
+  // day — which this effect read as "no date requested" and bounced straight
+  // back to today, discarding the user's choice.
+  const hasCheckedStartupDate = useRef(false);
+
   useEffect(() => {
+    if (hasCheckedStartupDate.current) {
+      return;
+    }
+    hasCheckedStartupDate.current = true;
+
     const params = new URLSearchParams(window.location.search);
     const nextDate = getStartupDateRedirect({
       requestedDate: params.get("date"),
@@ -218,7 +232,7 @@ export function ExperimentalAppShell({
                       </TransitionLink>
                     </div>
                   </div>
-                  <ExperimentalSettingsButton
+                  <SettingsButton
                     onClick={() => setProfileOpen(true)}
                     className="shrink-0"
                   />
@@ -242,7 +256,7 @@ export function ExperimentalAppShell({
 
               {!showDateNavigation && !topBar ? (
                 <div className="mb-3 flex justify-end">
-                  <ExperimentalSettingsButton onClick={() => setProfileOpen(true)} />
+                  <SettingsButton onClick={() => setProfileOpen(true)} />
                 </div>
               ) : null}
               {children}
@@ -272,7 +286,7 @@ export function ExperimentalAppShell({
         </div>
       ) : null}
 
-      <ExperimentalProfileSheet
+      <ProfileSheet
         open={profileOpen}
         userEmail={userEmail}
         canAccessAdmin={canAccessAdmin}
@@ -283,7 +297,7 @@ export function ExperimentalAppShell({
   );
 }
 
-export function ExperimentalSettingsButton({
+export function SettingsButton({
   onClick,
   className = "",
 }: {

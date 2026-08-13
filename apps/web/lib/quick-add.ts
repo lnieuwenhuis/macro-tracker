@@ -1,6 +1,7 @@
 import type { MacroGoals, MacroNumbers, MealEntryStatus, QuickAddCandidate } from "@macro-tracker/db";
 
 import type { MealDraft } from "@/components/meal-card";
+import { roundToSingleDecimal } from "@/lib/numbers";
 
 // ---------------------------------------------------------------------------
 // Live totals
@@ -19,9 +20,9 @@ function emptyTotals() {
 
 function roundTotals(totals: MacroNumbers): MacroNumbers {
   return {
-    proteinG: Math.round(totals.proteinG * 10) / 10,
-    carbsG: Math.round(totals.carbsG * 10) / 10,
-    fatG: Math.round(totals.fatG * 10) / 10,
+    proteinG: roundToSingleDecimal(totals.proteinG),
+    carbsG: roundToSingleDecimal(totals.carbsG),
+    fatG: roundToSingleDecimal(totals.fatG),
     caloriesKcal: Math.round(totals.caloriesKcal),
   };
 }
@@ -256,8 +257,14 @@ function daysSinceDate(referenceDate: string, sourceDate?: string): number | nul
 
 export type RankCandidatesOptions = {
   limit?: number;
-  currentHourUtc?: number;
-  referenceDate?: string;
+  /** Current hour in UTC, matching `peakHourUtc` on the candidates. */
+  currentHourUtc: number;
+  /**
+   * The caller's calendar day. Required rather than defaulted: a UTC default
+   * would silently score against a different day boundary than the browser
+   * this always runs in.
+   */
+  referenceDate: string;
 };
 
 function scoreCandidate(
@@ -294,13 +301,9 @@ function scoreCandidate(
  */
 export function rankCandidates(
   candidates: QuickAddCandidate[],
-  options: RankCandidatesOptions = {},
+  options: RankCandidatesOptions,
 ): QuickAddCandidate[] {
-  const {
-    limit = 10,
-    currentHourUtc = new Date().getUTCHours(),
-    referenceDate = new Date().toISOString().slice(0, 10),
-  } = options;
+  const { limit = 10, currentHourUtc, referenceDate } = options;
   const pool = deduplicateCandidates(candidates);
 
   return pool

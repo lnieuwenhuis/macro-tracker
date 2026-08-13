@@ -13,6 +13,7 @@ import {
   softDeleteAdminBarcodeProductAction,
   updateAdminBarcodeProductAction,
 } from "@/lib/admin-actions";
+import { requireAdminUser } from "@/lib/auth";
 
 type AdminBarcodeDetailPageProps = {
   params: Promise<{ id: string }>;
@@ -26,10 +27,11 @@ export default async function AdminBarcodeDetailPage({
   params,
   searchParams,
 }: AdminBarcodeDetailPageProps) {
+  const adminUser = await requireAdminUser();
   const [{ id }, query] = await Promise.all([params, searchParams]);
   const [barcode, audit] = await Promise.all([
-    getAdminBarcodeProductById(id),
-    listAdminAuditEvents({
+    getAdminBarcodeProductById(adminUser.id, id),
+    listAdminAuditEvents(adminUser.id, {
       targetType: "food_product",
       targetId: id,
       page: 1,

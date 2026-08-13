@@ -10,6 +10,7 @@ import {
   AdminStatCard,
   formatAdminTimestamp,
 } from "@/components/admin-ui";
+import { ConfirmSubmitButton } from "@/components/confirm-delete-button";
 import { changeUserRoleAction } from "@/lib/admin-actions";
 import { requireAdminUser } from "@/lib/auth";
 import { getTemplateMacroTotals } from "@/lib/template-macros";
@@ -45,7 +46,7 @@ export default async function AdminUserDetailPage({
 }: AdminUserDetailPageProps) {
   const adminUser = await requireAdminUser();
   const [{ userId }, query] = await Promise.all([params, searchParams]);
-  const detail = await getAdminUserDetail(userId);
+  const detail = await getAdminUserDetail(adminUser.id, userId);
 
   if (!detail) {
     notFound();
@@ -146,12 +147,13 @@ export default async function AdminUserDetailPage({
                     <option value="admin">Admin</option>
                     <option value="owner">Owner</option>
                   </select>
-                  <button
-                    type="submit"
+                  <ConfirmSubmitButton
+                    confirmLabel="Tap again to change role"
                     className="rounded-2xl bg-[var(--color-accent)] px-4 py-3 text-sm font-semibold text-white transition hover:opacity-90"
+                    armedClassName="rounded-2xl bg-[var(--color-danger)] px-4 py-3 text-sm font-semibold text-white ring-2 ring-[var(--color-danger)]/40 transition"
                   >
                     Update role
-                  </button>
+                  </ConfirmSubmitButton>
                 </form>
               </div>
             ) : null}

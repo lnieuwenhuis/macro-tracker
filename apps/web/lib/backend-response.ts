@@ -1,3 +1,5 @@
+import { backendFetch } from "@macro-tracker/db";
+
 export async function createBackendProxyResponse(
   response: Response,
   options: { includeBody?: boolean } = {},
@@ -25,6 +27,7 @@ export async function proxyBackendRoute(
   request: Request,
   path: string,
   unavailableBody: unknown,
+  options: { timeoutMs?: number } = {},
 ) {
   const headers = new Headers(request.headers);
   headers.delete("host");
@@ -35,11 +38,15 @@ export async function proxyBackendRoute(
       method: request.method,
       headers,
       body: forwardsBody ? request.body : undefined,
+      ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
       ...(forwardsBody ? { duplex: "half" as const } : {}),
-    } as RequestInit & { duplex?: "half" });
+    } as RequestInit & { duplex?: "half"; timeoutMs?: number });
     return createBackendProxyResponse(response);
-  } catch {
+  } catch (error) {
+    // Logged rather than swallowed: a 502 here is indistinguishable from a
+    // genuine "not found" once it reaches the client, so the cause has to be
+    // recoverable from the server logs.
+    console.error(`Backend proxy failure for ${path}`, error);
     return Response.json(unavailableBody, { status: 502 });
   }
 }
-import { backendFetch } from "@macro-tracker/db";

@@ -1,6 +1,7 @@
 "use client";
 
 import type { MealTemplate, RecipeRecord } from "@macro-tracker/db";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { useMemo, useState, useTransition } from "react";
 
@@ -11,12 +12,28 @@ import { prepareNavigationMotion } from "@/lib/navigation-motion";
 import type { OpenFoodFactsProduct } from "@/lib/openfoodfacts";
 
 import { AddFoodButton } from "./add-food-button";
-import { BarcodeCaptureModals } from "./barcode-capture-modals";
-import { ExperimentalAppShell } from "./experimental-app-shell";
+import { AppShell } from "./app-shell";
 import { IngredientCard, type IngredientDraft } from "./ingredient-card";
-import { PresetModal } from "./preset-modal";
+import {
+  ModalChunkDismissProvider,
+  ModalChunkFallback,
+  OverlayBackdropFallback,
+} from "./modal-chunk-fallback";
 import { RecipeTotalsBar } from "./recipe-totals-bar";
 import { useTemplateMutations } from "./use-template-mutations";
+
+// Matches the dashboard: neither modal is on the first paint path, and the
+// barcode bundle pulls in the zxing scanner. The options must stay inline
+// object literals — the bundler analyzes dynamic() options statically and
+// rejects a shared const.
+const BarcodeCaptureModals = dynamic(
+  () => import("./barcode-capture-modals").then((mod) => mod.BarcodeCaptureModals),
+  { loading: () => <OverlayBackdropFallback /> },
+);
+const PresetModal = dynamic(
+  () => import("./preset-modal").then((mod) => mod.PresetModal),
+  { loading: () => <ModalChunkFallback title="Meal Templates" /> },
+);
 
 type PresetMutationState =
   | { type: "save" }
@@ -94,6 +111,19 @@ export function RecipeBuilderShell({
   const [showScanner, setShowScanner] = useState(false);
   const [scanResult, setScanResult] = useState<OpenFoodFactsProduct | null>(null);
   const [notFoundBarcode, setNotFoundBarcode] = useState<string | null>(null);
+
+  // Also used as the dismissal handler for the lazy chunk fallbacks, so a slow
+  // chunk load can be cancelled instead of trapping the user behind a backdrop.
+  function dismissBarcodeCapture() {
+    setShowScanner(false);
+    setScanResult(null);
+    setNotFoundBarcode(null);
+  }
+
+  function dismissPresetModal() {
+    setPresetError(null);
+    setShowPresetsModal(false);
+  }
 
   // Computed totals
   const recipeTotals = useMemo(
@@ -370,21 +400,25 @@ export function RecipeBuilderShell({
 
       {/* Presets modal */}
       {showPresetsModal && (
-        <PresetModal
-          presets={localTemplates}
-          mutation={presetMutation}
-          errorMessage={presetError}
-          onClose={() => {
-            setPresetError(null);
-            setShowPresetsModal(false);
-          }}
-          onSelect={addIngredientFromPreset}
-          onSave={handleSavePreset}
-          onUpdate={handleUpdatePreset}
-          onDelete={handleDeletePreset}
-        />
+        <ModalChunkDismissProvider onDismiss={dismissPresetModal}>
+          <PresetModal
+            presets={localTemplates}
+            mutation={presetMutation}
+            errorMessage={presetError}
+            onClose={dismissPresetModal}
+            onSelect={addIngredientFromPreset}
+            onSave={handleSavePreset}
+            onUpdate={handleUpdatePreset}
+            onDelete={handleDeletePreset}
+          />
+        </ModalChunkDismissProvider>
       )}
 
+      {/* Mirrors the component's own render condition so its chunk stays
+          unloaded — and its full-screen loading backdrop unrendered — until a
+          capture flow actually starts. */}
+      {(showScanner || scanResult || notFoundBarcode) && (
+        <ModalChunkDismissProvider onDismiss={dismissBarcodeCapture}>
       <BarcodeCaptureModals
         showScanner={showScanner}
         scanResult={scanResult}
@@ -413,11 +447,13 @@ export function RecipeBuilderShell({
           handleSavePreset(input);
         }}
       />
+        </ModalChunkDismissProvider>
+      )}
     </>
   );
 
   return (
-    <ExperimentalAppShell
+    <AppShell
       userEmail={userEmail}
       canAccessAdmin={canAccessAdmin}
       selectedDate={selectedDate}
@@ -425,6 +461,6 @@ export function RecipeBuilderShell({
       activeTab="recipes"
     >
       {content}
-    </ExperimentalAppShell>
+    </AppShell>
   );
 }

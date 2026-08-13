@@ -1,8 +1,8 @@
 import {
   canAccessAdmin,
-  ensureUserRole,
   getUserById,
   isOwnerRole,
+  reconcileConfiguredOwner,
   type AppUser,
 } from "@macro-tracker/db";
 import { notFound, redirect } from "next/navigation";
@@ -17,7 +17,9 @@ async function applyBootstrapOwnerRole(user: AppUser) {
     return user;
   }
 
-  return (await ensureUserRole(user.id, "owner")) ?? user;
+  // The backend re-checks the address against its own ADMIN_OWNER_EMAILS, so
+  // the promotion decision is never taken from this side.
+  return (await reconcileConfiguredOwner(user.id)) ?? user;
 }
 
 export async function getCurrentAppUser() {

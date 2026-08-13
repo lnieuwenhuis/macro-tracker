@@ -5,8 +5,16 @@ import { useState } from "react";
 
 import { saveBarcodeFoodProductAction } from "@/lib/actions";
 import type { OpenFoodFactsProduct } from "@/lib/openfoodfacts";
+import {
+  parseNonNegativeNumber,
+  parsePositiveNumber,
+  roundToSingleDecimal,
+  roundToTwoDecimals,
+} from "@/lib/numbers";
+
 import { CloseButton } from "./close-button";
-import { OverlayPortal, useBodyScrollLock } from "./overlay-portal";
+import { ModalSurface } from "./modal-surface";
+import { OverlayPortal } from "./overlay-portal";
 
 type BarcodeResultProps = {
   product: OpenFoodFactsProduct | null;
@@ -40,23 +48,21 @@ type ManualFormValues = {
 };
 
 function scaleValue(per100: number, grams: number): number {
-  return Math.round((per100 * grams) / 100 * 10) / 10;
+  return roundToSingleDecimal((per100 * grams) / 100);
 }
 
 function scaleCalories(per100: number, grams: number): number {
   return Math.round((per100 * grams) / 100);
 }
 
-function parsePositiveNumber(value: string): number {
-  const n = parseFloat(value.replace(/,/g, "."));
-  return Number.isFinite(n) && n >= 0 ? Math.round(n * 10) / 10 : 0;
+function parseMacroField(value: string): number {
+  const parsed = parseNonNegativeNumber(value);
+  return parsed == null ? 0 : roundToSingleDecimal(parsed);
 }
 
 function parseServingGrams(value: string): number {
-  const grams = parseFloat(value.replace(/,/g, "."));
-  return Number.isFinite(grams) && grams > 0
-    ? Math.round(grams * 100) / 100
-    : 100;
+  const grams = parsePositiveNumber(value);
+  return grams == null ? 100 : roundToTwoDecimals(grams);
 }
 
 // ---------------------------------------------------------------------------
@@ -101,11 +107,11 @@ function NotFoundForm({
       return;
     }
 
-    const caloriesKcal = Math.round(parsePositiveNumber(form.caloriesKcal));
-    const proteinG = parsePositiveNumber(form.proteinG);
-    const carbsG = parsePositiveNumber(form.carbsG);
-    const fatG = parsePositiveNumber(form.fatG);
-    const servingSizeRaw = parsePositiveNumber(form.servingSizeG);
+    const caloriesKcal = Math.round(parseMacroField(form.caloriesKcal));
+    const proteinG = parseMacroField(form.proteinG);
+    const carbsG = parseMacroField(form.carbsG);
+    const fatG = parseMacroField(form.fatG);
+    const servingSizeRaw = parseMacroField(form.servingSizeG);
     const servingSizeG = servingSizeRaw > 0 ? servingSizeRaw : null;
 
     setIsSaving(true);
@@ -153,7 +159,11 @@ function NotFoundForm({
           className="absolute inset-0 bg-black/40 backdrop-blur-sm"
           onClick={onClose}
         />
-        <div className="relative z-10 mx-4 w-full max-w-sm rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-6 shadow-2xl">
+        <ModalSurface
+          ariaLabel="Product not found"
+          onClose={onClose}
+          className="relative z-10 mx-4 w-full max-w-sm rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-6 shadow-2xl outline-none"
+        >
           <h3 className="text-lg font-bold text-[var(--color-ink)]">
             Product not found
           </h3>
@@ -178,7 +188,7 @@ function NotFoundForm({
               Add product
             </button>
           </div>
-        </div>
+        </ModalSurface>
       </div>
     );
   }
@@ -190,7 +200,11 @@ function NotFoundForm({
         className="absolute inset-0 bg-black/40 backdrop-blur-sm"
         onClick={onClose}
       />
-      <div className="relative z-10 mx-4 mb-4 w-full max-w-sm rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] shadow-2xl sm:mb-0">
+      <ModalSurface
+        ariaLabel="Add a product"
+        onClose={onClose}
+        className="relative z-10 mx-4 mb-4 w-full max-w-sm rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] shadow-2xl outline-none sm:mb-0"
+      >
         {/* Header */}
         <div className="flex items-center justify-between border-b border-[var(--color-border)] px-5 py-4">
           <div>
@@ -209,7 +223,7 @@ function NotFoundForm({
           {/* Name */}
           <div>
             <label className="text-xs font-medium text-[var(--color-muted)]">
-              Product name <span className="text-red-500">*</span>
+              Product name <span className="text-[var(--color-danger)]">*</span>
             </label>
             <input
               type="text"
@@ -305,7 +319,7 @@ function NotFoundForm({
           </div>
 
           {saveError && (
-            <p className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600 dark:bg-red-950/30 dark:text-red-400">
+            <p className="rounded-lg bg-[color-mix(in_srgb,var(--color-danger)_12%,transparent)] px-3 py-2 text-xs text-[var(--color-danger)]">
               {saveError}
             </p>
           )}
@@ -328,7 +342,7 @@ function NotFoundForm({
             </button>
           </div>
         </form>
-      </div>
+      </ModalSurface>
     </div>
   );
 }
@@ -360,7 +374,6 @@ export function BarcodeResult({
   // A product manually entered this session — treated the same as a found one
   const [communityProduct, setCommunityProduct] =
     useState<OpenFoodFactsProduct | null>(null);
-  useBodyScrollLock();
 
   const displayProduct = communityProduct ?? product;
 
@@ -434,10 +447,10 @@ export function BarcodeResult({
         productId: null,
         label: edited.name.trim() || displayLabel,
         ...quantityMetadata,
-        proteinG: parsePositiveNumber(edited.proteinG),
-        carbsG: parsePositiveNumber(edited.carbsG),
-        fatG: parsePositiveNumber(edited.fatG),
-        caloriesKcal: Math.round(parsePositiveNumber(edited.caloriesKcal)),
+        proteinG: parseMacroField(edited.proteinG),
+        carbsG: parseMacroField(edited.carbsG),
+        fatG: parseMacroField(edited.fatG),
+        caloriesKcal: Math.round(parseMacroField(edited.caloriesKcal)),
       };
     }
     return {
@@ -478,7 +491,11 @@ export function BarcodeResult({
           className="absolute inset-0 bg-black/40 backdrop-blur-sm"
           onClick={onClose}
         />
-        <div className="relative z-10 mx-4 w-full max-w-sm rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-6 shadow-2xl">
+        <ModalSurface
+          ariaLabel="Scanned product"
+          onClose={onClose}
+          className="relative z-10 mx-4 w-full max-w-sm rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-6 shadow-2xl outline-none"
+        >
           {/* Header */}
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0 flex-1">
@@ -668,7 +685,7 @@ export function BarcodeResult({
               </button>
             </div>
           </div>
-        </div>
+        </ModalSurface>
       </div>
     </OverlayPortal>
   );

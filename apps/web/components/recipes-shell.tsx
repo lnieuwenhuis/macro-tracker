@@ -2,7 +2,7 @@
 
 import type { RecipeRecord } from "@macro-tracker/db";
 
-import { ExperimentalAppShell, ExperimentalSettingsButton } from "./experimental-app-shell";
+import { AppShell, SettingsButton } from "./app-shell";
 import { LibraryHubNav } from "./library-hub-nav";
 import { RecipeCard } from "./recipe-card";
 import { TransitionLink } from "./transition-link";
@@ -52,7 +52,7 @@ export function RecipesShell({
   );
 
   return (
-    <ExperimentalAppShell
+    <AppShell
       userEmail={userEmail}
       canAccessAdmin={canAccessAdmin}
       selectedDate={selectedDate}
@@ -79,11 +79,11 @@ export function RecipesShell({
             </svg>
             New Recipe
           </TransitionLink>
-          <ExperimentalSettingsButton onClick={openSettings} />
+          <SettingsButton onClick={openSettings} />
         </div>
       )}
     >
       {content}
-    </ExperimentalAppShell>
+    </AppShell>
   );
 }

@@ -45,6 +45,7 @@ export default defineConfig({
       TEST_ROUTES_SECRET: testRoutesSecret,
       SHOO_BASE_URL: "https://shoo.dev",
       ADMIN_OWNER_EMAILS: "owner@example.com",
+      BACKEND_ENABLE_TEST_ROUTES: "true",
     },
   },
 });

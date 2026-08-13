@@ -66,7 +66,7 @@ Required runtime variables:
 | --- | --- | --- |
 | `DATABASE_URL` | Backend and migration commands | PostgreSQL connection string for the Rust backend database. Must be `postgres://` or `postgresql://`, not `file:` or `memory:`. |
 | `APP_URL` | Backend and frontend | Public URL of the web app, for example `http://localhost:3000` locally. |
-| `SESSION_SECRET` | Backend and frontend | Long random secret used for sessions. |
+| `SESSION_SECRET` | Backend and frontend | Long random secret used for sessions. Required in every environment, including local development — there is no built-in fallback. |
 | `BACKEND_INTERNAL_SECRET` | Backend and frontend | Shared secret the frontend sends when calling backend internal routes. |
 | `BACKEND_URL` | Frontend | URL the Next.js app uses to reach the Rust backend. Defaults to `http://127.0.0.1:4000` outside production, but set it explicitly in deployments. |
 
@@ -116,18 +116,19 @@ Useful optional environment variables:
 | Variable | Use |
 | --- | --- |
 | `APP_TRUSTED_ORIGINS` | Extra comma-separated origins that are allowed during auth flows. |
-| `SHOO_BASE_URL` | Alternate Shoo base URL. Defaults to `https://shoo.dev`. |
+| `SHOO_BASE_URL` | Alternate Shoo base URL. Defaults to `https://shoo.dev`. Must also be set in the **build** environment: the Content-Security-Policy is baked in at build time and has to allow the browser to reach this origin for the sign-in token exchange. |
 | `ADMIN_OWNER_EMAILS` | Comma-separated emails that should get owner-level admin access. |
 | `POSTGRES_POOL_MAX` | Optional PostgreSQL pool cap. Defaults to `3` for small deployments. |
 | `POSTGRES_POOL_IDLE_TIMEOUT_MS` | Optional idle timeout for pooled PostgreSQL clients. Defaults to `10000`. |
 | `POSTGRES_POOL_CONNECTION_TIMEOUT_MS` | Optional PostgreSQL connection timeout. Defaults to `5000`. |
-| `NEXT_CACHE_MAX_MEMORY_MB` | Optional Next.js in-memory cache cap in MB. Defaults to `8`; set `0` to disable it. |
+| `NEXT_CACHE_MAX_MEMORY_MB` | Optional Next.js in-memory cache cap in MB. Defaults to `0`, which disables the in-memory data cache entirely; set a non-zero value where cached fetches are expected to hit. |
 | `OPENROUTER_API_KEY` | Enables food-photo estimates. |
 | `OPENROUTER_MODEL` | Optional primary OpenRouter model. Must be free, for example `google/gemma-4-26b-a4b-it:free`. |
 | `OPENROUTER_FALLBACK_MODELS` | Optional comma-separated free fallback models. |
 | `OPENROUTER_MODEL_TIMEOUT_MS` | Optional request timeout for food-photo estimates. |
 | `ENABLE_TEST_ROUTES` | Enables controlled test-only routes. Leave off in production unless you are doing a controlled test run. |
 | `TEST_ROUTES_SECRET` | Required whenever `ENABLE_TEST_ROUTES=true`; send it in the `x-test-route-secret` header. |
+| `BACKEND_ENABLE_TEST_ROUTES` | Backend-side counterpart to `ENABLE_TEST_ROUTES`. Enables the test-only role-assignment RPC that Playwright uses. Never set this on a deployed backend. |
 
 ## Contributing
 
@@ -191,6 +192,40 @@ pnpm db:generate
 pnpm db:migrate
 pnpm db:studio
 ```
+
+### Destructive migrations
+
+Migrations run forward only — there are no down-migrations, and deploy applies
+them as a Railway `preDeployCommand`. Once a migration has dropped a table the
+data is recoverable only from a backup, so any migration that drops or rewrites
+data follows this runbook:
+
+1. **Prefer deprecation over `DROP`.** Rename to `_deprecated_<name>` and keep
+   it for one release. That turns a rollback into a rename instead of a restore.
+   `0010` is the precedent for what to avoid: it backfills and then drops in the
+   same migration, which is forward-safe but leaves no way back.
+2. **Take a verified backup immediately before deploying.** Verified means
+   restored into a scratch database and checked, not just written:
+
+   ```bash
+   pg_dump "$DATABASE_URL" --format=custom --file=pre-migration.dump
+   createdb macro_tracker_restore_check
+   pg_restore --dbname=macro_tracker_restore_check pre-migration.dump
+   psql macro_tracker_restore_check -c "select count(*) from users;"
+   ```
+
+3. **Record the migration tag you are moving from**, so the rollback target is
+   unambiguous:
+
+   ```bash
+   psql "$DATABASE_URL" -c "select * from drizzle.__drizzle_migrations order by created_at desc limit 5;"
+   ```
+
+4. **To roll back**, restore the dump into a fresh database and repoint
+   `DATABASE_URL`; do not attempt to hand-reverse a dropped table in place.
+5. **Deploy the backend first.** It refuses to serve before migrations apply
+   (there is a CI test for this), so a failed migration fails closed rather than
+   serving against a half-migrated schema.
 
 ## License
 

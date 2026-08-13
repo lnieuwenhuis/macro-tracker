@@ -13,7 +13,7 @@ import {
   isDayTemplate,
   isFoodItemTemplate,
 } from "@/lib/template-macros";
-import { ExperimentalAppShell, ExperimentalSettingsButton } from "./experimental-app-shell";
+import { AppShell, SettingsButton } from "./app-shell";
 import { LibraryHubNav } from "./library-hub-nav";
 import { TransitionLink } from "./transition-link";
 
@@ -78,11 +78,11 @@ export function LibraryShell({
   const hasActiveTemplateSearch = normalizeLibraryQuery(deferredSearch).length > 0;
 
   return (
-    <ExperimentalAppShell
+    <AppShell
       userEmail={userEmail}
       canAccessAdmin={canAccessAdmin}
       selectedDate={selectedDate}
-      title="Library"
+      title="Food Library"
       activeTab="recipes"
       topBar={({ openSettings }) => (
         <div className="mb-4 flex items-center justify-between gap-3">
@@ -94,7 +94,7 @@ export function LibraryShell({
               Search foods, food item templates, day templates, and recipes.
             </p>
           </div>
-          <ExperimentalSettingsButton onClick={openSettings} />
+          <SettingsButton onClick={openSettings} />
         </div>
       )}
     >
@@ -243,6 +243,6 @@ export function LibraryShell({
           </div>
         </section>
       </div>
-    </ExperimentalAppShell>
+    </AppShell>
   );
 }

@@ -210,7 +210,7 @@ pub async fn authorize_shoo_login(
     Ok((session, user))
 }
 
-async fn reconcile_configured_owner(state: &AppState, user: AppUser) -> AppResult<AppUser> {
+pub async fn reconcile_configured_owner(state: &AppState, user: AppUser) -> AppResult<AppUser> {
     if state
         .config
         .admin_owner_emails
@@ -258,9 +258,12 @@ async fn verify_shoo_token(
 async fn fetch_shoo_jwks(state: &AppState) -> AppResult<JwkSet> {
     let shoo_base_url = state.config.shoo_base_url.trim_end_matches('/').to_string();
     let now = StdInstant::now();
+    // Recover from poisoning rather than propagating it: a panic inside any
+    // critical section would otherwise turn a one-off failure into "every
+    // login panics forever".
     if let Some(cached) = shoo_jwks_cache()
         .lock()
-        .expect("Shoo JWKS cache mutex should not be poisoned")
+        .unwrap_or_else(|error| error.into_inner())
         .get(&shoo_base_url)
         .filter(|cached| cached.expires_at > now)
         .cloned()
@@ -269,22 +272,28 @@ async fn fetch_shoo_jwks(state: &AppState) -> AppResult<JwkSet> {
     }
 
     let jwks_url = format!("{shoo_base_url}/.well-known/jwks.json");
+    // `reqwest::Error`'s Display embeds the request URL, so the details go to
+    // the log and the caller gets a fixed message.
+    let upstream_failure = |error: reqwest::Error| {
+        tracing::warn!(error = ?error, "Shoo JWKS fetch failed");
+        AppError::Upstream("Could not reach the identity provider.".to_string())
+    };
     let jwks = state
         .http
         .get(jwks_url)
         .timeout(SHOO_JWKS_FETCH_TIMEOUT)
         .send()
         .await
-        .map_err(|error| AppError::Upstream(error.to_string()))?
+        .map_err(upstream_failure)?
         .error_for_status()
-        .map_err(|error| AppError::Upstream(error.to_string()))?
+        .map_err(upstream_failure)?
         .json::<JwkSet>()
         .await
-        .map_err(|error| AppError::Upstream(error.to_string()))?;
+        .map_err(upstream_failure)?;
 
     shoo_jwks_cache()
         .lock()
-        .expect("Shoo JWKS cache mutex should not be poisoned")
+        .unwrap_or_else(|error| error.into_inner())
         .insert(
             shoo_base_url,
             CachedJwks {
@@ -316,6 +325,7 @@ mod tests {
     fn test_config(session_secret: &str) -> crate::config::Config {
         crate::config::Config {
             allow_insecure_internal_auth: false,
+            enable_test_routes: false,
             app_url: "http://localhost:3000".to_string(),
             backend_internal_secret: Some("internal-secret-with-at-least-32-chars".to_string()),
             database_url: "postgres://postgres:postgres@127.0.0.1:5432/macro_tracker".to_string(),

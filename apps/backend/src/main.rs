@@ -12,7 +12,7 @@ use axum::Router;
 use config::Config;
 use sqlx::postgres::PgPoolOptions;
 use tokio::net::TcpListener;
-use tower_http::trace::TraceLayer;
+use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Clone)]
@@ -22,12 +22,45 @@ pub struct AppState {
     pub http: reqwest::Client,
 }
 
+/// Ceiling for any outbound request that does not set its own deadline.
+///
+/// `tokio::time::timeout(.., send())` only bounds the *headers*; the body read
+/// that follows had no deadline at all, so a provider that answered and then
+/// stalled pinned the handler indefinitely. `Client::timeout` covers the whole
+/// exchange, and per-request `RequestBuilder::timeout` still overrides it where
+/// a longer budget is intended (the AI paths).
+const HTTP_CLIENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const HTTP_CLIENT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+pub fn build_http_client() -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(HTTP_CLIENT_TIMEOUT)
+        .connect_timeout(HTTP_CLIENT_CONNECT_TIMEOUT)
+        .build()
+}
+
+/// Applied to the internal RPC and health routes.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const POSTGRES_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 fn build_router(state: AppState) -> Router {
     Router::new()
+        // `/api/v1` enforces its own deadline inside the handler so a timeout
+        // still returns the documented JSON envelope and CORS headers, which a
+        // transport-level layer cannot do.
         .nest("/api/v1", api::router())
+        .merge(
+            Router::new()
+                .nest("/internal", routes::internal_router())
+                .route("/health", axum::routing::get(routes::health))
+                .layer(TimeoutLayer::with_status_code(
+                    axum::http::StatusCode::GATEWAY_TIMEOUT,
+                    REQUEST_TIMEOUT,
+                )),
+        )
+        // The AI routes are deliberately excluded — they carry their own (much
+        // longer) deadlines and semaphores.
         .merge(legacy_api::router())
-        .nest("/internal", routes::internal_router())
-        .route("/health", axum::routing::get(routes::health))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -45,6 +78,10 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_env()?;
     let db = PgPoolOptions::new()
         .max_connections(config.postgres_pool_max)
+        // Below the request timeout layer, so a starved pool surfaces as a
+        // fast 500 rather than queueing behind sqlx's 30s default while the
+        // proxy in front has already given up.
+        .acquire_timeout(POSTGRES_ACQUIRE_TIMEOUT)
         .connect_with(config.postgres_connect_options()?)
         .await
         .context("failed to connect to PostgreSQL")?;
@@ -56,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         config: config.clone(),
         db,
-        http: reqwest::Client::new(),
+        http: build_http_client().context("failed to build the outbound HTTP client")?,
     };
     let listener = TcpListener::bind(("0.0.0.0", config.port))
         .await
@@ -108,6 +145,7 @@ mod tests {
     fn test_config() -> Config {
         Config {
             allow_insecure_internal_auth: false,
+            enable_test_routes: false,
             app_url: "http://localhost:3000".to_string(),
             backend_internal_secret: Some("internal-secret-with-at-least-32-chars".to_string()),
             database_url: "postgres://postgres:postgres@127.0.0.1:5432/macro_tracker".to_string(),

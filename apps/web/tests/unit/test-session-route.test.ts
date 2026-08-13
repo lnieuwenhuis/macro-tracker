@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 const mocked = vi.hoisted(() => ({
   applySessionCookie: vi.fn(),
   completeUserOnboarding: vi.fn(),
-  ensureUserRole: vi.fn(),
+  ensureUserRoleForTesting: vi.fn(),
   getDb: vi.fn(),
   upsertUserFromShooProfile: vi.fn(),
   execute: vi.fn(),
@@ -20,7 +20,7 @@ vi.mock("@/lib/session", async (importOriginal) => {
 
 vi.mock("@macro-tracker/db", () => ({
   completeUserOnboarding: mocked.completeUserOnboarding,
-  ensureUserRole: mocked.ensureUserRole,
+  ensureUserRoleForTesting: mocked.ensureUserRoleForTesting,
   getDb: mocked.getDb,
   upsertUserFromShooProfile: mocked.upsertUserFromShooProfile,
 }));
@@ -66,7 +66,7 @@ describe("POST /api/test/session", () => {
       execute: mocked.execute,
     });
     mocked.completeUserOnboarding.mockResolvedValue(undefined);
-    mocked.ensureUserRole.mockResolvedValue(undefined);
+    mocked.ensureUserRoleForTesting.mockResolvedValue(undefined);
     mocked.upsertUserFromShooProfile.mockResolvedValue({
       id: "user-1",
       email: "coach@example.com",
@@ -122,7 +122,7 @@ describe("POST /api/test/session", () => {
 
     expect(response.status).toBe(403);
     expect(mocked.upsertUserFromShooProfile).not.toHaveBeenCalled();
-    expect(mocked.ensureUserRole).not.toHaveBeenCalled();
+    expect(mocked.ensureUserRoleForTesting).not.toHaveBeenCalled();
   });
 
   it("promotes owner test logins when the test route secret is valid", async () => {
@@ -138,6 +138,6 @@ describe("POST /api/test/session", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(mocked.ensureUserRole).toHaveBeenCalledWith("owner-1", "owner");
+    expect(mocked.ensureUserRoleForTesting).toHaveBeenCalledWith("owner-1", "owner");
   });
 });
