@@ -2,13 +2,13 @@
 
 import {
   act,
-  createElement,
   lazy,
   type ComponentType,
   type ReactNode,
   Suspense,
   useState,
 } from "react";
+
 import { createRoot } from "react-dom/client";
 import { describe, expect, it } from "vitest";
 
@@ -48,16 +48,21 @@ async function proveDismissalStaysClosed({
     const [open, setOpen] = useState(true);
     if (!open) return null;
 
-    return createElement(
-      ModalChunkDismissProvider,
-      { onDismiss: () => setOpen(false) },
-      createElement(Suspense, { fallback }, createElement(LazyModal)),
+    // JSX rather than `createElement`: the provider's props require
+    // `children`, which `createElement`'s props argument cannot satisfy when
+    // children are passed positionally.
+    return (
+      <ModalChunkDismissProvider onDismiss={() => setOpen(false)}>
+        <Suspense fallback={fallback}>
+          <LazyModal />
+        </Suspense>
+      </ModalChunkDismissProvider>
     );
   }
 
   try {
     await act(async () => {
-      root.render(createElement(Harness));
+      root.render(<Harness />);
     });
     expect(document.querySelector(fallbackSelector)).not.toBeNull();
 
@@ -68,8 +73,7 @@ async function proveDismissalStaysClosed({
 
     await act(async () => {
       deferred.resolve({
-        default: () =>
-          createElement("div", { "data-testid": "resolved-modal" }, "Resolved"),
+        default: () => <div data-testid="resolved-modal">Resolved</div>,
       });
       await deferred.promise;
     });
@@ -86,7 +90,7 @@ async function proveDismissalStaysClosed({
 describe("lazy modal chunk fallbacks", () => {
   it("keeps a deferred compact modal closed after its close button is clicked", async () => {
     await proveDismissalStaysClosed({
-      fallback: createElement(ModalChunkFallback, { title: "Deferred modal" }),
+      fallback: <ModalChunkFallback title="Deferred modal" />,
       fallbackSelector: '[role="dialog"]',
       dismiss: () =>
         document.querySelector<HTMLButtonElement>('button[aria-label="Close"]')!.click(),
@@ -95,7 +99,7 @@ describe("lazy modal chunk fallbacks", () => {
 
   it("keeps a deferred compact modal closed after its backdrop is clicked", async () => {
     await proveDismissalStaysClosed({
-      fallback: createElement(ModalChunkFallback, { title: "Deferred modal" }),
+      fallback: <ModalChunkFallback title="Deferred modal" />,
       fallbackSelector: '[role="dialog"]',
       dismiss: () =>
         document.querySelector<HTMLElement>('[aria-hidden="true"]')!.click(),
@@ -104,7 +108,7 @@ describe("lazy modal chunk fallbacks", () => {
 
   it("keeps a deferred compact modal closed after Escape", async () => {
     await proveDismissalStaysClosed({
-      fallback: createElement(ModalChunkFallback, { title: "Deferred modal" }),
+      fallback: <ModalChunkFallback title="Deferred modal" />,
       fallbackSelector: '[role="dialog"]',
       dismiss: () =>
         document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })),
@@ -113,7 +117,7 @@ describe("lazy modal chunk fallbacks", () => {
 
   it("keeps a deferred full-screen modal closed after backdrop cancellation", async () => {
     await proveDismissalStaysClosed({
-      fallback: createElement(OverlayBackdropFallback),
+      fallback: <OverlayBackdropFallback />,
       fallbackSelector: 'button[aria-label="Cancel loading modal"]',
       dismiss: () =>
         document
@@ -124,7 +128,7 @@ describe("lazy modal chunk fallbacks", () => {
 
   it("keeps a deferred full-screen modal closed after Escape", async () => {
     await proveDismissalStaysClosed({
-      fallback: createElement(OverlayBackdropFallback),
+      fallback: <OverlayBackdropFallback />,
       fallbackSelector: 'button[aria-label="Cancel loading modal"]',
       dismiss: () =>
         document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })),
