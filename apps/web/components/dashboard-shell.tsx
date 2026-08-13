@@ -16,6 +16,7 @@ import { createLazyCollectionLoader } from "@/lib/lazy-collection";
 import { prefetchOnIdle } from "@/lib/idle-prefetch";
 
 import { CompactModal } from "./compact-modal";
+import { OverlayPortal } from "./overlay-portal";
 import { ExperimentalAppShell } from "./experimental-app-shell";
 import { MacroBarGroup } from "./macro-bar";
 import { MealCard, type MealDraft } from "./meal-card";
@@ -25,21 +26,60 @@ import { useTemplateMutations } from "./use-template-mutations";
 // Modals only mount behind a flag, so keep them out of the log screen's initial
 // bundle. `prefetchModalChunks` below pulls them in once the browser is idle,
 // so opening one still costs nothing at click time.
-const AiFoodPhotoModal = dynamic(() =>
-  import("./ai-food-photo-modal").then((mod) => mod.AiFoodPhotoModal),
+//
+// The `loading` option is load-bearing: without it (or `ssr: false`)
+// next/dynamic emits no Suspense boundary of its own, so the first open
+// suspends up to the route-level loading.tsx and the whole page swaps to the
+// skeleton and remounts. The fallbacks mirror each modal's own shell rather
+// than rendering null — a lazy component always suspends for at least one
+// frame on first mount, and a null fallback makes the overlay vanish for that
+// frame, which reads as the modal closing and reopening. The options must stay
+// inline object literals — the bundler analyzes dynamic() options statically
+// and rejects a shared const.
+const AiFoodPhotoModal = dynamic(
+  () => import("./ai-food-photo-modal").then((mod) => mod.AiFoodPhotoModal),
+  { loading: () => <OverlayBackdropFallback /> },
 );
-const BarcodeCaptureModals = dynamic(() =>
-  import("./barcode-capture-modals").then((mod) => mod.BarcodeCaptureModals),
+const BarcodeCaptureModals = dynamic(
+  () => import("./barcode-capture-modals").then((mod) => mod.BarcodeCaptureModals),
+  { loading: () => <OverlayBackdropFallback /> },
 );
-const FoodSearchModal = dynamic(() =>
-  import("./food-search-modal").then((mod) => mod.FoodSearchModal),
+const FoodSearchModal = dynamic(
+  () => import("./food-search-modal").then((mod) => mod.FoodSearchModal),
+  { loading: () => <ModalChunkFallback title="Search History" /> },
 );
-const PresetModal = dynamic(() =>
-  import("./preset-modal").then((mod) => mod.PresetModal),
+const PresetModal = dynamic(
+  () => import("./preset-modal").then((mod) => mod.PresetModal),
+  { loading: () => <ModalChunkFallback title="Meal Templates" /> },
 );
-const RecipePickerModal = dynamic(() =>
-  import("./recipe-picker-modal").then((mod) => mod.RecipePickerModal),
+const RecipePickerModal = dynamic(
+  () => import("./recipe-picker-modal").then((mod) => mod.RecipePickerModal),
+  { loading: () => <ModalChunkFallback title="Pick a Recipe" /> },
 );
+
+// Close is a no-op in these fallbacks: the real modal takes over within a
+// frame or two, and its own close handler applies from then on.
+function ModalChunkFallback({ title }: { title: string }) {
+  return (
+    <CompactModal ariaLabel={title} title={title} onClose={() => {}}>
+      <div className="py-8 text-center">
+        <p className="text-sm text-[var(--color-muted)]">Loading…</p>
+      </div>
+    </CompactModal>
+  );
+}
+
+// For the photo and barcode flows, which render their own full-screen shells.
+function OverlayBackdropFallback() {
+  return (
+    <OverlayPortal>
+      <div
+        className="fixed inset-0 z-40 bg-black/40 backdrop-blur-[2px]"
+        aria-hidden="true"
+      />
+    </OverlayPortal>
+  );
+}
 
 function prefetchModalChunks() {
   void Promise.allSettled([
