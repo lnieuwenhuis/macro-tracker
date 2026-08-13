@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname, useRouter } from "next/navigation";
-import { type ReactNode, useEffect, useMemo, useState, useTransition } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState, useTransition } from "react";
 
 import type { ComposeAction } from "@/lib/compose";
 import {
@@ -61,7 +61,21 @@ export function AppShell({
   const outerMotion = isDayMotion ? "none" : screenMotion;
   const contentMotion = isDayMotion ? screenMotion : "none";
 
+  // Runs once, on mount. This is the *startup* correction for a cold load
+  // whose server render predates the timezone cookie; re-running it on every
+  // `selectedDate` change made it race with the router. Picking a date pushes
+  // the new URL inside a transition, so for a moment `window.location.search`
+  // still holds the previous query while `selectedDate` already holds the new
+  // day — which this effect read as "no date requested" and bounced straight
+  // back to today, discarding the user's choice.
+  const hasCheckedStartupDate = useRef(false);
+
   useEffect(() => {
+    if (hasCheckedStartupDate.current) {
+      return;
+    }
+    hasCheckedStartupDate.current = true;
+
     const params = new URLSearchParams(window.location.search);
     const nextDate = getStartupDateRedirect({
       requestedDate: params.get("date"),
