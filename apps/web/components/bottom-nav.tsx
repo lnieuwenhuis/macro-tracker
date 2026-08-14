@@ -2,7 +2,7 @@
 
 import type { ScreenMotion } from "@/lib/navigation-motion";
 
-import { TransitionLink } from "./transition-link";
+import { LinkPendingPulse, TransitionLink } from "./transition-link";
 
 type Tab = "log" | "progress" | "recipes" | "summary";
 
@@ -148,6 +148,7 @@ function NavLink({
     <TransitionLink
       href={item.href}
       motion={motion}
+      prefetch
       className={[
         "flex h-full min-w-0 flex-col items-center justify-center gap-0.5 rounded-[0.95rem] px-1 py-0.5 text-center transition",
         active
@@ -156,12 +157,14 @@ function NavLink({
       ].join(" ")}
       aria-current={active ? "page" : undefined}
     >
-      <span className="flex h-5 w-5 items-center justify-center rounded-full">
-        {item.icon}
-      </span>
-      <span className="text-[7.5px] font-semibold uppercase leading-tight tracking-[0.08em]">
-        {item.label}
-      </span>
+      <LinkPendingPulse className="flex min-w-0 flex-col items-center justify-center gap-0.5">
+        <span className="flex h-5 w-5 items-center justify-center rounded-full">
+          {item.icon}
+        </span>
+        <span className="text-[7.5px] font-semibold uppercase leading-tight tracking-[0.08em]">
+          {item.label}
+        </span>
+      </LinkPendingPulse>
     </TransitionLink>
   );
 }
