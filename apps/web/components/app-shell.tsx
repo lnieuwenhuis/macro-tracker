@@ -18,7 +18,7 @@ import {
 import { getLocalDateString, getStartupDateRedirect } from "@/lib/startup-date";
 
 import { ProfileSheet } from "./profile-sheet";
-import { TransitionLink } from "./transition-link";
+import { LinkPendingPulse, TransitionLink } from "./transition-link";
 
 type AppShellProps = {
   userEmail: string;
@@ -186,9 +186,11 @@ export function AppShell({
                         className="flex h-8 w-8 items-center justify-center rounded-xl text-[var(--color-ink)] transition hover:bg-[var(--color-card-muted)]"
                         aria-label="Previous day"
                       >
-                        <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          <path d="M11 4l-5 5 5 5" />
-                        </svg>
+                        <LinkPendingPulse className="flex items-center justify-center">
+                          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M11 4l-5 5 5 5" />
+                          </svg>
+                        </LinkPendingPulse>
                       </TransitionLink>
 
                       <div className="relative flex h-full flex-1 items-center justify-center rounded-xl text-center">
@@ -226,9 +228,11 @@ export function AppShell({
                         className="flex h-8 w-8 items-center justify-center rounded-xl text-[var(--color-ink)] transition hover:bg-[var(--color-card-muted)]"
                         aria-label="Next day"
                       >
-                        <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                          <path d="M7 4l5 5-5 5" />
-                        </svg>
+                        <LinkPendingPulse className="flex items-center justify-center">
+                          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M7 4l5 5-5 5" />
+                          </svg>
+                        </LinkPendingPulse>
                       </TransitionLink>
                     </div>
                   </div>

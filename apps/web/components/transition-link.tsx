@@ -1,7 +1,7 @@
 "use client";
 
-import Link, { type LinkProps } from "next/link";
-import type { AnchorHTMLAttributes, MouseEvent } from "react";
+import Link, { type LinkProps, useLinkStatus } from "next/link";
+import type { AnchorHTMLAttributes, MouseEvent, ReactNode } from "react";
 
 import {
   prepareNavigationMotion,
@@ -36,6 +36,10 @@ export function shouldPrepareNavigationMotion(
 export function TransitionLink({
   href,
   motion = "screen",
+  // Off by default: every dynamic prefetch renders the full route on the
+  // server, and hosting memory is tightly capped. High-traffic links (the
+  // bottom-nav tabs) opt in individually.
+  prefetch = false,
   onClick,
   target,
   children,
@@ -45,7 +49,7 @@ export function TransitionLink({
     <Link
       href={href}
       target={target}
-      prefetch={false}
+      prefetch={prefetch}
       onClick={(event: MouseEvent<HTMLAnchorElement>) => {
         onClick?.(event);
 
@@ -59,5 +63,30 @@ export function TransitionLink({
     >
       {children}
     </Link>
+  );
+}
+
+/**
+ * Wraps a link's content and pulses it while the navigation is pending.
+ * Renders nothing extra when idle, and the CSS animation delay keeps fast
+ * (or prefetched) navigations from flashing. Must be rendered inside a
+ * `TransitionLink`/`Link`, which is where `useLinkStatus` reads from.
+ */
+export function LinkPendingPulse({
+  className,
+  children,
+}: {
+  className?: string;
+  children: ReactNode;
+}) {
+  const { pending } = useLinkStatus();
+
+  return (
+    <span
+      className={className ? `macro-link-hint ${className}` : "macro-link-hint"}
+      data-pending={pending || undefined}
+    >
+      {children}
+    </span>
   );
 }
