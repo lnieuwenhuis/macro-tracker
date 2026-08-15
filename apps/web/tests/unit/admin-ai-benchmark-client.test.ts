@@ -292,7 +292,7 @@ describe("getBenchmarkCallCountText", () => {
         model: "candidate/free",
       }),
     ).toBe(
-      "This run will make up to 8 OpenRouter calls. Same-model runs are deduplicated automatically.",
+      "This run will make up to 8 AI provider calls. Same-model runs are deduplicated automatically.",
     );
 
     expect(
@@ -303,6 +303,6 @@ describe("getBenchmarkCallCountText", () => {
         fixtureLimit: 4,
         model: "candidate/free",
       }),
-    ).toBe("This run will make up to 4 OpenRouter calls using a cached baseline.");
+    ).toBe("This run will make up to 4 AI provider calls using a cached baseline.");
   });
 });

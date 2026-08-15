@@ -15,7 +15,7 @@ export default function AdminAiBenchmarkPage() {
     <div className="space-y-6">
       <AdminSection
         title="AI Model Benchmark"
-        description="Compare a candidate OpenRouter vision model against the configured production food-photo model."
+        description="Compare a candidate vision model against the configured production food-photo model."
       >
         <AdminAiBenchmarkClient currentModel={currentModel} />
       </AdminSection>

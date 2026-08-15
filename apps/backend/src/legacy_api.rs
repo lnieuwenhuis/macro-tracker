@@ -23,6 +23,18 @@ const DEFAULT_FOOD_PHOTO_FALLBACK_MODELS: &[&str] = &[
     "nvidia/nemotron-nano-12b-v2-vl:free",
     "openrouter/free",
 ];
+/// Effort suffixes are parsed by CLIProxyAPI and mapped to the reasoning
+/// parameter of the Codex backend; the fallback bumps effort in case low
+/// returns unparseable JSON (invalid_json failures are retryable).
+const DEFAULT_GATEWAY_FOOD_PHOTO_MODELS: &[&str] = &["gpt-5.6-luna(low)", "gpt-5.6-luna(medium)"];
+/// Reasoning happens inside the output-token budget on the Codex backend, so
+/// the gateway cap must leave room for thinking tokens on top of the ~300
+/// tokens of JSON the prompt asks for.
+const GATEWAY_MAX_TOKENS: u16 = 4_000;
+const OPENROUTER_MODEL_TIMEOUT_MS_DEFAULT: u64 = 10_000;
+/// Reasoning models need more headroom per attempt than the free
+/// OpenRouter vision models, even at low effort.
+const GATEWAY_MODEL_TIMEOUT_MS_DEFAULT: u64 = 20_000;
 const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 const FOOD_PHOTO_BODY_LIMIT_BYTES: usize = MAX_IMAGE_BYTES + 1024 * 1024;
 const FOOD_PHOTO_SLOT_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -340,16 +352,16 @@ async fn admin_benchmark(
         .map(str::trim)
         .filter(|model| !model.is_empty() && model.len() <= 160)
         .filter(|model| {
-            model
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | ':' | '/' | '-'))
+            model.chars().all(|ch| {
+                ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | ':' | '/' | '-' | '(' | ')')
+            })
         });
     let Some(candidate_model) = candidate_model else {
         return legacy_json(
             StatusCode::BAD_REQUEST,
             json!({
                 "ok": false,
-                "error": "Enter an OpenRouter model id, for example google/gemma-4-31b-it:free."
+                "error": "Enter a model id, for example google/gemma-4-31b-it:free or gpt-5.6-luna(low)."
             }),
         );
     };
@@ -901,11 +913,17 @@ async fn analyze_food_photo_url(
     user_id: &str,
     force_ready: bool,
 ) -> Value {
+    let gateway_url = state.config.ai_gateway_url.as_deref();
+    let default_timeout = if gateway_url.is_some() {
+        GATEWAY_MODEL_TIMEOUT_MS_DEFAULT
+    } else {
+        OPENROUTER_MODEL_TIMEOUT_MS_DEFAULT
+    };
     let model_timeout = Duration::from_millis(
         state
             .config
             .openrouter_model_timeout_ms
-            .unwrap_or(10_000)
+            .unwrap_or(default_timeout)
             .clamp(3_000, 30_000),
     );
     analyze_food_photo_url_with_limits(
@@ -916,7 +934,8 @@ async fn analyze_food_photo_url(
         user_id,
         force_ready,
         FoodPhotoRequestLimits {
-            openrouter_url: OPENROUTER_CHAT_COMPLETIONS_URL,
+            chat_completions_url: gateway_url.unwrap_or(OPENROUTER_CHAT_COMPLETIONS_URL),
+            gateway: gateway_url.is_some(),
             model_timeout,
             request_timeout: FOOD_PHOTO_REQUEST_TIMEOUT,
         },
@@ -926,7 +945,11 @@ async fn analyze_food_photo_url(
 
 #[derive(Clone, Copy)]
 struct FoodPhotoRequestLimits<'a> {
-    openrouter_url: &'a str,
+    chat_completions_url: &'a str,
+    /// True when talking to the configured AI gateway (an OpenAI-compatible
+    /// endpoint) instead of OpenRouter: skips the free-model allowlist and
+    /// the OpenRouter-specific request fields.
+    gateway: bool,
     model_timeout: Duration,
     request_timeout: Duration,
 }
@@ -941,12 +964,22 @@ async fn analyze_food_photo_url_with_limits(
     limits: FoodPhotoRequestLimits<'_>,
 ) -> Value {
     let FoodPhotoRequestLimits {
-        openrouter_url,
+        chat_completions_url,
+        gateway,
         model_timeout,
         request_timeout,
     } = limits;
-    let Some(api_key) = state.config.openrouter_api_key.as_deref() else {
-        tracing::error!("OPENROUTER_API_KEY is not configured on the server");
+    let api_key = if gateway {
+        state.config.ai_gateway_api_key.as_deref()
+    } else {
+        state.config.openrouter_api_key.as_deref()
+    };
+    let Some(api_key) = api_key else {
+        if gateway {
+            tracing::error!("AI_GATEWAY_API_KEY is not configured on the server");
+        } else {
+            tracing::error!("OPENROUTER_API_KEY is not configured on the server");
+        }
         return photo_failure(
             "Photo analysis is not available on this server.",
             "missing_api_key",
@@ -980,7 +1013,9 @@ async fn analyze_food_photo_url_with_limits(
     let models = requested_model
         .map(|model| vec![model.trim().to_string()])
         .unwrap_or_else(|| configured_food_photo_models(&state.config));
-    if let Some(non_free_model) = models.iter().find(|model| !is_free_openrouter_model(model)) {
+    if !gateway
+        && let Some(non_free_model) = models.iter().find(|model| !is_free_openrouter_model(model))
+    {
         return json!({
             "ok": false,
             "error": format!("Food photo AI only permits free OpenRouter models. \"{non_free_model}\" is not allowed."),
@@ -998,18 +1033,33 @@ async fn analyze_food_photo_url_with_limits(
         }
         let attempt_timeout = model_timeout.min(remaining_budget);
         let attempt_uses_remaining_budget = remaining_budget <= model_timeout;
-        let body =
-            build_openrouter_request_body(&model, image_url, clarification, user_id, force_ready);
         let request = state
             .http
-            .post(openrouter_url)
+            .post(chat_completions_url)
             .timeout(attempt_timeout)
             .bearer_auth(api_key)
-            .header("Content-Type", "application/json")
-            .header("HTTP-Referer", &state.config.app_url)
-            .header("X-OpenRouter-Title", "Macro Tracker")
-            .header("X-OpenRouter-Metadata", "enabled")
-            .json(&body);
+            .header("Content-Type", "application/json");
+        let request = if gateway {
+            request.json(&build_gateway_request_body(
+                &model,
+                image_url,
+                clarification,
+                user_id,
+                force_ready,
+            ))
+        } else {
+            request
+                .header("HTTP-Referer", &state.config.app_url)
+                .header("X-OpenRouter-Title", "Macro Tracker")
+                .header("X-OpenRouter-Metadata", "enabled")
+                .json(&build_openrouter_request_body(
+                    &model,
+                    image_url,
+                    clarification,
+                    user_id,
+                    force_ready,
+                ))
+        };
 
         match request.send().await {
             Ok(response) if !response.status().is_success() => {
@@ -1210,6 +1260,53 @@ struct OpenRouterReasoning {
     enabled: bool,
 }
 
+/// Chat-completions body for the AI gateway (CLIProxyAPI in front of the
+/// Codex backend). Reasoning effort travels in the model id suffix, e.g.
+/// `gpt-5.6-luna(low)`. OpenRouter-only fields (provider, plugins,
+/// response_format) are omitted, as is `temperature`, which reasoning models
+/// reject; JSON-only output is enforced by the prompt and re-checked by the
+/// parser.
+#[derive(Serialize)]
+struct GatewayRequest<'a> {
+    model: &'a str,
+    messages: (OpenRouterSystemMessage<'a>, OpenRouterUserMessage<'a>),
+    user: &'a str,
+    max_tokens: u16,
+}
+
+fn build_gateway_request_body<'a>(
+    model: &'a str,
+    image_url: &'a str,
+    clarification: &str,
+    user_id: &'a str,
+    force_ready: bool,
+) -> GatewayRequest<'a> {
+    GatewayRequest {
+        model,
+        messages: (
+            OpenRouterSystemMessage {
+                role: "system",
+                content: food_photo_system_prompt(),
+            },
+            OpenRouterUserMessage {
+                role: "user",
+                content: (
+                    OpenRouterTextContent {
+                        kind: "text",
+                        text: build_prompt(clarification, force_ready),
+                    },
+                    OpenRouterImageContent {
+                        kind: "image_url",
+                        image_url: OpenRouterImageUrl { url: image_url },
+                    },
+                ),
+            },
+        ),
+        user: user_id,
+        max_tokens: GATEWAY_MAX_TOKENS,
+    }
+}
+
 fn build_openrouter_request_body<'a>(
     model: &'a str,
     image_url: &'a str,
@@ -1358,6 +1455,29 @@ fn normalize_estimate(value: Option<&Value>) -> Option<Value> {
 }
 
 fn configured_food_photo_models(config: &crate::config::Config) -> Vec<String> {
+    if config.ai_gateway_url.is_some() {
+        let mut seen = Vec::<String>::new();
+        for model in config
+            .ai_gateway_models
+            .as_deref()
+            .unwrap_or_default()
+            .split([',', '\n'])
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+        {
+            if !seen.iter().any(|seen_model| seen_model == model) {
+                seen.push(model.to_string());
+            }
+        }
+        if seen.is_empty() {
+            return DEFAULT_GATEWAY_FOOD_PHOTO_MODELS
+                .iter()
+                .map(|model| model.to_string())
+                .collect();
+        }
+        return seen;
+    }
+
     let configured_primary = config
         .openrouter_model
         .as_deref()
@@ -1991,6 +2111,9 @@ mod tests {
             openrouter_model: None,
             openrouter_fallback_models: None,
             openrouter_model_timeout_ms: None,
+            ai_gateway_url: None,
+            ai_gateway_api_key: None,
+            ai_gateway_models: None,
             open_food_facts_base_url: provider_base_url.to_string(),
             albert_heijn_base_url: provider_base_url.to_string(),
             jumbo_base_url: provider_base_url.to_string(),
@@ -2127,6 +2250,14 @@ mod tests {
         state
     }
 
+    fn gateway_test_state(endpoint: &str, models: Option<&str>) -> AppState {
+        let mut state = test_state(None);
+        state.config.ai_gateway_url = Some(endpoint.to_string());
+        state.config.ai_gateway_api_key = Some("test-gateway-key".to_string());
+        state.config.ai_gateway_models = models.map(str::to_string);
+        state
+    }
+
     #[tokio::test]
     async fn barcode_provider_race_returns_fast_ah_without_waiting_for_slow_jumbo() {
         let result = tokio::time::timeout(
@@ -2202,7 +2333,8 @@ mod tests {
             "test-user",
             false,
             FoodPhotoRequestLimits {
-                openrouter_url: &endpoint,
+                chat_completions_url: &endpoint,
+                gateway: false,
                 model_timeout: Duration::from_millis(100),
                 request_timeout: Duration::from_secs(1),
             },
@@ -2251,7 +2383,8 @@ mod tests {
             "test-user",
             false,
             FoodPhotoRequestLimits {
-                openrouter_url: &endpoint,
+                chat_completions_url: &endpoint,
+                gateway: false,
                 model_timeout: Duration::from_millis(100),
                 request_timeout: Duration::from_secs(1),
             },
@@ -2283,7 +2416,8 @@ mod tests {
             "test-user",
             false,
             FoodPhotoRequestLimits {
-                openrouter_url: &endpoint,
+                chat_completions_url: &endpoint,
+                gateway: false,
                 model_timeout: Duration::from_millis(60),
                 request_timeout: Duration::from_millis(100),
             },
@@ -2297,6 +2431,125 @@ mod tests {
         assert_eq!(
             result["error"],
             json!("Food photo AI request timed out after 100ms.")
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_mode_permits_non_free_models() {
+        let (endpoint, stub) = spawn_openrouter_stub(vec![OpenRouterStubResponse {
+            status: StatusCode::OK,
+            delay: Duration::ZERO,
+            body: json!({
+                "choices": [{
+                    "message": {
+                        "content": "{\"status\":\"ready\",\"estimate\":{\"label\":\"Gateway meal\",\"caloriesKcal\":250,\"proteinG\":20,\"carbsG\":30,\"fatG\":5,\"confidence\":0.8,\"notes\":[]}}"
+                    }
+                }]
+            }),
+        }])
+        .await;
+
+        let result = analyze_food_photo_url_with_limits(
+            &gateway_test_state(&endpoint, Some("gpt-5.6-luna(low)")),
+            "data:image/png;base64,AA==",
+            "",
+            None,
+            "test-user",
+            false,
+            FoodPhotoRequestLimits {
+                chat_completions_url: &endpoint,
+                gateway: true,
+                model_timeout: Duration::from_millis(500),
+                request_timeout: Duration::from_secs(1),
+            },
+        )
+        .await;
+
+        assert_eq!(stub.requests.load(Ordering::SeqCst), 1);
+        assert_eq!(result["ok"], json!(true));
+        assert_eq!(
+            result["analysis"]["estimate"]["label"],
+            json!("Gateway meal")
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_mode_without_api_key_fails_closed() {
+        let mut state = gateway_test_state("http://127.0.0.1:9/unreachable", None);
+        state.config.ai_gateway_api_key = None;
+
+        let result = analyze_food_photo_url_with_limits(
+            &state,
+            "data:image/png;base64,AA==",
+            "",
+            None,
+            "test-user",
+            false,
+            FoodPhotoRequestLimits {
+                chat_completions_url: "http://127.0.0.1:9/unreachable",
+                gateway: true,
+                model_timeout: Duration::from_millis(100),
+                request_timeout: Duration::from_secs(1),
+            },
+        )
+        .await;
+
+        assert_eq!(result["kind"], json!("missing_api_key"));
+    }
+
+    #[test]
+    fn gateway_models_come_from_config_with_luna_defaults() {
+        let mut config = test_config(None);
+        config.ai_gateway_url = Some("https://gateway.example".to_string());
+        assert_eq!(
+            configured_food_photo_models(&config),
+            vec![
+                "gpt-5.6-luna(low)".to_string(),
+                "gpt-5.6-luna(medium)".to_string()
+            ]
+        );
+
+        config.ai_gateway_models =
+            Some("gpt-5.6-luna(medium), gpt-5.6-terra(low)\ngpt-5.6-luna(medium)".to_string());
+        assert_eq!(
+            configured_food_photo_models(&config),
+            vec![
+                "gpt-5.6-luna(medium)".to_string(),
+                "gpt-5.6-terra(low)".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn gateway_request_body_omits_openrouter_specific_fields() {
+        let body = serde_json::to_value(build_gateway_request_body(
+            "gpt-5.6-luna(low)",
+            "data:image/png;base64,AA==",
+            "",
+            "user-1",
+            false,
+        ))
+        .expect("gateway body should serialize");
+
+        assert_eq!(body["model"], json!("gpt-5.6-luna(low)"));
+        assert_eq!(body["max_tokens"], json!(4000));
+        // Reasoning models reject temperature pins, and the OpenRouter
+        // routing fields would be meaningless or rejected upstream.
+        for absent in [
+            "temperature",
+            "provider",
+            "plugins",
+            "response_format",
+            "reasoning",
+        ] {
+            assert!(
+                body.get(absent).is_none(),
+                "gateway body must not include {absent}"
+            );
+        }
+        assert_eq!(
+            body["messages"][1]["content"][1]["image_url"]["url"],
+            json!("data:image/png;base64,AA==")
         );
     }
 
