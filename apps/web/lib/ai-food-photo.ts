@@ -50,6 +50,13 @@ export const DEFAULT_FOOD_PHOTO_FALLBACK_MODELS = [
   "nvidia/nemotron-nano-12b-v2-vl:free",
   "openrouter/free",
 ] as const;
+// Mirrors the backend's gateway defaults: when AI_GATEWAY_URL is set, food
+// photos go to an OpenAI-compatible gateway (CLIProxyAPI in front of the
+// Codex backend) and the free-OpenRouter-model restriction does not apply.
+export const DEFAULT_GATEWAY_FOOD_PHOTO_MODELS = [
+  "gpt-5.6-luna(low)",
+  "gpt-5.6-luna(medium)",
+] as const;
 
 const DEPRECATED_FOOD_PHOTO_MODELS = new Set([
   "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
@@ -86,7 +93,16 @@ function uniqueFreeFoodPhotoModels(models: string[]) {
   });
 }
 
+function isGatewayConfigured() {
+  return Boolean(process.env.AI_GATEWAY_URL?.trim());
+}
+
 export function getConfiguredFoodPhotoModels() {
+  if (isGatewayConfigured()) {
+    const models = [...new Set(parseModelList(process.env.AI_GATEWAY_MODELS))];
+    return models.length > 0 ? models : [...DEFAULT_GATEWAY_FOOD_PHOTO_MODELS];
+  }
+
   const configuredPrimary = process.env.OPENROUTER_MODEL?.trim();
   const primary =
     configuredPrimary &&

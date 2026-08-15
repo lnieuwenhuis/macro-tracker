@@ -24,9 +24,9 @@ const BASELINE_CACHE_PREFIX = "macro-benchmark-baseline:v2:";
 const BASELINE_TTL_MS = 24 * 60 * 60 * 1000;
 
 const FAILURE_LABELS: Record<AnalyzeFoodPhotoFailureKind, string> = {
-  missing_api_key: "OpenRouter API key missing",
+  missing_api_key: "AI provider API key missing",
   invalid_image: "Fixture image unavailable",
-  provider_rate_limit: "Free-model rate limit hit",
+  provider_rate_limit: "Provider rate limit hit",
   provider_quota: "Provider quota/balance unavailable",
   provider_image_access: "Provider could not fetch fixture image",
   provider_error: "Provider error",
@@ -148,18 +148,18 @@ export function getBenchmarkCallCountText(params: {
   model: string;
 }) {
   if (params.candidateOnly) {
-    return `This run will make up to ${params.fixtureLimit} OpenRouter calls.`;
+    return `This run will make up to ${params.fixtureLimit} AI provider calls.`;
   }
 
   if (params.cachedBaseline?.currentModel === params.currentModel) {
     if (params.model.trim() === params.currentModel) {
-      return "This run can use the cached baseline and may make 0 OpenRouter calls.";
+      return "This run can use the cached baseline and may make 0 AI provider calls.";
     }
 
-    return `This run will make up to ${params.fixtureLimit} OpenRouter calls using a cached baseline.`;
+    return `This run will make up to ${params.fixtureLimit} AI provider calls using a cached baseline.`;
   }
 
-  return `This run will make up to ${params.fixtureLimit * 2} OpenRouter calls. Same-model runs are deduplicated automatically.`;
+  return `This run will make up to ${params.fixtureLimit * 2} AI provider calls. Same-model runs are deduplicated automatically.`;
 }
 
 function writeBaselineCache(result: MacroBenchmarkResult) {
@@ -431,7 +431,7 @@ export function AdminAiBenchmarkClient({
       <form className="grid gap-3 lg:grid-cols-[1fr_12rem_auto]" onSubmit={runBenchmark}>
         <label className="block">
           <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--color-muted-strong)]">
-            Candidate OpenRouter model
+            Candidate model
           </span>
           <input
             type="text"
