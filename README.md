@@ -122,10 +122,13 @@ Useful optional environment variables:
 | `POSTGRES_POOL_IDLE_TIMEOUT_MS` | Optional idle timeout for pooled PostgreSQL clients. Defaults to `10000`. |
 | `POSTGRES_POOL_CONNECTION_TIMEOUT_MS` | Optional PostgreSQL connection timeout. Defaults to `5000`. |
 | `NEXT_CACHE_MAX_MEMORY_MB` | Optional Next.js in-memory cache cap in MB. Defaults to `0`, which disables the in-memory data cache entirely; set a non-zero value where cached fetches are expected to hit. |
-| `OPENROUTER_API_KEY` | Enables food-photo estimates. |
+| `OPENROUTER_API_KEY` | Enables food-photo estimates via OpenRouter. |
 | `OPENROUTER_MODEL` | Optional primary OpenRouter model. Must be free, for example `google/gemma-4-26b-a4b-it:free`. |
 | `OPENROUTER_FALLBACK_MODELS` | Optional comma-separated free fallback models. |
-| `OPENROUTER_MODEL_TIMEOUT_MS` | Optional request timeout for food-photo estimates. |
+| `OPENROUTER_MODEL_TIMEOUT_MS` | Optional per-model attempt timeout for food-photo estimates (applies to OpenRouter and the AI gateway). |
+| `AI_GATEWAY_URL` | Optional OpenAI-compatible chat-completions URL that replaces OpenRouter for food-photo estimates, for example `http://cliproxyapi.railway.internal:8317/v1/chat/completions`. Must be `https` unless the host is loopback or `*.railway.internal`. See `infra/cliproxyapi/`. Set on the backend service, and also on the web service (URL only) so the admin benchmark page shows the right models. |
+| `AI_GATEWAY_API_KEY` | Backend-only bearer key for the AI gateway. Required when `AI_GATEWAY_URL` is set. |
+| `AI_GATEWAY_MODELS` | Optional comma-separated gateway model list. Defaults to `gpt-5.6-luna(low),gpt-5.6-luna(medium)`; the effort suffix is translated by CLIProxyAPI into the reasoning-effort parameter. |
 | `ENABLE_TEST_ROUTES` | Enables controlled test-only routes. Leave off in production unless you are doing a controlled test run. |
 | `TEST_ROUTES_SECRET` | Required whenever `ENABLE_TEST_ROUTES=true`; send it in the `x-test-route-secret` header. |
 | `BACKEND_ENABLE_TEST_ROUTES` | Backend-side counterpart to `ENABLE_TEST_ROUTES`. Enables the test-only role-assignment RPC that Playwright uses. Never set this on a deployed backend. |

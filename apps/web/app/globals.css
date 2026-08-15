@@ -481,6 +481,23 @@ input::placeholder {
   opacity: 0.86;
 }
 
+/* iOS Safari zooms the page in when a focused control renders text below 16px,
+   and never zooms back out on blur. Rebasing the small end of the type scale
+   to 16px inside form controls keeps that zoom from firing at all. Rebasing
+   text-sm's line-height ratio along with it (16px x 1.25 = the same 20px box
+   it has at 14px) keeps every field its current height — which matters for the
+   selects whose h-[38px]/h-[42px] has to line up with a sibling input. Scoped
+   to the variables rather than font-size so controls the design already sets
+   at text-base or larger keep their own size. */
+@media (pointer: coarse) {
+  input,
+  select,
+  textarea {
+    --text-sm: 16px;
+    --text-sm--line-height: 1.25;
+  }
+}
+
 .font-serif {
   font-family: var(--font-fraunces), serif;
 }
