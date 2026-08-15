@@ -23,13 +23,10 @@ pub struct Config {
     pub shoo_base_url: String,
     pub trusted_origins: Vec<String>,
     pub admin_owner_emails: Vec<String>,
-    pub openrouter_api_key: Option<String>,
-    pub openrouter_model: Option<String>,
-    pub openrouter_fallback_models: Option<String>,
-    pub openrouter_model_timeout_ms: Option<u64>,
     pub ai_gateway_url: Option<String>,
     pub ai_gateway_api_key: Option<String>,
     pub ai_gateway_models: Option<String>,
+    pub ai_gateway_model_timeout_ms: Option<u64>,
     pub open_food_facts_base_url: String,
     pub albert_heijn_base_url: String,
     pub jumbo_base_url: String,
@@ -106,22 +103,19 @@ impl Config {
             )?,
             trusted_origins,
             admin_owner_emails: parse_csv_lower(read_value(&mut read, "ADMIN_OWNER_EMAILS")),
-            openrouter_api_key: read_value(&mut read, "OPENROUTER_API_KEY"),
-            openrouter_model: read_value(&mut read, "OPENROUTER_MODEL"),
-            openrouter_fallback_models: read_value(&mut read, "OPENROUTER_FALLBACK_MODELS"),
-            openrouter_model_timeout_ms: match read_value(&mut read, "OPENROUTER_MODEL_TIMEOUT_MS")
-            {
-                None => None,
-                Some(value) => Some(value.parse().with_context(|| {
-                    "OPENROUTER_MODEL_TIMEOUT_MS must be a non-negative integer".to_string()
-                })?),
-            },
             ai_gateway_url: parse_ai_gateway_url(
                 read_value(&mut read, "AI_GATEWAY_URL"),
                 allow_insecure_local,
             )?,
             ai_gateway_api_key: read_value(&mut read, "AI_GATEWAY_API_KEY"),
             ai_gateway_models: read_value(&mut read, "AI_GATEWAY_MODELS"),
+            ai_gateway_model_timeout_ms: match read_value(&mut read, "AI_GATEWAY_MODEL_TIMEOUT_MS")
+            {
+                None => None,
+                Some(value) => Some(value.parse().with_context(|| {
+                    "AI_GATEWAY_MODEL_TIMEOUT_MS must be a non-negative integer".to_string()
+                })?),
+            },
             open_food_facts_base_url: parse_https_base_url(
                 read_value(&mut read, "OPEN_FOOD_FACTS_BASE_URL"),
                 "OPEN_FOOD_FACTS_BASE_URL",
@@ -369,11 +363,11 @@ fn parse_https_base_url(
     Ok(raw)
 }
 
-/// The AI gateway is the OpenAI-compatible chat-completions endpoint that
-/// replaces OpenRouter for food-photo analysis (a CLIProxyAPI service).
-/// Railway's private network (`*.railway.internal`) has no TLS, so plain
-/// http is only allowed there and on loopback; anything else must be https
-/// or the API key would cross the public internet in cleartext.
+/// The AI gateway is the OpenAI-compatible chat-completions endpoint used
+/// for food-photo analysis (normally a CLIProxyAPI service). Railway's
+/// private network (`*.railway.internal`) has no TLS, so plain http is only
+/// allowed there and on loopback; anything else must be https or the API
+/// key would cross the public internet in cleartext.
 fn parse_ai_gateway_url(
     value: Option<String>,
     allow_insecure_local: bool,
@@ -537,6 +531,7 @@ mod tests {
         assert!(config.ai_gateway_url.is_none());
         assert!(config.ai_gateway_api_key.is_none());
         assert!(config.ai_gateway_models.is_none());
+        assert!(config.ai_gateway_model_timeout_ms.is_none());
     }
 
     #[test]

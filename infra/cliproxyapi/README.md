@@ -2,17 +2,20 @@
 
 Runs [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) as its own
 Railway service so the backend can use a ChatGPT/Codex subscription
-(GPT-5.6 Luna) for food-photo macro estimates instead of the free OpenRouter
-models. The backend talks to it over Railway's private network as a normal
-OpenAI-compatible chat-completions endpoint.
+(GPT-5.6 Luna) for food-photo macro estimates. The backend talks to it over
+Railway's private network as a normal OpenAI-compatible chat-completions
+endpoint.
 
 Heads-up before relying on it: this rides the unofficial ChatGPT Codex
 backend. OpenAI has publicly tolerated personal use of your own
 subscription through third-party clients, but the endpoint can change or
 break without notice (Luna specifically has broken for third-party clients
-before). If it breaks, unset `AI_GATEWAY_URL` on the backend service and
-food photos fall back to the OpenRouter path unchanged. Keep this to your
-own subscription; don't pool accounts or serve strangers' traffic with it.
+before). If it breaks, any OpenAI-compatible provider works as a stand-in:
+point `AI_GATEWAY_URL` straight at one (for example
+`https://openrouter.ai/api/v1/chat/completions` with an OpenRouter API key
+in `AI_GATEWAY_API_KEY` and its model ids in `AI_GATEWAY_MODELS`). Keep the
+Codex route to your own subscription; don't pool accounts or serve
+strangers' traffic with it.
 
 ## Railway setup
 
@@ -76,9 +79,8 @@ it does not need the API key.
 
 `AI_GATEWAY_MODELS` is optional and defaults to
 `gpt-5.6-luna(low),gpt-5.6-luna(medium)` — low effort first (~2s to first
-token), medium as the retry fallback. `OPENROUTER_MODEL_TIMEOUT_MS` still
-bounds each model attempt (defaults to 20s in gateway mode, clamped to
-3–30s).
+token), medium as the retry fallback. `AI_GATEWAY_MODEL_TIMEOUT_MS` bounds
+each model attempt (defaults to 20s, clamped to 3–30s).
 
 The private network URL is plain `http`; that is expected — Railway's
 private network is isolated and has no TLS. The backend refuses `http`
