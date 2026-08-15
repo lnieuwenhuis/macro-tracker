@@ -17,18 +17,27 @@ own subscription; don't pool accounts or serve strangers' traffic with it.
 ## Railway setup
 
 1. **Create the service.** In the Railway project: New Service → GitHub Repo
-   → this repository, and set the service's *Root Directory* to
-   `infra/cliproxyapi`. Railway detects the Dockerfile automatically.
-2. **Attach a volume** mounted at `/data`. Codex OAuth credentials live
+   → this repository (do not repurpose the web or backend service), and set
+   the service's *Root Directory* to `infra/cliproxyapi`. Railway detects
+   the Dockerfile automatically.
+2. **Point config-as-code at this directory.** Settings → Config-as-code →
+   file path `infra/cliproxyapi/railway.toml`. Skipping this applies the
+   repo-root `railway.toml` (the web service's default), whose `pnpm`
+   start command overrides the container entrypoint and fails the deploy
+   with "The executable `pnpm` could not be found".
+3. **Attach a volume** mounted at `/data`. Codex OAuth credentials live
    there (`/data/auths`) and survive redeploys. Without it you re-login
    after every deploy.
-3. **Set service variables:**
+4. **Set service variables:**
    - `AI_GATEWAY_API_KEY` — long random string; the backend authenticates
      to the proxy with it. Generate with `openssl rand -hex 32`. Use only
      letters/digits/dashes (it is templated into a quoted YAML string).
    - `CLIPROXY_MANAGEMENT_KEY` — second long random string; password for
      the management panel. Same character advice.
-4. **Expose a public domain** (Settings → Networking → Generate Domain).
+   - `PORT=8317` — pins the listen port so the private-network URL below
+     is predictable (Railway may otherwise inject its own `PORT`, which
+     the entrypoint honors).
+5. **Expose a public domain** (Settings → Networking → Generate Domain).
    Needed once for the login panel; you can remove the public domain after
    logging in if you prefer, the backend uses the private network.
 
