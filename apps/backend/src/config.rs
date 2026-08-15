@@ -27,6 +27,9 @@ pub struct Config {
     pub openrouter_model: Option<String>,
     pub openrouter_fallback_models: Option<String>,
     pub openrouter_model_timeout_ms: Option<u64>,
+    pub ai_gateway_url: Option<String>,
+    pub ai_gateway_api_key: Option<String>,
+    pub ai_gateway_models: Option<String>,
     pub open_food_facts_base_url: String,
     pub albert_heijn_base_url: String,
     pub jumbo_base_url: String,
@@ -113,6 +116,12 @@ impl Config {
                     "OPENROUTER_MODEL_TIMEOUT_MS must be a non-negative integer".to_string()
                 })?),
             },
+            ai_gateway_url: parse_ai_gateway_url(
+                read_value(&mut read, "AI_GATEWAY_URL"),
+                allow_insecure_local,
+            )?,
+            ai_gateway_api_key: read_value(&mut read, "AI_GATEWAY_API_KEY"),
+            ai_gateway_models: read_value(&mut read, "AI_GATEWAY_MODELS"),
             open_food_facts_base_url: parse_https_base_url(
                 read_value(&mut read, "OPEN_FOOD_FACTS_BASE_URL"),
                 "OPEN_FOOD_FACTS_BASE_URL",
@@ -360,6 +369,49 @@ fn parse_https_base_url(
     Ok(raw)
 }
 
+/// The AI gateway is the OpenAI-compatible chat-completions endpoint that
+/// replaces OpenRouter for food-photo analysis (a CLIProxyAPI service).
+/// Railway's private network (`*.railway.internal`) has no TLS, so plain
+/// http is only allowed there and on loopback; anything else must be https
+/// or the API key would cross the public internet in cleartext.
+fn parse_ai_gateway_url(
+    value: Option<String>,
+    allow_insecure_local: bool,
+) -> anyhow::Result<Option<String>> {
+    let Some(raw) = value.filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    let parsed =
+        url::Url::parse(&raw).context("AI_GATEWAY_URL must be a valid chat-completions URL")?;
+    if !parsed.has_host() {
+        bail!("AI_GATEWAY_URL must include a host");
+    }
+
+    match parsed.scheme() {
+        "https" => {}
+        "http" if allow_insecure_local || is_private_gateway_host(parsed.host()) => {}
+        "http" => bail!(
+            "AI_GATEWAY_URL must use https unless the host is loopback or on the Railway private network (*.railway.internal)."
+        ),
+        scheme => bail!("AI_GATEWAY_URL must use http or https, got {scheme}"),
+    }
+
+    Ok(Some(raw))
+}
+
+fn is_private_gateway_host(host: Option<url::Host<&str>>) -> bool {
+    match host {
+        Some(url::Host::Domain(host)) => {
+            host.eq_ignore_ascii_case("localhost")
+                || host.to_ascii_lowercase().ends_with(".railway.internal")
+        }
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    }
+}
+
 fn parse_origin_list(value: Option<String>) -> anyhow::Result<Vec<String>> {
     value
         .unwrap_or_default()
@@ -444,6 +496,47 @@ mod tests {
                 "internal-secret-with-at-least-32-chars",
             ),
         ]
+    }
+
+    #[test]
+    fn ai_gateway_url_allows_https_and_railway_private_network_http() {
+        let mut values = production_values();
+        values.push((
+            "AI_GATEWAY_URL",
+            "https://gateway.example.com/v1/chat/completions",
+        ));
+        let config = config_from(&values).expect("https gateway URL should be accepted");
+        assert_eq!(
+            config.ai_gateway_url.as_deref(),
+            Some("https://gateway.example.com/v1/chat/completions")
+        );
+
+        let mut values = production_values();
+        values.push((
+            "AI_GATEWAY_URL",
+            "http://cliproxyapi.railway.internal:8317/v1/chat/completions",
+        ));
+        let config = config_from(&values).expect("Railway private-network http should be accepted");
+        assert!(config.ai_gateway_url.is_some());
+    }
+
+    #[test]
+    fn ai_gateway_url_rejects_public_http() {
+        let mut values = production_values();
+        values.push((
+            "AI_GATEWAY_URL",
+            "http://gateway.example.com/v1/chat/completions",
+        ));
+        let error = config_from(&values).expect_err("public http gateway URL must fail");
+        assert!(error.to_string().contains("AI_GATEWAY_URL must use https"));
+    }
+
+    #[test]
+    fn ai_gateway_is_optional_and_absent_by_default() {
+        let config = config_from(&production_values()).expect("config should build");
+        assert!(config.ai_gateway_url.is_none());
+        assert!(config.ai_gateway_api_key.is_none());
+        assert!(config.ai_gateway_models.is_none());
     }
 
     #[test]
