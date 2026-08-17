@@ -296,6 +296,50 @@ CREATE INDEX IF NOT EXISTS meal_template_items_product_idx ON meal_template_item
 const DRIZZLE_MIGRATION_JOURNAL: &str =
     include_str!("../../../packages/db/drizzle/meta/_journal.json");
 const DEFAULT_MEAL_GROUP_LABELS: [&str; 4] = ["Breakfast", "Lunch", "Dinner", "Snack"];
+
+/// The streak computation, shared verbatim by `stats_page_data_json` and
+/// `leaderboard_json`.
+///
+/// BUG-01: the Summary page hardcoded `'currentStreak', 0` while the real
+/// gaps-and-islands query lived only in the leaderboard, so every user's Summary
+/// permanently read `0🔥 / Best: 0 days` even though five tests asserted correct
+/// streaks — against the other consumer. Expanding one literal into both
+/// queries keeps them from drifting again; a `macro_rules!` rather than a
+/// `const` so each query stays a single compile-time string literal and the
+/// "no `format!` into SQL" invariant holds.
+///
+/// Contract: the caller supplies a preceding CTE named `streak_days` with one
+/// row per date the user logged an eaten entry, and binds `$2` to the reference
+/// date.
+macro_rules! streak_summary_ctes {
+    () => {
+        r#"
+        dated_islands AS (
+          SELECT
+            entry_date,
+            entry_date - row_number() OVER (ORDER BY entry_date)::int AS island
+          FROM streak_days
+        ),
+        streaks AS (
+          SELECT
+            min(entry_date) AS start_date,
+            max(entry_date) AS end_date,
+            count(*)::int AS streak_length
+          FROM dated_islands
+          GROUP BY island
+        ),
+        streak_summary AS (
+          SELECT
+            coalesce(max(CASE
+              WHEN start_date <= $2::date AND end_date >= $2::date THEN ($2::date - start_date) + 1
+              WHEN end_date = $2::date - 1 THEN streak_length
+            END), 0)::int AS current_streak,
+            coalesce(max(streak_length), 0)::int AS longest_streak
+          FROM streaks
+        )
+        "#
+    };
+}
 const REQUIRED_TABLES: &[&str] = &[
     "users",
     "api_tokens",
@@ -489,10 +533,52 @@ where
     )
     .bind(user_id)
     .bind(role)
-    .fetch_one(executor)
-    .await?;
+    .fetch_optional(executor)
+    .await?
+    // LOW-A3: an unknown user id used to surface as `RowNotFound` from
+    // `fetch_one`, i.e. a 500 for what is plainly a 404.
+    .ok_or_else(|| AppError::NotFound("User not found.".to_string()))?;
 
     row_to_app_user(row)
+}
+
+/// The `email` claim in a Shoo ID token is not proof of address ownership —
+/// there is no `email_verified` claim to lean on. Refusing the login keeps a
+/// token minted for one subject from ever reaching another subject's row. The
+/// message deliberately does not echo the address back, so it cannot be used to
+/// probe which addresses are registered.
+fn account_identity_conflict() -> AppError {
+    AppError::Conflict(
+        "This email address is already linked to a different sign-in identity. Sign in with the original identity instead.".to_string(),
+    )
+}
+
+/// Turns a `23505` unique violation into a 409 with a caller-actionable
+/// message. Everything else keeps its original classification, so a genuine
+/// database fault is still logged and reported as a 500.
+fn map_unique_violation(message: &'static str) -> impl Fn(sqlx::Error) -> AppError {
+    move |error| {
+        if let sqlx::Error::Database(db_error) = &error
+            && db_error.code().as_deref() == Some("23505")
+        {
+            return AppError::Conflict(message.to_string());
+        }
+        AppError::Sqlx(error)
+    }
+}
+
+/// A `users_email_key` duplicate means another account already holds the
+/// address. That is the same conflict as the pre-check below, reached through a
+/// concurrent login rather than a stale read, so it gets the same 409 instead of
+/// a generic 500.
+fn map_user_email_conflict(error: sqlx::Error) -> AppError {
+    if let sqlx::Error::Database(db_error) = &error
+        && db_error.code().as_deref() == Some("23505")
+        && db_error.constraint() == Some("users_email_key")
+    {
+        return account_identity_conflict();
+    }
+    AppError::Sqlx(error)
 }
 
 pub async fn upsert_user_from_shoo_profile(
@@ -500,19 +586,17 @@ pub async fn upsert_user_from_shoo_profile(
     profile: &ShooProfile,
 ) -> AppResult<AppUser> {
     let user_id = Uuid::new_v4();
-    if let Some(existing) = sqlx::query(
-        r#"
-        SELECT id
-        FROM users
-        WHERE shoo_pairwise_sub = $1 OR email = $2
-        ORDER BY CASE WHEN shoo_pairwise_sub = $1 THEN 0 ELSE 1 END
-        LIMIT 1
-        "#,
-    )
-    .bind(&profile.pairwise_sub)
-    .bind(&profile.email)
-    .fetch_optional(pool)
-    .await?
+    // SEC-03: match on `shoo_pairwise_sub` ONLY. The previous
+    // `shoo_pairwise_sub = $1 OR email = $2` also matched by address and then
+    // unconditionally overwrote `shoo_pairwise_sub`, so a token whose `email`
+    // claim named a victim rebound the victim's row — meals, weights, goals and
+    // `role` included — to the attacker's subject. Changing the address on an
+    // already-matched subject is still allowed; adopting somebody else's
+    // address never is.
+    if let Some(existing) = sqlx::query("SELECT id FROM users WHERE shoo_pairwise_sub = $1 LIMIT 1")
+        .bind(&profile.pairwise_sub)
+        .fetch_optional(pool)
+        .await?
     {
         let id: Uuid = existing.try_get("id")?;
         let row = sqlx::query(
@@ -549,9 +633,22 @@ pub async fn upsert_user_from_shoo_profile(
         .bind(&profile.display_name)
         .bind(&profile.picture_url)
         .fetch_one(pool)
-        .await?;
+        .await
+        .map_err(map_user_email_conflict)?;
 
         return row_to_app_user(row);
+    }
+
+    // Unknown subject. If the address is already attached to some other
+    // subject, refuse rather than create a second account that would then fail
+    // the unique index anyway.
+    if sqlx::query("SELECT 1 FROM users WHERE email = $1 LIMIT 1")
+        .bind(&profile.email)
+        .fetch_optional(pool)
+        .await?
+        .is_some()
+    {
+        return Err(account_identity_conflict());
     }
 
     let row = sqlx::query(
@@ -595,7 +692,8 @@ pub async fn upsert_user_from_shoo_profile(
     .bind(&profile.display_name)
     .bind(&profile.picture_url)
     .fetch_one(pool)
-    .await?;
+    .await
+    .map_err(map_user_email_conflict)?;
 
     row_to_app_user(row)
 }
@@ -638,7 +736,7 @@ fn validate_macro_goals(goals: &MacroGoals) -> AppResult<()> {
         ("fatG", goals.fat_g),
     ] {
         if let Some(value) = value
-            && (!value.is_finite() || value < 0.0 || value > MAX_MACRO_GRAMS)
+            && (!value.is_finite() || !(0.0..=MAX_MACRO_GRAMS).contains(&value))
         {
             return Err(AppError::BadRequest(format!(
                 "{key} must be between 0 and {MAX_MACRO_GRAMS}."
@@ -660,7 +758,7 @@ pub(crate) fn validate_goal_weight_kg(value: Option<f64>) -> AppResult<Option<f6
         None => Ok(None),
         Some(value) => {
             let rounded = round2(value);
-            if !rounded.is_finite() || rounded < 0.0 || rounded >= 1000.0 {
+            if !rounded.is_finite() || !(0.0..1000.0).contains(&rounded) {
                 return Err(AppError::BadRequest(
                     "goalWeightKg must be between 0 and 1000 kg.".to_string(),
                 ));
@@ -866,10 +964,15 @@ async fn meal_groups_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
           )
           ORDER BY sort_order, label
         ), '[]'::jsonb) AS data
-        FROM meal_groups
-        WHERE user_id = $1 AND deleted_at IS NULL
+        FROM (
+          SELECT id, user_id, label, sort_order, is_default
+          FROM meal_groups
+          WHERE user_id = $1 AND deleted_at IS NULL
+          ORDER BY sort_order, label
+          LIMIT $2
+        ) groups
         "#,
-        &[JsonBind::Uuid(user_id)],
+        &[JsonBind::Uuid(user_id), JsonBind::I64(MAX_COLLECTION_ROWS)],
     )
     .await
 }
@@ -1409,16 +1512,14 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
         "getTemplateById" => {
             let user_id = uuid_arg(&args, "userId")?;
             let template_id = uuid_arg(&args, "templateId")?;
-            let all = templates_json(pool, user_id).await?;
-            let template = all
-                .as_array()
-                .and_then(|items| {
-                    items.iter().find(|item| {
-                        item.get("id").and_then(Value::as_str) == Some(&template_id.to_string())
-                    })
-                })
-                .cloned();
-            Ok(template.unwrap_or(Value::Null))
+            // PERF-01: this used to load the account's whole template
+            // collection and linear-scan it. The indexed by-id helper already
+            // existed for exactly this.
+            match template_by_id_json(pool, user_id, template_id).await {
+                Ok(template) => Ok(template),
+                Err(AppError::NotFound(_)) => Ok(Value::Null),
+                Err(error) => Err(error),
+            }
         }
         "createTemplate" => {
             let user_id = uuid_arg(&args, "userId")?;
@@ -1471,16 +1572,13 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
         "getRecipeById" => {
             let user_id = uuid_arg(&args, "userId")?;
             let recipe_id = uuid_arg(&args, "recipeId")?;
-            let all = recipes_json(pool, user_id).await?;
-            let recipe = all
-                .as_array()
-                .and_then(|items| {
-                    items.iter().find(|item| {
-                        item.get("id").and_then(Value::as_str) == Some(&recipe_id.to_string())
-                    })
-                })
-                .cloned();
-            Ok(recipe.unwrap_or(Value::Null))
+            // PERF-01: as above — the indexed helper replaces a full-collection
+            // load plus linear scan.
+            match recipe_by_id_json(pool, user_id, recipe_id).await {
+                Ok(recipe) => Ok(recipe),
+                Err(AppError::NotFound(_)) => Ok(Value::Null),
+                Err(error) => Err(error),
+            }
         }
         "createRecipe" => {
             let user_id = uuid_arg(&args, "userId")?;
@@ -1799,6 +1897,7 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
 
 enum JsonBind {
     Uuid(Uuid),
+    I64(i64),
 }
 
 async fn query_json(pool: &PgPool, sql: &str, binds: &[JsonBind]) -> AppResult<Value> {
@@ -1806,6 +1905,9 @@ async fn query_json(pool: &PgPool, sql: &str, binds: &[JsonBind]) -> AppResult<V
     for bind in binds {
         match bind {
             JsonBind::Uuid(value) => {
+                query = query.bind(*value);
+            }
+            JsonBind::I64(value) => {
                 query = query.bind(*value);
             }
         }
@@ -1872,15 +1974,15 @@ async fn daily_summary_json(pool: &PgPool, user_id: Uuid, date: &str) -> AppResu
             coalesce(sum(protein_g) FILTER (WHERE status = 'eaten'), 0)::float8 AS protein_g,
             coalesce(sum(carbs_g) FILTER (WHERE status = 'eaten'), 0)::float8 AS carbs_g,
             coalesce(sum(fat_g) FILTER (WHERE status = 'eaten'), 0)::float8 AS fat_g,
-            coalesce(sum(calories_kcal) FILTER (WHERE status = 'eaten'), 0)::int AS calories_kcal,
+            coalesce(sum(calories_kcal) FILTER (WHERE status = 'eaten'), 0)::bigint AS calories_kcal,
             coalesce(sum(protein_g) FILTER (WHERE status = 'planned'), 0)::float8 AS planned_protein_g,
             coalesce(sum(carbs_g) FILTER (WHERE status = 'planned'), 0)::float8 AS planned_carbs_g,
             coalesce(sum(fat_g) FILTER (WHERE status = 'planned'), 0)::float8 AS planned_fat_g,
-            coalesce(sum(calories_kcal) FILTER (WHERE status = 'planned'), 0)::int AS planned_calories_kcal,
+            coalesce(sum(calories_kcal) FILTER (WHERE status = 'planned'), 0)::bigint AS planned_calories_kcal,
             coalesce(sum(protein_g) FILTER (WHERE status = 'skipped'), 0)::float8 AS skipped_protein_g,
             coalesce(sum(carbs_g) FILTER (WHERE status = 'skipped'), 0)::float8 AS skipped_carbs_g,
             coalesce(sum(fat_g) FILTER (WHERE status = 'skipped'), 0)::float8 AS skipped_fat_g,
-            coalesce(sum(calories_kcal) FILTER (WHERE status = 'skipped'), 0)::int AS skipped_calories_kcal
+            coalesce(sum(calories_kcal) FILTER (WHERE status = 'skipped'), 0)::bigint AS skipped_calories_kcal
           FROM day_entries
         )
         SELECT jsonb_build_object(
@@ -1916,8 +2018,17 @@ async fn daily_summary_json(pool: &PgPool, user_id: Uuid, date: &str) -> AppResu
     Ok(row.try_get("data")?)
 }
 
+/// PERF-03: collection reads had no ceiling at all. `getAdminUserDetail`
+/// loaded a user's entire recipe/template/weight history and then kept ten of
+/// each in Rust, and `ensure_date_string` permits years 0001-9999, so one
+/// account can hold millions of weight rows. Limits now live in SQL: the
+/// database sorts and stops, instead of shipping the whole history over the
+/// wire so Rust can throw it away.
+const MAX_COLLECTION_ROWS: i64 = 5_000;
+const ADMIN_DETAIL_ROWS: i64 = 10;
+
 async fn templates_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
-    templates_json_filtered(pool, user_id, None).await
+    templates_json_filtered(pool, user_id, None, MAX_COLLECTION_ROWS).await
 }
 
 /// Shared shape for the template list and single-template reads. Passing a
@@ -1927,6 +2038,7 @@ async fn templates_json_filtered(
     pool: &PgPool,
     user_id: Uuid,
     template_id: Option<Uuid>,
+    limit: i64,
 ) -> AppResult<Value> {
     let row = sqlx::query(
         r#"
@@ -1936,6 +2048,10 @@ async fn templates_json_filtered(
           WHERE user_id = $1
             AND deleted_at IS NULL
             AND ($2::uuid IS NULL OR id = $2::uuid)
+          -- Same ordering as the outer aggregate, so the limit keeps the rows a
+          -- caller would have kept anyway.
+          ORDER BY updated_at DESC, created_at DESC
+          LIMIT $3
         ),
         item_data AS (
           SELECT
@@ -1981,13 +2097,14 @@ async fn templates_json_filtered(
     )
     .bind(user_id)
     .bind(template_id)
+    .bind(limit)
     .fetch_one(pool)
     .await?;
     Ok(row.try_get("data")?)
 }
 
 async fn recipes_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
-    recipes_json_filtered(pool, user_id, None).await
+    recipes_json_filtered(pool, user_id, None, MAX_COLLECTION_ROWS).await
 }
 
 /// Shared shape for the recipe list and single-recipe reads. See
@@ -1996,6 +2113,7 @@ async fn recipes_json_filtered(
     pool: &PgPool,
     user_id: Uuid,
     recipe_id: Option<Uuid>,
+    limit: i64,
 ) -> AppResult<Value> {
     let row = sqlx::query(
         r#"
@@ -2004,6 +2122,8 @@ async fn recipes_json_filtered(
           FROM recipes
           WHERE user_id = $1
             AND ($2::uuid IS NULL OR id = $2::uuid)
+          ORDER BY updated_at DESC, created_at DESC
+          LIMIT $3
         ),
         ingredient_data AS (
           SELECT
@@ -2028,7 +2148,7 @@ async fn recipes_json_filtered(
             coalesce(sum(protein_g), 0)::float8 AS protein_g,
             coalesce(sum(carbs_g), 0)::float8 AS carbs_g,
             coalesce(sum(fat_g), 0)::float8 AS fat_g,
-            coalesce(sum(calories_kcal), 0)::int AS calories_kcal
+            coalesce(sum(calories_kcal), 0)::bigint AS calories_kcal
           FROM recipe_ingredients
           WHERE recipe_id IN (SELECT id FROM visible_recipes)
           GROUP BY recipe_id
@@ -2062,6 +2182,7 @@ async fn recipes_json_filtered(
     )
     .bind(user_id)
     .bind(recipe_id)
+    .bind(limit)
     .fetch_one(pool)
     .await?;
     Ok(row.try_get("data")?)
@@ -2405,6 +2526,21 @@ struct NormalizedMealEntry {
     client_mutation_id: Option<String>,
 }
 
+/// PERF-02: everything `normalize_meal_input` would otherwise fetch once *per
+/// entry*. `applyTemplateToDate` normalizes a whole template in a loop, so a
+/// 30-item template cost ~95 round trips — one meal-group check and one product
+/// fetch per item, both for ids it had already resolved and access-checked in
+/// bulk moments earlier. A caller that has done that work up front passes it in
+/// here; callers that have not use `Default` and behave exactly as before.
+#[derive(Default)]
+struct MealInputContext {
+    /// Meal-group ids already proven to belong to `user_id`.
+    trusted_meal_group_ids: HashSet<Uuid>,
+    /// Products already loaded through the same visibility predicate that
+    /// `food_product_json_by_id` applies.
+    products: HashMap<Uuid, Value>,
+}
+
 async fn normalize_meal_input(
     pool: &PgPool,
     user_id: Uuid,
@@ -2412,9 +2548,30 @@ async fn normalize_meal_input(
     default_sort_order: i32,
     recalculate_product_macros: bool,
 ) -> AppResult<NormalizedMealEntry> {
+    normalize_meal_input_with_context(
+        pool,
+        user_id,
+        input,
+        default_sort_order,
+        recalculate_product_macros,
+        &MealInputContext::default(),
+    )
+    .await
+}
+
+async fn normalize_meal_input_with_context(
+    pool: &PgPool,
+    user_id: Uuid,
+    input: &serde_json::Map<String, Value>,
+    default_sort_order: i32,
+    recalculate_product_macros: bool,
+    context: &MealInputContext,
+) -> AppResult<NormalizedMealEntry> {
     let date = required_date(input, "date")?;
     let meal_group_id = optional_uuid(input, "mealGroupId")?;
-    assert_meal_group_access(pool, user_id, meal_group_id).await?;
+    if !meal_group_id.is_some_and(|id| context.trusted_meal_group_ids.contains(&id)) {
+        assert_meal_group_access(pool, user_id, meal_group_id).await?;
+    }
     let product_id = optional_uuid(input, "productId")?;
     let sort_order = optional_i32(input, "sortOrder").unwrap_or(default_sort_order);
     if sort_order < 0 {
@@ -2436,9 +2593,12 @@ async fn normalize_meal_input(
         .map(str::to_string);
 
     if let Some(product_id) = product_id {
-        let product = food_product_json_by_id(pool, user_id, product_id)
-            .await?
-            .ok_or_else(|| AppError::NotFound("Food product not found.".to_string()))?;
+        let product = match context.products.get(&product_id) {
+            Some(product) => product.clone(),
+            None => food_product_json_by_id(pool, user_id, product_id)
+                .await?
+                .ok_or_else(|| AppError::NotFound("Food product not found.".to_string()))?,
+        };
         let (product_label, quantity, unit, serving_multiplier, protein, carbs, fat, calories) =
             nutrition_for_product(&product, input, recalculate_product_macros);
         let label = input
@@ -2655,7 +2815,13 @@ async fn update_meal_entry_json(
     .bind(entry.macros.calories)
     .bind(entry.client_mutation_id.as_deref())
     .execute(pool)
-    .await?;
+    .await
+    // LOW-B1: reusing a `clientMutationId` that another entry already holds is
+    // a client-visible collision, not an internal fault. The create path
+    // resolves it with `ON CONFLICT`; the update path turned it into a 500.
+    .map_err(map_unique_violation(
+        "That clientMutationId is already used by another meal entry.",
+    ))?;
 
     meal_entry_json(pool, user_id, entry_id).await
 }
@@ -2750,26 +2916,42 @@ async fn meal_entries_json_by_ids(
     Ok(row.try_get("data")?)
 }
 
+/// API-07: the OpenAPI spec documents `template.type` as `["meal", "day"]`, but
+/// the handler only did `required_string` and the column is bare `text` with no
+/// CHECK — so `{"type": "anything"}` was stored and returned, breaking every
+/// consumer that switches on it.
+fn normalize_template_type(input: &serde_json::Map<String, Value>) -> AppResult<String> {
+    let template_type = required_string(input, "type")?;
+    if !matches!(template_type.as_str(), "meal" | "day") {
+        return Err(AppError::BadRequest(
+            "Template type must be either \"meal\" or \"day\".".to_string(),
+        ));
+    }
+    Ok(template_type)
+}
+
+fn template_items(input: &serde_json::Map<String, Value>) -> AppResult<&Vec<Value>> {
+    let items = input
+        .get("items")
+        .and_then(Value::as_array)
+        .filter(|items| !items.is_empty())
+        .ok_or_else(|| {
+            AppError::BadRequest("A template must include at least one item.".to_string())
+        })?;
+    ensure_collection_size(items, "items")?;
+    Ok(items)
+}
+
 async fn create_template_json(
     pool: &PgPool,
     user_id: Uuid,
     input: &serde_json::Map<String, Value>,
 ) -> AppResult<Value> {
     let template_id = Uuid::new_v4();
-    let template_type = required_string(input, "type")?;
+    let template_type = normalize_template_type(input)?;
     let label = required_string(input, "label")?;
-    let notes = input.get("notes").and_then(Value::as_str);
-    let items = input
-        .get("items")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            AppError::BadRequest("A template must include at least one item.".to_string())
-        })?;
-    if items.is_empty() {
-        return Err(AppError::BadRequest(
-            "A template must include at least one item.".to_string(),
-        ));
-    }
+    let notes = optional_free_text(input, "notes", "notes")?;
+    let items = template_items(input)?;
     validate_item_product_access(pool, user_id, items).await?;
     let mut tx = pool.begin().await?;
     sqlx::query(
@@ -2779,7 +2961,7 @@ async fn create_template_json(
     .bind(user_id)
     .bind(template_type)
     .bind(label)
-    .bind(notes)
+    .bind(notes.as_deref())
     .execute(&mut *tx)
     .await?;
     insert_template_items(&mut tx, template_id, items).await?;
@@ -2793,20 +2975,10 @@ async fn update_template_json(
     template_id: Uuid,
     input: &serde_json::Map<String, Value>,
 ) -> AppResult<Value> {
-    let template_type = required_string(input, "type")?;
+    let template_type = normalize_template_type(input)?;
     let label = required_string(input, "label")?;
-    let notes = input.get("notes").and_then(Value::as_str);
-    let items = input
-        .get("items")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            AppError::BadRequest("A template must include at least one item.".to_string())
-        })?;
-    if items.is_empty() {
-        return Err(AppError::BadRequest(
-            "A template must include at least one item.".to_string(),
-        ));
-    }
+    let notes = optional_free_text(input, "notes", "notes")?;
+    let items = template_items(input)?;
     validate_item_product_access(pool, user_id, items).await?;
     let mut tx = pool.begin().await?;
     let updated = sqlx::query(
@@ -2816,7 +2988,7 @@ async fn update_template_json(
     .bind(template_id)
     .bind(template_type)
     .bind(label)
-    .bind(notes)
+    .bind(notes.as_deref())
     .fetch_optional(&mut *tx)
     .await?
     .is_some();
@@ -2945,6 +3117,65 @@ impl TemplateItemColumns {
     }
 }
 
+/// Loads every product a template's items reference in one round trip, using
+/// the same visibility predicate as `food_product_json_by_id` so a prefetched
+/// product is indistinguishable from an individually fetched one (PERF-02).
+async fn food_products_json_by_ids(
+    pool: &PgPool,
+    user_id: Uuid,
+    product_ids: &[Uuid],
+) -> AppResult<HashMap<Uuid, Value>> {
+    if product_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query(
+        r#"
+        SELECT
+          id,
+          jsonb_build_object(
+            'id', id,
+            'ownerUserId', owner_user_id,
+            'scope', scope,
+            'source', source,
+            'barcode', barcode,
+            'name', name,
+            'brand', brand,
+            'defaultServingQuantity', default_serving_quantity::float8,
+            'defaultServingUnit', default_serving_unit,
+            'proteinPer100', protein_per_100::float8,
+            'carbsPer100', carbs_per_100::float8,
+            'fatPer100', fat_per_100::float8,
+            'caloriesPer100', calories_per_100,
+            'servingWeightG', serving_weight_g::float8,
+            'servingVolumeMl', serving_volume_ml::float8,
+            'submittedByUserId', submitted_by_user_id,
+            'deletedByUserId', deleted_by_user_id,
+            'sourceProvider', source_provider,
+            'sourceConfidence', source_confidence::float8,
+            'sourceMetadata', source_metadata,
+            'correctedFromProductId', corrected_from_product_id,
+            'createdAt', created_at,
+            'updatedAt', updated_at,
+            'deletedAt', deleted_at
+          ) AS data
+        FROM food_products
+        WHERE id = ANY($2::uuid[])
+          AND deleted_at IS NULL
+          AND (owner_user_id = $1 OR owner_user_id IS NULL)
+        "#,
+    )
+    .bind(user_id)
+    .bind(product_ids)
+    .fetch_all(pool)
+    .await?;
+
+    let mut products = HashMap::with_capacity(rows.len());
+    for row in rows {
+        products.insert(row.try_get::<Uuid, _>("id")?, row.try_get::<Value, _>("data")?);
+    }
+    Ok(products)
+}
+
 async fn validate_item_product_access(
     pool: &PgPool,
     user_id: Uuid,
@@ -3003,7 +3234,7 @@ async fn assert_food_products_accessible(
 }
 
 async fn template_by_id_json(pool: &PgPool, user_id: Uuid, template_id: Uuid) -> AppResult<Value> {
-    first_json_item(templates_json_filtered(pool, user_id, Some(template_id)).await?)
+    first_json_item(templates_json_filtered(pool, user_id, Some(template_id), 1).await?)
         .ok_or_else(|| AppError::NotFound("Template not found.".to_string()))
 }
 
@@ -3066,6 +3297,17 @@ impl MealGroupLabelIndex {
             _ => None,
         }
     }
+
+    /// Every id `resolve` can hand back. All of them came from a query filtered
+    /// on `user_id`, so they need no further access check (PERF-02).
+    fn resolvable_ids(&self) -> HashSet<Uuid> {
+        self.exact
+            .values()
+            .chain(self.case_insensitive.values())
+            .filter(|(_, count)| *count == 1)
+            .map(|(id, _)| *id)
+            .collect()
+    }
 }
 
 async fn apply_template_json(
@@ -3097,6 +3339,28 @@ async fn apply_template_json(
     .fetch_one(pool)
     .await?;
     let next_sort_order: i32 = row.try_get("sort_order")?;
+
+    // PERF-02: resolve the per-item lookups once instead of once per item.
+    // `meal_groups` was loaded with `WHERE user_id = $1 AND deleted_at IS NULL`,
+    // so every id it can return is already proven to belong to this user — the
+    // per-item `assert_meal_group_access` was a provably redundant round trip.
+    // The products were already access-checked in bulk by
+    // `validate_item_product_access` just above, so one batched read replaces
+    // the per-item fetch.
+    let mut product_ids = Vec::new();
+    for item in items {
+        let item = item
+            .as_object()
+            .ok_or_else(|| AppError::BadRequest("Template item must be an object.".to_string()))?;
+        if let Some(product_id) = optional_uuid(item, "productId")? {
+            product_ids.push(product_id);
+        }
+    }
+    let context = MealInputContext {
+        trusted_meal_group_ids: meal_groups.resolvable_ids(),
+        products: food_products_json_by_ids(pool, user_id, &product_ids).await?,
+    };
+
     let mut normalized = Vec::new();
     for (index, item) in items.iter().enumerate() {
         let mut meal = item
@@ -3113,8 +3377,15 @@ async fn apply_template_json(
         meal.insert("date".to_string(), Value::String(date.clone()));
         meal.insert("status".to_string(), Value::String(status.clone()));
         normalized.push(
-            normalize_meal_input(pool, user_id, &meal, next_sort_order + index as i32, true)
-                .await?,
+            normalize_meal_input_with_context(
+                pool,
+                user_id,
+                &meal,
+                next_sort_order + index as i32,
+                true,
+                &context,
+            )
+            .await?,
         );
     }
 
@@ -3296,11 +3567,28 @@ async fn create_food_product_json(
     .bind(normalized.source_metadata)
     .bind(normalized.corrected_from_product_id)
     .execute(pool)
-    .await?;
+    .await
+    .map_err(map_active_barcode_conflict)?;
     let product = food_product_json_by_id(pool, user_id, product_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Food product not found.".to_string()))?;
     Ok(product)
+}
+
+/// DATA-07: `active_global_barcode_exists` is a check-then-insert. Under READ
+/// COMMITTED two concurrent submissions both see no row, and
+/// `food_products_active_global_barcode_key` rejects the loser with `23505` —
+/// which reached the caller as a 500 rather than the 400 the pre-check already
+/// produces for the sequential case. Same message either way, so the two
+/// outcomes are indistinguishable to the client.
+fn map_active_barcode_conflict(error: sqlx::Error) -> AppError {
+    if let sqlx::Error::Database(db_error) = &error
+        && db_error.code().as_deref() == Some("23505")
+        && db_error.constraint() == Some("food_products_active_global_barcode_key")
+    {
+        return AppError::BadRequest("That barcode already exists.".to_string());
+    }
+    AppError::Sqlx(error)
 }
 
 async fn active_global_barcode_exists(
@@ -3521,7 +3809,8 @@ async fn save_barcode_food_product_with_executor(
     .bind(normalized.source_metadata)
     .bind(normalized.corrected_from_product_id)
     .execute(&mut *executor)
-    .await?;
+    .await
+    .map_err(map_active_barcode_conflict)?;
 
     let product = food_product_json_by_id_with_executor(&mut *executor, user_id, product_id)
         .await?
@@ -3642,7 +3931,10 @@ async fn list_admin_users_json(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|value| format!("%{}%", value.replace('%', "\\%").replace('_', "\\_")));
+        // DATA-05: this used to be a hand-rolled copy that escaped `%` and `_`
+        // but not the backslash, while the SQL still declares `ESCAPE '\'` — so
+        // searching for `100\%` produced a trailing wildcard and wrong results.
+        .map(|value| format!("%{}%", escape_like_pattern(value)));
     let role = input
         .get("role")
         .and_then(Value::as_str)
@@ -3775,9 +4067,9 @@ async fn get_admin_user_detail_json(pool: &PgPool, user_id: Uuid) -> AppResult<V
     // their sum.
     let (recent_recipes, recent_templates, recent_weights, goals, recent_meals, recent_barcodes) =
         tokio::try_join!(
-            recipes_json(pool, user_id),
-            templates_json(pool, user_id),
-            weight_entries_json(pool, user_id),
+            recipes_json_filtered(pool, user_id, None, ADMIN_DETAIL_ROWS),
+            templates_json_filtered(pool, user_id, None, ADMIN_DETAIL_ROWS),
+            weight_entries_json_limited(pool, user_id, ADMIN_DETAIL_ROWS),
             get_user_goals(pool, user_id),
             list_recent_meal_entries_json(pool, user_id, 10, false),
             recent_barcode_submissions_json(pool, user_id, 10),
@@ -3793,9 +4085,12 @@ async fn get_admin_user_detail_json(pool: &PgPool, user_id: Uuid) -> AppResult<V
             "barcodeSubmissions": counts.try_get::<i32, _>("barcode_submissions")?
         },
         "recentMeals": recent_meals,
-        "recentWeights": recent_weights.as_array().cloned().unwrap_or_default().into_iter().rev().take(10).collect::<Vec<_>>(),
-        "recentRecipes": recent_recipes.as_array().cloned().unwrap_or_default().into_iter().take(10).collect::<Vec<_>>(),
-        "recentTemplates": recent_templates.as_array().cloned().unwrap_or_default().into_iter().take(10).collect::<Vec<_>>(),
+        // PERF-03: the limit is applied in SQL now; `rev()` still stands
+        // because `recentWeights` is contracted as newest-first while the
+        // series itself is stored ascending.
+        "recentWeights": recent_weights.as_array().cloned().unwrap_or_default().into_iter().rev().collect::<Vec<_>>(),
+        "recentRecipes": recent_recipes,
+        "recentTemplates": recent_templates,
         "recentBarcodeSubmissions": recent_barcodes
     }))
 }
@@ -4018,7 +4313,8 @@ async fn admin_food_products_json(
     review_queue: bool,
     filters: &AdminBarcodeFilters,
 ) -> AppResult<Value> {
-    let offset = (page - 1) * page_size;
+    // Second offset computation (DATA-06); shares the clamp with `pagination`.
+    let offset = page_offset(page, page_size);
     let rows = sqlx::query(
         r#"
         WITH barcode_products AS (
@@ -4144,7 +4440,15 @@ async fn admin_food_products_json(
     .bind(filters.submitter_pattern.as_deref())
     .fetch_all(pool)
     .await?;
-    let total_row = sqlx::query(
+    // PERF-04: outside the review queue the outer predicate below is
+    // `NOT false`, i.e. always true — so the whole review-metadata chain
+    // (`regexp_replace` over every catalogue row, the duplicate-name GROUP BY,
+    // the revision and audit rollups and three LEFT JOINs) was computed and
+    // then discarded. Every ordinary admin page view paid for it, and
+    // `admin_dashboard_json` paid for it again to render five rows. The count
+    // is the same either way; only the review queue actually needs the rollups.
+    let total_row = if review_queue {
+        sqlx::query(
         r#"
         WITH barcode_products AS (
           SELECT
@@ -4212,12 +4516,40 @@ async fn admin_food_products_json(
           )
         "#,
     )
-    .bind(review_queue)
-    .bind(filters.q_pattern.as_deref())
-    .bind(filters.status.as_str())
-    .bind(filters.submitter_pattern.as_deref())
-    .fetch_one(pool)
-    .await?;
+        .bind(review_queue)
+        .bind(filters.q_pattern.as_deref())
+        .bind(filters.status.as_str())
+        .bind(filters.submitter_pattern.as_deref())
+        .fetch_one(pool)
+        .await?
+    } else {
+        sqlx::query(
+            r#"
+            SELECT count(*)::int AS total
+            FROM food_products fp
+            LEFT JOIN users submitter ON submitter.id = fp.submitted_by_user_id
+            WHERE fp.owner_user_id IS NULL
+              AND fp.source = 'barcode'
+              AND (
+                $1::text IS NULL
+                OR fp.barcode ILIKE $1 ESCAPE '\'
+                OR fp.name ILIKE $1 ESCAPE '\'
+                OR fp.brand ILIKE $1 ESCAPE '\'
+              )
+              AND (
+                $2 = 'all'
+                OR ($2 = 'active' AND fp.deleted_at IS NULL)
+                OR ($2 = 'deleted' AND fp.deleted_at IS NOT NULL)
+              )
+              AND ($3::text IS NULL OR submitter.email ILIKE $3 ESCAPE '\')
+            "#,
+        )
+        .bind(filters.q_pattern.as_deref())
+        .bind(filters.status.as_str())
+        .bind(filters.submitter_pattern.as_deref())
+        .fetch_one(pool)
+        .await?
+    };
     let total: i32 = total_row.try_get("total")?;
     Ok(page_json(
         rows.into_iter()
@@ -4392,7 +4724,8 @@ async fn update_admin_barcode_product_json(
     .bind(normalized.source_provider.as_deref())
     .bind(normalized.source_metadata)
     .fetch_optional(&mut *tx)
-    .await?
+    .await
+    .map_err(map_active_barcode_conflict)?
     .is_some();
     if !updated {
         return Err(AppError::NotFound("Barcode product not found.".to_string()));
@@ -4769,9 +5102,11 @@ async fn list_api_tokens_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> 
         FROM api_tokens
         WHERE user_id = $1
         ORDER BY created_at DESC
+        LIMIT $2
         "#,
     )
     .bind(user_id)
+    .bind(MAX_COLLECTION_ROWS)
     .fetch_all(pool)
     .await?;
     let records = rows
@@ -4951,6 +5286,7 @@ fn parse_recipe_input(input: &serde_json::Map<String, Value>) -> AppResult<Recip
         .ok_or_else(|| {
             AppError::BadRequest("A recipe must have at least one ingredient.".to_string())
         })?;
+    ensure_collection_size(ingredients, "ingredients")?;
 
     Ok(RecipeInput {
         label,
@@ -5024,11 +5360,22 @@ async fn insert_recipe_ingredients(
 }
 
 async fn recipe_by_id_json(pool: &PgPool, user_id: Uuid, recipe_id: Uuid) -> AppResult<Value> {
-    first_json_item(recipes_json_filtered(pool, user_id, Some(recipe_id)).await?)
+    first_json_item(recipes_json_filtered(pool, user_id, Some(recipe_id), 1).await?)
         .ok_or_else(|| AppError::NotFound("Recipe not found.".to_string()))
 }
 
 async fn weight_entries_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
+    weight_entries_json_limited(pool, user_id, MAX_COLLECTION_ROWS).await
+}
+
+/// PERF-03: the row set is selected most-recent-first so a limit keeps the
+/// newest entries, then re-sorted ascending because every consumer charts the
+/// series forwards in time.
+async fn weight_entries_json_limited(
+    pool: &PgPool,
+    user_id: Uuid,
+    limit: i64,
+) -> AppResult<Value> {
     let row = sqlx::query(
         r#"
         SELECT coalesce(jsonb_agg(
@@ -5042,11 +5389,17 @@ async fn weight_entries_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
           )
           ORDER BY entry_date ASC
         ), '[]'::jsonb) AS data
-        FROM weight_entries
-        WHERE user_id = $1
+        FROM (
+          SELECT id, user_id, entry_date, weight_kg, body_fat_pct, notes
+          FROM weight_entries
+          WHERE user_id = $1
+          ORDER BY entry_date DESC
+          LIMIT $2
+        ) recent
         "#,
     )
     .bind(user_id)
+    .bind(limit)
     .fetch_one(pool)
     .await?;
     Ok(row.try_get("data")?)
@@ -5496,27 +5849,31 @@ async fn list_recent_meal_entries_json(
 ) -> AppResult<Value> {
     let row = sqlx::query(
         r#"
+        -- DATA-08: this was the one meal-JSON shape that did not mask
+        -- soft-deleted products. It handed clients a `productId` that 404s on
+        -- lookup and always reported a null `sourceLabel`; the other four
+        -- blocks join exactly like this.
         SELECT coalesce(jsonb_agg(
           jsonb_build_object(
-            'id', id,
-            'userId', user_id,
-            'date', entry_date,
-            'mealGroupId', meal_group_id,
-            'status', status,
-            'productId', product_id,
-            'label', label,
-            'sortOrder', sort_order,
-            'quantity', quantity::float8,
-            'unit', unit,
-            'servingMultiplier', serving_multiplier::float8,
-            'proteinG', protein_g::float8,
-            'carbsG', carbs_g::float8,
-            'fatG', fat_g::float8,
-            'caloriesKcal', calories_kcal,
-            'clientMutationId', client_mutation_id,
-            'sourceLabel', NULL
+            'id', recent.id,
+            'userId', recent.user_id,
+            'date', recent.entry_date,
+            'mealGroupId', recent.meal_group_id,
+            'status', recent.status,
+            'productId', CASE WHEN fp.id IS NULL THEN NULL ELSE recent.product_id END,
+            'label', recent.label,
+            'sortOrder', recent.sort_order,
+            'quantity', recent.quantity::float8,
+            'unit', recent.unit,
+            'servingMultiplier', recent.serving_multiplier::float8,
+            'proteinG', recent.protein_g::float8,
+            'carbsG', recent.carbs_g::float8,
+            'fatG', recent.fat_g::float8,
+            'caloriesKcal', recent.calories_kcal,
+            'clientMutationId', recent.client_mutation_id,
+            'sourceLabel', fp.name
           )
-          ORDER BY entry_date DESC, sort_order ASC, created_at DESC, id
+          ORDER BY recent.entry_date DESC, recent.sort_order ASC, recent.created_at DESC, recent.id
         ), '[]'::jsonb) AS data
         FROM (
           SELECT *
@@ -5525,6 +5882,10 @@ async fn list_recent_meal_entries_json(
           ORDER BY entry_date DESC, sort_order ASC, created_at DESC, id
           LIMIT $2
         ) recent
+        LEFT JOIN food_products fp
+          ON fp.id = recent.product_id
+          AND fp.deleted_at IS NULL
+          AND (fp.owner_user_id = recent.user_id OR fp.owner_user_id IS NULL)
         "#,
     )
     .bind(user_id)
@@ -5562,7 +5923,7 @@ async fn recent_daily_overviews_json(
             round(sum(protein_g)::numeric, 1)::float8 AS protein_g,
             round(sum(carbs_g)::numeric, 1)::float8 AS carbs_g,
             round(sum(fat_g)::numeric, 1)::float8 AS fat_g,
-            sum(calories_kcal)::int AS calories_kcal,
+            sum(calories_kcal)::bigint AS calories_kcal,
             count(*)::int AS item_count
           FROM meal_entries
           WHERE user_id = $1 AND status = 'eaten' AND entry_date <= $2::date
@@ -5631,7 +5992,7 @@ async fn period_averages_json(
               'proteinG', CASE WHEN logged_days = 0 THEN 0 ELSE round((protein_g / logged_days)::numeric, 1)::float8 END,
               'carbsG', CASE WHEN logged_days = 0 THEN 0 ELSE round((carbs_g / logged_days)::numeric, 1)::float8 END,
               'fatG', CASE WHEN logged_days = 0 THEN 0 ELSE round((fat_g / logged_days)::numeric, 1)::float8 END,
-              'caloriesKcal', CASE WHEN logged_days = 0 THEN 0 ELSE round(calories_kcal / logged_days)::int END
+              'caloriesKcal', CASE WHEN logged_days = 0 THEN 0 ELSE round(calories_kcal / logged_days)::bigint END
             )
           )
           ORDER BY CASE label WHEN 'week' THEN 1 WHEN 'month' THEN 2 WHEN 'rolling7' THEN 3 ELSE 4 END
@@ -5647,7 +6008,7 @@ async fn period_averages_json(
 }
 
 async fn stats_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppResult<Value> {
-    let row = sqlx::query(
+    let row = sqlx::query(concat!(
         r#"
         WITH user_goals AS (
           SELECT
@@ -5667,11 +6028,11 @@ async fn stats_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppR
             coalesce(sum(protein_g) FILTER (WHERE status = 'eaten'), 0)::float8 AS protein_g,
             coalesce(sum(carbs_g) FILTER (WHERE status = 'eaten'), 0)::float8 AS carbs_g,
             coalesce(sum(fat_g) FILTER (WHERE status = 'eaten'), 0)::float8 AS fat_g,
-            coalesce(sum(calories_kcal) FILTER (WHERE status = 'eaten'), 0)::int AS calories_kcal,
+            coalesce(sum(calories_kcal) FILTER (WHERE status = 'eaten'), 0)::bigint AS calories_kcal,
             coalesce(sum(protein_g) FILTER (WHERE status = 'planned' AND entry_date <= $2::date), 0)::float8 AS planned_protein_g,
             coalesce(sum(carbs_g) FILTER (WHERE status = 'planned' AND entry_date <= $2::date), 0)::float8 AS planned_carbs_g,
             coalesce(sum(fat_g) FILTER (WHERE status = 'planned' AND entry_date <= $2::date), 0)::float8 AS planned_fat_g,
-            coalesce(sum(calories_kcal) FILTER (WHERE status = 'planned' AND entry_date <= $2::date), 0)::int AS planned_calories_kcal
+            coalesce(sum(calories_kcal) FILTER (WHERE status = 'planned' AND entry_date <= $2::date), 0)::bigint AS planned_calories_kcal
           FROM meal_entries
           WHERE user_id = $1
             AND (
@@ -5691,7 +6052,7 @@ async fn stats_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppR
             coalesce(sum(protein_g), 0)::float8 AS total_protein_g,
             coalesce(sum(carbs_g), 0)::float8 AS total_carbs_g,
             coalesce(sum(fat_g), 0)::float8 AS total_fat_g,
-            coalesce(sum(calories_kcal), 0)::int AS total_calories_kcal
+            coalesce(sum(calories_kcal), 0)::bigint AS total_calories_kcal
           FROM eaten_days
         ),
         rolling_7 AS (
@@ -5699,7 +6060,7 @@ async fn stats_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppR
             CASE WHEN count(*) = 0 THEN 0 ELSE round((sum(protein_g) / count(*))::numeric, 1)::float8 END AS protein_g,
             CASE WHEN count(*) = 0 THEN 0 ELSE round((sum(carbs_g) / count(*))::numeric, 1)::float8 END AS carbs_g,
             CASE WHEN count(*) = 0 THEN 0 ELSE round((sum(fat_g) / count(*))::numeric, 1)::float8 END AS fat_g,
-            CASE WHEN count(*) = 0 THEN 0 ELSE round(sum(calories_kcal)::numeric / count(*))::int END AS calories_kcal
+            CASE WHEN count(*) = 0 THEN 0 ELSE round(sum(calories_kcal)::numeric / count(*))::bigint END AS calories_kcal
           FROM eaten_days
           WHERE entry_date >= $2::date - interval '6 days' AND entry_date <= $2::date
         ),
@@ -5708,7 +6069,7 @@ async fn stats_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppR
             CASE WHEN count(*) = 0 THEN 0 ELSE round((sum(protein_g) / count(*))::numeric, 1)::float8 END AS protein_g,
             CASE WHEN count(*) = 0 THEN 0 ELSE round((sum(carbs_g) / count(*))::numeric, 1)::float8 END AS carbs_g,
             CASE WHEN count(*) = 0 THEN 0 ELSE round((sum(fat_g) / count(*))::numeric, 1)::float8 END AS fat_g,
-            CASE WHEN count(*) = 0 THEN 0 ELSE round(sum(calories_kcal)::numeric / count(*))::int END AS calories_kcal
+            CASE WHEN count(*) = 0 THEN 0 ELSE round(sum(calories_kcal)::numeric / count(*))::bigint END AS calories_kcal
           FROM eaten_days
           WHERE entry_date >= $2::date - interval '29 days' AND entry_date <= $2::date
         ),
@@ -5752,7 +6113,7 @@ async fn stats_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppR
           SELECT
             CASE
               WHEN user_goals.goal_calories_kcal IS NULL OR count(eaten_days.*) = 0 THEN NULL
-              ELSE round(avg(abs(eaten_days.calories_kcal - user_goals.goal_calories_kcal)))::int
+              ELSE round(avg(abs(eaten_days.calories_kcal - user_goals.goal_calories_kcal)))::bigint
             END AS calorie_avg_absolute_deviation,
             CASE
               WHEN user_goals.goal_calories_kcal IS NULL OR user_goals.goal_calories_kcal <= 0 OR count(eaten_days.*) = 0 THEN NULL
@@ -5766,7 +6127,7 @@ async fn stats_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppR
           SELECT
             CASE
               WHEN user_goals.goal_calories_kcal IS NULL OR totals.total_days_tracked = 0 THEN NULL
-              ELSE round((totals.total_calories_kcal::float8 / totals.total_days_tracked) - user_goals.goal_calories_kcal)::int
+              ELSE round((totals.total_calories_kcal::float8 / totals.total_days_tracked) - user_goals.goal_calories_kcal)::bigint
             END AS average_daily_delta_kcal
           FROM totals, user_goals
         ),
@@ -5790,8 +6151,17 @@ async fn stats_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppR
               entry_date,
               round(weight_kg::numeric, 2)::float8 AS weight_kg,
               round(avg(weight_kg) OVER (ORDER BY entry_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)::numeric, 2)::float8 AS smoothed_weight_kg
-            FROM weight_entries
-            WHERE user_id = $1
+            -- PERF-03: `ensure_date_string` accepts years 0001-9999, so this
+            -- window function could run over millions of rows for one account
+            -- and emit a JSON object for every one of them. The chart only ever
+            -- draws a bounded series.
+            FROM (
+              SELECT entry_date, weight_kg
+              FROM weight_entries
+              WHERE user_id = $1
+              ORDER BY entry_date DESC
+              LIMIT 1000
+            ) bounded_weights
           ) weights
         ),
         planned_adherence AS (
@@ -5820,13 +6190,29 @@ async fn stats_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppR
             )
             ORDER BY entry_date
           ), '[]'::jsonb) AS all_daily_totals
-          FROM daily
-        )
+          -- PERF-03: one JSON object per day ever logged, unbounded. The
+          -- aggregates above still run over the full history; only this
+          -- per-day payload is capped.
+          FROM (
+            SELECT * FROM daily ORDER BY entry_date DESC LIMIT 1000
+          ) bounded_daily
+        ),
+        -- Same date set the leaderboard streaks over: one row per date with an
+        -- eaten entry. `daily` above also carries planned-only dates, which must
+        -- not count towards a streak.
+        streak_days AS (
+          SELECT DISTINCT entry_date
+          FROM meal_entries
+          WHERE user_id = $1 AND status = 'eaten'
+        ),
+        "#,
+        streak_summary_ctes!(),
+        r#"
         SELECT jsonb_build_object(
           'allDailyTotals', daily_totals.all_daily_totals,
           'totalDaysTracked', totals.total_days_tracked,
-          'currentStreak', 0,
-          'longestStreak', 0,
+          'currentStreak', streak_summary.current_streak,
+          'longestStreak', streak_summary.longest_streak,
           'totalProteinG', totals.total_protein_g,
           'totalCarbsG', totals.total_carbs_g,
           'totalFatG', totals.total_fat_g,
@@ -5882,10 +6268,11 @@ async fn stats_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppR
         CROSS JOIN energy_balance
         CROSS JOIN smoothed_weight_trend
         CROSS JOIN planned_adherence
+        CROSS JOIN streak_summary
         LEFT JOIN best_calorie_day ON true
         LEFT JOIN latest_weight ON true
         "#,
-    )
+    ))
     .bind(user_id)
     .bind(today)
     .fetch_one(pool)
@@ -5896,12 +6283,12 @@ async fn stats_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppR
 async fn leaderboard_json(pool: &PgPool, user_id: Uuid, reference_date: &str) -> AppResult<Value> {
     let today = NaiveDate::parse_from_str(reference_date, "%Y-%m-%d")
         .map_err(|_| AppError::BadRequest("referenceDate must be YYYY-MM-DD.".to_string()))?;
-    let row = sqlx::query(
+    let row = sqlx::query(concat!(
         r#"
         WITH daily AS (
           SELECT
             entry_date,
-            round(sum(calories_kcal)::numeric)::int AS calories_kcal,
+            round(sum(calories_kcal)::numeric)::bigint AS calories_kcal,
             round(sum(protein_g)::numeric, 1)::float8 AS protein_g,
             round(sum(carbs_g)::numeric, 1)::float8 AS carbs_g,
             count(*)::int AS entry_count
@@ -5909,29 +6296,12 @@ async fn leaderboard_json(pool: &PgPool, user_id: Uuid, reference_date: &str) ->
           WHERE user_id = $1 AND status = 'eaten'
           GROUP BY entry_date
         ),
-        dated_islands AS (
-          SELECT
-            entry_date,
-            entry_date - row_number() OVER (ORDER BY entry_date)::int AS island
-          FROM daily
+        streak_days AS (
+          SELECT entry_date FROM daily
         ),
-        streaks AS (
-          SELECT
-            min(entry_date) AS start_date,
-            max(entry_date) AS end_date,
-            count(*)::int AS streak_length
-          FROM dated_islands
-          GROUP BY island
-        ),
-        streak_summary AS (
-          SELECT
-            coalesce(max(CASE
-              WHEN start_date <= $2 AND end_date >= $2 THEN ($2 - start_date) + 1
-              WHEN end_date = $2 - 1 THEN streak_length
-            END), 0)::int AS current_streak,
-            coalesce(max(streak_length), 0)::int AS longest_streak
-          FROM streaks
-        )
+        "#,
+        streak_summary_ctes!(),
+        r#"
         SELECT jsonb_build_object(
           'currentStreak', streak_summary.current_streak,
           'longestStreak', streak_summary.longest_streak,
@@ -5963,7 +6333,7 @@ async fn leaderboard_json(pool: &PgPool, user_id: Uuid, reference_date: &str) ->
         ) AS data
         FROM streak_summary
         "#,
-    )
+    ))
     .bind(user_id)
     .bind(today)
     .fetch_one(pool)
@@ -6096,19 +6466,30 @@ fn maybe_trigger_test_fault(
     Ok(())
 }
 
+/// DATA-06: `page` comes straight from the request. Unclamped,
+/// `(page - 1) * page_size` overflowed `i64` — a panic in debug, and in release
+/// a negative value that Postgres rejects with `OFFSET must not be negative`,
+/// i.e. a 500. A page this deep is meaningless for every paginated view here.
+const MAX_PAGE: i64 = 100_000;
+
+fn page_offset(page: i64, page_size: i64) -> i64 {
+    page.clamp(1, MAX_PAGE)
+        .saturating_sub(1)
+        .saturating_mul(page_size)
+}
+
 fn pagination(input: &serde_json::Map<String, Value>) -> (i64, i64, i64) {
     let page = input
         .get("page")
         .and_then(Value::as_i64)
         .unwrap_or(1)
-        .max(1);
+        .clamp(1, MAX_PAGE);
     let page_size = input
         .get("pageSize")
         .and_then(Value::as_i64)
         .unwrap_or(25)
         .clamp(1, 100);
-    let offset = (page - 1) * page_size;
-    (page, page_size, offset)
+    (page, page_size, page_offset(page, page_size))
 }
 
 fn page_json(items: Vec<Value>, page: i64, page_size: i64, total_items: i32) -> Value {
@@ -6128,13 +6509,67 @@ fn is_quantity_unit(value: &str) -> bool {
     matches!(value, "g" | "ml" | "serving" | "count")
 }
 
+/// API-10: nothing capped the length of any string reaching a `text` column, so
+/// a `write:daily` token could store a ~2 MB `label` on every meal entry and a
+/// ~2 MB `notes` on every template — bounded only by the HTTP body limit.
+/// Names, labels and codes are never prose, so they get the tighter cap;
+/// free-text fields get the looser one.
+const MAX_TEXT_FIELD_LENGTH: usize = 500;
+const MAX_FREE_TEXT_LENGTH: usize = 2_000;
+/// `items` / `ingredients` were only checked for non-emptiness, so one request
+/// could ask for thousands of rows.
+const MAX_COLLECTION_ITEMS: usize = 200;
+
+/// Counted in `char`s rather than bytes: the columns are `text`, so the limit
+/// users care about is characters, and a byte limit would silently reject
+/// shorter non-ASCII input.
+fn ensure_text_length(value: &str, max: usize, field_name: &str) -> AppResult<()> {
+    if value.chars().count() > max {
+        return Err(AppError::BadRequest(format!(
+            "{field_name} must be at most {max} characters."
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_collection_size(items: &[Value], field_name: &str) -> AppResult<()> {
+    if items.len() > MAX_COLLECTION_ITEMS {
+        return Err(AppError::BadRequest(format!(
+            "{field_name} must contain at most {MAX_COLLECTION_ITEMS} entries."
+        )));
+    }
+    Ok(())
+}
+
+/// Free-text fields (`notes`) accept more than a label but are still bounded.
+fn optional_free_text(
+    input: &serde_json::Map<String, Value>,
+    key: &str,
+    field_name: &str,
+) -> AppResult<Option<String>> {
+    let Some(value) = input
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    ensure_text_length(value, MAX_FREE_TEXT_LENGTH, field_name)?;
+    Ok(Some(value.to_string()))
+}
+
 fn trim_optional_string(input: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
     input
         .get(key)
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_string)
+        // Truncation rather than rejection: several callers use this for
+        // optional filter/search arguments where a hard error would be worse
+        // than a clamp, and the persisted callers (`brand`, `barcode`,
+        // `sourceProvider`) are all short by nature.
+        .map(|value| value.chars().take(MAX_TEXT_FIELD_LENGTH).collect())
 }
 
 fn required_string_with_message(
@@ -6142,13 +6577,14 @@ fn required_string_with_message(
     key: &str,
     message: &str,
 ) -> AppResult<String> {
-    input
+    let value = input
         .get(key)
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| AppError::BadRequest(message.to_string()))
+        .ok_or_else(|| AppError::BadRequest(message.to_string()))?;
+    ensure_text_length(value, MAX_TEXT_FIELD_LENGTH, key)?;
+    Ok(value.to_string())
 }
 
 fn normalize_positive_number(
@@ -6205,7 +6641,10 @@ fn normalize_macros(
         protein: round1(required_f64_bounded(input, protein_key, MAX_MACRO_GRAMS)?),
         carbs: round1(required_f64_bounded(input, carbs_key, MAX_MACRO_GRAMS)?),
         fat: round1(required_f64_bounded(input, fat_key, MAX_MACRO_GRAMS)?),
-        calories: required_i32(input, calories_key)?,
+        // DATA-03: calories used to be the one unbounded macro, which let a
+        // day's `sum(calories_kcal)` overflow the aggregate cast and 500 every
+        // summary/stats/leaderboard read for that account.
+        calories: required_i32_bounded(input, calories_key, MAX_CALORIES_KCAL)?,
     })
 }
 
@@ -6218,6 +6657,16 @@ fn require_any_nutrition(macros: &MacroValues) -> AppResult<()> {
     ))
 }
 
+/// The single enforcement point for every value that reaches a `meal_entries` /
+/// `meal_template_items` / `recipe_ingredients` numeric column.
+///
+/// DATA-01: the manual path bounded its inputs on the way in
+/// (`normalize_positive_number`, `required_f64_bounded`), but the product-linked
+/// path built its values from the product row and the raw request and only
+/// checked finite/positive here — so `quantity: 1e12` reached the INSERT and
+/// came back as a Postgres `22003`, i.e. a 500 for what is a client error. The
+/// bounds live here rather than being copied into the product path so the two
+/// cannot drift apart again.
 fn validate_meal_components(
     label: &str,
     sort_order: i32,
@@ -6240,6 +6689,11 @@ fn validate_meal_components(
             "Quantity must be a positive number.".to_string(),
         ));
     }
+    if quantity > MAX_QUANTITY {
+        return Err(AppError::BadRequest(format!(
+            "Quantity must be at most {MAX_QUANTITY}."
+        )));
+    }
     if !is_quantity_unit(unit) {
         return Err(AppError::BadRequest(
             "Quantity unit is invalid.".to_string(),
@@ -6249,6 +6703,37 @@ fn validate_meal_components(
         return Err(AppError::BadRequest(
             "Serving multiplier must be a positive number.".to_string(),
         ));
+    }
+    if serving_multiplier > MAX_QUANTITY {
+        return Err(AppError::BadRequest(format!(
+            "Serving multiplier must be at most {MAX_QUANTITY}."
+        )));
+    }
+    for (field_name, value) in [
+        ("Protein", macros.protein),
+        ("Carbs", macros.carbs),
+        ("Fat", macros.fat),
+    ] {
+        if !value.is_finite() || value < 0.0 {
+            return Err(AppError::BadRequest(format!(
+                "{field_name} must be a non-negative number."
+            )));
+        }
+        if value > MAX_MACRO_GRAMS {
+            return Err(AppError::BadRequest(format!(
+                "{field_name} must be at most {MAX_MACRO_GRAMS}."
+            )));
+        }
+    }
+    if macros.calories < 0 {
+        return Err(AppError::BadRequest(
+            "Calories must be a non-negative integer.".to_string(),
+        ));
+    }
+    if macros.calories > MAX_CALORIES_KCAL {
+        return Err(AppError::BadRequest(format!(
+            "Calories must be at most {MAX_CALORIES_KCAL}."
+        )));
     }
     require_any_nutrition(macros)
 }
@@ -6281,6 +6766,48 @@ fn normalize_meal_food_values(
         label_message,
     )?;
     Ok(values)
+}
+
+/// DATA-09: `sourceMetadata` was taken verbatim from the request and stored as
+/// `jsonb` with no shape or size validation — the barcode path builds it
+/// server-side, but `createPersonalFoodProduct` let a caller persist an
+/// arbitrarily large and deeply nested document per product, bounded only by the
+/// HTTP body limit. Only a flat object of scalars is accepted, which is all any
+/// producer in this codebase writes.
+const MAX_SOURCE_METADATA_KEYS: usize = 32;
+
+fn normalize_source_metadata(input: &serde_json::Map<String, Value>) -> AppResult<Value> {
+    let Some(value) = input.get("sourceMetadata") else {
+        return Ok(json!({}));
+    };
+    if value.is_null() {
+        return Ok(json!({}));
+    }
+    let Some(object) = value.as_object() else {
+        return Err(AppError::BadRequest(
+            "sourceMetadata must be an object.".to_string(),
+        ));
+    };
+    if object.len() > MAX_SOURCE_METADATA_KEYS {
+        return Err(AppError::BadRequest(format!(
+            "sourceMetadata must have at most {MAX_SOURCE_METADATA_KEYS} keys."
+        )));
+    }
+    for (key, entry) in object {
+        ensure_text_length(key, MAX_TEXT_FIELD_LENGTH, "sourceMetadata keys")?;
+        match entry {
+            Value::Null | Value::Bool(_) | Value::Number(_) => {}
+            Value::String(text) => {
+                ensure_text_length(text, MAX_TEXT_FIELD_LENGTH, "sourceMetadata values")?;
+            }
+            Value::Array(_) | Value::Object(_) => {
+                return Err(AppError::BadRequest(
+                    "sourceMetadata values must be strings, numbers, booleans or null.".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(value.clone())
 }
 
 fn normalize_food_product_input(
@@ -6340,10 +6867,7 @@ fn normalize_food_product_input(
         serving_volume_ml: optional_positive_number(input, "servingVolumeMl", "Serving volume")?,
         source_provider: trim_optional_string(input, "sourceProvider"),
         source_confidence,
-        source_metadata: input
-            .get("sourceMetadata")
-            .cloned()
-            .unwrap_or_else(|| json!({})),
+        source_metadata: normalize_source_metadata(input)?,
         corrected_from_product_id: optional_uuid(input, "correctedFromProductId")?,
     })
 }
@@ -6380,13 +6904,14 @@ fn normalize_weight_entry_input(
 }
 
 fn required_string(input: &serde_json::Map<String, Value>, key: &str) -> AppResult<String> {
-    input
+    let value = input
         .get(key)
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| AppError::BadRequest(format!("{key} is required.")))
+        .ok_or_else(|| AppError::BadRequest(format!("{key} is required.")))?;
+    ensure_text_length(value, MAX_TEXT_FIELD_LENGTH, key)?;
+    Ok(value.to_string())
 }
 
 fn required_date(input: &serde_json::Map<String, Value>, key: &str) -> AppResult<String> {
@@ -6433,6 +6958,12 @@ fn optional_i32(input: &serde_json::Map<String, Value>, key: &str) -> Option<i32
 pub(crate) const MAX_MACRO_GRAMS: f64 = 99_999.9;
 /// Widest value a `numeric(8, 2)` column accepts.
 pub(crate) const MAX_QUANTITY: f64 = 999_999.99;
+/// Calories land in an `integer` column, so a single row cannot overflow — but
+/// `sum(calories_kcal)` across a day could, and the shared barcode catalogue
+/// publishes `calories_per_100` to every account. Capping a single value at the
+/// same order of magnitude as [`MAX_MACRO_GRAMS`] keeps both honest; no real
+/// food comes close.
+pub(crate) const MAX_CALORIES_KCAL: i32 = 99_999;
 
 fn required_f64(input: &serde_json::Map<String, Value>, key: &str) -> AppResult<f64> {
     optional_f64(input, key)
@@ -6458,6 +6989,20 @@ fn required_i32(input: &serde_json::Map<String, Value>, key: &str) -> AppResult<
     optional_i32(input, key)
         .filter(|value| *value >= 0)
         .ok_or_else(|| AppError::BadRequest(format!("{key} must be a non-negative integer.")))
+}
+
+fn required_i32_bounded(
+    input: &serde_json::Map<String, Value>,
+    key: &str,
+    max: i32,
+) -> AppResult<i32> {
+    let value = required_i32(input, key)?;
+    if value > max {
+        return Err(AppError::BadRequest(format!(
+            "{key} must be at most {max}."
+        )));
+    }
+    Ok(value)
 }
 
 fn required_f64_lossy(input: &serde_json::Map<String, Value>, key: &str) -> f64 {
@@ -6554,24 +7099,31 @@ mod tests {
         }
     }
 
-    async fn test_db() -> Option<TestDb> {
+    async fn test_db() -> TestDb {
         test_db_with_connections(1).await
     }
 
-    async fn test_db_with_connections(max_connections: u32) -> Option<TestDb> {
+    /// Builds a throwaway schema for one integration test.
+    ///
+    /// Every failure here panics rather than being swallowed. Callers are gated
+    /// by `#[cfg_attr(not(has_test_database), ignore = ...)]`, so reaching this
+    /// function at all means a database URL was configured at build time — a
+    /// missing or unreachable database is then a real failure, not a reason to
+    /// report a test as passed (TEST-01).
+    async fn test_db_with_connections(max_connections: u32) -> TestDb {
         let database_url = env::var("TEST_DATABASE_URL")
             .or_else(|_| env::var("DATABASE_URL"))
-            .ok()?;
+            .expect("TEST_DATABASE_URL or DATABASE_URL must be set for PostgreSQL integration tests");
         let schema = format!("backend_test_{}", Uuid::new_v4().simple());
         let setup_pool = PgPoolOptions::new()
             .max_connections(1)
             .connect(&database_url)
             .await
-            .ok()?;
+            .expect("test database should accept a connection");
         sqlx::query(&format!(r#"CREATE SCHEMA "{}""#, schema))
             .execute(&setup_pool)
             .await
-            .ok()?;
+            .expect("test schema should be created");
         setup_pool.close().await;
 
         let search_path_sql = format!(r#"SET search_path TO "{}""#, schema);
@@ -6586,9 +7138,12 @@ mod tests {
             })
             .connect(&database_url)
             .await
-            .ok()?;
-        sqlx::raw_sql(SCHEMA_SQL).execute(&pool).await.ok()?;
-        Some(TestDb { pool, schema })
+            .expect("test database pool should connect");
+        sqlx::raw_sql(SCHEMA_SQL)
+            .execute(&pool)
+            .await
+            .expect("test schema should be created from SCHEMA_SQL");
+        TestDb { pool, schema }
     }
 
     async fn insert_test_user(pool: &PgPool) -> Uuid {
@@ -6730,14 +7285,10 @@ mod tests {
         entry_id
     }
 
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
     #[tokio::test]
     async fn ensure_default_meal_groups_creates_all_groups_idempotently() {
-        let Some(test_db) = test_db().await else {
-            eprintln!(
-                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
-            );
-            return;
-        };
+        let test_db = test_db().await;
         let user_id = insert_test_user(&test_db.pool).await;
         let legacy_breakfast_id = Uuid::new_v4();
         sqlx::query(
@@ -6830,14 +7381,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
     #[tokio::test]
     async fn ensure_default_meal_groups_reactivates_a_soft_deleted_default() {
-        let Some(test_db) = test_db().await else {
-            eprintln!(
-                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
-            );
-            return;
-        };
+        let test_db = test_db().await;
         let user_id = insert_test_user(&test_db.pool).await;
         ensure_default_meal_groups(&test_db.pool, user_id)
             .await
@@ -6875,14 +7422,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
     #[tokio::test]
     async fn apply_day_template_resolves_exact_and_unambiguous_meal_group_labels() {
-        let Some(test_db) = test_db().await else {
-            eprintln!(
-                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
-            );
-            return;
-        };
+        let test_db = test_db().await;
         let user_id = insert_test_user(&test_db.pool).await;
         ensure_default_meal_groups(&test_db.pool, user_id)
             .await
@@ -6965,14 +7508,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
     #[tokio::test]
     async fn list_admin_barcode_products_applies_catalogue_filters_to_items_and_totals() {
-        let Some(test_db) = test_db().await else {
-            eprintln!(
-                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
-            );
-            return;
-        };
+        let test_db = test_db().await;
         let alice_id =
             insert_test_user_with_email(&test_db.pool, "alice.submitter@example.test").await;
         let bob_id = insert_test_user_with_email(&test_db.pool, "bob.submitter@example.test").await;
@@ -7085,14 +7624,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
     #[tokio::test]
     async fn search_food_products_blank_query_returns_empty_array() {
-        let Some(test_db) = test_db().await else {
-            eprintln!(
-                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
-            );
-            return;
-        };
+        let test_db = test_db().await;
         let user_id = insert_test_user(&test_db.pool).await;
         insert_test_food_product(
             &test_db.pool,
@@ -7116,14 +7651,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
     #[tokio::test]
     async fn search_food_products_matches_each_word_independently() {
-        let Some(test_db) = test_db().await else {
-            eprintln!(
-                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
-            );
-            return;
-        };
+        let test_db = test_db().await;
         let user_id = insert_test_user(&test_db.pool).await;
         let product_id = insert_test_food_product(
             &test_db.pool,
@@ -7152,14 +7683,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
     #[tokio::test]
     async fn search_food_products_prioritizes_corrected_and_personal_products() {
-        let Some(test_db) = test_db().await else {
-            eprintln!(
-                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
-            );
-            return;
-        };
+        let test_db = test_db().await;
         let user_id = insert_test_user(&test_db.pool).await;
         let global_id =
             insert_test_food_product(&test_db.pool, None, "Alpha Yogurt", "Macro", None).await;
@@ -7192,14 +7719,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
     #[tokio::test]
     async fn admin_user_detail_preserves_recent_activity_contracts() {
-        let Some(test_db) = test_db().await else {
-            eprintln!(
-                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
-            );
-            return;
-        };
+        let test_db = test_db().await;
         let user_id = insert_test_user(&test_db.pool).await;
         let last_meal_id = insert_test_meal_entry(
             &test_db.pool,
@@ -7322,14 +7845,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
     #[tokio::test]
     async fn search_meal_entries_excludes_planned_and_skipped_entries() {
-        let Some(test_db) = test_db().await else {
-            eprintln!(
-                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
-            );
-            return;
-        };
+        let test_db = test_db().await;
         let user_id = insert_test_user(&test_db.pool).await;
         let eaten_id = insert_test_meal_entry(
             &test_db.pool,
@@ -7376,14 +7895,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
     #[tokio::test]
     async fn search_meal_entries_deduplicates_equivalent_historical_foods() {
-        let Some(test_db) = test_db().await else {
-            eprintln!(
-                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
-            );
-            return;
-        };
+        let test_db = test_db().await;
         let user_id = insert_test_user(&test_db.pool).await;
         let newest_id = insert_test_meal_entry(
             &test_db.pool,
@@ -7430,14 +7945,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
     #[tokio::test]
     async fn search_meal_entries_hides_soft_deleted_product_id_but_keeps_macro_snapshot() {
-        let Some(test_db) = test_db().await else {
-            eprintln!(
-                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
-            );
-            return;
-        };
+        let test_db = test_db().await;
         let user_id = insert_test_user(&test_db.pool).await;
         let product_id =
             insert_test_food_product(&test_db.pool, Some(user_id), "Deleted Protein", "", None)
@@ -7484,14 +7995,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
     #[tokio::test]
     async fn get_recent_quick_add_candidates_defaults_to_thirty_when_limit_is_omitted() {
-        let Some(test_db) = test_db().await else {
-            eprintln!(
-                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
-            );
-            return;
-        };
+        let test_db = test_db().await;
         let user_id = insert_test_user(&test_db.pool).await;
         for index in 0..31 {
             insert_test_meal_entry(
@@ -7587,14 +8094,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
     #[tokio::test]
     async fn leaderboard_handles_empty_grace_gaps_ties_and_large_history() {
-        let Some(test_db) = test_db().await else {
-            eprintln!(
-                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
-            );
-            return;
-        };
+        let test_db = test_db().await;
 
         let empty_user = insert_test_user(&test_db.pool).await;
         let empty = leaderboard_json(&test_db.pool, empty_user, "2026-07-06")
@@ -7703,14 +8206,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
     #[tokio::test]
     async fn list_recent_meal_entries_excludes_planned_and_skipped_entries() {
-        let Some(test_db) = test_db().await else {
-            eprintln!(
-                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
-            );
-            return;
-        };
+        let test_db = test_db().await;
         let user_id = insert_test_user(&test_db.pool).await;
         let eaten_id = insert_test_meal_entry(
             &test_db.pool,
@@ -7757,14 +8256,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
     #[tokio::test]
     async fn concurrent_owner_demotions_cannot_remove_last_owner() {
-        let Some(test_db) = test_db_with_connections(4).await else {
-            eprintln!(
-                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
-            );
-            return;
-        };
+        let test_db = test_db_with_connections(4).await;
         let actor_id = insert_test_user_with_email(&test_db.pool, "owner-a@example.test").await;
         let other_owner_id =
             insert_test_user_with_email(&test_db.pool, "owner-b@example.test").await;
@@ -7812,14 +8307,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
     #[tokio::test]
     async fn set_user_role_rolls_back_role_when_audit_insert_fails() {
-        let Some(test_db) = test_db().await else {
-            eprintln!(
-                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
-            );
-            return;
-        };
+        let test_db = test_db().await;
         let actor_id = insert_test_user_with_email(&test_db.pool, "owner@example.test").await;
         let target_id = insert_test_user_with_email(&test_db.pool, "target@example.test").await;
         ensure_user_role(&test_db.pool, actor_id, "owner")
@@ -7862,14 +8353,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
     #[tokio::test]
     async fn create_admin_barcode_product_rolls_back_product_and_revision_when_audit_fails() {
-        let Some(test_db) = test_db().await else {
-            eprintln!(
-                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
-            );
-            return;
-        };
+        let test_db = test_db().await;
         let actor_id = insert_test_user_with_email(&test_db.pool, "admin@example.test").await;
         ensure_user_role(&test_db.pool, actor_id, "admin")
             .await
@@ -7912,14 +8399,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
     #[tokio::test]
     async fn update_admin_barcode_product_rolls_back_product_when_revision_fails() {
-        let Some(test_db) = test_db().await else {
-            eprintln!(
-                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
-            );
-            return;
-        };
+        let test_db = test_db().await;
         let actor_id =
             insert_test_user_with_email(&test_db.pool, "admin-update@example.test").await;
         ensure_user_role(&test_db.pool, actor_id, "admin")
@@ -7965,14 +8448,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
     #[tokio::test]
     async fn delete_admin_barcode_product_rolls_back_product_when_audit_fails() {
-        let Some(test_db) = test_db().await else {
-            eprintln!(
-                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
-            );
-            return;
-        };
+        let test_db = test_db().await;
         let actor_id =
             insert_test_user_with_email(&test_db.pool, "admin-delete@example.test").await;
         ensure_user_role(&test_db.pool, actor_id, "admin")
@@ -8024,14 +8503,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
     #[tokio::test]
     async fn save_barcode_food_product_rpc_creates_created_revision() {
-        let Some(test_db) = test_db().await else {
-            eprintln!(
-                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
-            );
-            return;
-        };
+        let test_db = test_db().await;
         let user_id = insert_test_user(&test_db.pool).await;
         let barcode = format!("test-{}", Uuid::new_v4());
 
@@ -8072,14 +8547,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
     #[tokio::test]
     async fn save_barcode_food_product_rolls_back_product_when_created_revision_fails() {
-        let Some(test_db) = test_db().await else {
-            eprintln!(
-                "skipping PostgreSQL integration test: TEST_DATABASE_URL/DATABASE_URL unavailable"
-            );
-            return;
-        };
+        let test_db = test_db().await;
         let user_id = insert_test_user(&test_db.pool).await;
         let barcode = format!("test-{}", Uuid::new_v4());
 
@@ -8278,7 +8749,7 @@ mod tests {
         assert!(validate_search_query(&"a".repeat(MAX_SEARCH_QUERY_LENGTH)).is_ok());
         assert!(validate_search_query(&"a".repeat(MAX_SEARCH_QUERY_LENGTH + 1)).is_err());
 
-        let too_many_terms = vec!["term"; MAX_SEARCH_TERMS + 1].join(" ");
+        let too_many_terms = ["term"; MAX_SEARCH_TERMS + 1].join(" ");
         assert!(validate_search_query(&too_many_terms).is_err());
     }
 
@@ -8511,5 +8982,468 @@ mod tests {
             sql_tags.contains(latest.0.as_str()),
             "latest expected migration must have a SQL file"
         );
+    }
+
+    fn shoo_profile(sub: &str, email: &str) -> ShooProfile {
+        ShooProfile {
+            pairwise_sub: sub.to_string(),
+            email: email.to_string(),
+            display_name: Some("Test User".to_string()),
+            picture_url: None,
+        }
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    async fn shoo_login_refuses_to_rebind_an_existing_email_to_a_new_subject() {
+        let test_db = test_db().await;
+        let victim_id = insert_test_user_with_email(&test_db.pool, "victim@example.test").await;
+        let original_sub: String =
+            sqlx::query("SELECT shoo_pairwise_sub FROM users WHERE id = $1")
+                .bind(victim_id)
+                .fetch_one(&test_db.pool)
+                .await
+                .expect("victim should exist")
+                .try_get("shoo_pairwise_sub")
+                .expect("sub should read");
+
+        let result = upsert_user_from_shoo_profile(
+            &test_db.pool,
+            &shoo_profile("attacker-sub", "victim@example.test"),
+        )
+        .await;
+
+        match result {
+            Err(AppError::Conflict(message)) => {
+                assert!(
+                    !message.contains("victim@example.test"),
+                    "conflict message must not echo the address back: {message}"
+                );
+            }
+            Err(error) => panic!("expected a conflict, got {error:?}"),
+            Ok(_) => panic!("expected a conflict, got a successful login"),
+        }
+
+        let stored_sub: String = sqlx::query("SELECT shoo_pairwise_sub FROM users WHERE id = $1")
+            .bind(victim_id)
+            .fetch_one(&test_db.pool)
+            .await
+            .expect("victim should still exist")
+            .try_get("shoo_pairwise_sub")
+            .expect("sub should read");
+        assert_eq!(
+            stored_sub, original_sub,
+            "the victim row must keep its original subject"
+        );
+        let user_count: i64 = sqlx::query("SELECT count(*) AS total FROM users")
+            .fetch_one(&test_db.pool)
+            .await
+            .expect("count should run")
+            .try_get("total")
+            .expect("count should read");
+        assert_eq!(user_count, 1, "no shadow account may be created either");
+
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    async fn shoo_login_updates_the_email_of_a_known_subject() {
+        let test_db = test_db().await;
+        let created = upsert_user_from_shoo_profile(
+            &test_db.pool,
+            &shoo_profile("stable-sub", "before@example.test"),
+        )
+        .await
+        .expect("first login should create the account");
+
+        let updated = upsert_user_from_shoo_profile(
+            &test_db.pool,
+            &shoo_profile("stable-sub", "after@example.test"),
+        )
+        .await
+        .expect("a known subject may change its email");
+
+        assert_eq!(updated.id, created.id, "row identity must be preserved");
+        assert_eq!(updated.email, "after@example.test");
+        assert_eq!(updated.shoo_pairwise_sub, "stable-sub");
+
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    async fn shoo_login_refuses_to_move_a_known_subject_onto_a_taken_email() {
+        let test_db = test_db().await;
+        let victim = upsert_user_from_shoo_profile(
+            &test_db.pool,
+            &shoo_profile("victim-sub", "victim@example.test"),
+        )
+        .await
+        .expect("victim account should be created");
+        upsert_user_from_shoo_profile(
+            &test_db.pool,
+            &shoo_profile("attacker-sub", "attacker@example.test"),
+        )
+        .await
+        .expect("attacker account should be created");
+
+        // The subject matches an existing row, so the update path runs and the
+        // `users_email_key` violation must surface as a conflict, not a 500.
+        let result = upsert_user_from_shoo_profile(
+            &test_db.pool,
+            &shoo_profile("attacker-sub", "victim@example.test"),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(AppError::Conflict(_))),
+            "expected a conflict, got {result:?}"
+        );
+
+        let victim_email: String = sqlx::query("SELECT email FROM users WHERE id = $1")
+            .bind(victim.id)
+            .fetch_one(&test_db.pool)
+            .await
+            .expect("victim should still exist")
+            .try_get("email")
+            .expect("email should read");
+        assert_eq!(victim_email, "victim@example.test");
+
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    async fn shoo_login_creates_a_user_for_an_unused_subject_and_email() {
+        let test_db = test_db().await;
+        let created = upsert_user_from_shoo_profile(
+            &test_db.pool,
+            &shoo_profile("fresh-sub", "fresh@example.test"),
+        )
+        .await
+        .expect("a brand-new subject should create an account");
+        assert_eq!(created.shoo_pairwise_sub, "fresh-sub");
+        assert_eq!(created.email, "fresh@example.test");
+
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    async fn product_linked_meal_writes_are_bounded_like_the_manual_path() {
+        let test_db = test_db().await;
+        let user_id = insert_test_user(&test_db.pool).await;
+        let product_id =
+            insert_test_food_product(&test_db.pool, Some(user_id), "Oats", "Brand", None).await;
+
+        // DATA-01: the product path never applied MAX_QUANTITY, so this reached
+        // the INSERT and came back as a numeric-overflow 500.
+        let result = rpc_json(
+            &test_db.pool,
+            "createMealEntry",
+            json!({
+                "userId": user_id,
+                "input": {
+                    "date": "2026-01-01",
+                    "productId": product_id,
+                    "unit": "g",
+                    "quantity": 1e12,
+                }
+            }),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(AppError::BadRequest(_))),
+            "expected a 400 for an out-of-range quantity, got {result:?}"
+        );
+
+        // Same for the macro columns. Creates always recalculate from the
+        // product, so the overflow arrives as `per-100 value x quantity` rather
+        // than as a client-supplied macro.
+        let dense_product_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO food_products (
+              id, owner_user_id, scope, source, name, brand,
+              default_serving_quantity, default_serving_unit,
+              protein_per_100, carbs_per_100, fat_per_100, calories_per_100
+            )
+            VALUES ($1, $2, 'personal', 'manual', 'Dense', '', 100, 'g', 9999.99, 1, 1, 900)
+            "#,
+        )
+        .bind(dense_product_id)
+        .bind(user_id)
+        .execute(&test_db.pool)
+        .await
+        .expect("dense product should insert");
+
+        let result = rpc_json(
+            &test_db.pool,
+            "createMealEntry",
+            json!({
+                "userId": user_id,
+                "input": {
+                    "date": "2026-01-01",
+                    "productId": dense_product_id,
+                    "unit": "g",
+                    "quantity": 500_000,
+                }
+            }),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(AppError::BadRequest(_))),
+            "expected a 400 for out-of-range macros, got {result:?}"
+        );
+
+        let stored: i64 = sqlx::query("SELECT count(*) AS total FROM meal_entries")
+            .fetch_one(&test_db.pool)
+            .await
+            .expect("count should run")
+            .try_get("total")
+            .expect("count should read");
+        assert_eq!(stored, 0, "no out-of-range row may reach the table");
+
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    async fn preserved_product_snapshots_cannot_write_negative_macros() {
+        let test_db = test_db().await;
+        let user_id = insert_test_user(&test_db.pool).await;
+        let product_id =
+            insert_test_food_product(&test_db.pool, Some(user_id), "Oats", "Brand", None).await;
+        let created = rpc_json(
+            &test_db.pool,
+            "createMealEntry",
+            json!({
+                "userId": user_id,
+                "input": {
+                    "date": "2026-01-01",
+                    "productId": product_id,
+                    "unit": "serving",
+                    "quantity": 1,
+                }
+            }),
+        )
+        .await
+        .expect("baseline product-linked entry should be created");
+        let entry_id = created
+            .get("id")
+            .and_then(Value::as_str)
+            .expect("created entry should carry an id")
+            .to_string();
+        let before: i32 = sqlx::query("SELECT calories_kcal FROM meal_entries WHERE id = $1::uuid")
+            .bind(&entry_id)
+            .fetch_one(&test_db.pool)
+            .await
+            .expect("entry should exist")
+            .try_get("calories_kcal")
+            .expect("calories should read");
+
+        let result = rpc_json(
+            &test_db.pool,
+            "updateMealEntry",
+            json!({
+                "userId": user_id,
+                "entryId": entry_id,
+                "input": {
+                    "date": "2026-01-01",
+                    "productId": product_id,
+                    "unit": "serving",
+                    "quantity": 1,
+                    "proteinG": 1.0,
+                    "carbsG": 1.0,
+                    "fatG": 1.0,
+                    "caloriesKcal": -2000000000,
+                    "__recalculateProductMacros": false,
+                }
+            }),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(AppError::BadRequest(_))),
+            "expected a 400 for negative calories, got {result:?}"
+        );
+
+        // The same preserved-snapshot path must also respect the upper bounds.
+        let result = rpc_json(
+            &test_db.pool,
+            "updateMealEntry",
+            json!({
+                "userId": user_id,
+                "entryId": entry_id,
+                "input": {
+                    "date": "2026-01-01",
+                    "productId": product_id,
+                    "unit": "serving",
+                    "quantity": 1,
+                    "proteinG": 1.0e9,
+                    "carbsG": 1.0,
+                    "fatG": 1.0,
+                    "caloriesKcal": 100,
+                    "__recalculateProductMacros": false,
+                }
+            }),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(AppError::BadRequest(_))),
+            "expected a 400 for out-of-range macros, got {result:?}"
+        );
+
+        let after: i32 = sqlx::query("SELECT calories_kcal FROM meal_entries WHERE id = $1::uuid")
+            .bind(&entry_id)
+            .fetch_one(&test_db.pool)
+            .await
+            .expect("entry should still exist")
+            .try_get("calories_kcal")
+            .expect("calories should read");
+        assert_eq!(after, before, "the stored row must be unchanged");
+
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    async fn calories_are_bounded_to_the_column_domain() {
+        let test_db = test_db().await;
+        let user_id = insert_test_user(&test_db.pool).await;
+
+        let result = rpc_json(
+            &test_db.pool,
+            "createMealEntry",
+            json!({
+                "userId": user_id,
+                "input": meal_payload(&[("caloriesKcal", json!(2_000_000_000i64))]),
+            }),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(AppError::BadRequest(_))),
+            "expected a 400 for an absurd caloriesKcal, got {result:?}"
+        );
+
+        // The same unbounded helper fed `caloriesPer100`, which lands in the
+        // shared catalogue every other account searches.
+        let result = rpc_json(
+            &test_db.pool,
+            "createPersonalFoodProduct",
+            json!({
+                "userId": user_id,
+                "input": food_payload(&[("caloriesPer100", json!(2_000_000_000i64))]),
+            }),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(AppError::BadRequest(_))),
+            "expected a 400 for an absurd caloriesPer100, got {result:?}"
+        );
+
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    async fn calorie_aggregates_survive_rows_that_predate_the_bound() {
+        let test_db = test_db().await;
+        let user_id = insert_test_user(&test_db.pool).await;
+        // Written straight to the table: these are the rows the old unbounded
+        // path could already have stored. Every aggregate must still answer.
+        for sort_order in 0..2 {
+            insert_test_meal_entry(
+                &test_db.pool,
+                user_id,
+                "2026-01-01",
+                "eaten",
+                "Legacy",
+                sort_order,
+                (1.0, 1.0, 1.0, 2_000_000_000),
+            )
+            .await;
+        }
+
+        for op in [
+            "getDailySummary",
+            "getDashboardData",
+            "getRecentDailyOverviews",
+            "getStatsPageData",
+            "getLeaderboardStats",
+        ] {
+            let result = rpc_json(
+                &test_db.pool,
+                op,
+                json!({
+                    "userId": user_id,
+                    "date": "2026-01-01",
+                    "selectedDate": "2026-01-01",
+                    "today": "2026-01-01",
+                    "referenceDate": "2026-01-01",
+                }),
+            )
+            .await;
+            assert!(result.is_ok(), "{op} must not overflow: {result:?}");
+        }
+
+        test_db.cleanup().await;
+    }
+
+    #[tokio::test]
+    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    async fn stats_page_reports_the_same_streaks_as_the_leaderboard() {
+        let test_db = test_db().await;
+        let user_id = insert_test_user(&test_db.pool).await;
+        // A closed 3-day streak, a gap, then a 4-day streak ending yesterday —
+        // so `currentStreak` uses the one-day grace the leaderboard allows.
+        for (index, date) in [
+            "2026-01-01",
+            "2026-01-02",
+            "2026-01-03",
+            "2026-01-08",
+            "2026-01-09",
+            "2026-01-10",
+            "2026-01-11",
+        ]
+        .iter()
+        .enumerate()
+        {
+            insert_test_meal_entry(
+                &test_db.pool,
+                user_id,
+                date,
+                "eaten",
+                "Oats",
+                index as i32,
+                (10.0, 20.0, 5.0, 165),
+            )
+            .await;
+        }
+
+        let stats = rpc_json(
+            &test_db.pool,
+            "getStatsPageData",
+            json!({ "userId": user_id, "today": "2026-01-12" }),
+        )
+        .await
+        .expect("stats page data should load");
+        let leaderboard = rpc_json(
+            &test_db.pool,
+            "getLeaderboardStats",
+            json!({ "userId": user_id, "referenceDate": "2026-01-12" }),
+        )
+        .await
+        .expect("leaderboard should load");
+
+        assert_eq!(
+            stats.get("currentStreak"),
+            leaderboard.get("currentStreak"),
+            "the Summary page must not report a different streak from the leaderboard"
+        );
+        assert_eq!(stats.get("longestStreak"), leaderboard.get("longestStreak"));
+        assert_eq!(stats.get("currentStreak").and_then(Value::as_i64), Some(4));
+        assert_eq!(stats.get("longestStreak").and_then(Value::as_i64), Some(4));
+
+        test_db.cleanup().await;
     }
 }
