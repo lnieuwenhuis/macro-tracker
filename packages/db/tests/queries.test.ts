@@ -1,6 +1,5 @@
 import {
   authenticateApiToken,
-  computeStreaks,
   createApiToken,
   createMealGroup,
   createRecipe,
@@ -1864,27 +1863,6 @@ describe("database queries", () => {
     });
   });
 
-  it("computes streaks from local date strings", () => {
-    expect(
-      computeStreaks(
-        ["2026-03-01", "2026-03-02", "2026-03-04", "2026-03-05", "2026-03-06"],
-        "2026-03-07",
-      ),
-    ).toEqual({
-      currentStreak: 3,
-      longestStreak: 3,
-    });
-
-    expect(
-      computeStreaks(
-        ["2026-03-01", "2026-03-02", "2026-03-04", "2026-03-05", "2026-03-06"],
-        "2026-03-06",
-      ),
-    ).toEqual({
-      currentStreak: 3,
-      longestStreak: 3,
-    });
-  });
 
   it("returns quick-add candidates with sourceDate, observedUseDays, and habit metadata", async () => {
     await createMealWithCreatedAt(

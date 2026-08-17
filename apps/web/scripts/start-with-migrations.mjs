@@ -19,6 +19,33 @@ export function shouldRunStartupMigrations(env = process.env) {
   return value === "1" || value === "true" || value === "yes" || value === "on";
 }
 
+function getWorkspaceRoot() {
+  return resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+}
+
+function runCommand(command, args, options) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn(command, args, { stdio: "inherit", ...options });
+
+    child.on("error", rejectPromise);
+    child.on("exit", (code, signal) => {
+      if (signal) {
+        rejectPromise(
+          new Error(`${command} ${args.join(" ")} was terminated by signal ${signal}`),
+        );
+        return;
+      }
+
+      if (code === 0) {
+        resolvePromise();
+        return;
+      }
+
+      rejectPromise(new Error(`${command} ${args.join(" ")} exited with code ${code}`));
+    });
+  });
+}
+
 async function runMigrationsIfNeeded() {
   const connectionString = process.env.DATABASE_URL;
 
@@ -33,26 +60,27 @@ async function runMigrationsIfNeeded() {
     return;
   }
 
-  // Imported lazily: the backend owns migrations, so the normal startup path
-  // must not pull an ORM and a Postgres driver into the frontend process.
-  // These are only reachable when LEGACY_FRONTEND_RUN_MIGRATIONS is set.
-  const [{ drizzle }, { migrate }, { default: pg }] = await Promise.all([
-    import("drizzle-orm/node-postgres"),
-    import("drizzle-orm/node-postgres/migrator"),
-    import("pg"),
-  ]);
-
-  const scriptDir = dirname(fileURLToPath(import.meta.url));
-  const migrationsFolder = resolve(scriptDir, "../../../packages/db/drizzle");
-  const pool = new pg.Pool(getStartupMigrationConnectionConfig(connectionString));
-
-  try {
-    console.info("Running database migrations before Next.js startup");
-    await migrate(drizzle(pool), { migrationsFolder });
-    console.info("Database migrations completed");
-  } finally {
-    await pool.end();
-  }
+  // Routed through the shared `packages/db` migration runner (`db:migrate`,
+  // which calls `migrateCurrentDatabase` -> `migrateDatabaseUrl`) instead of
+  // calling drizzle's migrator directly here (DB-06): the old code
+  // duplicated the runner without its advisory lock, so two replicas
+  // starting at once could both replay the same migration set and one would
+  // crash with "already exists". `migrateDatabaseUrl` also takes the bounded
+  // `pg_try_advisory_lock` retry (DB-07) and sets the lock/statement
+  // timeouts (DB-02) that the backend's own migration path uses.
+  //
+  // Spawned via `pnpm`/`tsx` rather than imported in-process: this script
+  // runs as plain Node before Next.js starts, and `packages/db` ships
+  // TypeScript source with no build step -- `tsx` (already how
+  // `apps/backend/railway.toml`'s own `preDeployCommand` runs the same
+  // script) is what actually knows how to run it, without relying on the
+  // Node version in this container supporting `.ts` imports natively.
+  console.info("Running database migrations before Next.js startup");
+  await runCommand("pnpm", ["--filter", "@macro-tracker/db", "db:migrate"], {
+    cwd: getWorkspaceRoot(),
+    env: process.env,
+  });
+  console.info("Database migrations completed");
 }
 
 function getAppDir() {

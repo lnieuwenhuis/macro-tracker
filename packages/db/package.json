@@ -9,7 +9,6 @@
     "./testing": "./src/testing.ts"
   },
   "scripts": {
-    "db:generate": "drizzle-kit generate --config drizzle.config.ts",
     "db:migrate": "tsx src/migrate.ts",
     "db:studio": "drizzle-kit studio --config drizzle.config.ts",
     "test": "tsx src/test-backend-preflight.ts && vitest run --fileParallelism=false",
