@@ -1,4 +1,6 @@
-# Default Railway config for the frontend service.
+# Single source of truth for the frontend (@macro-tracker/web) Railway service.
+# Do not duplicate this into apps/web/railway.toml - a near-identical copy there
+# was removed because the two configs could silently drift out of sync.
 # Configure the Rust backend as a separate Railway service using /apps/backend/railway.toml.
 
 [build]

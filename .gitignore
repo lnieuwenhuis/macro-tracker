@@ -19,6 +19,12 @@ apps/web/.test-data/
 # claude code local settings
 .claude/settings.local.json
 
+# codex CLI local config (can contain dev-only secrets/flags)
+.codex/
+
+# working document for the in-progress audit remediation queue; not for commit
+AUDIT-REMEDIATION.md
+
 # system
 .DS_Store
 Thumbs.db

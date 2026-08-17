@@ -1,7 +1,7 @@
 # Macro Tracker
 
 [![Try Macro Tracker](https://img.shields.io/badge/try-macro.safasfly.dev-1f7a4d?style=flat-square)](https://macro.safasfly.dev)
-[![CI](https://github.com/lnieuwenhuis/marco-tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/lnieuwenhuis/marco-tracker/actions/workflows/ci.yml)
+[![CI](https://github.com/lnieuwenhuis/macro-tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/lnieuwenhuis/macro-tracker/actions/workflows/ci.yml)
 ![Next.js](https://img.shields.io/badge/Next.js-16-black?style=flat-square&logo=nextdotjs)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?style=flat-square&logo=typescript&logoColor=white)
 ![Drizzle](https://img.shields.io/badge/Drizzle-ORM-c5f74f?style=flat-square)
@@ -10,7 +10,7 @@
 
 Macro Tracker is a phone-first macro tracking app for the day-to-day work of eating like you meant to. It is built around the stuff I actually want when I am logging food: fast daily entries, planned meals, reusable meals and days, barcode scanning, recipes, weight tracking, and enough stats to see patterns without turning breakfast into a spreadsheet ceremony.
 
-Current app version: `v3.01`
+The current app version is defined in [`apps/web/lib/app-version.ts`](apps/web/lib/app-version.ts) (`APP_VERSION`), which is the single source of truth — it is not duplicated here so this line cannot drift out of sync.
 
 ## Try It
 
@@ -45,7 +45,7 @@ Requirements:
 Clone and install:
 
 ```bash
-git clone https://github.com/lnieuwenhuis/marco-tracker.git macro-tracker
+git clone https://github.com/lnieuwenhuis/macro-tracker.git macro-tracker
 cd macro-tracker
 pnpm install
 ```
@@ -54,8 +54,8 @@ Export the required environment variables in the shell or deployment environment
 
 ```bash
 export APP_URL=http://localhost:3000
-export SESSION_SECRET=change-this-to-a-long-random-string
-export BACKEND_INTERNAL_SECRET=change-this-to-another-long-random-string
+export SESSION_SECRET=$(openssl rand -base64 48)
+export BACKEND_INTERNAL_SECRET=$(openssl rand -base64 48)
 export BACKEND_URL=http://127.0.0.1:4000
 export DATABASE_URL=postgres://macro:macro@localhost:5432/macro_tracker
 ```
@@ -66,7 +66,7 @@ Required runtime variables:
 | --- | --- | --- |
 | `DATABASE_URL` | Backend and migration commands | PostgreSQL connection string for the Rust backend database. Must be `postgres://` or `postgresql://`, not `file:` or `memory:`. |
 | `APP_URL` | Backend and frontend | Public URL of the web app, for example `http://localhost:3000` locally. |
-| `SESSION_SECRET` | Backend and frontend | Long random secret used for sessions. Required in every environment, including local development — there is no built-in fallback. |
+| `SESSION_SECRET` | Backend and frontend | Long random secret used for sessions. Required in every environment, including local development — there is no built-in fallback. Generate a fresh value per environment (for example `openssl rand -base64 48`); never reuse a value from this README, a sample `.env`, or another environment, and keep it secret. |
 | `BACKEND_INTERNAL_SECRET` | Backend and frontend | Shared secret the frontend sends when calling backend internal routes. |
 | `BACKEND_URL` | Frontend | URL the Next.js app uses to reach the Rust backend. Defaults to `http://127.0.0.1:4000` outside production, but set it explicitly in deployments. |
 
@@ -188,10 +188,12 @@ DATABASE_URL="$E2E_DATABASE_URL" pnpm test:e2e
 Database helpers:
 
 ```bash
-pnpm db:generate
 pnpm db:migrate
 pnpm db:studio
 ```
+
+Migrations in this repo are hand-authored rather than generated — see
+[`packages/db/MIGRATIONS.md`](packages/db/MIGRATIONS.md) for why and for the steps to add one.
 
 ### Destructive migrations
 
