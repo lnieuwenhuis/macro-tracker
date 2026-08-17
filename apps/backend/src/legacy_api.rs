@@ -16,25 +16,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-const OPENROUTER_CHAT_COMPLETIONS_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
-const DEFAULT_FOOD_PHOTO_MODEL: &str = "google/gemma-4-26b-a4b-it:free";
-const DEFAULT_FOOD_PHOTO_FALLBACK_MODELS: &[&str] = &[
-    "google/gemma-4-31b-it:free",
-    "nvidia/nemotron-nano-12b-v2-vl:free",
-    "openrouter/free",
-];
 /// Effort suffixes are parsed by CLIProxyAPI and mapped to the reasoning
 /// parameter of the Codex backend; the fallback bumps effort in case low
 /// returns unparseable JSON (invalid_json failures are retryable).
-const DEFAULT_GATEWAY_FOOD_PHOTO_MODELS: &[&str] = &["gpt-5.6-luna(low)", "gpt-5.6-luna(medium)"];
+const DEFAULT_FOOD_PHOTO_MODELS: &[&str] = &["gpt-5.6-luna(low)", "gpt-5.6-luna(medium)"];
 /// Reasoning happens inside the output-token budget on the Codex backend, so
-/// the gateway cap must leave room for thinking tokens on top of the ~300
-/// tokens of JSON the prompt asks for.
-const GATEWAY_MAX_TOKENS: u16 = 4_000;
-const OPENROUTER_MODEL_TIMEOUT_MS_DEFAULT: u64 = 10_000;
-/// Reasoning models need more headroom per attempt than the free
-/// OpenRouter vision models, even at low effort.
-const GATEWAY_MODEL_TIMEOUT_MS_DEFAULT: u64 = 20_000;
+/// the cap must leave room for thinking tokens on top of the ~300 tokens of
+/// JSON the prompt asks for.
+const FOOD_PHOTO_MAX_TOKENS: u16 = 4_000;
+/// Reasoning models need headroom per attempt even at low effort.
+const FOOD_PHOTO_MODEL_TIMEOUT_MS_DEFAULT: u64 = 20_000;
 const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 const FOOD_PHOTO_BODY_LIMIT_BYTES: usize = MAX_IMAGE_BYTES + 1024 * 1024;
 const FOOD_PHOTO_SLOT_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -361,7 +352,7 @@ async fn admin_benchmark(
             StatusCode::BAD_REQUEST,
             json!({
                 "ok": false,
-                "error": "Enter a model id, for example google/gemma-4-31b-it:free or gpt-5.6-luna(low)."
+                "error": "Enter a model id, for example gpt-5.6-luna(low)."
             }),
         );
     };
@@ -913,17 +904,20 @@ async fn analyze_food_photo_url(
     user_id: &str,
     force_ready: bool,
 ) -> Value {
-    let gateway_url = state.config.ai_gateway_url.as_deref();
-    let default_timeout = if gateway_url.is_some() {
-        GATEWAY_MODEL_TIMEOUT_MS_DEFAULT
-    } else {
-        OPENROUTER_MODEL_TIMEOUT_MS_DEFAULT
+    let Some(gateway_url) = state.config.ai_gateway_url.as_deref() else {
+        tracing::error!("AI_GATEWAY_URL is not configured on the server");
+        return photo_failure(
+            "Photo analysis is not available on this server.",
+            "missing_api_key",
+            None,
+            None,
+        );
     };
     let model_timeout = Duration::from_millis(
         state
             .config
-            .openrouter_model_timeout_ms
-            .unwrap_or(default_timeout)
+            .ai_gateway_model_timeout_ms
+            .unwrap_or(FOOD_PHOTO_MODEL_TIMEOUT_MS_DEFAULT)
             .clamp(3_000, 30_000),
     );
     analyze_food_photo_url_with_limits(
@@ -934,8 +928,7 @@ async fn analyze_food_photo_url(
         user_id,
         force_ready,
         FoodPhotoRequestLimits {
-            chat_completions_url: gateway_url.unwrap_or(OPENROUTER_CHAT_COMPLETIONS_URL),
-            gateway: gateway_url.is_some(),
+            chat_completions_url: gateway_url,
             model_timeout,
             request_timeout: FOOD_PHOTO_REQUEST_TIMEOUT,
         },
@@ -946,10 +939,6 @@ async fn analyze_food_photo_url(
 #[derive(Clone, Copy)]
 struct FoodPhotoRequestLimits<'a> {
     chat_completions_url: &'a str,
-    /// True when talking to the configured AI gateway (an OpenAI-compatible
-    /// endpoint) instead of OpenRouter: skips the free-model allowlist and
-    /// the OpenRouter-specific request fields.
-    gateway: bool,
     model_timeout: Duration,
     request_timeout: Duration,
 }
@@ -965,21 +954,11 @@ async fn analyze_food_photo_url_with_limits(
 ) -> Value {
     let FoodPhotoRequestLimits {
         chat_completions_url,
-        gateway,
         model_timeout,
         request_timeout,
     } = limits;
-    let api_key = if gateway {
-        state.config.ai_gateway_api_key.as_deref()
-    } else {
-        state.config.openrouter_api_key.as_deref()
-    };
-    let Some(api_key) = api_key else {
-        if gateway {
-            tracing::error!("AI_GATEWAY_API_KEY is not configured on the server");
-        } else {
-            tracing::error!("OPENROUTER_API_KEY is not configured on the server");
-        }
+    let Some(api_key) = state.config.ai_gateway_api_key.as_deref() else {
+        tracing::error!("AI_GATEWAY_API_KEY is not configured on the server");
         return photo_failure(
             "Photo analysis is not available on this server.",
             "missing_api_key",
@@ -1013,16 +992,6 @@ async fn analyze_food_photo_url_with_limits(
     let models = requested_model
         .map(|model| vec![model.trim().to_string()])
         .unwrap_or_else(|| configured_food_photo_models(&state.config));
-    if !gateway
-        && let Some(non_free_model) = models.iter().find(|model| !is_free_openrouter_model(model))
-    {
-        return json!({
-            "ok": false,
-            "error": format!("Food photo AI only permits free OpenRouter models. \"{non_free_model}\" is not allowed."),
-            "kind": "unsupported_model",
-            "retryable": false
-        });
-    }
 
     let deadline = Instant::now() + request_timeout;
     let mut last_failure = None;
@@ -1038,38 +1007,24 @@ async fn analyze_food_photo_url_with_limits(
             .post(chat_completions_url)
             .timeout(attempt_timeout)
             .bearer_auth(api_key)
-            .header("Content-Type", "application/json");
-        let request = if gateway {
-            request.json(&build_gateway_request_body(
+            .header("Content-Type", "application/json")
+            .json(&build_food_photo_request_body(
                 &model,
                 image_url,
                 clarification,
                 user_id,
                 force_ready,
-            ))
-        } else {
-            request
-                .header("HTTP-Referer", &state.config.app_url)
-                .header("X-OpenRouter-Title", "Macro Tracker")
-                .header("X-OpenRouter-Metadata", "enabled")
-                .json(&build_openrouter_request_body(
-                    &model,
-                    image_url,
-                    clarification,
-                    user_id,
-                    force_ready,
-                ))
-        };
+            ));
 
         match request.send().await {
             Ok(response) if !response.status().is_success() => {
                 let status = response.status().as_u16();
-                let error = read_openrouter_error(response).await;
+                let error = read_upstream_error(response).await;
                 if Instant::now() >= deadline {
                     return food_photo_timeout_failure(request_timeout);
                 }
                 let kind = classify_food_photo_failure(&error, Some(status));
-                let retryable = is_retryable_openrouter_error(&error, Some(status));
+                let retryable = is_retryable_upstream_error(&error, Some(status));
                 let failure = upstream_photo_failure(&error, kind, Some(status), retryable);
                 if !retryable {
                     return failure;
@@ -1084,7 +1039,7 @@ async fn analyze_food_photo_url_with_limits(
                         .and_then(Value::as_str)
                     {
                         let kind = classify_food_photo_failure(message, None);
-                        let retryable = is_retryable_openrouter_error(message, None);
+                        let retryable = is_retryable_upstream_error(message, None);
                         let failure = upstream_photo_failure(message, kind, None, retryable);
                         if !retryable {
                             return failure;
@@ -1108,7 +1063,7 @@ async fn analyze_food_photo_url_with_limits(
                             .and_then(Value::as_str)
                             .unwrap_or("The AI provider returned an error.");
                         let kind = classify_food_photo_failure(error, None);
-                        let retryable = is_retryable_openrouter_error(error, None);
+                        let retryable = is_retryable_upstream_error(error, None);
                         let failure = upstream_photo_failure(error, kind, None, retryable);
                         if !retryable {
                             return failure;
@@ -1194,166 +1149,83 @@ fn food_photo_timeout_failure(request_timeout: Duration) -> Value {
 }
 
 #[derive(Serialize)]
-struct OpenRouterRequest<'a> {
-    model: &'a str,
-    messages: (OpenRouterSystemMessage<'a>, OpenRouterUserMessage<'a>),
-    user: &'a str,
-    provider: OpenRouterProvider,
-    plugins: [OpenRouterPlugin<'a>; 1],
-    response_format: OpenRouterResponseFormat<'a>,
-    temperature: u8,
-    max_tokens: u16,
-    include_reasoning: bool,
-    reasoning: OpenRouterReasoning,
-}
-
-#[derive(Serialize)]
-struct OpenRouterSystemMessage<'a> {
+struct ChatSystemMessage<'a> {
     role: &'a str,
     content: &'a str,
 }
 
 #[derive(Serialize)]
-struct OpenRouterUserMessage<'a> {
+struct ChatUserMessage<'a> {
     role: &'a str,
-    content: (OpenRouterTextContent, OpenRouterImageContent<'a>),
+    content: (ChatTextContent, ChatImageContent<'a>),
 }
 
 #[derive(Serialize)]
-struct OpenRouterTextContent {
+struct ChatTextContent {
     #[serde(rename = "type")]
     kind: &'static str,
     text: String,
 }
 
 #[derive(Serialize)]
-struct OpenRouterImageContent<'a> {
+struct ChatImageContent<'a> {
     #[serde(rename = "type")]
     kind: &'static str,
-    image_url: OpenRouterImageUrl<'a>,
+    image_url: ChatImageUrl<'a>,
 }
 
 #[derive(Serialize)]
-struct OpenRouterImageUrl<'a> {
+struct ChatImageUrl<'a> {
     url: &'a str,
 }
 
+/// Chat-completions body for the AI gateway (an OpenAI-compatible endpoint,
+/// normally CLIProxyAPI in front of the Codex backend). Reasoning effort
+/// travels in the model id suffix, e.g. `gpt-5.6-luna(low)`. `temperature`
+/// is omitted because reasoning models reject it; JSON-only output is
+/// enforced by the prompt and re-checked by the parser.
 #[derive(Serialize)]
-struct OpenRouterProvider {
-    allow_fallbacks: bool,
-}
-
-#[derive(Serialize)]
-struct OpenRouterPlugin<'a> {
-    id: &'a str,
-    enabled: bool,
-}
-
-#[derive(Serialize)]
-struct OpenRouterResponseFormat<'a> {
-    #[serde(rename = "type")]
-    kind: &'a str,
-}
-
-#[derive(Serialize)]
-struct OpenRouterReasoning {
-    enabled: bool,
-}
-
-/// Chat-completions body for the AI gateway (CLIProxyAPI in front of the
-/// Codex backend). Reasoning effort travels in the model id suffix, e.g.
-/// `gpt-5.6-luna(low)`. OpenRouter-only fields (provider, plugins,
-/// response_format) are omitted, as is `temperature`, which reasoning models
-/// reject; JSON-only output is enforced by the prompt and re-checked by the
-/// parser.
-#[derive(Serialize)]
-struct GatewayRequest<'a> {
+struct FoodPhotoRequest<'a> {
     model: &'a str,
-    messages: (OpenRouterSystemMessage<'a>, OpenRouterUserMessage<'a>),
+    messages: (ChatSystemMessage<'a>, ChatUserMessage<'a>),
     user: &'a str,
     max_tokens: u16,
 }
 
-fn build_gateway_request_body<'a>(
+fn build_food_photo_request_body<'a>(
     model: &'a str,
     image_url: &'a str,
     clarification: &str,
     user_id: &'a str,
     force_ready: bool,
-) -> GatewayRequest<'a> {
-    GatewayRequest {
+) -> FoodPhotoRequest<'a> {
+    FoodPhotoRequest {
         model,
         messages: (
-            OpenRouterSystemMessage {
+            ChatSystemMessage {
                 role: "system",
                 content: food_photo_system_prompt(),
             },
-            OpenRouterUserMessage {
+            ChatUserMessage {
                 role: "user",
                 content: (
-                    OpenRouterTextContent {
+                    ChatTextContent {
                         kind: "text",
                         text: build_prompt(clarification, force_ready),
                     },
-                    OpenRouterImageContent {
+                    ChatImageContent {
                         kind: "image_url",
-                        image_url: OpenRouterImageUrl { url: image_url },
+                        image_url: ChatImageUrl { url: image_url },
                     },
                 ),
             },
         ),
         user: user_id,
-        max_tokens: GATEWAY_MAX_TOKENS,
+        max_tokens: FOOD_PHOTO_MAX_TOKENS,
     }
 }
 
-fn build_openrouter_request_body<'a>(
-    model: &'a str,
-    image_url: &'a str,
-    clarification: &str,
-    user_id: &'a str,
-    force_ready: bool,
-) -> OpenRouterRequest<'a> {
-    OpenRouterRequest {
-        model,
-        messages: (
-            OpenRouterSystemMessage {
-                role: "system",
-                content: food_photo_system_prompt(),
-            },
-            OpenRouterUserMessage {
-                role: "user",
-                content: (
-                    OpenRouterTextContent {
-                        kind: "text",
-                        text: build_prompt(clarification, force_ready),
-                    },
-                    OpenRouterImageContent {
-                        kind: "image_url",
-                        image_url: OpenRouterImageUrl { url: image_url },
-                    },
-                ),
-            },
-        ),
-        user: user_id,
-        provider: OpenRouterProvider {
-            allow_fallbacks: true,
-        },
-        plugins: [OpenRouterPlugin {
-            id: "response-healing",
-            enabled: true,
-        }],
-        response_format: OpenRouterResponseFormat {
-            kind: "json_object",
-        },
-        temperature: 0,
-        max_tokens: 300,
-        include_reasoning: false,
-        reasoning: OpenRouterReasoning { enabled: false },
-    }
-}
-
-async fn read_openrouter_error(response: reqwest::Response) -> String {
+async fn read_upstream_error(response: reqwest::Response) -> String {
     let status = response.status();
     match response.json::<Value>().await {
         Ok(payload) => {
@@ -1363,9 +1235,7 @@ async fn read_openrouter_error(response: reqwest::Response) -> String {
                 .and_then(Value::as_str)
                 .or_else(|| payload.get("message").and_then(Value::as_str))
                 .map(str::to_string)
-                .unwrap_or_else(|| {
-                    format!("OpenRouter request failed with status {}.", status.as_u16())
-                });
+                .unwrap_or_else(|| format!("AI request failed with status {}.", status.as_u16()));
             let detail = payload
                 .get("error")
                 .and_then(|error| error.get("metadata"))
@@ -1379,7 +1249,7 @@ async fn read_openrouter_error(response: reqwest::Response) -> String {
                 });
             detail.map_or(message.clone(), |detail| format!("{message} ({detail})"))
         }
-        Err(_) => format!("OpenRouter request failed with status {}.", status.as_u16()),
+        Err(_) => format!("AI request failed with status {}.", status.as_u16()),
     }
 }
 
@@ -1455,66 +1325,26 @@ fn normalize_estimate(value: Option<&Value>) -> Option<Value> {
 }
 
 fn configured_food_photo_models(config: &crate::config::Config) -> Vec<String> {
-    if config.ai_gateway_url.is_some() {
-        let mut seen = Vec::<String>::new();
-        for model in config
-            .ai_gateway_models
-            .as_deref()
-            .unwrap_or_default()
-            .split([',', '\n'])
-            .map(str::trim)
-            .filter(|model| !model.is_empty())
-        {
-            if !seen.iter().any(|seen_model| seen_model == model) {
-                seen.push(model.to_string());
-            }
-        }
-        if seen.is_empty() {
-            return DEFAULT_GATEWAY_FOOD_PHOTO_MODELS
-                .iter()
-                .map(|model| model.to_string())
-                .collect();
-        }
-        return seen;
-    }
-
-    let configured_primary = config
-        .openrouter_model
-        .as_deref()
-        .map(str::trim)
-        .unwrap_or_default();
-    let primary = if is_free_openrouter_model(configured_primary)
-        && !is_deprecated_food_photo_model(configured_primary)
-    {
-        configured_primary
-    } else {
-        DEFAULT_FOOD_PHOTO_MODEL
-    };
-    let fallbacks: Vec<&str> = config
-        .openrouter_fallback_models
-        .as_deref()
-        .map(|value| {
-            value
-                .split([',', '\n'])
-                .map(str::trim)
-                .filter(|model| !model.is_empty())
-                .collect()
-        })
-        .unwrap_or_else(|| DEFAULT_FOOD_PHOTO_FALLBACK_MODELS.to_vec());
     let mut seen = Vec::<String>::new();
-    for model in std::iter::once(primary).chain(fallbacks) {
-        if is_free_openrouter_model(model)
-            && !is_deprecated_food_photo_model(model)
-            && !seen.iter().any(|seen_model| seen_model == model)
-        {
+    for model in config
+        .ai_gateway_models
+        .as_deref()
+        .unwrap_or_default()
+        .split([',', '\n'])
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    {
+        if !seen.iter().any(|seen_model| seen_model == model) {
             seen.push(model.to_string());
         }
     }
     if seen.is_empty() {
-        vec![DEFAULT_FOOD_PHOTO_MODEL.to_string()]
-    } else {
-        seen
+        return DEFAULT_FOOD_PHOTO_MODELS
+            .iter()
+            .map(|model| model.to_string())
+            .collect();
     }
+    seen
 }
 
 async fn run_macro_benchmark(
@@ -1528,7 +1358,7 @@ async fn run_macro_benchmark(
     let current_model = configured_food_photo_models(&state.config)
         .first()
         .cloned()
-        .unwrap_or_else(|| DEFAULT_FOOD_PHOTO_MODEL.to_string());
+        .unwrap_or_else(|| DEFAULT_FOOD_PHOTO_MODELS[0].to_string());
     let fixtures = BENCHMARK_FIXTURES
         .iter()
         .take(fixture_limit)
@@ -1803,7 +1633,7 @@ fn legacy_json(status: StatusCode, body: Value) -> Response {
     (status, Json(body)).into_response()
 }
 
-/// Copy shown to the user for an upstream (OpenRouter) failure.
+/// Copy shown to the user for an upstream AI-provider failure.
 ///
 /// The provider's own message is never forwarded: it can carry
 /// `metadata.raw`, `provider_name`, and — for a misconfigured deployment —
@@ -1966,7 +1796,7 @@ fn classify_food_photo_failure(error: &str, status_code: Option<u16>) -> &'stati
     "unknown"
 }
 
-fn is_retryable_openrouter_error(error: &str, status_code: Option<u16>) -> bool {
+fn is_retryable_upstream_error(error: &str, status_code: Option<u16>) -> bool {
     let lower = error.to_lowercase();
     let kind = classify_food_photo_failure(error, status_code);
     if matches!(
@@ -2018,15 +1848,6 @@ Ready response format:\n\
 {\"status\":\"ready\",\"question\":null,\"estimate\":{\"label\":\"short food name\",\"caloriesKcal\":0,\"proteinG\":0,\"carbsG\":0,\"fatG\":0,\"confidence\":0.8,\"notes\":[\"short assumption\"]}}\n\
 Clarification response format:\n\
 {\"status\":\"needs_clarification\",\"question\":\"one short question\",\"estimate\":null}"
-}
-
-fn is_free_openrouter_model(model: &str) -> bool {
-    let model = model.trim();
-    model == "openrouter/free" || model.ends_with(":free")
-}
-
-fn is_deprecated_food_photo_model(model: &str) -> bool {
-    model.trim() == "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
 }
 
 fn safe_number(value: Option<&Value>) -> f64 {
@@ -2107,13 +1928,10 @@ mod tests {
             shoo_base_url: "https://shoo.dev".to_string(),
             trusted_origins: vec!["http://localhost:3000".to_string()],
             admin_owner_emails: vec![],
-            openrouter_api_key: None,
-            openrouter_model: None,
-            openrouter_fallback_models: None,
-            openrouter_model_timeout_ms: None,
             ai_gateway_url: None,
             ai_gateway_api_key: None,
             ai_gateway_models: None,
+            ai_gateway_model_timeout_ms: None,
             open_food_facts_base_url: provider_base_url.to_string(),
             albert_heijn_base_url: provider_base_url.to_string(),
             jumbo_base_url: provider_base_url.to_string(),
@@ -2195,20 +2013,18 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct OpenRouterStubResponse {
+    struct ChatStubResponse {
         status: StatusCode,
         delay: Duration,
         body: Value,
     }
 
-    struct OpenRouterStubState {
+    struct ChatStubState {
         requests: AtomicUsize,
-        responses: Vec<OpenRouterStubResponse>,
+        responses: Vec<ChatStubResponse>,
     }
 
-    async fn openrouter_stub_handler(
-        State(state): State<Arc<OpenRouterStubState>>,
-    ) -> impl IntoResponse {
+    async fn chat_stub_handler(State(state): State<Arc<ChatStubState>>) -> impl IntoResponse {
         let request_index = state.requests.fetch_add(1, Ordering::SeqCst);
         let response = state
             .responses
@@ -2220,15 +2036,13 @@ mod tests {
         (response.status, Json(response.body))
     }
 
-    async fn spawn_openrouter_stub(
-        responses: Vec<OpenRouterStubResponse>,
-    ) -> (String, Arc<OpenRouterStubState>) {
-        let state = Arc::new(OpenRouterStubState {
+    async fn spawn_chat_stub(responses: Vec<ChatStubResponse>) -> (String, Arc<ChatStubState>) {
+        let state = Arc::new(ChatStubState {
             requests: AtomicUsize::new(0),
             responses,
         });
         let app = Router::new()
-            .route("/chat/completions", post(openrouter_stub_handler))
+            .route("/chat/completions", post(chat_stub_handler))
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -2240,14 +2054,6 @@ mod tests {
                 .expect("stub server should run");
         });
         (format!("http://{addr}/chat/completions"), state)
-    }
-
-    fn openrouter_test_state(models: &str) -> AppState {
-        let mut state = test_state(None);
-        state.config.openrouter_api_key = Some("test-api-key".to_string());
-        state.config.openrouter_model = Some("test/primary:free".to_string());
-        state.config.openrouter_fallback_models = Some(models.to_string());
-        state
     }
 
     fn gateway_test_state(endpoint: &str, models: Option<&str>) -> AppState {
@@ -2318,7 +2124,7 @@ mod tests {
 
     #[tokio::test]
     async fn food_photo_stops_after_non_retryable_provider_response() {
-        let (endpoint, stub) = spawn_openrouter_stub(vec![OpenRouterStubResponse {
+        let (endpoint, stub) = spawn_chat_stub(vec![ChatStubResponse {
             status: StatusCode::UNAUTHORIZED,
             delay: Duration::ZERO,
             body: json!({ "error": { "message": "Invalid API key." } }),
@@ -2326,7 +2132,7 @@ mod tests {
         .await;
 
         let result = analyze_food_photo_url_with_limits(
-            &openrouter_test_state("test/fallback-1:free,test/fallback-2:free"),
+            &gateway_test_state(&endpoint, Some("test/model-1,test/model-2,test/model-3")),
             "data:image/png;base64,AA==",
             "",
             None,
@@ -2334,7 +2140,6 @@ mod tests {
             false,
             FoodPhotoRequestLimits {
                 chat_completions_url: &endpoint,
-                gateway: false,
                 model_timeout: Duration::from_millis(100),
                 request_timeout: Duration::from_secs(1),
             },
@@ -2355,13 +2160,13 @@ mod tests {
 
     #[tokio::test]
     async fn food_photo_uses_fallback_after_retryable_provider_response() {
-        let (endpoint, stub) = spawn_openrouter_stub(vec![
-            OpenRouterStubResponse {
+        let (endpoint, stub) = spawn_chat_stub(vec![
+            ChatStubResponse {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 delay: Duration::ZERO,
                 body: json!({ "error": { "message": "Provider temporarily unavailable." } }),
             },
-            OpenRouterStubResponse {
+            ChatStubResponse {
                 status: StatusCode::OK,
                 delay: Duration::ZERO,
                 body: json!({
@@ -2376,7 +2181,7 @@ mod tests {
         .await;
 
         let result = analyze_food_photo_url_with_limits(
-            &openrouter_test_state("test/fallback:free"),
+            &gateway_test_state(&endpoint, Some("test/model-1,test/model-2")),
             "data:image/png;base64,AA==",
             "",
             None,
@@ -2384,7 +2189,6 @@ mod tests {
             false,
             FoodPhotoRequestLimits {
                 chat_completions_url: &endpoint,
-                gateway: false,
                 model_timeout: Duration::from_millis(100),
                 request_timeout: Duration::from_secs(1),
             },
@@ -2398,17 +2202,18 @@ mod tests {
 
     #[tokio::test]
     async fn food_photo_fallback_chain_cannot_exceed_request_deadline() {
-        let delayed_retryable_failure = OpenRouterStubResponse {
+        let delayed_retryable_failure = ChatStubResponse {
             status: StatusCode::SERVICE_UNAVAILABLE,
             delay: Duration::from_millis(40),
             body: json!({ "error": { "message": "Provider temporarily unavailable." } }),
         };
-        let (endpoint, stub) = spawn_openrouter_stub(vec![delayed_retryable_failure]).await;
+        let (endpoint, stub) = spawn_chat_stub(vec![delayed_retryable_failure]).await;
         let started = Instant::now();
 
         let result = analyze_food_photo_url_with_limits(
-            &openrouter_test_state(
-                "test/fallback-1:free,test/fallback-2:free,test/fallback-3:free",
+            &gateway_test_state(
+                &endpoint,
+                Some("test/model-1,test/model-2,test/model-3,test/model-4"),
             ),
             "data:image/png;base64,AA==",
             "",
@@ -2417,7 +2222,6 @@ mod tests {
             false,
             FoodPhotoRequestLimits {
                 chat_completions_url: &endpoint,
-                gateway: false,
                 model_timeout: Duration::from_millis(60),
                 request_timeout: Duration::from_millis(100),
             },
@@ -2435,8 +2239,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gateway_mode_permits_non_free_models() {
-        let (endpoint, stub) = spawn_openrouter_stub(vec![OpenRouterStubResponse {
+    async fn food_photo_succeeds_through_the_gateway() {
+        let (endpoint, stub) = spawn_chat_stub(vec![ChatStubResponse {
             status: StatusCode::OK,
             delay: Duration::ZERO,
             body: json!({
@@ -2458,7 +2262,6 @@ mod tests {
             false,
             FoodPhotoRequestLimits {
                 chat_completions_url: &endpoint,
-                gateway: true,
                 model_timeout: Duration::from_millis(500),
                 request_timeout: Duration::from_secs(1),
             },
@@ -2487,7 +2290,6 @@ mod tests {
             false,
             FoodPhotoRequestLimits {
                 chat_completions_url: "http://127.0.0.1:9/unreachable",
-                gateway: true,
                 model_timeout: Duration::from_millis(100),
                 request_timeout: Duration::from_secs(1),
             },
@@ -2521,19 +2323,19 @@ mod tests {
     }
 
     #[test]
-    fn gateway_request_body_omits_openrouter_specific_fields() {
-        let body = serde_json::to_value(build_gateway_request_body(
+    fn food_photo_request_body_omits_fields_reasoning_models_reject() {
+        let body = serde_json::to_value(build_food_photo_request_body(
             "gpt-5.6-luna(low)",
             "data:image/png;base64,AA==",
             "",
             "user-1",
             false,
         ))
-        .expect("gateway body should serialize");
+        .expect("request body should serialize");
 
         assert_eq!(body["model"], json!("gpt-5.6-luna(low)"));
         assert_eq!(body["max_tokens"], json!(4000));
-        // Reasoning models reject temperature pins, and the OpenRouter
+        // Reasoning models reject temperature pins, and provider-specific
         // routing fields would be meaningless or rejected upstream.
         for absent in [
             "temperature",
@@ -2544,7 +2346,7 @@ mod tests {
         ] {
             assert!(
                 body.get(absent).is_none(),
-                "gateway body must not include {absent}"
+                "request body must not include {absent}"
             );
         }
         assert_eq!(
