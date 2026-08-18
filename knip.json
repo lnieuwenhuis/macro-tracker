@@ -1,8 +1,10 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
+  "ignoreExportsUsedInFile": true,
   "ignore": [
     "apps/web/public/sw.js",
-    "packages/db/drizzle.config.ts"
+    "packages/db/drizzle.config.ts",
+    "packages/db/src/postgres-config.d.ts"
   ],
   "workspaces": {
     "apps/web": {

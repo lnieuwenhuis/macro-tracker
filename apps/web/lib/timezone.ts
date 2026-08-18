@@ -71,12 +71,3 @@ export function dateStringInTimeZone(timeZone: string, instant = new Date()) {
 
   return `${year.padStart(4, "0")}-${month}-${day}`;
 }
-
-/** The browser's IANA zone, or `null` where `Intl` cannot resolve one. */
-export function resolveBrowserTimeZone() {
-  try {
-    return normalizeTimeZone(Intl.DateTimeFormat().resolvedOptions().timeZone);
-  } catch {
-    return null;
-  }
-}
