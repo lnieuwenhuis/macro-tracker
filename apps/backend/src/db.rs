@@ -76,9 +76,12 @@ const API_SCOPE_VALUES: &[&str] = &[
     "read:stats",
 ];
 
-// Retained only as a temporary parity reference during the Rust port. Startup
-// must rely on Drizzle migrations, not this ad-hoc schema bootstrap.
-#[allow(dead_code)]
+// CLEAN-03: this is NOT dead, and it is not merely a reference. `test_db()` runs
+// `sqlx::raw_sql(SCHEMA_SQL)` to build the schema for EVERY backend integration
+// test, so if it drifts from `packages/db/drizzle/*.sql` the whole suite silently
+// stops testing the schema production actually runs. Startup still relies on the
+// Drizzle migrations, never on this. `schema_sql_matches_the_drizzle_migrations`
+// below pins the two together - update both, or that test fails.
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS users (
   id uuid PRIMARY KEY NOT NULL,
@@ -118,7 +121,7 @@ CREATE INDEX IF NOT EXISTS api_tokens_user_revoked_idx ON api_tokens USING btree
 
 CREATE TABLE IF NOT EXISTS admin_audit_events (
   id uuid PRIMARY KEY NOT NULL,
-  actor_user_id uuid NOT NULL REFERENCES users(id),
+  actor_user_id uuid REFERENCES users(id) ON DELETE SET NULL,
   actor_role text NOT NULL,
   action text NOT NULL,
   target_type text NOT NULL,
@@ -1125,7 +1128,11 @@ async fn complete_onboarding_setup_json(
         )
         .bind(template_id)
         .bind(user_id)
-        .bind(required_string(template, "type")?)
+        // API-07: the onboarding starter template is the third write path into
+        // meal_templates.type and was the one that skipped validation. Migration
+        // 0016 adds a CHECK on this column, so an unvalidated value would now
+        // surface as a raw 23514 -> 500 instead of a 400.
+        .bind(normalize_template_type(template)?)
         .bind(required_string(template, "label")?)
         .bind(template.get("notes").and_then(Value::as_str))
         .execute(&mut *tx)
@@ -7286,6 +7293,65 @@ mod tests {
         entry_id
     }
 
+    /// API-07: `completeOnboardingSetup` is the third write path into
+    /// `meal_templates.type` and the one that skipped `normalize_template_type`.
+    /// Migration 0016 adds a CHECK on that column, so an unvalidated value would
+    /// come back as a raw 23514 -> 500 rather than a 400, and nothing else
+    /// covered this path.
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
+    #[tokio::test]
+    async fn onboarding_starter_template_rejects_an_out_of_union_type() {
+        let test_db = test_db().await;
+        let user_id = insert_test_user(&test_db.pool).await;
+
+        let error = rpc_json(
+            &test_db.pool,
+            "completeOnboardingSetup",
+            serde_json::json!({
+                "userId": user_id,
+                "input": {
+                    "goals": {
+                        "proteinG": 150,
+                        "carbsG": 200,
+                        "fatG": 70,
+                        "caloriesKcal": 2030
+                    },
+                    "starterTemplate": {
+                        "type": "not-a-real-type",
+                        "label": "Starter",
+                        "items": [{
+                            "label": "Oats",
+                            "quantity": 100,
+                            "unit": "g",
+                            "proteinG": 10,
+                            "carbsG": 60,
+                            "fatG": 7,
+                            "caloriesKcal": 380
+                        }]
+                    }
+                }
+            }),
+        )
+        .await
+        .expect_err("an out-of-union template type must be rejected");
+
+        assert!(
+            matches!(error, AppError::BadRequest(_)),
+            "expected a 400-shaped BadRequest, got {error:?}"
+        );
+
+        let templates: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM meal_templates WHERE user_id = $1")
+                .bind(user_id)
+                .fetch_one(&test_db.pool)
+                .await
+                .expect("template count should query");
+        assert_eq!(templates, 0, "the rejected template must not be persisted");
+    }
+
     #[cfg_attr(
         not(has_test_database),
         ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
@@ -9012,6 +9078,143 @@ mod tests {
         assert_eq!(
             bad_request_message(normalize_api_token_expiry(Some(&json!("not-a-date")))),
             "API token expiry is invalid."
+        );
+    }
+
+    /// Applies every Drizzle migration into one scratch schema and `SCHEMA_SQL`
+    /// into another, then compares the resulting catalogs. This is what stops
+    /// the integration-test schema from drifting away from the migrations that
+    /// production actually runs - the CLEAN-03 hazard.
+    ///
+    /// Migrations schema-qualify some references as `"public"."x"`, which would
+    /// escape the scratch schema, so that qualifier is stripped before applying.
+    /// That is the only rewrite performed.
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
+    #[tokio::test]
+    async fn schema_sql_matches_the_drizzle_migrations() {
+        async fn columns_of(
+            conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+            schema: &str,
+        ) -> Vec<(String, String, String, String)> {
+            sqlx::query_as::<_, (String, String, String, String)>(
+                r#"
+                SELECT table_name::text, column_name::text, data_type::text, is_nullable::text
+                FROM information_schema.columns
+                WHERE table_schema = $1
+                ORDER BY table_name, column_name
+                "#,
+            )
+            .bind(schema)
+            .fetch_all(&mut **conn)
+            .await
+            .expect("catalog query should succeed")
+        }
+
+        let database_url = std::env::var("TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .expect("TEST_DATABASE_URL or DATABASE_URL must be set");
+        let pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&database_url)
+            .await
+            .expect("parity pool should connect");
+
+        let migrated = format!("parity_migrated_{}", Uuid::new_v4().simple());
+        let declared = format!("parity_declared_{}", Uuid::new_v4().simple());
+
+        let mut conn = pool
+            .acquire()
+            .await
+            .expect("parity connection should acquire");
+        for schema in [&migrated, &declared] {
+            sqlx::query(&format!(r#"CREATE SCHEMA "{schema}""#))
+                .execute(&mut *conn)
+                .await
+                .expect("scratch schema should be created");
+        }
+
+        // 0014 creates pg_trgm opportunistically. Two things bite here: left to
+        // itself the extension lands in whatever schema is first on search_path
+        // (a scratch one), and if a previous run already installed it elsewhere
+        // then `IF NOT EXISTS` silently no-ops rather than relocating it - so
+        // `gin_trgm_ops` fails to resolve either way. Install it if missing, then
+        // resolve wherever it actually lives and put that on the search_path.
+        sqlx::query("CREATE EXTENSION IF NOT EXISTS pg_trgm SCHEMA public")
+            .execute(&mut *conn)
+            .await
+            .expect("pg_trgm should be installable for the parity check");
+        let trgm_schema: String = sqlx::query_scalar(
+            "SELECT n.nspname::text FROM pg_extension e
+             JOIN pg_namespace n ON n.oid = e.extnamespace
+             WHERE e.extname = 'pg_trgm'",
+        )
+        .fetch_one(&mut *conn)
+        .await
+        .expect("pg_trgm should be present after creation");
+
+        // Apply the migrations, in journal order, into the first scratch schema.
+        let drizzle_dir =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/db/drizzle");
+        sqlx::query(&format!(
+            r#"SET search_path TO "{migrated}", "{trgm_schema}", public"#
+        ))
+        .execute(&mut *conn)
+        .await
+        .expect("search_path should be set");
+        for (tag, _) in expected_drizzle_migrations().expect("journal should parse") {
+            let sql = fs::read_to_string(drizzle_dir.join(format!("{tag}.sql")))
+                .unwrap_or_else(|error| panic!("migration {tag} should be readable: {error}"));
+            let sql = sql.replace("\"public\".", "");
+            for statement in sql.split("--> statement-breakpoint") {
+                if statement.trim().is_empty() {
+                    continue;
+                }
+                sqlx::raw_sql(statement)
+                    .execute(&mut *conn)
+                    .await
+                    .unwrap_or_else(|error| panic!("migration {tag} should apply: {error}"));
+            }
+        }
+
+        // Apply SCHEMA_SQL into the second.
+        sqlx::query(&format!(
+            r#"SET search_path TO "{declared}", "{trgm_schema}", public"#
+        ))
+        .execute(&mut *conn)
+        .await
+        .expect("search_path should be set");
+        sqlx::raw_sql(SCHEMA_SQL)
+            .execute(&mut *conn)
+            .await
+            .expect("SCHEMA_SQL should apply");
+
+        let migrated_columns = columns_of(&mut conn, &migrated).await;
+        let declared_columns = columns_of(&mut conn, &declared).await;
+
+        for schema in [&migrated, &declared] {
+            sqlx::query(&format!(r#"DROP SCHEMA "{schema}" CASCADE"#))
+                .execute(&mut *conn)
+                .await
+                .expect("scratch schema should drop");
+        }
+
+        let only_in_migrations = migrated_columns
+            .iter()
+            .filter(|column| !declared_columns.contains(column))
+            .collect::<Vec<_>>();
+        let only_in_schema_sql = declared_columns
+            .iter()
+            .filter(|column| !migrated_columns.contains(column))
+            .collect::<Vec<_>>();
+
+        assert!(
+            only_in_migrations.is_empty() && only_in_schema_sql.is_empty(),
+            "SCHEMA_SQL has drifted from the Drizzle migrations.\n\
+             Present in the migrations but missing/different in SCHEMA_SQL: {only_in_migrations:#?}\n\
+             Present in SCHEMA_SQL but missing/different in the migrations: {only_in_schema_sql:#?}"
         );
     }
 
