@@ -5,6 +5,7 @@ mod db;
 mod errors;
 mod legacy_api;
 mod routes;
+mod shared;
 mod types;
 
 use anyhow::Context;
@@ -276,28 +277,7 @@ mod tests {
     use std::env;
     use tower::ServiceExt;
 
-    fn test_config() -> Config {
-        Config {
-            allow_insecure_internal_auth: false,
-            enable_test_routes: false,
-            app_url: "http://localhost:3000".to_string(),
-            backend_internal_secret: Some("internal-secret-with-at-least-32-chars".to_string()),
-            database_url: "postgres://postgres:postgres@127.0.0.1:5432/macro_tracker".to_string(),
-            port: 4000,
-            postgres_pool_max: 1,
-            session_secret: "session-secret-with-at-least-32-chars".to_string(),
-            shoo_base_url: "https://shoo.dev".to_string(),
-            trusted_origins: vec!["http://localhost:3000".to_string()],
-            admin_owner_emails: vec![],
-            ai_gateway_url: None,
-            ai_gateway_api_key: None,
-            ai_gateway_models: None,
-            ai_gateway_model_timeout_ms: None,
-            open_food_facts_base_url: "https://world.openfoodfacts.org".to_string(),
-            albert_heijn_base_url: "https://api.ah.nl".to_string(),
-            jumbo_base_url: "https://mobileapi.jumbo.com".to_string(),
-        }
-    }
+    use config::test_config;
 
     fn test_state(config: Config) -> AppState {
         AppState {

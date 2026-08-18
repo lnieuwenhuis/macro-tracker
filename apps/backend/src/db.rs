@@ -1,5 +1,6 @@
 use crate::{
     errors::{AppError, AppResult},
+    shared::{round1, round2},
     types::{AppUser, MacroGoals, ShooProfile},
 };
 use chrono::{DateTime, Duration, NaiveDate, Utc};
@@ -7020,14 +7021,6 @@ fn required_i32_lossy(input: &serde_json::Map<String, Value>, key: &str) -> i32 
     optional_i32(input, key).unwrap_or(0)
 }
 
-fn round1(value: f64) -> f64 {
-    (value * 10.0).round() / 10.0
-}
-
-fn round2(value: f64) -> f64 {
-    (value * 100.0).round() / 100.0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7153,6 +7146,42 @@ mod tests {
             .await
             .expect("test schema should be created from SCHEMA_SQL");
         TestDb { pool, schema }
+    }
+
+    /// Rollback-injection tests (`save_barcode_food_product_rolls_back_*`)
+    /// assert that a forced mid-transaction failure left neither the
+    /// product row nor any revision row behind. Both fault points check the
+    /// same postcondition, so it lives here once.
+    async fn assert_no_barcode_product_or_revision_rows(pool: &PgPool, barcode: &str) {
+        let product_count: i64 =
+            sqlx::query("SELECT count(*)::bigint AS count FROM food_products WHERE barcode = $1")
+                .bind(barcode)
+                .fetch_one(pool)
+                .await
+                .expect("product count should query")
+                .try_get("count")
+                .unwrap();
+        let revision_count: i64 =
+            sqlx::query("SELECT count(*)::bigint AS count FROM food_product_revisions")
+                .fetch_one(pool)
+                .await
+                .expect("revision count should query")
+                .try_get("count")
+                .unwrap();
+        assert_eq!(product_count, 0);
+        assert_eq!(revision_count, 0);
+    }
+
+    /// Pulls the `id` field out of every element of a `*_json` search
+    /// result array, in order. Several search tests assert on nothing but
+    /// this ordered id list.
+    fn search_result_ids(results: &Value) -> Vec<&str> {
+        results
+            .as_array()
+            .expect("result should be array")
+            .iter()
+            .map(|item| item.get("id").and_then(Value::as_str).unwrap())
+            .collect::<Vec<_>>()
     }
 
     async fn insert_test_user(pool: &PgPool) -> Uuid {
@@ -7979,12 +8008,7 @@ mod tests {
         let results = search_meal_entries_json(&test_db.pool, user_id, "protein bowl")
             .await
             .expect("meal search should succeed");
-        let ids = results
-            .as_array()
-            .expect("search result should be array")
-            .iter()
-            .map(|item| item.get("id").and_then(Value::as_str).unwrap())
-            .collect::<Vec<_>>();
+        let ids = search_result_ids(&results);
 
         assert_eq!(ids, vec![eaten_id.to_string()]);
         test_db.cleanup().await;
@@ -8032,12 +8056,7 @@ mod tests {
         let results = search_meal_entries_json(&test_db.pool, user_id, "turkey chili")
             .await
             .expect("meal search should succeed");
-        let ids = results
-            .as_array()
-            .expect("search result should be array")
-            .iter()
-            .map(|item| item.get("id").and_then(Value::as_str).unwrap())
-            .collect::<Vec<_>>();
+        let ids = search_result_ids(&results);
 
         assert_eq!(ids, vec![newest_id.to_string(), distinct_id.to_string()]);
         test_db.cleanup().await;
@@ -8355,12 +8374,7 @@ mod tests {
         let results = list_recent_meal_entries_json(&test_db.pool, user_id, 10, true)
             .await
             .expect("recent meals should list");
-        let ids = results
-            .as_array()
-            .expect("recent result should be array")
-            .iter()
-            .map(|item| item.get("id").and_then(Value::as_str).unwrap())
-            .collect::<Vec<_>>();
+        let ids = search_result_ids(&results);
 
         assert_eq!(ids, vec![eaten_id.to_string()]);
         test_db.cleanup().await;
@@ -8497,23 +8511,7 @@ mod tests {
         .await;
 
         assert_eq!(bad_request_message(result), "forced audit failure");
-        let product_count: i64 =
-            sqlx::query("SELECT count(*)::bigint AS count FROM food_products WHERE barcode = $1")
-                .bind(&barcode)
-                .fetch_one(&test_db.pool)
-                .await
-                .expect("product count should query")
-                .try_get("count")
-                .unwrap();
-        let revision_count: i64 =
-            sqlx::query("SELECT count(*)::bigint AS count FROM food_product_revisions")
-                .fetch_one(&test_db.pool)
-                .await
-                .expect("revision count should query")
-                .try_get("count")
-                .unwrap();
-        assert_eq!(product_count, 0);
-        assert_eq!(revision_count, 0);
+        assert_no_barcode_product_or_revision_rows(&test_db.pool, &barcode).await;
 
         test_db.cleanup().await;
     }
@@ -8700,24 +8698,7 @@ mod tests {
         .await;
 
         assert_eq!(bad_request_message(result), "forced revision failure");
-        let product_count: i64 =
-            sqlx::query("SELECT count(*)::bigint AS count FROM food_products WHERE barcode = $1")
-                .bind(&barcode)
-                .fetch_one(&test_db.pool)
-                .await
-                .expect("product count should query")
-                .try_get("count")
-                .unwrap();
-        let revision_count: i64 =
-            sqlx::query("SELECT count(*)::bigint AS count FROM food_product_revisions")
-                .fetch_one(&test_db.pool)
-                .await
-                .expect("revision count should query")
-                .try_get("count")
-                .unwrap();
-
-        assert_eq!(product_count, 0);
-        assert_eq!(revision_count, 0);
+        assert_no_barcode_product_or_revision_rows(&test_db.pool, &barcode).await;
 
         test_db.cleanup().await;
     }

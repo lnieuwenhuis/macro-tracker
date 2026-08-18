@@ -195,6 +195,23 @@ pnpm db:studio
 Migrations in this repo are hand-authored rather than generated — see
 [`packages/db/MIGRATIONS.md`](packages/db/MIGRATIONS.md) for why and for the steps to add one.
 
+### Railway build configuration
+
+Both services build from the repository root, so Railpack resolves the single
+root `railpack.json` for each of them. That is why it installs a Rust toolchain
+even though the frontend service only builds `@macro-tracker/web` — removing the
+`rust` package to slim the frontend build would break the backend build, which
+runs `cargo build --release -p macro-tracker-backend` from that same root.
+
+Adding `apps/backend/railpack.json` does not help: Railpack reads its config from
+the build root, so a per-directory file is never loaded. Giving each service its
+own config means pointing it at one with the `RAILPACK_CONFIG_FILE` service
+variable in the Railway dashboard — a deployment change, not a repository one.
+The cost today is frontend build time only, so this is left alone deliberately.
+
+The root `railway.toml` is the frontend service's config and the single source
+for it; `apps/backend/railway.toml` configures the backend service.
+
 ### Destructive migrations
 
 Migrations run forward only — there are no down-migrations, and deploy applies

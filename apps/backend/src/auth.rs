@@ -542,7 +542,10 @@ mod tests {
         format!("http://{address}")
     }
 
-    async fn jwks_base_url(jwks_body: String) -> (String, Arc<AtomicUsize>) {
+    /// Binds a loopback listener that answers every connection with `response`
+    /// and counts how many requests it served. Shared by `jwks_base_url` and
+    /// `failing_jwks_base_url`, which only differ in the bytes they hand back.
+    async fn spawn_looping_stub_server(response: String) -> (String, Arc<AtomicUsize>) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("test listener should bind");
@@ -557,15 +560,19 @@ mod tests {
                 server_count.fetch_add(1, Ordering::SeqCst);
                 let mut buffer = [0; 1024];
                 let _ = socket.read(&mut buffer).await;
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
-                    jwks_body.len(),
-                    jwks_body
-                );
                 let _ = socket.write_all(response.as_bytes()).await;
             }
         });
         (format!("http://{address}"), request_count)
+    }
+
+    async fn jwks_base_url(jwks_body: String) -> (String, Arc<AtomicUsize>) {
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+            jwks_body.len(),
+            jwks_body
+        );
+        spawn_looping_stub_server(response).await
     }
 
     /// Throwaway P-256 keypair, generated for these tests only and never used
@@ -808,26 +815,10 @@ mod tests {
 
     /// Like `jwks_base_url`, but every request fails upstream.
     async fn failing_jwks_base_url() -> (String, Arc<AtomicUsize>) {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("test listener should bind");
-        let address = listener.local_addr().expect("listener should have address");
-        let request_count = Arc::new(AtomicUsize::new(0));
-        let server_count = Arc::clone(&request_count);
-        tokio::spawn(async move {
-            loop {
-                let Ok((mut socket, _)) = listener.accept().await else {
-                    break;
-                };
-                server_count.fetch_add(1, Ordering::SeqCst);
-                let mut buffer = [0; 1024];
-                let _ = socket.read(&mut buffer).await;
-                let _ = socket
-                    .write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n")
-                    .await;
-            }
-        });
-        (format!("http://{address}"), request_count)
+        spawn_looping_stub_server(
+            "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n".to_string(),
+        )
+        .await
     }
 
     fn shoo_state_for(base_url: &str) -> crate::AppState {

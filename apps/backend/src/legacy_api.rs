@@ -1,4 +1,7 @@
-use crate::{AppState, auth, db};
+use crate::{
+    AppState, auth, db,
+    shared::{round1, round2},
+};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
@@ -2093,14 +2096,6 @@ fn number_from_value(value: &Value) -> Option<f64> {
         Value::String(text) => text.trim().replace(',', ".").parse::<f64>().ok(),
         _ => None,
     }
-}
-
-fn round1(value: f64) -> f64 {
-    (value * 10.0).round() / 10.0
-}
-
-fn round2(value: f64) -> f64 {
-    (value * 100.0).round() / 100.0
 }
 
 fn average(values: &[f64]) -> f64 {
