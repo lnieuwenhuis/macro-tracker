@@ -98,12 +98,19 @@ const securityHeaders = [
   {
     key: "Permissions-Policy",
     // `camera=(self)` stays enabled: the barcode scanner needs it.
-    value: "camera=(self), microphone=(), geolocation=(), interest-cohort=()",
+    // `interest-cohort=()` is gone — FLoC was withdrawn and no browser parses
+    // it, so it only risked invalidating the whole header on a strict parser.
+    value: "camera=(self), microphone=(), geolocation=()",
   },
   {
     key: "Strict-Transport-Security",
     value: "max-age=63072000; includeSubDomains; preload",
   },
+  // Safe here because `@shoojs/auth` signs in with a full-page
+  // `window.location.assign` redirect rather than a popup, so nothing in this
+  // app depends on a cross-origin `window.opener` relationship.
+  { key: "Cross-Origin-Opener-Policy", value: "same-origin" },
+  { key: "Cross-Origin-Resource-Policy", value: "same-origin" },
 ];
 
 const nextConfig: NextConfig = {

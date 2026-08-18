@@ -12,12 +12,19 @@ export type RecipePortionMealEntryInput = Omit<MealEntryInput, "sortOrder"> & {
  * whose zone differs from the server's.
  */
 export function buildRecipePortionMealEntryInput({
+  clientMutationId,
   date,
   gramsConsumed,
   portionCount,
   recipe,
   status,
 }: {
+  /**
+   * Idempotency key for the create. The backend's unique index is over a
+   * nullable column, so multiple `NULL`s do not collide — without a value a
+   * double-tap writes two identical entries.
+   */
+  clientMutationId?: string;
   date: string;
   gramsConsumed: number | null;
   portionCount: number;
@@ -37,6 +44,7 @@ export function buildRecipePortionMealEntryInput({
     : portionCount;
 
   return {
+    ...(clientMutationId ? { clientMutationId } : {}),
     date,
     status,
     label: hasGramsConsumed

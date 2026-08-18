@@ -50,6 +50,7 @@ describe("POST /api/test/templates", () => {
   beforeEach(() => {
     process.env.ENABLE_TEST_ROUTES = "true";
     process.env.TEST_ROUTES_SECRET = TEST_ROUTE_SECRET;
+    process.env.SESSION_SECRET = "test-templates-route-secret-32-char";
     resetServerEnvForTests();
     vi.clearAllMocks();
     mocked.getSessionUserFromCookies.mockResolvedValue({ userId: "user-1" });
@@ -68,7 +69,9 @@ describe("POST /api/test/templates", () => {
   it("rejects missing test route secrets before reading the session", async () => {
     const response = await POST(testTemplatesRequest());
 
-    expect(response.status).toBe(403);
+    // 404 for both a wrong secret and disabled test routes, so the response
+    // does not tell a prober that ENABLE_TEST_ROUTES is on.
+    expect(response.status).toBe(404);
     expect(mocked.getSessionUserFromCookies).not.toHaveBeenCalled();
     expect(mocked.createTemplate).not.toHaveBeenCalled();
   });
@@ -78,7 +81,7 @@ describe("POST /api/test/templates", () => {
       testTemplatesRequest({ secret: "wrong-secret" }),
     );
 
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(404);
     expect(mocked.getSessionUserFromCookies).not.toHaveBeenCalled();
     expect(mocked.createTemplate).not.toHaveBeenCalled();
   });
