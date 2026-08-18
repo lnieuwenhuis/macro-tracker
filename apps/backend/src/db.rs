@@ -82,6 +82,7 @@ const API_SCOPE_VALUES: &[&str] = &[
 // stops testing the schema production actually runs. Startup still relies on the
 // Drizzle migrations, never on this. `schema_sql_matches_the_drizzle_migrations`
 // below pins the two together - update both, or that test fails.
+#[cfg(test)]
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS users (
   id uuid PRIMARY KEY NOT NULL,

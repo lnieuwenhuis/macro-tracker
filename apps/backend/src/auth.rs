@@ -14,27 +14,49 @@ use jsonwebtoken::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
-    sync::{Mutex, OnceLock},
+    collections::{HashMap, HashSet},
+    sync::{Arc, Mutex, OnceLock},
     time::{Duration as StdDuration, Instant as StdInstant},
 };
+use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 pub const SESSION_COOKIE_NAME: &str = "mt_session";
 pub const SESSION_MAX_AGE_SECONDS: i64 = 60 * 60 * 24 * 7;
 const SHOO_JWKS_FETCH_TIMEOUT: StdDuration = StdDuration::from_secs(2);
 const SHOO_JWKS_CACHE_TTL: StdDuration = StdDuration::from_secs(5 * 60);
+/// CLEAN-A2: a failed fetch is cached too, briefly. Without it an identity
+/// provider outage makes every single login pay the full
+/// `SHOO_JWKS_FETCH_TIMEOUT` again. Kept short so recovery is fast.
+const SHOO_JWKS_NEGATIVE_CACHE_TTL: StdDuration = StdDuration::from_secs(10);
 
 #[derive(Clone)]
 struct CachedJwks {
-    jwks: JwkSet,
+    /// `None` is a negative entry — the last fetch failed.
+    jwks: Option<JwkSet>,
     expires_at: StdInstant,
 }
 
 static SHOO_JWKS_CACHE: OnceLock<Mutex<HashMap<String, CachedJwks>>> = OnceLock::new();
+/// CLEAN-A2: one lock per base URL, so a cold cache during a login burst makes
+/// exactly one upstream request instead of one per concurrent login. The map is
+/// keyed by a configured value, so it holds one entry in practice.
+static SHOO_JWKS_FETCH_LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+    OnceLock::new();
 
 fn shoo_jwks_cache() -> &'static Mutex<HashMap<String, CachedJwks>> {
     SHOO_JWKS_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn shoo_jwks_fetch_lock(shoo_base_url: &str) -> Arc<tokio::sync::Mutex<()>> {
+    Arc::clone(
+        SHOO_JWKS_FETCH_LOCKS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .entry(shoo_base_url.to_string())
+            .or_default(),
+    )
 }
 
 fn install_crypto_provider() {
@@ -62,17 +84,20 @@ struct ShooClaims {
 #[derive(Debug)]
 pub struct InternalAuth;
 
+/// SEC-20: the single message every internal-auth failure returns, whatever the
+/// underlying cause.
+const INVALID_BACKEND_SECRET: &str = "Invalid backend secret.";
+
+/// SEC-17: the hand-rolled OR-accumulate loop this replaces was written
+/// correctly, but nothing in the language guarantees the optimizer preserves it
+/// — and the release profile compiles the whole crate as one LTO'd codegen unit,
+/// which is exactly where a compiler is most able to reintroduce an early exit.
+/// `subtle` carries `optimization_barrier` intrinsics for that reason.
+///
+/// Length inequality still short-circuits (in `subtle` too): the secret's length
+/// is not what needs hiding, the bytes are.
 fn constant_time_eq_bytes(provided: &[u8], expected: &[u8]) -> bool {
-    let mut diff = provided.len() ^ expected.len();
-    let max_len = provided.len().max(expected.len());
-
-    for index in 0..max_len {
-        let provided_byte = provided.get(index).copied().unwrap_or(0);
-        let expected_byte = expected.get(index).copied().unwrap_or(0);
-        diff |= usize::from(provided_byte ^ expected_byte);
-    }
-
-    diff == 0
+    provided.ct_eq(expected).into()
 }
 
 impl FromRequestParts<AppState> for InternalAuth {
@@ -83,9 +108,14 @@ impl FromRequestParts<AppState> for InternalAuth {
             if state.config.allows_insecure_internal_auth_for_app_url() {
                 return Ok(Self);
             }
-            return Err(AppError::Unauthorized(
-                "Backend internal secret is not configured.".to_string(),
-            ));
+            // SEC-20: an unauthenticated caller learns nothing about *why* the
+            // request failed. "not configured" told them the deployment is
+            // broken rather than that their secret was wrong, which is free
+            // reconnaissance. The distinction goes to the operator's log.
+            tracing::error!(
+                "refusing internal request: BACKEND_INTERNAL_SECRET is unset and insecure local mode does not apply to this APP_URL"
+            );
+            return Err(AppError::Unauthorized(INVALID_BACKEND_SECRET.to_string()));
         };
         let provided = parts
             .headers
@@ -97,9 +127,7 @@ impl FromRequestParts<AppState> for InternalAuth {
         {
             Ok(Self)
         } else {
-            Err(AppError::Unauthorized(
-                "Invalid backend secret.".to_string(),
-            ))
+            Err(AppError::Unauthorized(INVALID_BACKEND_SECRET.to_string()))
         }
     }
 }
@@ -210,17 +238,77 @@ pub async fn authorize_shoo_login(
     Ok((session, user))
 }
 
-pub async fn reconcile_configured_owner(state: &AppState, user: AppUser) -> AppResult<AppUser> {
-    if state
-        .config
-        .admin_owner_emails
-        .iter()
-        .any(|email| email == &user.email.to_lowercase())
-        && user.role != "owner"
-    {
-        return db::ensure_user_role(&state.db, user.id, "owner").await;
+/// What `ADMIN_OWNER_EMAILS` implies for one account. Split out from
+/// `reconcile_configured_owner` so the policy is unit-testable without a
+/// database.
+#[derive(Debug, PartialEq, Eq)]
+enum ConfiguredOwnerAction {
+    /// The address is configured and the account is not an owner yet.
+    Promote,
+    /// The account holds `owner` but its address is not configured. See
+    /// `reconcile_configured_owner` for why this cannot be an automatic
+    /// demotion.
+    ReportUnconfiguredOwner,
+    Nothing,
+}
+
+fn configured_owner_action(
+    admin_owner_emails: &[String],
+    email: &str,
+    role: &str,
+) -> ConfiguredOwnerAction {
+    let configured = admin_owner_emails.contains(&email.to_lowercase());
+    match (configured, role) {
+        (true, "owner") => ConfiguredOwnerAction::Nothing,
+        (true, _) => ConfiguredOwnerAction::Promote,
+        (false, "owner") => ConfiguredOwnerAction::ReportUnconfiguredOwner,
+        (false, _) => ConfiguredOwnerAction::Nothing,
     }
-    Ok(user)
+}
+
+/// Warned at most once per account per process. `reconcile_configured_owner`
+/// runs on every authenticated request, so an unconditional `warn!` would be
+/// per-request log spam for a condition that is usually legitimate.
+static REPORTED_UNCONFIGURED_OWNERS: OnceLock<Mutex<HashSet<Uuid>>> = OnceLock::new();
+
+/// SEC-18: this promotes but deliberately does **not** demote.
+///
+/// Removing an address from `ADMIN_OWNER_EMAILS` and redeploying leaves that
+/// account `owner`. Automatic demotion is not safe to add here, because the
+/// `users` table records only the resulting `role` — there is no column saying
+/// whether ownership came from this config list or from the admin UI. Demoting
+/// every owner missing from the list would therefore strip admin-granted owners
+/// on the next login and, if the list were ever empty or misconfigured, could
+/// leave the system with no owner at all.
+///
+/// **Revocation must go through the admin flow** (`setUserRole`), which takes
+/// `FOR UPDATE`, refuses to demote the last owner, and writes an audit event.
+/// Removing the address from `ADMIN_OWNER_EMAILS` only stops re-promotion; it is
+/// not a revocation on its own.
+///
+/// Making this automatic needs a schema change — an owner-grant provenance
+/// column, or reading `admin_audit_events` — in `apps/backend/src/db.rs`.
+pub async fn reconcile_configured_owner(state: &AppState, user: AppUser) -> AppResult<AppUser> {
+    match configured_owner_action(&state.config.admin_owner_emails, &user.email, &user.role) {
+        ConfiguredOwnerAction::Promote => db::ensure_user_role(&state.db, user.id, "owner").await,
+        ConfiguredOwnerAction::ReportUnconfiguredOwner => {
+            let first_time = REPORTED_UNCONFIGURED_OWNERS
+                .get_or_init(|| Mutex::new(HashSet::new()))
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .insert(user.id);
+            if first_time {
+                tracing::warn!(
+                    user_id = %user.id,
+                    "account holds the owner role but its address is not in ADMIN_OWNER_EMAILS; \
+                     removing an address from that list does not revoke ownership - demote through \
+                     the admin flow if this is unintended"
+                );
+            }
+            Ok(user)
+        }
+        ConfiguredOwnerAction::Nothing => Ok(user),
+    }
 }
 
 async fn verify_shoo_token(
@@ -280,20 +368,62 @@ async fn verify_shoo_token(
     Ok(decoded.claims)
 }
 
-async fn fetch_shoo_jwks(state: &AppState) -> AppResult<JwkSet> {
-    let shoo_base_url = state.config.shoo_base_url.trim_end_matches('/').to_string();
+fn jwks_unreachable() -> AppError {
+    AppError::Upstream("Could not reach the identity provider.".to_string())
+}
+
+/// Reads the cache without fetching. `Some(Err(..))` is a live negative entry.
+///
+/// Recovers from poisoning rather than propagating it: a panic inside any
+/// critical section would otherwise turn a one-off failure into "every login
+/// panics forever".
+fn cached_shoo_jwks(shoo_base_url: &str) -> Option<AppResult<JwkSet>> {
     let now = StdInstant::now();
-    // Recover from poisoning rather than propagating it: a panic inside any
-    // critical section would otherwise turn a one-off failure into "every
-    // login panics forever".
-    if let Some(cached) = shoo_jwks_cache()
+    let cached = shoo_jwks_cache()
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .get(&shoo_base_url)
+        .get(shoo_base_url)
         .filter(|cached| cached.expires_at > now)
-        .cloned()
-    {
-        return Ok(cached.jwks);
+        .cloned()?;
+
+    Some(match cached.jwks {
+        Some(jwks) => Ok(jwks),
+        None => Err(jwks_unreachable()),
+    })
+}
+
+fn store_shoo_jwks(shoo_base_url: &str, jwks: Option<JwkSet>) {
+    let ttl = if jwks.is_some() {
+        SHOO_JWKS_CACHE_TTL
+    } else {
+        SHOO_JWKS_NEGATIVE_CACHE_TTL
+    };
+    shoo_jwks_cache()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(
+            shoo_base_url.to_string(),
+            CachedJwks {
+                jwks,
+                expires_at: StdInstant::now() + ttl,
+            },
+        );
+}
+
+async fn fetch_shoo_jwks(state: &AppState) -> AppResult<JwkSet> {
+    let shoo_base_url = state.config.shoo_base_url.trim_end_matches('/').to_string();
+    if let Some(cached) = cached_shoo_jwks(&shoo_base_url) {
+        return cached;
+    }
+
+    // CLEAN-A2: single-flight. Without this, a cold cache during a login burst
+    // fans out one JWKS request per concurrent login.
+    let fetch_lock = shoo_jwks_fetch_lock(&shoo_base_url);
+    let _guard = fetch_lock.lock().await;
+    // The task that held the lock has just filled the cache - positively or,
+    // with the short negative TTL, negatively. Either way, do not refetch.
+    if let Some(cached) = cached_shoo_jwks(&shoo_base_url) {
+        return cached;
     }
 
     let jwks_url = format!("{shoo_base_url}/.well-known/jwks.json");
@@ -301,33 +431,26 @@ async fn fetch_shoo_jwks(state: &AppState) -> AppResult<JwkSet> {
     // the log and the caller gets a fixed message.
     let upstream_failure = |error: reqwest::Error| {
         tracing::warn!(error = ?error, "Shoo JWKS fetch failed");
-        AppError::Upstream("Could not reach the identity provider.".to_string())
+        jwks_unreachable()
     };
-    let jwks = state
-        .http
-        .get(jwks_url)
-        .timeout(SHOO_JWKS_FETCH_TIMEOUT)
-        .send()
-        .await
-        .map_err(upstream_failure)?
-        .error_for_status()
-        .map_err(upstream_failure)?
-        .json::<JwkSet>()
-        .await
-        .map_err(upstream_failure)?;
+    let fetched = async {
+        state
+            .http
+            .get(jwks_url)
+            .timeout(SHOO_JWKS_FETCH_TIMEOUT)
+            .send()
+            .await
+            .map_err(upstream_failure)?
+            .error_for_status()
+            .map_err(upstream_failure)?
+            .json::<JwkSet>()
+            .await
+            .map_err(upstream_failure)
+    }
+    .await;
 
-    shoo_jwks_cache()
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .insert(
-            shoo_base_url,
-            CachedJwks {
-                jwks: jwks.clone(),
-                expires_at: StdInstant::now() + SHOO_JWKS_CACHE_TTL,
-            },
-        );
-
-    Ok(jwks)
+    store_shoo_jwks(&shoo_base_url, fetched.as_ref().ok().cloned());
+    fetched
 }
 
 #[cfg(test)]
@@ -542,6 +665,95 @@ mod tests {
         assert!(matches!(error, AppError::Unauthorized(_)));
     }
 
+    /// SEC-20: an unconfigured backend and a wrong secret must be
+    /// indistinguishable to the caller.
+    #[tokio::test]
+    async fn internal_auth_does_not_reveal_that_the_secret_is_unconfigured() {
+        let mut config = test_config("session-secret-with-at-least-32-chars");
+        config.backend_internal_secret = None;
+        let state = crate::AppState {
+            config,
+            db: PgPoolOptions::new()
+                .connect_lazy("postgres://postgres:***@127.0.0.1:5432/macro_tracker")
+                .expect("test pool should be created lazily"),
+            http: reqwest::Client::new(),
+        };
+        let (mut parts, ()) = axum::http::Request::builder()
+            .body(())
+            .expect("test request should build")
+            .into_parts();
+
+        let unconfigured = InternalAuth::from_request_parts(&mut parts, &state)
+            .await
+            .expect_err("an unconfigured backend must still reject");
+        let wrong_secret = authorize_internal_request(Some("wrong-secret-with-at-least-32-chars"))
+            .await
+            .expect_err("a wrong secret must be rejected");
+
+        let AppError::Unauthorized(unconfigured) = unconfigured else {
+            panic!("expected an unauthorized rejection");
+        };
+        let AppError::Unauthorized(wrong_secret) = wrong_secret else {
+            panic!("expected an unauthorized rejection");
+        };
+        assert_eq!(unconfigured, wrong_secret);
+        assert_eq!(unconfigured, INVALID_BACKEND_SECRET);
+    }
+
+    /// SEC-17: guards the swap from the hand-rolled loop to `subtle`.
+    #[test]
+    fn constant_time_comparison_matches_byte_equality() {
+        let secret = b"internal-secret-with-at-least-32-chars";
+
+        assert!(constant_time_eq_bytes(secret, secret));
+        assert!(!constant_time_eq_bytes(b"", secret));
+        assert!(!constant_time_eq_bytes(secret, b""));
+        // Same length, differing only in the last byte: the case an early-exit
+        // comparison would answer fastest.
+        assert!(!constant_time_eq_bytes(
+            b"internal-secret-with-at-least-32-charS",
+            secret
+        ));
+        // A prefix must not compare equal.
+        assert!(!constant_time_eq_bytes(b"internal-secret", secret));
+        assert!(constant_time_eq_bytes(b"", b""));
+    }
+
+    /// SEC-18: promotion is automatic, revocation is not — and an admin-granted
+    /// owner must never be demoted by an absence from `ADMIN_OWNER_EMAILS`.
+    #[test]
+    fn configured_owner_policy_promotes_but_never_demotes() {
+        let configured = vec!["owner@example.com".to_string()];
+
+        assert_eq!(
+            configured_owner_action(&configured, "owner@example.com", "user"),
+            ConfiguredOwnerAction::Promote
+        );
+        // Matching is case-insensitive; `admin_owner_emails` is stored lowercased.
+        assert_eq!(
+            configured_owner_action(&configured, "Owner@Example.com", "admin"),
+            ConfiguredOwnerAction::Promote
+        );
+        assert_eq!(
+            configured_owner_action(&configured, "owner@example.com", "owner"),
+            ConfiguredOwnerAction::Nothing
+        );
+        // Granted through the admin flow, or left behind by an address removed
+        // from the config list. Indistinguishable here, so neither is demoted.
+        assert_eq!(
+            configured_owner_action(&configured, "someone@example.com", "owner"),
+            ConfiguredOwnerAction::ReportUnconfiguredOwner
+        );
+        assert_eq!(
+            configured_owner_action(&[], "someone@example.com", "owner"),
+            ConfiguredOwnerAction::ReportUnconfiguredOwner
+        );
+        assert_eq!(
+            configured_owner_action(&configured, "someone@example.com", "user"),
+            ConfiguredOwnerAction::Nothing
+        );
+    }
+
     #[tokio::test]
     async fn shoo_jwks_fetch_times_out_instead_of_hanging() {
         let mut config = test_config("session-secret-with-at-least-32-chars");
@@ -592,6 +804,104 @@ mod tests {
         assert_eq!(first.pairwise_sub, "pairwise-test-sub");
         assert_eq!(second.email.as_deref(), Some("coach@example.test"));
         assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    }
+
+    /// Like `jwks_base_url`, but every request fails upstream.
+    async fn failing_jwks_base_url() -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test listener should bind");
+        let address = listener.local_addr().expect("listener should have address");
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let server_count = Arc::clone(&request_count);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                server_count.fetch_add(1, Ordering::SeqCst);
+                let mut buffer = [0; 1024];
+                let _ = socket.read(&mut buffer).await;
+                let _ = socket
+                    .write_all(b"HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n")
+                    .await;
+            }
+        });
+        (format!("http://{address}"), request_count)
+    }
+
+    fn shoo_state_for(base_url: &str) -> crate::AppState {
+        let mut config = test_config("session-secret-with-at-least-32-chars");
+        config.shoo_base_url = base_url.to_string();
+        crate::AppState {
+            config,
+            db: PgPoolOptions::new()
+                .connect_lazy("postgres://postgres:***@127.0.0.1:5432/macro_tracker")
+                .expect("test pool should be created lazily"),
+            http: reqwest::Client::new(),
+        }
+    }
+
+    /// CLEAN-A2: a cold cache during a login burst used to fan out one JWKS
+    /// request per concurrent login.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_cold_logins_make_exactly_one_jwks_request() {
+        const LOGINS: usize = 8;
+        let kid = "single-flight-key";
+        let (base_url, request_count) = jwks_base_url(ec_jwks(kid)).await;
+        let state = shoo_state_for(&base_url);
+        let token = signed_shoo_token(kid, &base_url, "http://localhost:3000");
+        // Releases every task into the cache lookup at the same moment, so the
+        // un-deduplicated version really does race.
+        let start = Arc::new(tokio::sync::Barrier::new(LOGINS));
+
+        let mut handles = Vec::with_capacity(LOGINS);
+        for _ in 0..LOGINS {
+            let state = state.clone();
+            let token = token.clone();
+            let start = Arc::clone(&start);
+            handles.push(tokio::spawn(async move {
+                start.wait().await;
+                verify_shoo_token(&state, &token, "http://localhost:3000").await
+            }));
+        }
+
+        for handle in handles {
+            let claims = handle
+                .await
+                .expect("task should not panic")
+                .expect("every concurrent login should verify");
+            assert_eq!(claims.pairwise_sub, "pairwise-test-sub");
+        }
+
+        assert_eq!(
+            request_count.load(Ordering::SeqCst),
+            1,
+            "concurrent cold logins must share a single upstream JWKS fetch"
+        );
+    }
+
+    /// CLEAN-A2: without a negative entry, an identity-provider outage makes
+    /// every login pay the full fetch timeout again.
+    #[tokio::test]
+    async fn failed_jwks_fetches_are_negatively_cached() {
+        let kid = "negative-cache-key";
+        let (base_url, request_count) = failing_jwks_base_url().await;
+        let state = shoo_state_for(&base_url);
+        let token = signed_shoo_token(kid, &base_url, "http://localhost:3000");
+
+        for attempt in 0..3 {
+            let error = verify_shoo_token(&state, &token, "http://localhost:3000")
+                .await
+                .expect_err("an unreachable provider must fail the login");
+            assert!(matches!(error, AppError::Upstream(_)), "attempt {attempt}");
+        }
+
+        assert_eq!(
+            request_count.load(Ordering::SeqCst),
+            1,
+            "a failed fetch must be cached briefly instead of retried per login"
+        );
     }
 
     /// Builds state whose JWKS endpoint serves `jwks_body`, and returns the
