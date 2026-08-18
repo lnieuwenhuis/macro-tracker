@@ -3171,7 +3171,10 @@ async fn food_products_json_by_ids(
 
     let mut products = HashMap::with_capacity(rows.len());
     for row in rows {
-        products.insert(row.try_get::<Uuid, _>("id")?, row.try_get::<Value, _>("data")?);
+        products.insert(
+            row.try_get::<Uuid, _>("id")?,
+            row.try_get::<Value, _>("data")?,
+        );
     }
     Ok(products)
 }
@@ -5371,11 +5374,7 @@ async fn weight_entries_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
 /// PERF-03: the row set is selected most-recent-first so a limit keeps the
 /// newest entries, then re-sorted ascending because every consumer charts the
 /// series forwards in time.
-async fn weight_entries_json_limited(
-    pool: &PgPool,
-    user_id: Uuid,
-    limit: i64,
-) -> AppResult<Value> {
+async fn weight_entries_json_limited(pool: &PgPool, user_id: Uuid, limit: i64) -> AppResult<Value> {
     let row = sqlx::query(
         r#"
         SELECT coalesce(jsonb_agg(
@@ -7113,7 +7112,9 @@ mod tests {
     async fn test_db_with_connections(max_connections: u32) -> TestDb {
         let database_url = env::var("TEST_DATABASE_URL")
             .or_else(|_| env::var("DATABASE_URL"))
-            .expect("TEST_DATABASE_URL or DATABASE_URL must be set for PostgreSQL integration tests");
+            .expect(
+                "TEST_DATABASE_URL or DATABASE_URL must be set for PostgreSQL integration tests",
+            );
         let schema = format!("backend_test_{}", Uuid::new_v4().simple());
         let setup_pool = PgPoolOptions::new()
             .max_connections(1)
@@ -7285,7 +7286,10 @@ mod tests {
         entry_id
     }
 
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     #[tokio::test]
     async fn ensure_default_meal_groups_creates_all_groups_idempotently() {
         let test_db = test_db().await;
@@ -7381,7 +7385,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     #[tokio::test]
     async fn ensure_default_meal_groups_reactivates_a_soft_deleted_default() {
         let test_db = test_db().await;
@@ -7422,7 +7429,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     #[tokio::test]
     async fn apply_day_template_resolves_exact_and_unambiguous_meal_group_labels() {
         let test_db = test_db().await;
@@ -7508,7 +7518,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     #[tokio::test]
     async fn list_admin_barcode_products_applies_catalogue_filters_to_items_and_totals() {
         let test_db = test_db().await;
@@ -7624,7 +7637,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     #[tokio::test]
     async fn search_food_products_blank_query_returns_empty_array() {
         let test_db = test_db().await;
@@ -7651,7 +7667,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     #[tokio::test]
     async fn search_food_products_matches_each_word_independently() {
         let test_db = test_db().await;
@@ -7683,7 +7702,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     #[tokio::test]
     async fn search_food_products_prioritizes_corrected_and_personal_products() {
         let test_db = test_db().await;
@@ -7719,7 +7741,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     #[tokio::test]
     async fn admin_user_detail_preserves_recent_activity_contracts() {
         let test_db = test_db().await;
@@ -7845,7 +7870,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     #[tokio::test]
     async fn search_meal_entries_excludes_planned_and_skipped_entries() {
         let test_db = test_db().await;
@@ -7895,7 +7923,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     #[tokio::test]
     async fn search_meal_entries_deduplicates_equivalent_historical_foods() {
         let test_db = test_db().await;
@@ -7945,7 +7976,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     #[tokio::test]
     async fn search_meal_entries_hides_soft_deleted_product_id_but_keeps_macro_snapshot() {
         let test_db = test_db().await;
@@ -7995,7 +8029,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     #[tokio::test]
     async fn get_recent_quick_add_candidates_defaults_to_thirty_when_limit_is_omitted() {
         let test_db = test_db().await;
@@ -8094,7 +8131,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     #[tokio::test]
     async fn leaderboard_handles_empty_grace_gaps_ties_and_large_history() {
         let test_db = test_db().await;
@@ -8206,7 +8246,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     #[tokio::test]
     async fn list_recent_meal_entries_excludes_planned_and_skipped_entries() {
         let test_db = test_db().await;
@@ -8256,7 +8299,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     #[tokio::test]
     async fn concurrent_owner_demotions_cannot_remove_last_owner() {
         let test_db = test_db_with_connections(4).await;
@@ -8307,7 +8353,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     #[tokio::test]
     async fn set_user_role_rolls_back_role_when_audit_insert_fails() {
         let test_db = test_db().await;
@@ -8353,7 +8402,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     #[tokio::test]
     async fn create_admin_barcode_product_rolls_back_product_and_revision_when_audit_fails() {
         let test_db = test_db().await;
@@ -8399,7 +8451,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     #[tokio::test]
     async fn update_admin_barcode_product_rolls_back_product_when_revision_fails() {
         let test_db = test_db().await;
@@ -8448,7 +8503,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     #[tokio::test]
     async fn delete_admin_barcode_product_rolls_back_product_when_audit_fails() {
         let test_db = test_db().await;
@@ -8503,7 +8561,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     #[tokio::test]
     async fn save_barcode_food_product_rpc_creates_created_revision() {
         let test_db = test_db().await;
@@ -8547,7 +8608,10 @@ mod tests {
         test_db.cleanup().await;
     }
 
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     #[tokio::test]
     async fn save_barcode_food_product_rolls_back_product_when_created_revision_fails() {
         let test_db = test_db().await;
@@ -8994,18 +9058,20 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     async fn shoo_login_refuses_to_rebind_an_existing_email_to_a_new_subject() {
         let test_db = test_db().await;
         let victim_id = insert_test_user_with_email(&test_db.pool, "victim@example.test").await;
-        let original_sub: String =
-            sqlx::query("SELECT shoo_pairwise_sub FROM users WHERE id = $1")
-                .bind(victim_id)
-                .fetch_one(&test_db.pool)
-                .await
-                .expect("victim should exist")
-                .try_get("shoo_pairwise_sub")
-                .expect("sub should read");
+        let original_sub: String = sqlx::query("SELECT shoo_pairwise_sub FROM users WHERE id = $1")
+            .bind(victim_id)
+            .fetch_one(&test_db.pool)
+            .await
+            .expect("victim should exist")
+            .try_get("shoo_pairwise_sub")
+            .expect("sub should read");
 
         let result = upsert_user_from_shoo_profile(
             &test_db.pool,
@@ -9047,7 +9113,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     async fn shoo_login_updates_the_email_of_a_known_subject() {
         let test_db = test_db().await;
         let created = upsert_user_from_shoo_profile(
@@ -9072,7 +9141,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     async fn shoo_login_refuses_to_move_a_known_subject_onto_a_taken_email() {
         let test_db = test_db().await;
         let victim = upsert_user_from_shoo_profile(
@@ -9113,7 +9185,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     async fn shoo_login_creates_a_user_for_an_unused_subject_and_email() {
         let test_db = test_db().await;
         let created = upsert_user_from_shoo_profile(
@@ -9129,7 +9204,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     async fn product_linked_meal_writes_are_bounded_like_the_manual_path() {
         let test_db = test_db().await;
         let user_id = insert_test_user(&test_db.pool).await;
@@ -9208,7 +9286,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     async fn preserved_product_snapshots_cannot_write_negative_macros() {
         let test_db = test_db().await;
         let user_id = insert_test_user(&test_db.pool).await;
@@ -9306,7 +9387,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     async fn calories_are_bounded_to_the_column_domain() {
         let test_db = test_db().await;
         let user_id = insert_test_user(&test_db.pool).await;
@@ -9345,7 +9429,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     async fn calorie_aggregates_survive_rows_that_predate_the_bound() {
         let test_db = test_db().await;
         let user_id = insert_test_user(&test_db.pool).await;
@@ -9390,7 +9477,10 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg_attr(not(has_test_database), ignore = "requires TEST_DATABASE_URL or DATABASE_URL")]
+    #[cfg_attr(
+        not(has_test_database),
+        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
+    )]
     async fn stats_page_reports_the_same_streaks_as_the_leaderboard() {
         let test_db = test_db().await;
         let user_id = insert_test_user(&test_db.pool).await;
