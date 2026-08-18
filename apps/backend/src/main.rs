@@ -61,6 +61,9 @@ const POSTGRES_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_
 /// purely about availability.
 const API_RATE_LIMIT_REPLENISH_MS: u64 = 50;
 const API_RATE_LIMIT_BURST: u32 = 100;
+/// Only reachable with `BACKEND_ENABLE_TEST_ROUTES`, which SEC-05 restricts to
+/// a loopback `APP_URL`.
+const API_RATE_LIMIT_TEST_BURST: u32 = 100_000;
 /// Drops rate-limit state for IPs that have gone quiet, so the keyed map cannot
 /// grow without bound and become its own memory-exhaustion vector.
 const API_RATE_LIMIT_GC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
@@ -101,8 +104,12 @@ fn rate_limited_response(error: GovernorError) -> axum::response::Response {
         ),
     };
 
+    // The limiter sits in front of the handler, so without this a throttled
+    // browser client sees a CORS failure rather than the 429 - the same defect
+    // API-06 fixed for the body-limit and path rejections.
     (
         status,
+        api::cors_headers(),
         axum::Json(serde_json::json!({
             "ok": false,
             "error": { "code": code, "message": message }
@@ -112,7 +119,18 @@ fn rate_limited_response(error: GovernorError) -> axum::response::Response {
 }
 
 fn build_router(state: AppState) -> Router {
-    build_router_with_rate_limit(state, API_RATE_LIMIT_REPLENISH_MS, API_RATE_LIMIT_BURST)
+    // The request-level suite in `apps/web/tests/unit/api-v1.test.ts` drives
+    // hundreds of sequential calls from one address, which is exactly the
+    // shape the limiter exists to stop - it cannot tell that traffic from a
+    // flood. `enable_test_routes` is the existing "this is a test deployment"
+    // switch and SEC-05 refuses it unless `APP_URL` is loopback, so widening
+    // the burst behind it cannot loosen a real deployment.
+    let burst = if state.config.enable_test_routes {
+        API_RATE_LIMIT_TEST_BURST
+    } else {
+        API_RATE_LIMIT_BURST
+    };
+    build_router_with_rate_limit(state, API_RATE_LIMIT_REPLENISH_MS, burst)
 }
 
 fn build_router_with_rate_limit(state: AppState, replenish_ms: u64, burst: u32) -> Router {
