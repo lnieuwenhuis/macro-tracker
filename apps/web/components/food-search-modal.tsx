@@ -31,6 +31,19 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
   const [copiedIds, setCopiedIds] = useState<Set<string>>(new Set());
   const inputRef = useRef<HTMLInputElement>(null);
   const mutationIds = useRef(createClientMutationIdStore());
+  // Pending "copied" flash timers, keyed by entry id, cleared on unmount so
+  // closing the modal mid-flash doesn't call setState on an unmounted tree.
+  const copiedTimersRef = useRef<Map<string, number>>(new Map());
+
+  useEffect(() => {
+    const timers = copiedTimersRef.current;
+    return () => {
+      for (const timer of timers.values()) {
+        window.clearTimeout(timer);
+      }
+      timers.clear();
+    };
+  }, []);
 
   const todayStr = useMemo(() => getLocalDateString(), []);
   const trimmedQuery = normalizeFoodSearchQuery(query);
@@ -110,13 +123,21 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
           onEntrySaved?.(result.entry);
         }
         setCopiedIds((prev) => new Set([...prev, entry.id]));
-        setTimeout(() => {
-          setCopiedIds((prev) => {
-            const next = new Set(prev);
-            next.delete(entry.id);
-            return next;
-          });
-        }, 2500);
+        const existingTimer = copiedTimersRef.current.get(entry.id);
+        if (existingTimer !== undefined) {
+          window.clearTimeout(existingTimer);
+        }
+        copiedTimersRef.current.set(
+          entry.id,
+          window.setTimeout(() => {
+            copiedTimersRef.current.delete(entry.id);
+            setCopiedIds((prev) => {
+              const next = new Set(prev);
+              next.delete(entry.id);
+              return next;
+            });
+          }, 2500),
+        );
         return;
       }
 

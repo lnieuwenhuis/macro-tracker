@@ -30,6 +30,11 @@ type AppShellProps = {
   onComposeAction?: (action: ComposeAction) => void;
   topBar?: (controls: { openSettings: () => void }) => ReactNode;
   children: ReactNode;
+  // Resolved server-side (user's timezone) via `getRequestToday()` so the
+  // client render agrees with the server render on hydration. Falls back to
+  // the local runtime's day when a caller has not been updated to pass it
+  // yet -- see AUDIT-REMEDIATION.md UI-02.
+  todayStr?: string;
 };
 
 export function AppShell({
@@ -41,13 +46,17 @@ export function AppShell({
   onComposeAction,
   topBar,
   children,
+  todayStr: todayStrProp,
 }: AppShellProps) {
   const pathname = usePathname();
   const router = useRouter();
   const [isPending, startNavigation] = useTransition();
   const [profileOpen, setProfileOpen] = useState(false);
   const [screenMotion, setScreenMotion] = useState<ScreenMotion>("intro");
-  const todayStr = useMemo(() => getLocalDateString(), []);
+  const todayStr = useMemo(
+    () => todayStrProp ?? getLocalDateString(),
+    [todayStrProp],
+  );
   const isToday = selectedDate === todayStr;
   const basePath = activeTab === "summary" ? "/summary" : "/";
   const previousDateHref = `${basePath}?date=${previousDateString(selectedDate)}`;

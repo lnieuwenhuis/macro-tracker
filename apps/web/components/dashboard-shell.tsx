@@ -81,6 +81,11 @@ type DashboardShellProps = {
   quickAddCandidates: QuickAddCandidate[];
   initialComposeAction?: ComposeAction | null;
   initialPresetTemplateKind?: PresetTemplateKind | null;
+  // Resolved server-side (user's timezone) via `getRequestToday()` so the
+  // client render agrees with the server render on hydration. Falls back to
+  // the local runtime's day when a caller has not been updated to pass it
+  // yet -- see AUDIT-REMEDIATION.md UI-02.
+  todayStr?: string;
 };
 
 type ErrorState = Record<string, string | null>;
@@ -309,6 +314,7 @@ export function DashboardShell({
   quickAddCandidates,
   initialComposeAction = null,
   initialPresetTemplateKind = null,
+  todayStr: todayStrProp,
 }: DashboardShellProps) {
   const router = useRouter();
   const composeHandledRef = useRef<string | null>(null);
@@ -405,6 +411,19 @@ export function DashboardShell({
   // Tracks cards that were recently copied to today so the button can give
   // brief visual confirmation before returning to its normal state.
   const [copiedCardIds, setCopiedCardIds] = useState<Set<string>>(new Set());
+  // Pending "copied" flash timers, keyed by clientId, cleared on unmount so a
+  // navigation away mid-flash doesn't call setState on an unmounted tree.
+  const copiedTimersRef = useRef<Map<string, number>>(new Map());
+
+  useEffect(() => {
+    const timers = copiedTimersRef.current;
+    return () => {
+      for (const timer of timers.values()) {
+        window.clearTimeout(timer);
+      }
+      timers.clear();
+    };
+  }, []);
 
   // Barcode scanner state
   const [showScanner, setShowScanner] = useState(false);
@@ -428,7 +447,10 @@ export function DashboardShell({
   const liveTotals = totalsByStatus.eaten;
   const livePlannedTotals = totalsByStatus.planned;
   const liveSkippedTotals = totalsByStatus.skipped;
-  const todayStr = useMemo(() => getLocalDateString(), []);
+  const todayStr = useMemo(
+    () => todayStrProp ?? getLocalDateString(),
+    [todayStrProp],
+  );
   const defaultEntryStatus: MealEntryStatus =
     selectedDate > todayStr ? "planned" : "eaten";
 
@@ -500,6 +522,8 @@ export function DashboardShell({
     const draft = drafts.find((entry) => entry.clientId === clientId);
     if (!draft) return;
 
+    const previousMealGroupId = draft.mealGroupId;
+
     setDrafts((currentDrafts) =>
       currentDrafts.map((item) =>
         item.clientId === clientId ? { ...item, mealGroupId } : item,
@@ -522,6 +546,13 @@ export function DashboardShell({
       }));
 
       if (!result.ok) {
+        setDrafts((currentDrafts) =>
+          currentDrafts.map((item) =>
+            item.clientId === clientId
+              ? { ...item, mealGroupId: previousMealGroupId }
+              : item,
+          ),
+        );
         setErrors((currentErrors) => ({
           ...currentErrors,
           [clientId]: result.error ?? "Unable to update group.",
@@ -1028,13 +1059,21 @@ export function DashboardShell({
       } else {
         // Show a brief "copied" confirmation on the button, then clear it.
         setCopiedCardIds((prev) => new Set([...prev, clientId]));
-        setTimeout(() => {
-          setCopiedCardIds((prev) => {
-            const next = new Set(prev);
-            next.delete(clientId);
-            return next;
-          });
-        }, 2000);
+        const existingTimer = copiedTimersRef.current.get(clientId);
+        if (existingTimer !== undefined) {
+          window.clearTimeout(existingTimer);
+        }
+        copiedTimersRef.current.set(
+          clientId,
+          window.setTimeout(() => {
+            copiedTimersRef.current.delete(clientId);
+            setCopiedCardIds((prev) => {
+              const next = new Set(prev);
+              next.delete(clientId);
+              return next;
+            });
+          }, 2000),
+        );
       }
 
       setActiveMutation(null);
@@ -1401,6 +1440,7 @@ export function DashboardShell({
         activeTab="log"
         showDateNavigation
         onComposeAction={handleComposeAction}
+        todayStr={todayStr}
       >
         {content}
       </AppShell>

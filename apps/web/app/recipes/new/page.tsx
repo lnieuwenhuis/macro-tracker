@@ -10,7 +10,7 @@ type NewRecipePageProps = {
 };
 
 export default async function NewRecipePage({ searchParams }: NewRecipePageProps) {
-  const { sessionUser, selectedDate, userEmail, canAccessAdmin } =
+  const { sessionUser, selectedDate, userEmail, canAccessAdmin, today} =
     await loadOnboardedPageContext(searchParams);
   const templates = await getTemplates(sessionUser.userId);
 
@@ -19,6 +19,7 @@ export default async function NewRecipePage({ searchParams }: NewRecipePageProps
       userEmail={userEmail}
       canAccessAdmin={canAccessAdmin}
       selectedDate={selectedDate}
+      todayStr={today}
       templates={templates}
       mode="create"
     />

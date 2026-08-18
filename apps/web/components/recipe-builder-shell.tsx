@@ -46,6 +46,7 @@ type RecipeBuilderShellProps = {
   templates: MealTemplate[];
   mode: "create" | "edit";
   recipe?: RecipeRecord;
+  todayStr?: string;
 };
 
 function toNumber(value: string) {
@@ -60,6 +61,7 @@ export function RecipeBuilderShell({
   templates: initialTemplates,
   mode,
   recipe,
+  todayStr,
 }: RecipeBuilderShellProps) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
@@ -459,6 +461,7 @@ export function RecipeBuilderShell({
       selectedDate={selectedDate}
       title={mode === "create" ? "New Recipe" : "Edit Recipe"}
       activeTab="recipes"
+      todayStr={todayStr}
     >
       {content}
     </AppShell>

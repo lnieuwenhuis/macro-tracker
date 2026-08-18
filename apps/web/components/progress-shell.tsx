@@ -38,6 +38,7 @@ type ProgressShellProps = {
   weightData: WeightPageData;
   initialTab: ProgressTab;
   weightUnit: WeightUnit;
+  todayStr?: string;
 };
 
 /**
@@ -776,6 +777,7 @@ export function ProgressShell({
   weightData,
   initialTab,
   weightUnit,
+  todayStr,
 }: ProgressShellProps) {
   const router = useRouter();
   const [activeTab, setActiveTab] = useState<ProgressTab>(initialTab);
@@ -798,6 +800,7 @@ export function ProgressShell({
       selectedDate={selectedDate}
       title="Goals & Weight"
       activeTab="progress"
+      todayStr={todayStr}
       topBar={({ openSettings }) => (
         <div className="mb-4 flex items-center gap-3">
           <section className="flex-1 rounded-[1.45rem] border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-surface-strong)_92%,transparent)] p-1 shadow-[0_16px_30px_rgba(0,0,0,0.12)] backdrop-blur-xl">

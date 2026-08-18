@@ -36,6 +36,7 @@ type PlannerShellProps = {
   recipeCount: number;
   dailySummary: DailySummary;
   shoppingSummaries: DailySummary[];
+  todayStr?: string;
 };
 
 type PlannerMode = "templates" | "shopping";
@@ -54,6 +55,7 @@ export function PlannerShell({
   recipeCount,
   dailySummary,
   shoppingSummaries,
+  todayStr,
 }: PlannerShellProps) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
@@ -205,6 +207,7 @@ export function PlannerShell({
       selectedDate={selectedDate}
       title="Planner"
       activeTab="recipes"
+      todayStr={todayStr}
       topBar={({ openSettings }) => (
         <div className="mb-4 flex items-center justify-between gap-3">
           <div>

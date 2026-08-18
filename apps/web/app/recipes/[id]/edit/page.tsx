@@ -19,7 +19,7 @@ export default async function EditRecipePage({
     params,
     loadOnboardedPageContext(searchParams),
   ]);
-  const { sessionUser, selectedDate, userEmail, canAccessAdmin } = pageContext;
+  const { sessionUser, selectedDate, today, userEmail, canAccessAdmin } = pageContext;
 
   const [recipe, templates] = await Promise.all([
     getRecipeById(sessionUser.userId, routeParams.id),
@@ -36,6 +36,7 @@ export default async function EditRecipePage({
       userEmail={userEmail}
       canAccessAdmin={canAccessAdmin}
       selectedDate={selectedDate}
+      todayStr={today}
       templates={templates}
       mode="edit"
       recipe={recipe}
