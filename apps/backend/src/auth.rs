@@ -10,7 +10,7 @@ use axum::{
 use chrono::{Duration, Utc};
 use jsonwebtoken::{
     Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, decode_header, encode,
-    jwk::JwkSet,
+    jwk::{AlgorithmParameters, EllipticCurve, JwkSet, KeyAlgorithm},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -238,11 +238,36 @@ async fn verify_shoo_token(
     let jwk = jwks
         .find(&kid)
         .ok_or_else(|| AppError::Unauthorized("Shoo signing key was not found.".to_string()))?;
+    // SEC-19: pin the key type. `DecodingKey::from_jwk` will happily build an
+    // HMAC key from a symmetric `oct` JWK, so if Shoo ever published one, anyone
+    // who can read the public JWKS could sign their own logins for any email.
+    // Shoo signs with ES256 over P-256; nothing else is accepted.
+    // Match on the key *type*, not on `alg`: RFC 7517 makes `alg` optional, so
+    // gating on it would break every login the day Shoo stopped emitting it.
+    // `kty`/`crv` are mandatory, and rejecting anything that is not P-256 is
+    // what actually excludes a symmetric key.
+    let is_p256 = match &jwk.algorithm {
+        AlgorithmParameters::EllipticCurve(ec) => ec.curve == EllipticCurve::P256,
+        _ => false,
+    };
+    if !is_p256 || matches!(jwk.common.key_algorithm, Some(alg) if alg != KeyAlgorithm::ES256) {
+        return Err(AppError::Unauthorized(
+            "Shoo signing key is invalid.".to_string(),
+        ));
+    }
     let key = DecodingKey::from_jwk(jwk)
         .map_err(|_| AppError::Unauthorized("Shoo signing key is invalid.".to_string()))?;
-    let mut validation = Validation::new(header.alg);
+    // SEC-02: never derive the algorithm from the token's own header - that lets
+    // the caller pick it. Pin it to what Shoo actually signs with instead.
+    let mut validation = Validation::new(Algorithm::ES256);
     validation.set_issuer(&[state.config.shoo_base_url.as_str()]);
     validation.set_audience(&[format!("origin:{app_origin}")]);
+    // SEC-02: `Validation::new` seeds `required_spec_claims` with only `exp`, and
+    // neither `set_issuer` nor `set_audience` adds to it. In `validate()` both the
+    // `iss` and `aud` match arms end in `_ => {}`, so an *absent* claim falls
+    // through and passes - issuer and audience were only ever checked for tokens
+    // that happened to carry them. Require them explicitly.
+    validation.set_required_spec_claims(&["exp", "iss", "aud"]);
     let decoded = decode::<ShooClaims>(id_token, &key, &validation)
         .map_err(|_| AppError::Unauthorized("Unable to verify Shoo login.".to_string()))?;
 
@@ -420,11 +445,35 @@ mod tests {
         (format!("http://{address}"), request_count)
     }
 
-    fn signed_shoo_token(kid: &str, secret: &[u8], issuer: &str, app_origin: &str) -> String {
-        let mut header = Header::new(Algorithm::HS256);
+    /// Throwaway P-256 keypair, generated for these tests only and never used
+    /// anywhere else. Shoo signs ID tokens with ES256, so the fixtures have to
+    /// as well - a symmetric key would no longer be accepted (see SEC-19).
+    const TEST_EC_PRIVATE_KEY_PEM: &str = concat!(
+        "-----BEGIN PRIVATE KEY-----\n",
+        "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgl7f/GjQzI961QUMc\n",
+        "9mCHWJo8/lNDAwg3zxZzakX5IbmhRANCAATa0cFohs0y4U+YZ4z04JTsZWB5XQjx\n",
+        "hOc/kCgxv30TfZ9j0RGhSh2nw1h0n4dDKoIm/1HmggrwIu2WjiAozhFT\n",
+        "-----END PRIVATE KEY-----\n",
+    );
+    const TEST_EC_PUBLIC_X: &str = "2tHBaIbNMuFPmGeM9OCU7GVgeV0I8YTnP5AoMb99E30";
+    const TEST_EC_PUBLIC_Y: &str = "n2PREaFKHafDWHSfh0Mqgib_UeaCCvAi7ZaOICjOEVM";
+
+    fn ec_encoding_key() -> EncodingKey {
+        EncodingKey::from_ec_pem(TEST_EC_PRIVATE_KEY_PEM.as_bytes())
+            .expect("test EC key should parse")
+    }
+
+    /// Signs a token with the test EC key. `claims` is the full claim set so a
+    /// test can omit `iss`/`aud` and prove the absent-claim path is rejected.
+    fn signed_shoo_token_with_claims(kid: &str, claims: serde_json::Value) -> String {
+        let mut header = Header::new(Algorithm::ES256);
         header.kid = Some(kid.to_string());
+        encode(&header, &claims, &ec_encoding_key()).expect("test token should sign")
+    }
+
+    fn shoo_claims(issuer: &str, app_origin: &str) -> serde_json::Value {
         let now = Utc::now();
-        let claims = serde_json::json!({
+        serde_json::json!({
             "iss": issuer,
             "aud": format!("origin:{app_origin}"),
             "exp": (now + Duration::minutes(5)).timestamp(),
@@ -433,8 +482,26 @@ mod tests {
             "email": "coach@example.test",
             "name": "Coach Test",
             "picture": null
-        });
-        encode(&header, &claims, &EncodingKey::from_secret(secret)).expect("test token should sign")
+        })
+    }
+
+    fn signed_shoo_token(kid: &str, issuer: &str, app_origin: &str) -> String {
+        signed_shoo_token_with_claims(kid, shoo_claims(issuer, app_origin))
+    }
+
+    fn ec_jwks(kid: &str) -> String {
+        serde_json::json!({
+            "keys": [{
+                "kty": "EC",
+                "crv": "P-256",
+                "kid": kid,
+                "alg": "ES256",
+                "use": "sig",
+                "x": TEST_EC_PUBLIC_X,
+                "y": TEST_EC_PUBLIC_Y
+            }]
+        })
+        .to_string()
     }
 
     fn symmetric_jwks(kid: &str, secret: &[u8]) -> String {
@@ -502,9 +569,8 @@ mod tests {
 
     #[tokio::test]
     async fn shoo_jwks_are_cached_per_base_url() {
-        let secret = b"cached-shoo-secret-with-at-least-32-chars";
         let kid = "cached-key";
-        let (base_url, request_count) = jwks_base_url(symmetric_jwks(kid, secret)).await;
+        let (base_url, request_count) = jwks_base_url(ec_jwks(kid)).await;
         let mut config = test_config("session-secret-with-at-least-32-chars");
         config.shoo_base_url = base_url.clone();
         let state = crate::AppState {
@@ -514,7 +580,7 @@ mod tests {
                 .expect("test pool should be created lazily"),
             http: reqwest::Client::new(),
         };
-        let token = signed_shoo_token(kid, secret, &base_url, "http://localhost:3000");
+        let token = signed_shoo_token(kid, &base_url, "http://localhost:3000");
 
         let first = verify_shoo_token(&state, &token, "http://localhost:3000")
             .await
@@ -526,6 +592,151 @@ mod tests {
         assert_eq!(first.pairwise_sub, "pairwise-test-sub");
         assert_eq!(second.email.as_deref(), Some("coach@example.test"));
         assert_eq!(request_count.load(Ordering::SeqCst), 1);
+    }
+
+    /// Builds state whose JWKS endpoint serves `jwks_body`, and returns the
+    /// issuer the token must claim.
+    async fn shoo_state_with_jwks(jwks_body: String) -> (crate::AppState, String) {
+        let (base_url, _) = jwks_base_url(jwks_body).await;
+        let mut config = test_config("session-secret-with-at-least-32-chars");
+        config.shoo_base_url = base_url.clone();
+        let state = crate::AppState {
+            config,
+            db: PgPoolOptions::new()
+                .connect_lazy("postgres://postgres:***@127.0.0.1:5432/macro_tracker")
+                .expect("test pool should be created lazily"),
+            http: reqwest::Client::new(),
+        };
+        (state, base_url)
+    }
+
+    /// SEC-02 regression: `Validation` only ever seeded `required_spec_claims`
+    /// with `exp`, and its `iss`/`aud` match arms fall through on an absent
+    /// claim. A token that simply omitted `aud` used to authenticate.
+    #[tokio::test]
+    async fn shoo_token_without_audience_is_rejected() {
+        let kid = "es256-key";
+        let (state, base_url) = shoo_state_with_jwks(ec_jwks(kid)).await;
+        let now = Utc::now();
+        let token = signed_shoo_token_with_claims(
+            kid,
+            serde_json::json!({
+                "iss": base_url,
+                "exp": (now + Duration::minutes(5)).timestamp(),
+                "iat": now.timestamp(),
+                "pairwise_sub": "pairwise-test-sub",
+                "email": "coach@example.test"
+            }),
+        );
+
+        let error = verify_shoo_token(&state, &token, "http://localhost:3000")
+            .await
+            .expect_err("a token with no aud claim must not authenticate");
+
+        assert!(matches!(error, AppError::Unauthorized(_)));
+    }
+
+    /// SEC-02 regression: same fall-through, for the issuer.
+    #[tokio::test]
+    async fn shoo_token_without_issuer_is_rejected() {
+        let kid = "es256-key";
+        let (state, _) = shoo_state_with_jwks(ec_jwks(kid)).await;
+        let now = Utc::now();
+        let token = signed_shoo_token_with_claims(
+            kid,
+            serde_json::json!({
+                "aud": "origin:http://localhost:3000",
+                "exp": (now + Duration::minutes(5)).timestamp(),
+                "iat": now.timestamp(),
+                "pairwise_sub": "pairwise-test-sub",
+                "email": "coach@example.test"
+            }),
+        );
+
+        let error = verify_shoo_token(&state, &token, "http://localhost:3000")
+            .await
+            .expect_err("a token with no iss claim must not authenticate");
+
+        assert!(matches!(error, AppError::Unauthorized(_)));
+    }
+
+    /// Guard on the case that always worked, so the required-claims change
+    /// cannot be mistaken for the whole of the audience check.
+    #[tokio::test]
+    async fn shoo_token_with_wrong_audience_is_rejected() {
+        let kid = "es256-key";
+        let (state, base_url) = shoo_state_with_jwks(ec_jwks(kid)).await;
+        let token = signed_shoo_token(kid, &base_url, "https://evil.example");
+
+        let error = verify_shoo_token(&state, &token, "http://localhost:3000")
+            .await
+            .expect_err("a token minted for another origin must not authenticate");
+
+        assert!(matches!(error, AppError::Unauthorized(_)));
+    }
+
+    #[tokio::test]
+    async fn shoo_token_with_correct_issuer_and_audience_is_accepted() {
+        let kid = "es256-key";
+        let (state, base_url) = shoo_state_with_jwks(ec_jwks(kid)).await;
+        let token = signed_shoo_token(kid, &base_url, "http://localhost:3000");
+
+        let claims = verify_shoo_token(&state, &token, "http://localhost:3000")
+            .await
+            .expect("a well-formed ES256 token should authenticate");
+
+        assert_eq!(claims.pairwise_sub, "pairwise-test-sub");
+    }
+
+    /// A JWK may legitimately omit the optional `alg` member (RFC 7517 §4.4).
+    /// Gating on it would have turned a Shoo-side JWKS tweak into a total login
+    /// outage, so the key type carries the check instead.
+    #[tokio::test]
+    async fn shoo_key_without_alg_member_still_verifies() {
+        let kid = "es256-key";
+        let jwks = serde_json::json!({
+            "keys": [{
+                "kty": "EC",
+                "crv": "P-256",
+                "kid": kid,
+                "use": "sig",
+                "x": TEST_EC_PUBLIC_X,
+                "y": TEST_EC_PUBLIC_Y
+            }]
+        })
+        .to_string();
+        let (state, base_url) = shoo_state_with_jwks(jwks).await;
+        let token = signed_shoo_token(kid, &base_url, "http://localhost:3000");
+
+        let claims = verify_shoo_token(&state, &token, "http://localhost:3000")
+            .await
+            .expect("an EC key with no alg member should still verify");
+
+        assert_eq!(claims.pairwise_sub, "pairwise-test-sub");
+    }
+
+    /// SEC-19: `DecodingKey::from_jwk` builds an HMAC key from a symmetric `oct`
+    /// JWK. If Shoo ever published one, anyone able to read the public JWKS
+    /// could mint logins for any email, so the key type is pinned.
+    #[tokio::test]
+    async fn symmetric_jwks_key_is_rejected() {
+        let secret = b"symmetric-shoo-secret-with-at-least-32-chars";
+        let kid = "oct-key";
+        let (state, base_url) = shoo_state_with_jwks(symmetric_jwks(kid, secret)).await;
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some(kid.to_string());
+        let token = encode(
+            &header,
+            &shoo_claims(&base_url, "http://localhost:3000"),
+            &EncodingKey::from_secret(secret),
+        )
+        .expect("test token should sign");
+
+        let error = verify_shoo_token(&state, &token, "http://localhost:3000")
+            .await
+            .expect_err("a symmetric JWKS key must never verify a login");
+
+        assert!(matches!(error, AppError::Unauthorized(_)));
     }
 
     #[test]
