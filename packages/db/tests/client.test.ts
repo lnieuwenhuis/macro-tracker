@@ -43,8 +43,16 @@ describe("database client SSL config", () => {
 
   it("verifies the certificate for sslmode=require", () => {
     expect(
-      getSslConfig("postgres://user:pass@db.example.com:5432/macro?sslmode=require"),
+      getSslConfig("postgres://user:***@db.example.com:5432/macro?sslmode=require"),
     ).toEqual({ rejectUnauthorized: true });
+  });
+
+  it("accepts Railway private-network certificates for sslmode=require", () => {
+    expect(
+      getSslConfig(
+        "postgresql://user:***@postgres.railway.internal:5432/macro?sslmode=require",
+      ),
+    ).toEqual({ rejectUnauthorized: false });
   });
 
   it("verifies the certificate for sslmode=verify-full", () => {
