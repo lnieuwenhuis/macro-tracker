@@ -1,4 +1,5 @@
-import { cp, mkdir, rm } from "node:fs/promises";
+import { cp, mkdir, realpath, rm } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { existsSync } from "node:fs";
@@ -28,6 +29,25 @@ async function copyDirectoryIfExists(source, destination) {
   await cp(source, destination, { recursive: true });
 }
 
+async function copyCompleteSwcHelpers(appDir, standaloneAppDir) {
+  const sourceNextPackage = createRequire(resolve(appDir, "package.json")).resolve(
+    "next/package.json",
+  );
+  const standaloneNextPackage = await realpath(
+    resolve(standaloneAppDir, "node_modules/next/package.json"),
+  );
+  const sourceHelpers = dirname(
+    createRequire(sourceNextPackage).resolve("@swc/helpers/package.json"),
+  );
+  const standaloneHelpers = dirname(
+    createRequire(standaloneNextPackage).resolve("@swc/helpers/package.json"),
+  );
+
+  await rm(standaloneHelpers, { recursive: true, force: true });
+  await mkdir(dirname(standaloneHelpers), { recursive: true });
+  await cp(sourceHelpers, standaloneHelpers, { recursive: true });
+}
+
 export async function prepareStandaloneApp(appDir = getAppDir()) {
   const standaloneAppDir = getStandaloneAppDir(appDir);
 
@@ -45,6 +65,9 @@ export async function prepareStandaloneApp(appDir = getAppDir()) {
     resolve(appDir, ".next/static"),
     resolve(standaloneAppDir, ".next/static"),
   );
+  // Next 16.3's standalone trace can contain only the CJS half of
+  // @swc/helpers even though the server imports its ESM entry points.
+  await copyCompleteSwcHelpers(appDir, standaloneAppDir);
 }
 
 function isMainModule() {

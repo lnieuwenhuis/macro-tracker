@@ -15,6 +15,7 @@ const REMOTE_SSL_MODES = new Set(["require", "verify-full"]);
 // lines above. Both now verify by default; use ALLOW_UNVERIFIED_DB_TLS to
 // deliberately opt back out (see getSslConfig below).
 const VERIFY_REMOTE_SSL_MODES = new Set(["require", "verify-full"]);
+const RAILWAY_PRIVATE_DATABASE_SUFFIX = ".railway.internal";
 const ALLOW_UNVERIFIED_DB_TLS_ENV = "ALLOW_UNVERIFIED_DB_TLS";
 const DEFAULT_POSTGRES_POOL_MAX = 3;
 const DEFAULT_POSTGRES_IDLE_TIMEOUT_MS = 10_000;
@@ -67,6 +68,13 @@ function allowsUnverifiedDbTls(env) {
   return env[ALLOW_UNVERIFIED_DB_TLS_ENV]?.trim().toLowerCase() === "true";
 }
 
+function usesRailwayPrivateCertificate(url, sslMode) {
+  return (
+    sslMode === "require" &&
+    url.hostname.toLowerCase().endsWith(RAILWAY_PRIVATE_DATABASE_SUFFIX)
+  );
+}
+
 export function getSslConfig(connectionString, env = process.env) {
   const url = new URL(connectionString);
 
@@ -79,6 +87,13 @@ export function getSslConfig(connectionString, env = process.env) {
   const sslMode = url.searchParams.get("sslmode")?.toLowerCase();
   const shouldVerifyRemoteCertificate =
     sslMode === undefined || VERIFY_REMOTE_SSL_MODES.has(sslMode);
+
+  // Railway's private Postgres network is encrypted with its platform-issued
+  // self-signed chain. `sslmode=require` promises encryption, while
+  // `verify-full` remains available when CA/hostname verification is required.
+  if (usesRailwayPrivateCertificate(url, sslMode)) {
+    return { rejectUnauthorized: false };
+  }
 
   if (!shouldVerifyRemoteCertificate) {
     return { rejectUnauthorized: false };
