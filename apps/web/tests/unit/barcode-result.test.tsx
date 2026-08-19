@@ -8,7 +8,7 @@
  * already handles the identical situation with `dismissable={!isAnalyzing}`;
  * this applies the same pattern here.
  */
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocked = vi.hoisted(() => ({
@@ -81,11 +81,16 @@ describe("BarcodeResult manual-entry form dismissal", () => {
     fireEvent.click(closeButton);
     expect(onClose).not.toHaveBeenCalled();
 
-    // Once the save resolves, dismissal works normally again.
-    resolveSave({ ok: false });
-    await waitFor(() => {
-      expect((screen.getByRole("button", { name: /^save product$/i }) as HTMLButtonElement).disabled).toBe(false);
+    // Flush the promise resolution, resulting state update, and passive effects
+    // together. Waiting only for the button's DOM state can observe the commit
+    // before `useEscapeDismiss` has reattached its document listener.
+    await act(async () => {
+      resolveSave({ ok: false });
     });
+    expect(
+      (screen.getByRole("button", { name: /^save product$/i }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
 
     fireEvent.keyDown(document, { key: "Escape" });
     expect(onClose).toHaveBeenCalledTimes(1);
