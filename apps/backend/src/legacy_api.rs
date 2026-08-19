@@ -1432,7 +1432,10 @@ fn build_food_photo_request_body<'a>(
 
 async fn read_upstream_error(response: reqwest::Response) -> String {
     let status = response.status();
-    match response.json::<Value>().await {
+    // CLEAN-C1 applies on the error path too: an unbounded `response.json()` here
+    // lets a hostile or broken gateway buffer an arbitrarily large error body,
+    // which is the exact exhaustion the success path is capped against.
+    match read_capped_json(response).await.ok_or(()) {
         Ok(payload) => {
             let message = payload
                 .get("error")
