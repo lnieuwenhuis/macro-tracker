@@ -74,6 +74,7 @@ export const API_V1_ENDPOINTS: ApiEndpoint[] = [
         scopes: ["write:daily", "read:daily"],
         conditionalRequiredScopes: [{ scopes: ["read:foods"], when: "non-null productId is supplied" }],
         requestBody: "mealEntryPatch",
+        hasConflictResponse: true,
       },
       { method: "delete", summary: "Delete a meal entry", scopes: ["write:daily"] },
     ],
@@ -133,7 +134,7 @@ export const API_V1_ENDPOINTS: ApiEndpoint[] = [
   },
   {
     path: "/templates/{id}/apply",
-    methods: [{ method: "post", summary: "Apply a template to a date", scopes: ["read:templates", "write:daily"], successStatus: 201, requestBody: "date" }],
+    methods: [{ method: "post", summary: "Apply a template to a date", scopes: ["read:templates", "write:daily"], successStatus: 201, requestBody: "date", hasConflictResponse: true }],
   },
   {
     path: "/templates/from-day",

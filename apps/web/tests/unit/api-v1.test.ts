@@ -865,6 +865,91 @@ describe("Macro Tracker API v1", () => {
     });
   });
 
+  // DATA-02: apps/backend/src/api.rs has no DB harness of its own, so this
+  // is the request-level coverage for the mass-assignment fix there
+  // (`apply_client_patch` / `merge_meal_entry_patch` in api.rs, which strip
+  // any `__`-prefixed key -- including the client-supplied
+  // `__recalculateProductMacros` -- off of a PATCH body before merging it
+  // onto the stored row). A client that could set that private flag to
+  // `false` while also patching `proteinG` could pin its own macro numbers
+  // onto someone else's product snapshot instead of having them recomputed.
+  it("ignores a client-supplied __recalculateProductMacros flag and recalculates a product-linked entry's macros from the product", async () => {
+    const foodResponse = await apiRequest("POST", "/foods", {
+      token: fullToken,
+      body: {
+        name: "Mass-assignment skyr",
+        brand: "Macro Dairy",
+        defaultServingQuantity: 100,
+        defaultServingUnit: "g",
+        proteinPer100: 10,
+        carbsPer100: 4,
+        fatPer100: 1,
+        caloriesPer100: 65,
+        servingWeightG: 100,
+      },
+    });
+    expect(foodResponse.status).toBe(201);
+    const food = (await foodResponse.json()).data;
+
+    const entryResponse = await apiRequest("POST", "/days/2026-03-19/entries", {
+      token: fullToken,
+      body: {
+        productId: food.id,
+        label: "",
+        quantity: 200,
+        unit: "g",
+        proteinG: 0,
+        carbsG: 0,
+        fatG: 0,
+        caloriesKcal: 1,
+      },
+    });
+    expect(entryResponse.status).toBe(201);
+    const entry = (await entryResponse.json()).data;
+    expect(entry).toMatchObject({
+      proteinG: 20,
+      carbsG: 8,
+      fatG: 2,
+      caloriesKcal: 130,
+    });
+
+    // Change the product's macros so a "recalculated from the product" result
+    // is distinguishable from both the original entry and the client-supplied
+    // `proteinG`.
+    const foodUpdateResponse = await apiRequest("PATCH", `/foods/${food.id}`, {
+      token: fullToken,
+      body: {
+        proteinPer100: 20,
+        carbsPer100: 10,
+        fatPer100: 3,
+        caloriesPer100: 150,
+      },
+    });
+    expect(foodUpdateResponse.status).toBe(200);
+
+    // If the private flag were honored from the client, this would pin
+    // proteinG to 1 and leave the rest of the stale (pre-update) macros
+    // untouched. Since the reserved key must be stripped, and `proteinG` is
+    // part of the patch, the entry is recalculated from the now-updated
+    // product instead.
+    const updatedEntryResponse = await apiRequest("PATCH", `/meal-entries/${entry.id}`, {
+      token: fullToken,
+      body: { proteinG: 1, __recalculateProductMacros: false },
+    });
+    expect(updatedEntryResponse.status).toBe(200);
+    await expect(updatedEntryResponse.json()).resolves.toMatchObject({
+      ok: true,
+      data: {
+        id: entry.id,
+        productId: food.id,
+        proteinG: 40,
+        carbsG: 20,
+        fatG: 6,
+        caloriesKcal: 300,
+      },
+    });
+  });
+
   it("omits internal food fields from search responses", async () => {
     await saveBarcodeFoodProduct(
       userId,

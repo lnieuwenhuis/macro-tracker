@@ -40,6 +40,48 @@ export function getRequestProtocol(request: Request) {
   return new URL(getRequestOrigin(request)).protocol;
 }
 
+/**
+ * CSRF gate for state-changing endpoints that are reachable without a session.
+ *
+ * `SameSite=Lax` governs *sending* a cookie, not *setting* one, so a route
+ * whose response carries `Set-Cookie` is cross-site reachable by default: a
+ * `enctype="text/plain"` form needs no preflight and no JavaScript.
+ *
+ * `Sec-Fetch-Site` is sent by every browser that can mount that attack, so it
+ * is the primary signal; `Origin` is the fallback for anything that omits it.
+ * When neither header is present we **fail closed** — an unauthenticated caller
+ * that cannot prove same-origin has no business minting a session.
+ *
+ * `same-site` is deliberately rejected alongside `cross-site`: a sibling
+ * subdomain is not part of this app's trust boundary.
+ */
+export function isSameOriginRequest(request: Request) {
+  const secFetchSite = request.headers.get("sec-fetch-site");
+
+  if (secFetchSite) {
+    return secFetchSite.trim().toLowerCase() === "same-origin";
+  }
+
+  const origin = request.headers.get("origin");
+
+  if (!origin) {
+    return false;
+  }
+
+  let callerOrigin: string;
+
+  try {
+    // A sandboxed iframe sends the literal `null`, which is not a valid URL.
+    callerOrigin = new URL(origin).origin;
+  } catch {
+    return false;
+  }
+
+  return (
+    callerOrigin === getRequestOrigin(request) || getTrustedOrigins().has(callerOrigin)
+  );
+}
+
 export function getRequestOrigin(request: Request) {
   const trustedOrigins = getTrustedOrigins();
   const appOrigin = new URL(getServerEnv().appUrl).origin;

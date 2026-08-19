@@ -13,6 +13,7 @@ type SummaryShellProps = {
   periodAverages: PeriodAverage[];
   goals: MacroGoals;
   statsData: StatsPageData;
+  todayStr?: string;
 };
 
 export function SummaryShell({
@@ -22,6 +23,7 @@ export function SummaryShell({
   periodAverages,
   goals,
   statsData,
+  todayStr,
 }: SummaryShellProps) {
   const nonEmptyAverages = periodAverages.filter((summary) => summary.loggedDays > 0);
   const rollingAverages = nonEmptyAverages.filter(
@@ -58,6 +60,7 @@ export function SummaryShell({
       selectedDate={selectedDate}
       title="Summary"
       activeTab="summary"
+      todayStr={todayStr}
       topBar={({ openSettings }) => (
         <div className="mb-4 flex items-center justify-between gap-3">
           <div className="flex min-h-12 items-center">

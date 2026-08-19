@@ -524,6 +524,11 @@ type LogRecipePortionInput = {
   status: MealEntryStatus;
   portionCount?: number;
   gramsConsumed?: number | null;
+  /**
+   * Idempotency key minted by the caller and reused across retries of the same
+   * intent, so a double-tap collapses into one row instead of two.
+   */
+  clientMutationId?: string;
 };
 
 export async function logRecipePortionAction(
@@ -550,6 +555,7 @@ export async function logRecipePortionAction(
     await createMealEntry(
       sessionUser.userId,
       buildRecipePortionMealEntryInput({
+        clientMutationId: input.clientMutationId,
         date: input.date,
         gramsConsumed,
         portionCount,

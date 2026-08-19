@@ -1,8 +1,11 @@
-use crate::{AppState, db, errors::AppError};
+use crate::{AppState, db, errors::AppError, shared::round1};
 use axum::{
     Json, Router,
     body::{Body, Bytes},
-    extract::{Path, State},
+    extract::{
+        Path, State,
+        rejection::{BytesRejection, PathRejection},
+    },
     http::{HeaderMap, Method, StatusCode, Uri, header},
     response::{IntoResponse, Response},
     routing::any,
@@ -45,8 +48,15 @@ impl ApiFailure {
     }
 }
 
+/// One `/api/v1` endpoint shape.
+///
+/// `path` is the OpenAPI path template published at `/openapi.json`; a segment
+/// wrapped in braces is a wildcard when routing. Routing and the published
+/// contract share this one literal so the scope-contract tests can derive their
+/// coverage from [`API_V1_ENDPOINTS`] instead of restating it by hand (API-01).
 #[derive(Clone, Copy)]
 struct Endpoint {
+    path: &'static str,
     methods: &'static [&'static str],
     scopes: &'static [(&'static str, &'static [&'static str])],
 }
@@ -57,29 +67,37 @@ pub fn router() -> Router<AppState> {
         .route("/{*path}", any(api_v1_request))
 }
 
+// API-06: `Bytes` and `Path` are taken as `Result`s rather than as plain
+// extractors. An extractor that rejects does so *before* the handler runs, so
+// an over-limit body came back as a bare `413` with a plain-text body and none
+// of the CORS headers below — a browser client saw a CORS failure instead of
+// the documented error envelope, and a direct client got a body it could not
+// parse. Handling the rejection inside the handler keeps every `/api/v1`
+// response one shape.
 async fn api_v1_root(
     State(state): State<AppState>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    handle_api_v1(state, method, uri, headers, Vec::new(), body).await
+    handle_api_v1(state, method, uri, headers, Ok(Vec::new()), body).await
 }
 
 async fn api_v1_request(
     State(state): State<AppState>,
-    Path(path): Path<String>,
+    path: Result<Path<String>, PathRejection>,
     method: Method,
     uri: Uri,
     headers: HeaderMap,
-    body: Bytes,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let path = path
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .map(str::to_string)
-        .collect();
+    let path = path.map(|Path(path)| {
+        path.split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    });
     handle_api_v1(state, method, uri, headers, path, body).await
 }
 
@@ -88,16 +106,30 @@ async fn handle_api_v1(
     method: Method,
     uri: Uri,
     headers: HeaderMap,
-    path: Vec<String>,
-    body: Bytes,
+    path: Result<Vec<String>, PathRejection>,
+    body: Result<Bytes, BytesRejection>,
 ) -> Response {
     if method == Method::OPTIONS {
         return empty_response(StatusCode::NO_CONTENT, None);
     }
 
+    // A path we could not even decode cannot name an endpoint.
+    let Ok(path) = path else {
+        return failure_response(ApiFailure::new(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "API endpoint not found.",
+        ));
+    };
+
     if method == Method::GET && path.as_slice() == ["openapi.json"] {
         return static_json_response(API_V1_OPENAPI_JSON);
     }
+
+    let body = match body {
+        Ok(body) => body,
+        Err(rejection) => return failure_response(body_rejection_failure(&rejection)),
+    };
 
     // The deadline is enforced here rather than by a transport-level timeout
     // layer: a layer would emit a bare 504 with no body and none of the CORS
@@ -128,11 +160,17 @@ async fn handle_api_v1(
             .with_allow(allow));
         }
 
-        let scopes = endpoint
-            .scopes
-            .iter()
-            .find_map(|(candidate, scopes)| (*candidate == method_name).then_some(*scopes))
-            .unwrap_or(&[]);
+        // API-01: an endpoint that allows a method but declares no scopes for it
+        // is a server-side contract bug. Refusing is the only safe reading —
+        // the previous empty-slice default let any valid token through.
+        let Some(scopes) = required_scopes(&endpoint, method_name) else {
+            tracing::error!(
+                endpoint = endpoint.path,
+                method = method_name,
+                "endpoint allows a method it declares no scopes for"
+            );
+            return Err(internal_error());
+        };
         let auth = authenticate_request(&state, &headers, scopes).await?;
         dispatch_api_request(&state, method_name, &uri, &path, body, auth).await
     };
@@ -148,18 +186,34 @@ async fn handle_api_v1(
 
     match result {
         Ok((status, data)) => json_response(status, json!({ "ok": true, "data": data }), None),
-        Err(failure) => json_response(
-            failure.status,
-            json!({
-                "ok": false,
-                "error": {
-                    "code": failure.code,
-                    "message": failure.message
-                }
-            }),
-            failure.allow.as_deref(),
-        ),
+        Err(failure) => failure_response(failure),
     }
+}
+
+fn failure_response(failure: ApiFailure) -> Response {
+    json_response(
+        failure.status,
+        json!({
+            "ok": false,
+            "error": {
+                "code": failure.code,
+                "message": failure.message
+            }
+        }),
+        failure.allow.as_deref(),
+    )
+}
+
+/// Translates an extractor rejection into the documented envelope (API-06).
+fn body_rejection_failure(rejection: &BytesRejection) -> ApiFailure {
+    if rejection.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        return ApiFailure::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
+            "Request body is too large.",
+        );
+    }
+    bad_request("Request body could not be read.")
 }
 
 #[derive(Clone)]
@@ -334,27 +388,7 @@ async fn dispatch_api_request(
                     "Meal entry not found.",
                 ));
             }
-            let preserve_product_snapshot =
-                existing.get("productId").and_then(Value::as_str).is_some()
-                    && !patch.contains_key("productId")
-                    && ![
-                        "quantity",
-                        "unit",
-                        "servingMultiplier",
-                        "proteinG",
-                        "carbsG",
-                        "fatG",
-                        "caloriesKcal",
-                    ]
-                    .iter()
-                    .any(|key| patch.contains_key(*key));
-            let mut merged = require_object(existing)?;
-            for (key, value) in patch {
-                merged.insert(key, value);
-            }
-            if preserve_product_snapshot {
-                merged.insert("__recalculateProductMacros".to_string(), Value::Bool(false));
-            }
+            let merged = merge_meal_entry_patch(require_object(existing)?, patch);
             Ok((
                 StatusCode::OK,
                 rpc(
@@ -490,6 +524,7 @@ async fn dispatch_api_request(
             Ok((StatusCode::OK, map_food_product(product)))
         }
         (Some("barcodes"), Some(barcode), None, "GET") => {
+            require_barcode(barcode)?;
             let product = rpc(
                 state,
                 "lookupBarcodeFoodProduct",
@@ -708,10 +743,7 @@ async fn dispatch_api_request(
                     "Weight entry not found.",
                 ));
             }
-            let mut merged = require_object(existing)?;
-            for (key, value) in patch {
-                merged.insert(key, value);
-            }
+            let merged = apply_client_patch(require_object(existing)?, patch);
             let date = require_string_field(&merged, "date", "Date must use YYYY-MM-DD.")?;
             require_date(&date)?;
             // The unique-violation is already translated into `weight_conflict()`
@@ -828,137 +860,209 @@ async fn rpc(state: &AppState, op: &str, args: Value) -> ApiResult<Value> {
         .map_err(api_failure_from_app_error)
 }
 
+/// Every endpoint the public API serves, matched **in order**: a shape with a
+/// literal segment must precede the wildcard shape that would otherwise swallow
+/// it (`/foods/search` before `/foods/{id}`).
+const API_V1_ENDPOINTS: &[Endpoint] = &[
+    Endpoint {
+        path: "/me",
+        methods: &["GET"],
+        scopes: &[("GET", &["read:account", "read:goals"])],
+    },
+    Endpoint {
+        path: "/goals",
+        methods: &["GET", "PATCH"],
+        scopes: &[
+            ("GET", &["read:goals"]),
+            ("PATCH", &["write:goals", "read:goals"]),
+        ],
+    },
+    Endpoint {
+        path: "/days/{date}",
+        methods: &["GET"],
+        scopes: &[("GET", &["read:daily"])],
+    },
+    Endpoint {
+        path: "/days/{date}/entries",
+        methods: &["POST"],
+        scopes: &[("POST", &["write:daily"])],
+    },
+    Endpoint {
+        path: "/meal-entries/{id}",
+        methods: &["PATCH", "DELETE"],
+        scopes: &[
+            ("PATCH", &["write:daily", "read:daily"]),
+            ("DELETE", &["write:daily"]),
+        ],
+    },
+    Endpoint {
+        path: "/meal-entries/{id}/status",
+        methods: &["PATCH"],
+        scopes: &[("PATCH", &["write:daily", "read:daily"])],
+    },
+    Endpoint {
+        path: "/meal-groups",
+        methods: &["GET", "POST"],
+        scopes: &[("GET", &["read:daily"]), ("POST", &["write:daily"])],
+    },
+    Endpoint {
+        path: "/meal-groups/reorder",
+        methods: &["POST"],
+        scopes: &[("POST", &["write:daily"])],
+    },
+    Endpoint {
+        path: "/meal-groups/{id}",
+        methods: &["PATCH", "DELETE"],
+        scopes: &[("PATCH", &["write:daily"]), ("DELETE", &["write:daily"])],
+    },
+    Endpoint {
+        path: "/foods/search",
+        methods: &["GET"],
+        scopes: &[("GET", &["read:foods"])],
+    },
+    Endpoint {
+        path: "/foods",
+        methods: &["POST"],
+        scopes: &[("POST", &["write:foods"])],
+    },
+    Endpoint {
+        path: "/foods/{id}",
+        methods: &["PATCH"],
+        scopes: &[("PATCH", &["write:foods", "read:foods"])],
+    },
+    Endpoint {
+        path: "/barcodes/{barcode}",
+        methods: &["GET"],
+        scopes: &[("GET", &["read:foods"])],
+    },
+    Endpoint {
+        path: "/templates/from-day",
+        methods: &["POST"],
+        scopes: &[("POST", &["read:daily", "write:templates"])],
+    },
+    Endpoint {
+        path: "/templates",
+        methods: &["GET", "POST"],
+        scopes: &[("GET", &["read:templates"]), ("POST", &["write:templates"])],
+    },
+    Endpoint {
+        path: "/templates/{id}/apply",
+        methods: &["POST"],
+        scopes: &[("POST", &["read:templates", "write:daily"])],
+    },
+    Endpoint {
+        path: "/templates/{id}",
+        methods: &["GET", "PATCH", "DELETE"],
+        scopes: &[
+            ("GET", &["read:templates"]),
+            ("PATCH", &["write:templates"]),
+            ("DELETE", &["write:templates"]),
+        ],
+    },
+    Endpoint {
+        path: "/recipes",
+        methods: &["GET", "POST"],
+        scopes: &[("GET", &["read:recipes"]), ("POST", &["write:recipes"])],
+    },
+    Endpoint {
+        path: "/recipes/{id}/log",
+        methods: &["POST"],
+        scopes: &[("POST", &["read:recipes", "write:daily"])],
+    },
+    Endpoint {
+        path: "/recipes/{id}",
+        methods: &["GET", "PATCH", "DELETE"],
+        scopes: &[
+            ("GET", &["read:recipes"]),
+            ("PATCH", &["write:recipes"]),
+            ("DELETE", &["write:recipes"]),
+        ],
+    },
+    Endpoint {
+        path: "/weight",
+        methods: &["GET"],
+        scopes: &[("GET", &["read:weight"])],
+    },
+    Endpoint {
+        path: "/weight/entries",
+        methods: &["GET", "POST"],
+        scopes: &[("GET", &["read:weight"]), ("POST", &["write:weight"])],
+    },
+    Endpoint {
+        path: "/weight/entries/{id}",
+        methods: &["PATCH", "DELETE"],
+        scopes: &[
+            ("PATCH", &["write:weight", "read:weight"]),
+            ("DELETE", &["write:weight"]),
+        ],
+    },
+    Endpoint {
+        path: "/weight/goal",
+        methods: &["GET", "PATCH"],
+        scopes: &[("GET", &["read:weight"]), ("PATCH", &["write:weight"])],
+    },
+    Endpoint {
+        path: "/stats",
+        methods: &["GET"],
+        scopes: &[("GET", &["read:stats", "read:weight", "read:goals"])],
+    },
+    Endpoint {
+        path: "/summary",
+        methods: &["GET"],
+        scopes: &[(
+            "GET",
+            &["read:stats", "read:daily", "read:goals", "read:weight"],
+        )],
+    },
+    Endpoint {
+        path: "/leaderboard",
+        methods: &["GET"],
+        scopes: &[("GET", &["read:stats"])],
+    },
+    // Answered before authentication in `handle_api_v1`. The empty scope list
+    // is the contract published for it, not a routing default.
+    Endpoint {
+        path: "/openapi.json",
+        methods: &["GET"],
+        scopes: &[("GET", &[])],
+    },
+];
+
 fn endpoint_for(path: &[String]) -> Option<Endpoint> {
-    match (
-        path.first().map(String::as_str),
-        path.get(1).map(String::as_str),
-        path.get(2).map(String::as_str),
-        path.len(),
-    ) {
-        (Some("me"), None, None, 1) => Some(endpoint(
-            &["GET"],
-            &[("GET", &["read:account", "read:goals"])],
-        )),
-        (Some("goals"), None, None, 1) => Some(endpoint(
-            &["GET", "PATCH"],
-            &[
-                ("GET", &["read:goals"]),
-                ("PATCH", &["write:goals", "read:goals"]),
-            ],
-        )),
-        (Some("days"), Some(_), None, 2) => Some(endpoint(&["GET"], &[("GET", &["read:daily"])])),
-        (Some("days"), Some(_), Some("entries"), 3) => {
-            Some(endpoint(&["POST"], &[("POST", &["write:daily"])]))
-        }
-        (Some("meal-entries"), Some(_), None, 2) => Some(endpoint(
-            &["PATCH", "DELETE"],
-            &[
-                ("PATCH", &["write:daily", "read:daily"]),
-                ("DELETE", &["write:daily"]),
-            ],
-        )),
-        (Some("meal-entries"), Some(_), Some("status"), 3) => Some(endpoint(
-            &["PATCH"],
-            &[("PATCH", &["write:daily", "read:daily"])],
-        )),
-        (Some("meal-groups"), None, None, 1) => Some(endpoint(
-            &["GET", "POST"],
-            &[("GET", &["read:daily"]), ("POST", &["write:daily"])],
-        )),
-        (Some("meal-groups"), Some("reorder"), None, 2) => {
-            Some(endpoint(&["POST"], &[("POST", &["write:daily"])]))
-        }
-        (Some("meal-groups"), Some(_), None, 2) => Some(endpoint(
-            &["PATCH", "DELETE"],
-            &[("PATCH", &["write:daily"]), ("DELETE", &["write:daily"])],
-        )),
-        (Some("foods"), Some("search"), None, 2) => {
-            Some(endpoint(&["GET"], &[("GET", &["read:foods"])]))
-        }
-        (Some("foods"), None, None, 1) => Some(endpoint(&["POST"], &[("POST", &["write:foods"])])),
-        (Some("foods"), Some(_), None, 2) => Some(endpoint(
-            &["PATCH"],
-            &[("PATCH", &["write:foods", "read:foods"])],
-        )),
-        (Some("barcodes"), Some(_), None, 2) => {
-            Some(endpoint(&["GET"], &[("GET", &["read:foods"])]))
-        }
-        (Some("templates"), Some("from-day"), None, 2) => Some(endpoint(
-            &["POST"],
-            &[("POST", &["read:daily", "write:templates"])],
-        )),
-        (Some("templates"), None, None, 1) => Some(endpoint(
-            &["GET", "POST"],
-            &[("GET", &["read:templates"]), ("POST", &["write:templates"])],
-        )),
-        (Some("templates"), Some(_), Some("apply"), 3) => Some(endpoint(
-            &["POST"],
-            &[("POST", &["read:templates", "write:daily"])],
-        )),
-        (Some("templates"), Some(_), None, 2) => Some(endpoint(
-            &["GET", "PATCH", "DELETE"],
-            &[
-                ("GET", &["read:templates"]),
-                ("PATCH", &["write:templates"]),
-                ("DELETE", &["write:templates"]),
-            ],
-        )),
-        (Some("recipes"), None, None, 1) => Some(endpoint(
-            &["GET", "POST"],
-            &[("GET", &["read:recipes"]), ("POST", &["write:recipes"])],
-        )),
-        (Some("recipes"), Some(_), Some("log"), 3) => Some(endpoint(
-            &["POST"],
-            &[("POST", &["read:recipes", "write:daily"])],
-        )),
-        (Some("recipes"), Some(_), None, 2) => Some(endpoint(
-            &["GET", "PATCH", "DELETE"],
-            &[
-                ("GET", &["read:recipes"]),
-                ("PATCH", &["write:recipes"]),
-                ("DELETE", &["write:recipes"]),
-            ],
-        )),
-        (Some("weight"), None, None, 1) => Some(endpoint(&["GET"], &[("GET", &["read:weight"])])),
-        (Some("weight"), Some("entries"), None, 2) => Some(endpoint(
-            &["GET", "POST"],
-            &[("GET", &["read:weight"]), ("POST", &["write:weight"])],
-        )),
-        (Some("weight"), Some("entries"), Some(_), 3) => Some(endpoint(
-            &["PATCH", "DELETE"],
-            &[
-                ("PATCH", &["write:weight", "read:weight"]),
-                ("DELETE", &["write:weight"]),
-            ],
-        )),
-        (Some("weight"), Some("goal"), None, 2) => Some(endpoint(
-            &["GET", "PATCH"],
-            &[("GET", &["read:weight"]), ("PATCH", &["write:weight"])],
-        )),
-        (Some("stats"), None, None, 1) => Some(endpoint(
-            &["GET"],
-            &[("GET", &["read:stats", "read:weight", "read:goals"])],
-        )),
-        (Some("summary"), None, None, 1) => Some(endpoint(
-            &["GET"],
-            &[(
-                "GET",
-                &["read:stats", "read:daily", "read:goals", "read:weight"],
-            )],
-        )),
-        (Some("leaderboard"), None, None, 1) => {
-            Some(endpoint(&["GET"], &[("GET", &["read:stats"])]))
-        }
-        (Some("openapi.json"), None, None, 1) => Some(endpoint(&["GET"], &[("GET", &[])])),
-        _ => None,
-    }
+    API_V1_ENDPOINTS
+        .iter()
+        .find(|endpoint| path_template_matches(endpoint.path, path))
+        .copied()
 }
 
-fn endpoint(
-    methods: &'static [&'static str],
-    scopes: &'static [(&'static str, &'static [&'static str])],
-) -> Endpoint {
-    Endpoint { methods, scopes }
+/// A template segment in braces matches any single path segment; every other
+/// segment must match exactly, and the two lengths must agree.
+fn path_template_matches(template: &str, path: &[String]) -> bool {
+    let mut matched = 0usize;
+    for segment in template.split('/').filter(|segment| !segment.is_empty()) {
+        let Some(actual) = path.get(matched) else {
+            return false;
+        };
+        if !segment.starts_with('{') && segment != actual {
+            return false;
+        }
+        matched += 1;
+    }
+    matched == path.len()
+}
+
+/// Required scopes for `method` on `endpoint`, or `None` when the endpoint
+/// declares none for it.
+///
+/// API-01: this lookup used to end in `.unwrap_or(&[])`, so a method listed in
+/// `Endpoint::methods` but missing from `Endpoint::scopes` silently required no
+/// scope at all and any valid token could call it. The caller now refuses such
+/// a request, making the default deny.
+fn required_scopes(endpoint: &Endpoint, method: &str) -> Option<&'static [&'static str]> {
+    endpoint
+        .scopes
+        .iter()
+        .find_map(|(candidate, scopes)| (*candidate == method).then_some(*scopes))
 }
 
 fn bearer_token(headers: &HeaderMap) -> ApiResult<String> {
@@ -1022,6 +1126,22 @@ fn require_date(value: &str) -> ApiResult<()> {
     crate::db::ensure_date_string(value).map_err(|_| bad_request("Date must use YYYY-MM-DD."))
 }
 
+/// API-11: `/api/v1/barcodes/{barcode}` accepted anything while its
+/// session-authenticated twin in `legacy_api.rs` has always required 4–20
+/// characters. Not exploitable — the lookup is a parameterised equality — but
+/// two entry points to one capability should not disagree about what a barcode
+/// is, so both now read the same bounds.
+fn require_barcode(value: &str) -> ApiResult<()> {
+    use crate::legacy_api::{MAX_BARCODE_LENGTH, MIN_BARCODE_LENGTH};
+
+    if value.len() < MIN_BARCODE_LENGTH || value.len() > MAX_BARCODE_LENGTH {
+        return Err(bad_request(format!(
+            "Barcode must be {MIN_BARCODE_LENGTH} to {MAX_BARCODE_LENGTH} characters."
+        )));
+    }
+    Ok(())
+}
+
 fn require_uuid(value: &str) -> ApiResult<String> {
     Uuid::parse_str(value)
         .map(|uuid| uuid.to_string())
@@ -1030,6 +1150,64 @@ fn require_uuid(value: &str) -> ApiResult<String> {
 
 fn has_non_null(record: &Map<String, Value>, key: &str) -> bool {
     record.get(key).is_some_and(|value| !value.is_null())
+}
+
+/// Prefix reserved for control flags that this module adds to an RPC `input`
+/// map. `db.rs` reads them back out of that same map, so they are part of the
+/// internal calling convention and must never be settable by a client.
+const PRIVATE_INPUT_KEY_PREFIX: &str = "__";
+
+/// Copies a client patch onto a stored record, dropping every reserved key.
+///
+/// DATA-02: `PATCH` handlers merge the raw request body onto the row they just
+/// read and hand the result to the RPC layer as `input`. Copying every key
+/// meant a caller could inject `__recalculateProductMacros`, the private flag
+/// that decides whether a product-linked entry's macros are recomputed from the
+/// product row or taken verbatim from the request — i.e. the client could
+/// choose to have its own macro numbers stored against someone else's product
+/// snapshot. Reserved keys are stripped here; only the callers below may add
+/// one back.
+fn apply_client_patch(
+    mut record: Map<String, Value>,
+    patch: Map<String, Value>,
+) -> Map<String, Value> {
+    for (key, value) in patch {
+        if key.starts_with(PRIVATE_INPUT_KEY_PREFIX) {
+            continue;
+        }
+        record.insert(key, value);
+    }
+    record
+}
+
+/// Merges a meal-entry patch and re-derives the product-snapshot flag.
+///
+/// The flag is set only when the entry is product-linked and the patch touches
+/// none of the fields the product snapshot is derived from — patching any of
+/// them means the caller wants the entry recalculated. It is computed from the
+/// stored row and the patch's *key set*, never from a client-supplied value.
+fn merge_meal_entry_patch(
+    existing: Map<String, Value>,
+    patch: Map<String, Value>,
+) -> Map<String, Value> {
+    let preserve_product_snapshot = existing.get("productId").and_then(Value::as_str).is_some()
+        && !patch.contains_key("productId")
+        && ![
+            "quantity",
+            "unit",
+            "servingMultiplier",
+            "proteinG",
+            "carbsG",
+            "fatG",
+            "caloriesKcal",
+        ]
+        .iter()
+        .any(|key| patch.contains_key(*key));
+    let mut merged = apply_client_patch(existing, patch);
+    if preserve_product_snapshot {
+        merged.insert("__recalculateProductMacros".to_string(), Value::Bool(false));
+    }
+    merged
 }
 
 fn merge_goals(current: Value, patch: Value) -> ApiResult<Value> {
@@ -1360,13 +1538,29 @@ fn api_failure_from_app_error(error: AppError) -> ApiFailure {
         AppError::Unauthorized(message) => {
             ApiFailure::new(StatusCode::UNAUTHORIZED, "invalid_token", message)
         }
+        // API-03: only the weight-date constraint used to be recognised, so
+        // every other unique violation — reusing a `clientMutationId`, say —
+        // surfaced as a 500 `internal_error`, telling the caller the server
+        // broke when in fact their request collided with an existing row. The
+        // constraint name is logged, never returned: it names internal schema.
         AppError::Sqlx(ref sqlx_error)
             if sqlx_error
                 .as_database_error()
-                .and_then(|db| db.constraint())
-                .is_some_and(|constraint| constraint == WEIGHT_ENTRY_DATE_CONSTRAINT) =>
+                .is_some_and(|db| db.is_unique_violation()) =>
         {
-            weight_conflict()
+            let constraint = sqlx_error
+                .as_database_error()
+                .and_then(|db| db.constraint())
+                .unwrap_or_default();
+            if constraint == WEIGHT_ENTRY_DATE_CONSTRAINT {
+                return weight_conflict();
+            }
+            tracing::warn!(constraint, "API v1 unique violation");
+            ApiFailure::new(
+                StatusCode::CONFLICT,
+                "conflict",
+                "That value is already used by another record.",
+            )
         }
         AppError::Sqlx(_) | AppError::Json(_) | AppError::Anyhow(_) => {
             tracing::error!(error = ?error, "API v1 failure");
@@ -1414,7 +1608,7 @@ fn empty_response(status: StatusCode, allow: Option<&str>) -> Response {
     (status, headers).into_response()
 }
 
-fn cors_headers() -> HeaderMap {
+pub(crate) fn cors_headers() -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_ORIGIN,
@@ -1435,10 +1629,6 @@ fn cors_headers() -> HeaderMap {
     headers
 }
 
-fn round1(value: f64) -> f64 {
-    (value * 10.0).round() / 10.0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1449,29 +1639,7 @@ mod tests {
 
     fn test_state() -> AppState {
         AppState {
-            config: crate::config::Config {
-                allow_insecure_internal_auth: false,
-                enable_test_routes: false,
-                app_url: "http://localhost:3000".to_string(),
-                backend_internal_secret: Some("internal-secret-with-at-least-32-chars".to_string()),
-                database_url: "postgres://postgres:***@127.0.0.1:5432/macro_tracker".to_string(),
-                port: 4000,
-                postgres_pool_max: 1,
-                session_secret: "session-secret-with-at-least-32-chars".to_string(),
-                shoo_base_url: "https://shoo.dev".to_string(),
-                trusted_origins: vec!["http://localhost:3000".to_string()],
-                admin_owner_emails: vec![],
-                openrouter_api_key: None,
-                openrouter_model: None,
-                openrouter_fallback_models: None,
-                openrouter_model_timeout_ms: None,
-                ai_gateway_url: None,
-                ai_gateway_api_key: None,
-                ai_gateway_models: None,
-                open_food_facts_base_url: "https://world.openfoodfacts.org".to_string(),
-                albert_heijn_base_url: "https://api.ah.nl".to_string(),
-                jumbo_base_url: "https://mobileapi.jumbo.com".to_string(),
-            },
+            config: crate::config::test_config(),
             db: PgPoolOptions::new()
                 .connect_lazy("postgres://postgres:***@127.0.0.1:5432/macro_tracker")
                 .expect("test pool should be created lazily"),
@@ -1573,6 +1741,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_oversized_body_keeps_the_error_envelope_and_the_cors_headers() {
+        // API-06: the `Bytes` extractor rejects before the handler, so this
+        // used to be a bare 413 with a plain-text body and no
+        // `Access-Control-Allow-Origin` — a browser saw a CORS failure rather
+        // than the documented error shape.
+        let response = router()
+            .with_state(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri("/goals")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(vec![b'x'; 3 * 1024 * 1024]))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            Some(&CORS_ALLOW_ORIGIN.parse().unwrap())
+        );
+
+        let payload = read_json_body(response).await;
+        assert_eq!(payload["ok"], json!(false));
+        assert_eq!(payload["error"]["code"], json!("payload_too_large"));
+    }
+
+    #[tokio::test]
+    async fn the_public_spec_is_still_served_when_the_body_is_rejected() {
+        // A rejected body must not stop the unauthenticated document from
+        // being readable.
+        let response = router()
+            .with_state(test_state())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/openapi.json")
+                    .body(Body::from(vec![b'x'; 3 * 1024 * 1024]))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn preflight_succeeds_without_a_token() {
         let response = call("OPTIONS", "/goals", None).await;
 
@@ -1671,6 +1888,94 @@ mod tests {
         }
     }
 
+    fn object(value: Value) -> Map<String, Value> {
+        value
+            .as_object()
+            .cloned()
+            .expect("value should be an object")
+    }
+
+    #[test]
+    fn meal_entry_patches_cannot_set_the_private_recalculation_flag() {
+        // DATA-02: the exploit body. `proteinG` is present, so the handler's own
+        // snapshot rule says "recalculate", but the caller tries to override it
+        // with `false` so its raw macro numbers are stored verbatim against the
+        // linked product.
+        let merged = merge_meal_entry_patch(
+            object(json!({
+                "id": "11111111-1111-4111-8111-111111111111",
+                "productId": "22222222-2222-4222-8222-222222222222",
+                "label": "Oats",
+                "quantity": 1.0,
+                "unit": "serving",
+                "proteinG": 10.0,
+                "carbsG": 20.0,
+                "fatG": 5.0,
+                "caloriesKcal": 165
+            })),
+            object(json!({
+                "proteinG": 1,
+                "caloriesKcal": -2_000_000_000i64,
+                "__recalculateProductMacros": false
+            })),
+        );
+
+        assert!(
+            !merged.contains_key("__recalculateProductMacros"),
+            "a client must not be able to control the recalculation flag: {merged:?}"
+        );
+        assert_eq!(merged["proteinG"], json!(1));
+    }
+
+    #[test]
+    fn meal_entry_patches_drop_every_reserved_key() {
+        let merged = merge_meal_entry_patch(
+            object(json!({ "label": "Oats" })),
+            object(json!({ "__anythingElse": "nope", "label": "Toast" })),
+        );
+
+        assert!(!merged.contains_key("__anythingElse"));
+        assert_eq!(merged["label"], json!("Toast"));
+    }
+
+    #[test]
+    fn product_linked_entries_keep_their_snapshot_when_no_macro_field_is_patched() {
+        // Regression guard for the behaviour the flag exists for: renaming a
+        // product-linked entry must not recompute its macros.
+        let merged = merge_meal_entry_patch(
+            object(json!({
+                "productId": "22222222-2222-4222-8222-222222222222",
+                "label": "Oats",
+                "proteinG": 10.0
+            })),
+            object(json!({ "label": "Breakfast oats" })),
+        );
+
+        assert_eq!(merged["__recalculateProductMacros"], json!(false));
+        assert_eq!(merged["label"], json!("Breakfast oats"));
+    }
+
+    #[test]
+    fn entries_without_a_product_never_carry_the_recalculation_flag() {
+        let merged = merge_meal_entry_patch(
+            object(json!({ "label": "Oats", "proteinG": 10.0 })),
+            object(json!({ "label": "Toast" })),
+        );
+
+        assert!(!merged.contains_key("__recalculateProductMacros"));
+    }
+
+    #[test]
+    fn weight_entry_patches_drop_reserved_keys_too() {
+        let merged = apply_client_patch(
+            object(json!({ "date": "2026-01-15", "weightKg": 80.0 })),
+            object(json!({ "weightKg": 79.0, "__recalculateProductMacros": false })),
+        );
+
+        assert!(!merged.contains_key("__recalculateProductMacros"));
+        assert_eq!(merged["weightKg"], json!(79.0));
+    }
+
     #[test]
     fn read_json_rejects_a_malformed_body() {
         assert!(read_json(&Bytes::from_static(b"{ not json")).is_err());
@@ -1723,6 +2028,110 @@ mod tests {
         }
     }
 
+    /// Minimal `sqlx::error::DatabaseError` so the unique-violation mapping can
+    /// be tested without provoking a real constraint.
+    #[derive(Debug)]
+    struct FakeDatabaseError {
+        code: &'static str,
+        constraint: Option<&'static str>,
+    }
+
+    impl std::fmt::Display for FakeDatabaseError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "duplicate key value violates unique constraint")
+        }
+    }
+
+    impl std::error::Error for FakeDatabaseError {}
+
+    impl sqlx::error::DatabaseError for FakeDatabaseError {
+        fn message(&self) -> &str {
+            "duplicate key value violates unique constraint"
+        }
+
+        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+            Some(std::borrow::Cow::Borrowed(self.code))
+        }
+
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+
+        fn constraint(&self) -> Option<&str> {
+            self.constraint
+        }
+
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            if self.code == "23505" {
+                sqlx::error::ErrorKind::UniqueViolation
+            } else {
+                sqlx::error::ErrorKind::Other
+            }
+        }
+    }
+
+    fn database_error(code: &'static str, constraint: Option<&'static str>) -> AppError {
+        AppError::Sqlx(sqlx::Error::Database(Box::new(FakeDatabaseError {
+            code,
+            constraint,
+        })))
+    }
+
+    #[test]
+    fn any_unique_violation_is_a_conflict_not_an_internal_error() {
+        // API-03: only `weight_entries_user_date_key` was recognised, so
+        // reusing a `clientMutationId` reported a 500 for what is a collision
+        // with an existing row.
+        let failure = api_failure_from_app_error(database_error(
+            "23505",
+            Some("meal_entries_user_client_mutation_id_key"),
+        ));
+
+        assert_eq!(failure.status, StatusCode::CONFLICT);
+        assert_eq!(failure.code, "conflict");
+        assert!(
+            !failure.message.contains("meal_entries"),
+            "the constraint name must not be echoed: {}",
+            failure.message
+        );
+    }
+
+    #[test]
+    fn the_weight_date_conflict_keeps_its_specific_code() {
+        let failure =
+            api_failure_from_app_error(database_error("23505", Some(WEIGHT_ENTRY_DATE_CONSTRAINT)));
+
+        assert_eq!(failure.status, StatusCode::CONFLICT);
+        assert_eq!(failure.code, "weight_entry_date_conflict");
+    }
+
+    #[test]
+    fn a_non_unique_database_fault_is_still_an_internal_error() {
+        let failure = api_failure_from_app_error(database_error("08006", None));
+
+        assert_eq!(failure.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(failure.code, "internal_error");
+    }
+
+    #[test]
+    fn barcodes_are_validated_the_same_way_on_both_entry_points() {
+        // API-11.
+        assert!(require_barcode("8712345678901").is_ok());
+        assert!(require_barcode("1234").is_ok());
+        assert!(require_barcode("123").is_err());
+        assert!(require_barcode("").is_err());
+        assert!(require_barcode(&"9".repeat(21)).is_err());
+        assert!(require_barcode(&"9".repeat(20)).is_ok());
+    }
+
     #[test]
     fn unauthorized_is_reported_as_invalid_token_on_the_public_api() {
         let failure = api_failure_from_app_error(AppError::Unauthorized("nope".into()));
@@ -1743,52 +2152,314 @@ mod tests {
 
     // --- Scope contract -----------------------------------------------------
 
+    /// Turns an OpenAPI path template into a concrete request path, so the
+    /// tests below exercise the same routing a client would hit.
+    fn sample_path(template: &str) -> Vec<String> {
+        template
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(|segment| match segment {
+                "{date}" => "2026-01-15".to_string(),
+                "{barcode}" => "8712345678901".to_string(),
+                segment if segment.starts_with('{') => {
+                    "11111111-1111-4111-8111-111111111111".to_string()
+                }
+                segment => segment.to_string(),
+            })
+            .collect()
+    }
+
     #[test]
     fn every_shipped_endpoint_declares_scopes_for_each_method() {
-        let paths: &[&[&str]] = &[
-            &["me"],
-            &["goals"],
-            &["days", "2026-01-15"],
-            &["days", "2026-01-15", "entries"],
-            &["meal-entries", "id"],
-            &["meal-entries", "id", "status"],
-            &["meal-groups"],
-            &["meal-groups", "reorder"],
-            &["meal-groups", "id"],
-            &["foods"],
-            &["foods", "search"],
-            &["foods", "id"],
-            &["barcodes", "8712345678901"],
-            &["templates"],
-            &["templates", "from-day"],
-            &["templates", "id"],
-            &["templates", "id", "apply"],
-            &["recipes"],
-            &["recipes", "id"],
-            &["recipes", "id", "log"],
-            &["weight"],
-            &["weight", "entries"],
-            &["weight", "entries", "id"],
-        ];
-
-        for path in paths {
-            let owned = path
-                .iter()
-                .map(|part| (*part).to_string())
-                .collect::<Vec<_>>();
-            let endpoint = endpoint_for(&owned)
-                .unwrap_or_else(|| panic!("no endpoint registered for {path:?}"));
-
+        // Derived from the routing table rather than a hand-kept list, so a new
+        // endpoint cannot be added without this test covering it (API-01).
+        for endpoint in API_V1_ENDPOINTS {
             for method in endpoint.methods {
                 assert!(
-                    endpoint
-                        .scopes
-                        .iter()
-                        .any(|(candidate, _)| candidate == method),
-                    "{path:?} {method} declares no scopes"
+                    required_scopes(endpoint, method).is_some(),
+                    "{} {method} declares no scopes",
+                    endpoint.path
                 );
             }
         }
+    }
+
+    #[test]
+    fn an_endpoint_with_no_scope_tuple_for_a_method_is_denied() {
+        // The structural hole API-01 describes: a method allowed by `methods`
+        // but absent from `scopes`. The lookup must not fall back to "no scopes
+        // required".
+        let endpoint = Endpoint {
+            path: "/example",
+            methods: &["GET", "DELETE"],
+            scopes: &[("GET", &["read:daily"])],
+        };
+
+        assert_eq!(required_scopes(&endpoint, "GET"), Some(&["read:daily"][..]));
+        assert_eq!(required_scopes(&endpoint, "DELETE"), None);
+    }
+
+    #[test]
+    fn every_table_entry_routes_back_to_itself() {
+        // Guards the match order: a shape with a literal segment must not be
+        // swallowed by an earlier wildcard shape.
+        for endpoint in API_V1_ENDPOINTS {
+            let path = sample_path(endpoint.path);
+            let resolved =
+                endpoint_for(&path).unwrap_or_else(|| panic!("{} does not route", endpoint.path));
+            assert_eq!(
+                resolved.path, endpoint.path,
+                "{:?} routed to {} instead of {}",
+                path, resolved.path, endpoint.path
+            );
+        }
+    }
+
+    #[test]
+    fn the_routing_table_and_the_published_contract_agree_on_scopes() {
+        // The spec is served verbatim from `API_V1_OPENAPI_JSON`, so a drift
+        // between what is enforced and what is documented is a silent contract
+        // break. Compared in both directions.
+        let spec: Value = serde_json::from_slice(API_V1_OPENAPI_JSON).expect("spec should be JSON");
+        let paths = spec["paths"].as_object().expect("spec should have paths");
+
+        let mut documented = paths
+            .iter()
+            .flat_map(|(path, operations)| {
+                operations
+                    .as_object()
+                    .expect("operations should be an object")
+                    .iter()
+                    .map(move |(method, operation)| {
+                        (
+                            format!("{} {path}", method.to_uppercase()),
+                            operation["x-required-scopes"]
+                                .as_array()
+                                .map(|scopes| {
+                                    scopes
+                                        .iter()
+                                        .filter_map(Value::as_str)
+                                        .map(str::to_string)
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default(),
+                        )
+                    })
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        for endpoint in API_V1_ENDPOINTS {
+            for method in endpoint.methods {
+                let key = format!("{method} {}", endpoint.path);
+                let scopes = required_scopes(endpoint, method)
+                    .unwrap_or_else(|| panic!("{key} declares no scopes"));
+                let documented_scopes = documented
+                    .remove(&key)
+                    .unwrap_or_else(|| panic!("{key} is enforced but not documented"));
+                assert_eq!(
+                    documented_scopes,
+                    scopes
+                        .iter()
+                        .map(|scope| scope.to_string())
+                        .collect::<Vec<_>>(),
+                    "{key} enforces different scopes than the spec documents"
+                );
+            }
+        }
+
+        assert!(
+            documented.is_empty(),
+            "documented operations that no endpoint serves: {:?}",
+            documented.keys().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn the_published_status_lists_match_what_the_handler_can_actually_return() {
+        // API-15: every operation used to list an identical
+        // 400/401/403/404/405/500 set, including for the public
+        // `GET /openapi.json`, while the 504 the deadline emits and the 413 an
+        // over-limit body emits were documented nowhere.
+        let spec: Value = serde_json::from_slice(API_V1_OPENAPI_JSON).expect("spec should be JSON");
+        let paths = spec["paths"].as_object().expect("spec should have paths");
+
+        for (path, operations) in paths {
+            for (method, operation) in operations.as_object().expect("operations object") {
+                let responses = operation["responses"]
+                    .as_object()
+                    .expect("operation should document responses");
+                let label = format!("{} {path}", method.to_uppercase());
+
+                if path == "/openapi.json" {
+                    // Answered from a compiled-in constant before
+                    // authentication, before the body is read and before the
+                    // deadline wrapper — but `main.rs` mounts the rate limiter
+                    // in front of the whole `/api/v1` router, so 429 is still
+                    // reachable.
+                    assert_eq!(
+                        responses.keys().collect::<Vec<_>>(),
+                        vec!["200", "429"],
+                        "{label}: the public document has only these outcomes"
+                    );
+                    continue;
+                }
+
+                // 405 is a property of the *path*, not of one operation — a
+                // documented method is by definition allowed — but every
+                // operation lists it because OpenAPI has nowhere else to put a
+                // path-level response.
+                for required in ["401", "403", "405", "429", "500", "504"] {
+                    assert!(
+                        responses.contains_key(required),
+                        "{label}: missing {required}"
+                    );
+                }
+                if operation.get("requestBody").is_some() {
+                    assert!(responses.contains_key("413"), "{label}: missing 413");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_success_response_describes_its_data_and_every_ref_resolves() {
+        // API-15: all 41 operations shipped `"data": {}` — an envelope with no
+        // statement about what is inside it. The document is hand-maintained,
+        // so a dangling `$ref` would be silent until a consumer tried to
+        // dereference it.
+        let spec: Value = serde_json::from_slice(API_V1_OPENAPI_JSON).expect("spec should be JSON");
+
+        fn collect_refs(node: &Value, into: &mut Vec<String>) {
+            match node {
+                Value::Object(map) => {
+                    for (key, value) in map {
+                        if key == "$ref" {
+                            if let Some(reference) = value.as_str() {
+                                into.push(reference.to_string());
+                            }
+                        } else {
+                            collect_refs(value, into);
+                        }
+                    }
+                }
+                Value::Array(items) => items.iter().for_each(|item| collect_refs(item, into)),
+                _ => {}
+            }
+        }
+
+        let mut refs = Vec::new();
+        collect_refs(&spec, &mut refs);
+        assert!(!refs.is_empty(), "the document should use components");
+        for reference in &refs {
+            let path = reference
+                .strip_prefix("#/")
+                .unwrap_or_else(|| panic!("{reference} is not a local reference"));
+            let mut node = &spec;
+            for segment in path.split('/') {
+                node = node
+                    .get(segment)
+                    .unwrap_or_else(|| panic!("{reference} does not resolve"));
+            }
+        }
+
+        let paths = spec["paths"].as_object().expect("spec should have paths");
+        for (path, operations) in paths {
+            for (method, operation) in operations.as_object().expect("operations object") {
+                let label = format!("{} {path}", method.to_uppercase());
+                let responses = operation["responses"].as_object().expect("responses");
+                let (_, success) = responses
+                    .iter()
+                    .find(|(status, _)| status.starts_with('2'))
+                    .unwrap_or_else(|| panic!("{label}: no success response"));
+                let schema = &success["content"]["application/json"]["schema"];
+
+                if path == "/openapi.json" {
+                    // This one operation answers with the document itself, not
+                    // with the `{ ok, data }` envelope.
+                    assert!(
+                        schema.get("properties").is_none(),
+                        "{label}: the spec endpoint does not use the envelope"
+                    );
+                    continue;
+                }
+
+                let data = &schema["properties"]["data"];
+                assert!(
+                    data.is_object() && !data.as_object().expect("object").is_empty(),
+                    "{label}: `data` is still undescribed"
+                );
+                assert_eq!(
+                    schema["properties"]["ok"],
+                    json!({ "const": true }),
+                    "{label}: success responses set ok=true"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_published_timeout_status_is_the_one_the_handler_emits() {
+        let spec: Value = serde_json::from_slice(API_V1_OPENAPI_JSON).expect("spec should be JSON");
+
+        assert!(
+            spec["paths"]["/goals"]["get"]["responses"]
+                .get(StatusCode::GATEWAY_TIMEOUT.as_str())
+                .is_some()
+        );
+        assert!(
+            spec["paths"]["/goals"]["patch"]["responses"]
+                .get(StatusCode::PAYLOAD_TOO_LARGE.as_str())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn the_published_quantity_units_are_the_ones_the_data_layer_accepts() {
+        // API-15: `unit` and `defaultServingUnit` were documented as free
+        // strings while `is_quantity_unit` accepts exactly four values.
+        let spec: Value = serde_json::from_slice(API_V1_OPENAPI_JSON).expect("spec should be JSON");
+        let unit = &spec["paths"]["/days/{date}/entries"]["post"]["requestBody"]["content"]["application/json"]
+            ["schema"]["properties"]["unit"];
+
+        let documented = unit["enum"]
+            .as_array()
+            .expect("unit should be an enum")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+
+        // Mirrors `is_quantity_unit` in db.rs, which is private to that module;
+        // if it gains or loses a unit this assertion has to move with it.
+        assert_eq!(documented, vec!["g", "ml", "serving", "count"]);
+    }
+
+    #[test]
+    fn the_body_date_is_not_documented_where_the_path_wins() {
+        // API-15: `date` was documented in the body of
+        // `POST /days/{date}/entries` but `dispatch_api_request` overwrites it
+        // with the path segment before the RPC call.
+        let spec: Value = serde_json::from_slice(API_V1_OPENAPI_JSON).expect("spec should be JSON");
+        let properties = &spec["paths"]["/days/{date}/entries"]["post"]["requestBody"]["content"]["application/json"]
+            ["schema"]["properties"];
+
+        assert!(properties.get("date").is_none());
+    }
+
+    #[test]
+    fn portions_is_documented_as_optional_with_its_real_default() {
+        let spec: Value = serde_json::from_slice(API_V1_OPENAPI_JSON).expect("spec should be JSON");
+        let schema = &spec["paths"]["/recipes"]["post"]["requestBody"]["content"]["application/json"]
+            ["schema"];
+
+        let required = schema["required"]
+            .as_array()
+            .expect("required should be an array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+
+        assert!(!required.contains(&"portions"));
+        assert_eq!(schema["properties"]["portions"]["default"], json!(1));
     }
 
     #[tokio::test]

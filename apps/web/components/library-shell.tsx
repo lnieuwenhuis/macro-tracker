@@ -25,6 +25,7 @@ type LibraryShellProps = {
   products: FoodProduct[];
   templates: MealTemplate[];
   recipes: RecipeRecord[];
+  todayStr?: string;
 };
 
 export function LibraryShell({
@@ -35,6 +36,7 @@ export function LibraryShell({
   products,
   templates,
   recipes,
+  todayStr,
 }: LibraryShellProps) {
   const router = useRouter();
   const [search, setSearch] = useState(query);
@@ -84,6 +86,7 @@ export function LibraryShell({
       selectedDate={selectedDate}
       title="Food Library"
       activeTab="recipes"
+      todayStr={todayStr}
       topBar={({ openSettings }) => (
         <div className="mb-4 flex items-center justify-between gap-3">
           <div>

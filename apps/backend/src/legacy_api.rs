@@ -1,9 +1,12 @@
-use crate::{AppState, auth, db};
+use crate::{
+    AppState, auth, db,
+    shared::{round1, round2},
+};
 use axum::{
     Json, Router,
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{DefaultBodyLimit, Multipart, Path, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -11,30 +14,26 @@ use base64ct::{Base64, Encoding};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use std::{
+    collections::HashMap,
     future::Future,
-    sync::{Mutex, OnceLock},
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
+use uuid::Uuid;
 
-const OPENROUTER_CHAT_COMPLETIONS_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
-const DEFAULT_FOOD_PHOTO_MODEL: &str = "google/gemma-4-26b-a4b-it:free";
-const DEFAULT_FOOD_PHOTO_FALLBACK_MODELS: &[&str] = &[
-    "google/gemma-4-31b-it:free",
-    "nvidia/nemotron-nano-12b-v2-vl:free",
-    "openrouter/free",
-];
 /// Effort suffixes are parsed by CLIProxyAPI and mapped to the reasoning
 /// parameter of the Codex backend; the fallback bumps effort in case low
 /// returns unparseable JSON (invalid_json failures are retryable).
-const DEFAULT_GATEWAY_FOOD_PHOTO_MODELS: &[&str] = &["gpt-5.6-luna(low)", "gpt-5.6-luna(medium)"];
+const DEFAULT_FOOD_PHOTO_MODELS: &[&str] = &["gpt-5.6-luna(low)", "gpt-5.6-luna(medium)"];
 /// Reasoning happens inside the output-token budget on the Codex backend, so
-/// the gateway cap must leave room for thinking tokens on top of the ~300
-/// tokens of JSON the prompt asks for.
-const GATEWAY_MAX_TOKENS: u16 = 4_000;
-const OPENROUTER_MODEL_TIMEOUT_MS_DEFAULT: u64 = 10_000;
-/// Reasoning models need more headroom per attempt than the free
-/// OpenRouter vision models, even at low effort.
-const GATEWAY_MODEL_TIMEOUT_MS_DEFAULT: u64 = 20_000;
+/// the cap must leave room for thinking tokens on top of the ~300 tokens of
+/// JSON the prompt asks for.
+const FOOD_PHOTO_MAX_TOKENS: u16 = 4_000;
+/// Reasoning models need headroom per attempt even at low effort.
+const FOOD_PHOTO_MODEL_TIMEOUT_MS_DEFAULT: u64 = 20_000;
 const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 const FOOD_PHOTO_BODY_LIMIT_BYTES: usize = MAX_IMAGE_BYTES + 1024 * 1024;
 const FOOD_PHOTO_SLOT_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -43,7 +42,22 @@ const FOOD_PHOTO_REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
 const BENCHMARK_ROUTE_RUNTIME_BUDGET_MS: u64 = 270_000;
 const BENCHMARK_RUN_LOCK_TTL: Duration = Duration::from_secs(300);
 
-static BENCHMARK_LOCK: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+/// The benchmark run currently believed to be in flight.
+///
+/// API-08: this used to be a bare expiry stamp, and the guard's `Drop` set it
+/// back to `None` unconditionally. A run that overran [`BENCHMARK_RUN_LOCK_TTL`]
+/// would therefore clear the stamp of the run that had legitimately replaced
+/// it, letting a third run start alongside the second — two concurrent
+/// benchmarks, twice the upstream spend. The generation makes the release
+/// conditional on still owning the lock.
+#[derive(Clone, Copy)]
+struct BenchmarkRun {
+    generation: u64,
+    expires_at: Instant,
+}
+
+static BENCHMARK_LOCK: OnceLock<Mutex<Option<BenchmarkRun>>> = OnceLock::new();
+static BENCHMARK_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Each in-flight photo holds the decoded upload plus its base64 data URL, so
 /// peak footprint is a multiple of `MAX_IMAGE_BYTES` per request. Cap how many
@@ -54,6 +68,58 @@ static FOOD_PHOTO_SLOTS: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
 
 fn food_photo_slots() -> &'static tokio::sync::Semaphore {
     FOOD_PHOTO_SLOTS.get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_FOOD_PHOTO_UPLOADS))
+}
+
+/// How many of the global slots any one account may hold at once.
+///
+/// API-04: the global semaphore alone was not enough. A single account could
+/// take all four permits and hold them from before the multipart read through
+/// the entire 25s upstream round trip, so every other user hit the 2s wait
+/// timeout and got a 503 — one account starving the feature for everyone. Two
+/// leaves room for a retry while an upload is still in flight and still keeps
+/// half the capacity available to other accounts.
+const MAX_FOOD_PHOTO_UPLOADS_PER_USER: usize = 2;
+static FOOD_PHOTO_USER_SLOTS: OnceLock<Mutex<HashMap<Uuid, usize>>> = OnceLock::new();
+
+fn food_photo_user_slots() -> &'static Mutex<HashMap<Uuid, usize>> {
+    FOOD_PHOTO_USER_SLOTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Held for the lifetime of one food-photo request; releases the account's slot
+/// on drop, including on an early return or a panic.
+struct FoodPhotoUserSlot {
+    user_id: Uuid,
+}
+
+impl Drop for FoodPhotoUserSlot {
+    fn drop(&mut self) {
+        let mut slots = food_photo_user_slots()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(count) = slots.get_mut(&self.user_id) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                // Keeps the map bounded by the number of accounts actually
+                // in flight rather than by every account that ever uploaded.
+                slots.remove(&self.user_id);
+            }
+        }
+    }
+}
+
+/// Takes one of `user_id`'s slots, or `None` if the account is already at its
+/// cap. Deliberately does not wait: an account at its own limit should be told
+/// so immediately rather than sitting in the shared queue.
+fn acquire_food_photo_user_slot(user_id: Uuid) -> Option<FoodPhotoUserSlot> {
+    let mut slots = food_photo_user_slots()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let count = slots.get(&user_id).copied().unwrap_or(0);
+    if count >= MAX_FOOD_PHOTO_UPLOADS_PER_USER {
+        return None;
+    }
+    slots.insert(user_id, count + 1);
+    Some(FoodPhotoUserSlot { user_id })
 }
 
 /// Barcode lookups fan out to up to five upstream requests, each of which
@@ -68,29 +134,46 @@ fn barcode_lookup_slots() -> &'static tokio::sync::Semaphore {
     BARCODE_LOOKUP_SLOTS.get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_BARCODE_LOOKUPS))
 }
 
+/// Length window a barcode must fall in. Shared with `api.rs` so the public
+/// token API and this session-authenticated route agree on what a barcode is
+/// (API-11).
+pub(crate) const MIN_BARCODE_LENGTH: usize = 4;
+pub(crate) const MAX_BARCODE_LENGTH: usize = 20;
+
 /// Largest provider response we will buffer. Without this, `response.json()`
 /// reads whatever the upstream sends straight into memory.
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
 /// Reads a JSON body with a hard byte budget, returning `None` if the upstream
 /// exceeds it (or sends something that is not JSON).
-async fn read_capped_json(mut response: reqwest::Response) -> Option<Value> {
+async fn read_capped_json(response: reqwest::Response) -> Option<Value> {
+    read_capped_json_result(response).await.ok().flatten()
+}
+
+/// [`read_capped_json`] that keeps the transport error.
+///
+/// `Ok(None)` means the upstream answered but the body was over budget or not
+/// JSON; `Err` means the read itself failed, which the food-photo path needs in
+/// order to tell a timeout from a malformed response.
+async fn read_capped_json_result(
+    mut response: reqwest::Response,
+) -> Result<Option<Value>, reqwest::Error> {
     if response
         .content_length()
         .is_some_and(|length| length > MAX_PROVIDER_RESPONSE_BYTES as u64)
     {
-        return None;
+        return Ok(None);
     }
 
     let mut buffer: Vec<u8> = Vec::new();
-    while let Some(chunk) = response.chunk().await.ok()? {
+    while let Some(chunk) = response.chunk().await? {
         if buffer.len() + chunk.len() > MAX_PROVIDER_RESPONSE_BYTES {
-            return None;
+            return Ok(None);
         }
         buffer.extend_from_slice(&chunk);
     }
 
-    serde_json::from_slice(&buffer).ok()
+    Ok(serde_json::from_slice(&buffer).ok())
 }
 
 async fn acquire_food_photo_slot(
@@ -180,21 +263,36 @@ async fn lookup_barcode(
     Path(barcode): Path<String>,
 ) -> Response {
     // Every cache miss fans out to as many as five upstream requests, so this
-    // has to sit behind a session gate — otherwise the backend is an open
-    // amplifier for anyone who can reach it. The signature check is enough
-    // here: the lookup itself is not user-scoped, so loading the user record
-    // would only add a query to every scan.
-    let authenticated = auth::session_token_from_headers(&headers)
-        .and_then(|token| auth::verify_session_token(&state.config, &token).ok())
-        .is_some();
-    if !authenticated {
+    // has to sit behind an account gate — otherwise the backend is an open
+    // amplifier for anyone who can reach it.
+    //
+    // API-14: this used to verify the session *signature* only, on the grounds
+    // that the lookup is not user-scoped. But session tokens live for seven
+    // days and are renewed on use, so a deleted or de-onboarded account kept
+    // full access to the fan-out. `/api/v1/barcodes/{barcode}` gates the same
+    // capability on the user record plus onboarding; the two now agree, at the
+    // cost of one primary-key read per scan.
+    let user = match auth::current_user_from_headers(State(state.clone()), headers).await {
+        Ok(user) => user,
+        Err(_) => {
+            return legacy_json(
+                StatusCode::UNAUTHORIZED,
+                json!({ "found": false, "barcode": barcode, "error": "Authentication required." }),
+            );
+        }
+    };
+    if user.onboarding_completed_at.is_none() {
         return legacy_json(
-            StatusCode::UNAUTHORIZED,
-            json!({ "found": false, "barcode": barcode, "error": "Authentication required." }),
+            StatusCode::FORBIDDEN,
+            json!({ "found": false, "barcode": barcode, "error": "Complete onboarding first." }),
         );
     }
 
-    if barcode.len() < 4 || barcode.len() > 20 {
+    lookup_barcode_for_user(&state, barcode).await
+}
+
+async fn lookup_barcode_for_user(state: &AppState, barcode: String) -> Response {
+    if barcode.len() < MIN_BARCODE_LENGTH || barcode.len() > MAX_BARCODE_LENGTH {
         return legacy_json(
             StatusCode::BAD_REQUEST,
             json!({ "found": false, "barcode": barcode, "error": "Invalid barcode" }),
@@ -230,7 +328,7 @@ async fn lookup_barcode(
         );
     }
 
-    match lookup_barcode_provider_chain(&state, &barcode).await {
+    match lookup_barcode_provider_chain(state, &barcode).await {
         BarcodeLookup::Found(product) => {
             legacy_json(StatusCode::OK, json!({ "found": true, "product": product }))
         }
@@ -264,6 +362,25 @@ async fn food_photo(
             return legacy_json(
                 StatusCode::UNAUTHORIZED,
                 json!({ "ok": false, "error": "Unauthorized." }),
+            );
+        }
+    };
+    // API-14: `/api/v1` refuses token calls until onboarding is finished; this
+    // route skipped that check even though it spends money upstream.
+    if user.onboarding_completed_at.is_none() {
+        return legacy_json(
+            StatusCode::FORBIDDEN,
+            json!({ "ok": false, "error": "Complete onboarding first.", "kind": "unknown" }),
+        );
+    }
+
+    // Taken before the shared permit so an account at its own limit is told
+    // immediately instead of consuming the shared wait budget (API-04).
+    let _user_slot = match acquire_food_photo_user_slot(user.id) {
+        Some(slot) => slot,
+        None => {
+            return retryable_food_photo_failure(
+                "You already have photo analyses running. Wait for one to finish and try again.",
             );
         }
     };
@@ -324,11 +441,26 @@ async fn food_photo(
     legacy_json(status, result)
 }
 
+/// A benchmark request is a model id, a fixture count, a mode and at most one
+/// previously returned baseline. Generous, but far below the 2 MB an
+/// unauthenticated caller used to be able to make the server parse.
+const MAX_BENCHMARK_REQUEST_BYTES: usize = 256 * 1024;
+
 async fn admin_benchmark(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(payload): Json<Value>,
+    body: Body,
 ) -> Response {
+    let content_type_is_json = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(';')
+                .next()
+                .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
+        });
+
     let admin_user = match auth::current_user_from_headers(State(state.clone()), headers).await {
         Ok(user) => user,
         Err(_) => {
@@ -346,6 +478,38 @@ async fn admin_benchmark(
         );
     }
 
+    // API-09: the body is read and parsed only once the caller is known to be
+    // an admin. With `Json<Value>` in the signature the extractor ran first, so
+    // an unauthenticated caller got 400 for malformed JSON and 401 for valid
+    // JSON — a reliable existence probe for a route that deliberately 404s to
+    // authenticated non-admins — and could make the server parse a 2 MB body
+    // with no credentials at all. The `application/json` requirement is kept
+    // from `Json<Value>`: this route authenticates from the session cookie, so
+    // accepting a CORS-safelisted content type would open it to form CSRF.
+    if !content_type_is_json {
+        return legacy_json(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            json!({ "ok": false, "error": "Expected application/json." }),
+        );
+    }
+    let payload = match axum::body::to_bytes(body, MAX_BENCHMARK_REQUEST_BYTES).await {
+        Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
+            Ok(payload) => payload,
+            Err(_) => {
+                return legacy_json(
+                    StatusCode::BAD_REQUEST,
+                    json!({ "ok": false, "error": "Request body must be valid JSON." }),
+                );
+            }
+        },
+        Err(_) => {
+            return legacy_json(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                json!({ "ok": false, "error": "Request body is too large." }),
+            );
+        }
+    };
+
     let candidate_model = payload
         .get("model")
         .and_then(Value::as_str)
@@ -361,7 +525,7 @@ async fn admin_benchmark(
             StatusCode::BAD_REQUEST,
             json!({
                 "ok": false,
-                "error": "Enter a model id, for example google/gemma-4-31b-it:free or gpt-5.6-luna(low)."
+                "error": "Enter a model id, for example gpt-5.6-luna(low)."
             }),
         );
     };
@@ -913,17 +1077,20 @@ async fn analyze_food_photo_url(
     user_id: &str,
     force_ready: bool,
 ) -> Value {
-    let gateway_url = state.config.ai_gateway_url.as_deref();
-    let default_timeout = if gateway_url.is_some() {
-        GATEWAY_MODEL_TIMEOUT_MS_DEFAULT
-    } else {
-        OPENROUTER_MODEL_TIMEOUT_MS_DEFAULT
+    let Some(gateway_url) = state.config.ai_gateway_url.as_deref() else {
+        tracing::error!("AI_GATEWAY_URL is not configured on the server");
+        return photo_failure(
+            "Photo analysis is not available on this server.",
+            "missing_api_key",
+            None,
+            None,
+        );
     };
     let model_timeout = Duration::from_millis(
         state
             .config
-            .openrouter_model_timeout_ms
-            .unwrap_or(default_timeout)
+            .ai_gateway_model_timeout_ms
+            .unwrap_or(FOOD_PHOTO_MODEL_TIMEOUT_MS_DEFAULT)
             .clamp(3_000, 30_000),
     );
     analyze_food_photo_url_with_limits(
@@ -934,8 +1101,7 @@ async fn analyze_food_photo_url(
         user_id,
         force_ready,
         FoodPhotoRequestLimits {
-            chat_completions_url: gateway_url.unwrap_or(OPENROUTER_CHAT_COMPLETIONS_URL),
-            gateway: gateway_url.is_some(),
+            chat_completions_url: gateway_url,
             model_timeout,
             request_timeout: FOOD_PHOTO_REQUEST_TIMEOUT,
         },
@@ -946,10 +1112,6 @@ async fn analyze_food_photo_url(
 #[derive(Clone, Copy)]
 struct FoodPhotoRequestLimits<'a> {
     chat_completions_url: &'a str,
-    /// True when talking to the configured AI gateway (an OpenAI-compatible
-    /// endpoint) instead of OpenRouter: skips the free-model allowlist and
-    /// the OpenRouter-specific request fields.
-    gateway: bool,
     model_timeout: Duration,
     request_timeout: Duration,
 }
@@ -965,21 +1127,11 @@ async fn analyze_food_photo_url_with_limits(
 ) -> Value {
     let FoodPhotoRequestLimits {
         chat_completions_url,
-        gateway,
         model_timeout,
         request_timeout,
     } = limits;
-    let api_key = if gateway {
-        state.config.ai_gateway_api_key.as_deref()
-    } else {
-        state.config.openrouter_api_key.as_deref()
-    };
-    let Some(api_key) = api_key else {
-        if gateway {
-            tracing::error!("AI_GATEWAY_API_KEY is not configured on the server");
-        } else {
-            tracing::error!("OPENROUTER_API_KEY is not configured on the server");
-        }
+    let Some(api_key) = state.config.ai_gateway_api_key.as_deref() else {
+        tracing::error!("AI_GATEWAY_API_KEY is not configured on the server");
         return photo_failure(
             "Photo analysis is not available on this server.",
             "missing_api_key",
@@ -1010,19 +1162,17 @@ async fn analyze_food_photo_url_with_limits(
         }
     }
 
+    // API-13: the free-model allowlist that used to reject a caller-named model
+    // here is gone with the OpenRouter path, so this is no longer a place where
+    // "the caller asked for a model we refuse" can happen. The only remaining
+    // source of `unsupported_model` is `classify_food_photo_failure` — the
+    // gateway telling us the model cannot accept an image — and that is just as
+    // reachable for a model out of `AI_GATEWAY_MODELS` as for a benchmark-named
+    // one. It is therefore reported through `upstream_photo_failure`, which
+    // owns the status (502) rather than blaming the caller with a 400.
     let models = requested_model
         .map(|model| vec![model.trim().to_string()])
         .unwrap_or_else(|| configured_food_photo_models(&state.config));
-    if !gateway
-        && let Some(non_free_model) = models.iter().find(|model| !is_free_openrouter_model(model))
-    {
-        return json!({
-            "ok": false,
-            "error": format!("Food photo AI only permits free OpenRouter models. \"{non_free_model}\" is not allowed."),
-            "kind": "unsupported_model",
-            "retryable": false
-        });
-    }
 
     let deadline = Instant::now() + request_timeout;
     let mut last_failure = None;
@@ -1038,53 +1188,51 @@ async fn analyze_food_photo_url_with_limits(
             .post(chat_completions_url)
             .timeout(attempt_timeout)
             .bearer_auth(api_key)
-            .header("Content-Type", "application/json");
-        let request = if gateway {
-            request.json(&build_gateway_request_body(
+            .header("Content-Type", "application/json")
+            .json(&build_food_photo_request_body(
                 &model,
                 image_url,
                 clarification,
                 user_id,
                 force_ready,
-            ))
-        } else {
-            request
-                .header("HTTP-Referer", &state.config.app_url)
-                .header("X-OpenRouter-Title", "Macro Tracker")
-                .header("X-OpenRouter-Metadata", "enabled")
-                .json(&build_openrouter_request_body(
-                    &model,
-                    image_url,
-                    clarification,
-                    user_id,
-                    force_ready,
-                ))
-        };
+            ));
 
         match request.send().await {
             Ok(response) if !response.status().is_success() => {
                 let status = response.status().as_u16();
-                let error = read_openrouter_error(response).await;
+                let error = read_upstream_error(response).await;
                 if Instant::now() >= deadline {
                     return food_photo_timeout_failure(request_timeout);
                 }
                 let kind = classify_food_photo_failure(&error, Some(status));
-                let retryable = is_retryable_openrouter_error(&error, Some(status));
+                let retryable = is_retryable_upstream_error(&error, Some(status));
                 let failure = upstream_photo_failure(&error, kind, Some(status), retryable);
                 if !retryable {
                     return failure;
                 }
                 last_failure = Some(failure);
             }
-            Ok(response) => match response.json::<Value>().await {
-                Ok(payload) => {
+            // CLEAN-C1: the same byte budget every barcode provider is read
+            // under. `response.json()` buffered whatever the gateway sent.
+            Ok(response) => match read_capped_json_result(response).await {
+                Ok(None) => {
+                    let failure = upstream_photo_failure(
+                        "provider body was not JSON within the size budget",
+                        "empty_response",
+                        None,
+                        true,
+                    );
+                    last_failure = Some(failure);
+                    continue;
+                }
+                Ok(Some(payload)) => {
                     if let Some(message) = payload
                         .get("error")
                         .and_then(|error| error.get("message"))
                         .and_then(Value::as_str)
                     {
                         let kind = classify_food_photo_failure(message, None);
-                        let retryable = is_retryable_openrouter_error(message, None);
+                        let retryable = is_retryable_upstream_error(message, None);
                         let failure = upstream_photo_failure(message, kind, None, retryable);
                         if !retryable {
                             return failure;
@@ -1108,7 +1256,7 @@ async fn analyze_food_photo_url_with_limits(
                             .and_then(Value::as_str)
                             .unwrap_or("The AI provider returned an error.");
                         let kind = classify_food_photo_failure(error, None);
-                        let retryable = is_retryable_openrouter_error(error, None);
+                        let retryable = is_retryable_upstream_error(error, None);
                         let failure = upstream_photo_failure(error, kind, None, retryable);
                         if !retryable {
                             return failure;
@@ -1121,26 +1269,29 @@ async fn analyze_food_photo_url_with_limits(
                         .and_then(|item| item.get("message"))
                         .and_then(|message| message.get("content"))
                         .and_then(extract_message_content);
+                    // API-02: the upstream payload used to be echoed back as
+                    // `aiResponse`. It carries `provider`, `model`, `usage`
+                    // (token counts and spend) and any provider-side error
+                    // text, so it goes to the log and never to the browser —
+                    // the same rule every other upstream failure follows.
                     let Some(content) = content else {
-                        last_failure = Some(json!({
-                            "ok": false,
-                            "error": "The AI did not return a response.",
-                            "kind": "empty_response",
-                            "aiResponse": payload.to_string(),
-                            "retryable": true
-                        }));
+                        last_failure = Some(upstream_photo_failure(
+                            &payload.to_string(),
+                            "empty_response",
+                            None,
+                            true,
+                        ));
                         continue;
                     };
                     match parse_food_photo_analysis(&content) {
                         Ok(analysis) => return json!({ "ok": true, "analysis": analysis }),
                         Err(error) => {
-                            last_failure = Some(json!({
-                                "ok": false,
-                                "error": error,
-                                "kind": "invalid_json",
-                                "aiResponse": content,
-                                "retryable": true
-                            }));
+                            last_failure = Some(upstream_photo_failure(
+                                &format!("{error} Model output: {content}"),
+                                "invalid_json",
+                                None,
+                                true,
+                            ));
                         }
                     }
                 }
@@ -1166,8 +1317,10 @@ async fn analyze_food_photo_url_with_limits(
                     return food_photo_timeout_failure(request_timeout);
                 }
                 let retryable = error.is_timeout();
+                // API-12: `reqwest::Error`'s Display embeds the request URL, so
+                // the raw string must not reach the caller.
                 let failure =
-                    photo_failure(&error.to_string(), "provider_error", None, Some(retryable));
+                    upstream_photo_failure(&error.to_string(), "provider_error", None, retryable);
                 if !retryable {
                     return failure;
                 }
@@ -1194,168 +1347,95 @@ fn food_photo_timeout_failure(request_timeout: Duration) -> Value {
 }
 
 #[derive(Serialize)]
-struct OpenRouterRequest<'a> {
-    model: &'a str,
-    messages: (OpenRouterSystemMessage<'a>, OpenRouterUserMessage<'a>),
-    user: &'a str,
-    provider: OpenRouterProvider,
-    plugins: [OpenRouterPlugin<'a>; 1],
-    response_format: OpenRouterResponseFormat<'a>,
-    temperature: u8,
-    max_tokens: u16,
-    include_reasoning: bool,
-    reasoning: OpenRouterReasoning,
-}
-
-#[derive(Serialize)]
-struct OpenRouterSystemMessage<'a> {
+struct ChatSystemMessage<'a> {
     role: &'a str,
     content: &'a str,
 }
 
 #[derive(Serialize)]
-struct OpenRouterUserMessage<'a> {
+struct ChatUserMessage<'a> {
     role: &'a str,
-    content: (OpenRouterTextContent, OpenRouterImageContent<'a>),
+    content: (ChatTextContent, ChatImageContent<'a>),
 }
 
 #[derive(Serialize)]
-struct OpenRouterTextContent {
+struct ChatTextContent {
     #[serde(rename = "type")]
     kind: &'static str,
     text: String,
 }
 
 #[derive(Serialize)]
-struct OpenRouterImageContent<'a> {
+struct ChatImageContent<'a> {
     #[serde(rename = "type")]
     kind: &'static str,
-    image_url: OpenRouterImageUrl<'a>,
+    image_url: ChatImageUrl<'a>,
 }
 
 #[derive(Serialize)]
-struct OpenRouterImageUrl<'a> {
+struct ChatImageUrl<'a> {
     url: &'a str,
 }
 
+/// Chat-completions body for the AI gateway (an OpenAI-compatible endpoint,
+/// normally CLIProxyAPI in front of the Codex backend). Reasoning effort
+/// travels in the model id suffix, e.g. `gpt-5.6-luna(low)`. `temperature`
+/// is omitted because reasoning models reject it; JSON-only output is
+/// enforced by the prompt and re-checked by the parser.
 #[derive(Serialize)]
-struct OpenRouterProvider {
-    allow_fallbacks: bool,
-}
-
-#[derive(Serialize)]
-struct OpenRouterPlugin<'a> {
-    id: &'a str,
-    enabled: bool,
-}
-
-#[derive(Serialize)]
-struct OpenRouterResponseFormat<'a> {
-    #[serde(rename = "type")]
-    kind: &'a str,
-}
-
-#[derive(Serialize)]
-struct OpenRouterReasoning {
-    enabled: bool,
-}
-
-/// Chat-completions body for the AI gateway (CLIProxyAPI in front of the
-/// Codex backend). Reasoning effort travels in the model id suffix, e.g.
-/// `gpt-5.6-luna(low)`. OpenRouter-only fields (provider, plugins,
-/// response_format) are omitted, as is `temperature`, which reasoning models
-/// reject; JSON-only output is enforced by the prompt and re-checked by the
-/// parser.
-#[derive(Serialize)]
-struct GatewayRequest<'a> {
+struct FoodPhotoRequest<'a> {
     model: &'a str,
-    messages: (OpenRouterSystemMessage<'a>, OpenRouterUserMessage<'a>),
+    messages: (ChatSystemMessage<'a>, ChatUserMessage<'a>),
     user: &'a str,
     max_tokens: u16,
 }
 
-fn build_gateway_request_body<'a>(
+fn build_food_photo_request_body<'a>(
     model: &'a str,
     image_url: &'a str,
     clarification: &str,
     user_id: &'a str,
     force_ready: bool,
-) -> GatewayRequest<'a> {
-    GatewayRequest {
+) -> FoodPhotoRequest<'a> {
+    FoodPhotoRequest {
         model,
         messages: (
-            OpenRouterSystemMessage {
+            ChatSystemMessage {
                 role: "system",
                 content: food_photo_system_prompt(),
             },
-            OpenRouterUserMessage {
+            ChatUserMessage {
                 role: "user",
                 content: (
-                    OpenRouterTextContent {
+                    ChatTextContent {
                         kind: "text",
                         text: build_prompt(clarification, force_ready),
                     },
-                    OpenRouterImageContent {
+                    ChatImageContent {
                         kind: "image_url",
-                        image_url: OpenRouterImageUrl { url: image_url },
+                        image_url: ChatImageUrl { url: image_url },
                     },
                 ),
             },
         ),
+        // CLEAN-C2: deliberate. The chat-completions `user` field is the
+        // per-end-user abuse-attribution and rate-limiting key, so a stable
+        // per-account identifier is required for a shared API key not to be
+        // throttled as one caller. The
+        // account UUID is an opaque internal identifier — no email, name or
+        // other personal data is sent — and it is the same value the rest of
+        // the system already logs.
         user: user_id,
-        max_tokens: GATEWAY_MAX_TOKENS,
+        max_tokens: FOOD_PHOTO_MAX_TOKENS,
     }
 }
 
-fn build_openrouter_request_body<'a>(
-    model: &'a str,
-    image_url: &'a str,
-    clarification: &str,
-    user_id: &'a str,
-    force_ready: bool,
-) -> OpenRouterRequest<'a> {
-    OpenRouterRequest {
-        model,
-        messages: (
-            OpenRouterSystemMessage {
-                role: "system",
-                content: food_photo_system_prompt(),
-            },
-            OpenRouterUserMessage {
-                role: "user",
-                content: (
-                    OpenRouterTextContent {
-                        kind: "text",
-                        text: build_prompt(clarification, force_ready),
-                    },
-                    OpenRouterImageContent {
-                        kind: "image_url",
-                        image_url: OpenRouterImageUrl { url: image_url },
-                    },
-                ),
-            },
-        ),
-        user: user_id,
-        provider: OpenRouterProvider {
-            allow_fallbacks: true,
-        },
-        plugins: [OpenRouterPlugin {
-            id: "response-healing",
-            enabled: true,
-        }],
-        response_format: OpenRouterResponseFormat {
-            kind: "json_object",
-        },
-        temperature: 0,
-        max_tokens: 300,
-        include_reasoning: false,
-        reasoning: OpenRouterReasoning { enabled: false },
-    }
-}
-
-async fn read_openrouter_error(response: reqwest::Response) -> String {
+async fn read_upstream_error(response: reqwest::Response) -> String {
     let status = response.status();
-    match response.json::<Value>().await {
+    // CLEAN-C1 applies on the error path too: an unbounded `response.json()` here
+    // lets a hostile or broken gateway buffer an arbitrarily large error body,
+    // which is the exact exhaustion the success path is capped against.
+    match read_capped_json(response).await.ok_or(()) {
         Ok(payload) => {
             let message = payload
                 .get("error")
@@ -1363,9 +1443,7 @@ async fn read_openrouter_error(response: reqwest::Response) -> String {
                 .and_then(Value::as_str)
                 .or_else(|| payload.get("message").and_then(Value::as_str))
                 .map(str::to_string)
-                .unwrap_or_else(|| {
-                    format!("OpenRouter request failed with status {}.", status.as_u16())
-                });
+                .unwrap_or_else(|| format!("AI request failed with status {}.", status.as_u16()));
             let detail = payload
                 .get("error")
                 .and_then(|error| error.get("metadata"))
@@ -1379,7 +1457,7 @@ async fn read_openrouter_error(response: reqwest::Response) -> String {
                 });
             detail.map_or(message.clone(), |detail| format!("{message} ({detail})"))
         }
-        Err(_) => format!("OpenRouter request failed with status {}.", status.as_u16()),
+        Err(_) => format!("AI request failed with status {}.", status.as_u16()),
     }
 }
 
@@ -1455,66 +1533,26 @@ fn normalize_estimate(value: Option<&Value>) -> Option<Value> {
 }
 
 fn configured_food_photo_models(config: &crate::config::Config) -> Vec<String> {
-    if config.ai_gateway_url.is_some() {
-        let mut seen = Vec::<String>::new();
-        for model in config
-            .ai_gateway_models
-            .as_deref()
-            .unwrap_or_default()
-            .split([',', '\n'])
-            .map(str::trim)
-            .filter(|model| !model.is_empty())
-        {
-            if !seen.iter().any(|seen_model| seen_model == model) {
-                seen.push(model.to_string());
-            }
-        }
-        if seen.is_empty() {
-            return DEFAULT_GATEWAY_FOOD_PHOTO_MODELS
-                .iter()
-                .map(|model| model.to_string())
-                .collect();
-        }
-        return seen;
-    }
-
-    let configured_primary = config
-        .openrouter_model
-        .as_deref()
-        .map(str::trim)
-        .unwrap_or_default();
-    let primary = if is_free_openrouter_model(configured_primary)
-        && !is_deprecated_food_photo_model(configured_primary)
-    {
-        configured_primary
-    } else {
-        DEFAULT_FOOD_PHOTO_MODEL
-    };
-    let fallbacks: Vec<&str> = config
-        .openrouter_fallback_models
-        .as_deref()
-        .map(|value| {
-            value
-                .split([',', '\n'])
-                .map(str::trim)
-                .filter(|model| !model.is_empty())
-                .collect()
-        })
-        .unwrap_or_else(|| DEFAULT_FOOD_PHOTO_FALLBACK_MODELS.to_vec());
     let mut seen = Vec::<String>::new();
-    for model in std::iter::once(primary).chain(fallbacks) {
-        if is_free_openrouter_model(model)
-            && !is_deprecated_food_photo_model(model)
-            && !seen.iter().any(|seen_model| seen_model == model)
-        {
+    for model in config
+        .ai_gateway_models
+        .as_deref()
+        .unwrap_or_default()
+        .split([',', '\n'])
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+    {
+        if !seen.iter().any(|seen_model| seen_model == model) {
             seen.push(model.to_string());
         }
     }
     if seen.is_empty() {
-        vec![DEFAULT_FOOD_PHOTO_MODEL.to_string()]
-    } else {
-        seen
+        return DEFAULT_FOOD_PHOTO_MODELS
+            .iter()
+            .map(|model| model.to_string())
+            .collect();
     }
+    seen
 }
 
 async fn run_macro_benchmark(
@@ -1528,7 +1566,7 @@ async fn run_macro_benchmark(
     let current_model = configured_food_photo_models(&state.config)
         .first()
         .cloned()
-        .unwrap_or_else(|| DEFAULT_FOOD_PHOTO_MODEL.to_string());
+        .unwrap_or_else(|| DEFAULT_FOOD_PHOTO_MODELS[0].to_string());
     let fixtures = BENCHMARK_FIXTURES
         .iter()
         .take(fixture_limit)
@@ -1613,7 +1651,9 @@ async fn run_fixture_for_model(
     let clarification = format!("Benchmark fixture: {}", fixture.serving_description);
     let result = analyze_food_photo_url(
         state,
-        fixture.image_source_url,
+        // The direct file URL, not the Commons article page — see
+        // `BenchmarkFixture::image_url`.
+        fixture.image_url,
         &clarification,
         Some(model),
         user_id,
@@ -1774,36 +1814,51 @@ fn skipped_result(model: &str, error: &str, failure_kind: &str) -> Value {
     })
 }
 
-struct BenchmarkLockGuard;
+struct BenchmarkLockGuard {
+    generation: u64,
+}
 
 impl Drop for BenchmarkLockGuard {
     fn drop(&mut self) {
-        release_benchmark_lock();
+        release_benchmark_lock(self.generation);
     }
 }
 
 fn acquire_benchmark_lock() -> Option<BenchmarkLockGuard> {
-    let lock = BENCHMARK_LOCK.get_or_init(|| Mutex::new(None));
-    // Poison recovery: the guarded value is a plain expiry stamp, so a panic
-    // elsewhere must not permanently wedge the benchmark route.
-    let mut active = lock.lock().unwrap_or_else(|error| error.into_inner());
-    if active.is_some_and(|expires_at| expires_at > Instant::now()) {
-        return None;
-    }
-    *active = Some(Instant::now() + BENCHMARK_RUN_LOCK_TTL);
-    Some(BenchmarkLockGuard)
+    acquire_benchmark_lock_with_ttl(BENCHMARK_RUN_LOCK_TTL)
 }
 
-fn release_benchmark_lock() {
+fn acquire_benchmark_lock_with_ttl(ttl: Duration) -> Option<BenchmarkLockGuard> {
     let lock = BENCHMARK_LOCK.get_or_init(|| Mutex::new(None));
-    *lock.lock().unwrap_or_else(|error| error.into_inner()) = None;
+    // Poison recovery: the guarded value is a plain stamp, so a panic elsewhere
+    // must not permanently wedge the benchmark route.
+    let mut active = lock.lock().unwrap_or_else(|error| error.into_inner());
+    if active.is_some_and(|run| run.expires_at > Instant::now()) {
+        return None;
+    }
+    let generation = BENCHMARK_GENERATION.fetch_add(1, Ordering::Relaxed);
+    *active = Some(BenchmarkRun {
+        generation,
+        expires_at: Instant::now() + ttl,
+    });
+    Some(BenchmarkLockGuard { generation })
+}
+
+/// Clears the lock only if `generation` still owns it. A run that outlived its
+/// TTL has already been replaced, so its release is a no-op.
+fn release_benchmark_lock(generation: u64) {
+    let lock = BENCHMARK_LOCK.get_or_init(|| Mutex::new(None));
+    let mut active = lock.lock().unwrap_or_else(|error| error.into_inner());
+    if active.is_some_and(|run| run.generation == generation) {
+        *active = None;
+    }
 }
 
 fn legacy_json(status: StatusCode, body: Value) -> Response {
     (status, Json(body)).into_response()
 }
 
-/// Copy shown to the user for an upstream (OpenRouter) failure.
+/// Copy shown to the user for an upstream AI-provider failure.
 ///
 /// The provider's own message is never forwarded: it can carry
 /// `metadata.raw`, `provider_name`, and — for a misconfigured deployment —
@@ -1814,6 +1869,8 @@ fn public_provider_message(kind: &str) -> &'static str {
         "provider_rate_limit" => "Photo analysis is busy right now. Please try again in a minute.",
         "provider_image_access" => "That image could not be read. Try taking the photo again.",
         "unsupported_model" => "Photo analysis is temporarily unavailable. Please try again later.",
+        "empty_response" => "The AI did not return a response. Please try again.",
+        "invalid_json" => "The AI returned a result we could not read. Please try again.",
         _ => "Photo analysis failed. Please try again.",
     }
 }
@@ -1966,7 +2023,7 @@ fn classify_food_photo_failure(error: &str, status_code: Option<u16>) -> &'stati
     "unknown"
 }
 
-fn is_retryable_openrouter_error(error: &str, status_code: Option<u16>) -> bool {
+fn is_retryable_upstream_error(error: &str, status_code: Option<u16>) -> bool {
     let lower = error.to_lowercase();
     let kind = classify_food_photo_failure(error, status_code);
     if matches!(
@@ -1985,7 +2042,19 @@ fn is_retryable_openrouter_error(error: &str, status_code: Option<u16>) -> bool 
         || lower.contains("upstream")
 }
 
+/// API-05: the `clarification` multipart field had no cap while the image field
+/// was capped at [`MAX_IMAGE_BYTES`], so a caller could push ~9 MB of prose
+/// straight into the model prompt while holding a concurrency slot — paying for
+/// the tokens and the latency. A clarification is one sentence of context ("the
+/// bowl is 300 ml"); anything past this is not a clarification.
+const MAX_CLARIFICATION_CHARS: usize = 500;
+
 fn build_prompt(clarification: &str, force_ready: bool) -> String {
+    let clarification = clarification.trim();
+    let clarification = match clarification.char_indices().nth(MAX_CLARIFICATION_CHARS) {
+        Some((byte_index, _)) => &clarification[..byte_index],
+        None => clarification,
+    };
     let ready_line = if force_ready {
         "This is a benchmark fixture with a known serving size. Do not ask a clarification question; return status ready."
     } else {
@@ -1997,7 +2066,7 @@ fn build_prompt(clarification: &str, force_ready: bool) -> String {
         ready_line,
         "Keep notes short and only include assumptions.",
         "Return only the JSON object matching the schema.",
-        clarification.trim(),
+        clarification,
     ]
     .into_iter()
     .filter(|line| !line.is_empty())
@@ -2020,15 +2089,6 @@ Clarification response format:\n\
 {\"status\":\"needs_clarification\",\"question\":\"one short question\",\"estimate\":null}"
 }
 
-fn is_free_openrouter_model(model: &str) -> bool {
-    let model = model.trim();
-    model == "openrouter/free" || model.ends_with(":free")
-}
-
-fn is_deprecated_food_photo_model(model: &str) -> bool {
-    model.trim() == "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
-}
-
 fn safe_number(value: Option<&Value>) -> f64 {
     value.and_then(number_from_value).map(round1).unwrap_or(0.0)
 }
@@ -2039,14 +2099,6 @@ fn number_from_value(value: &Value) -> Option<f64> {
         Value::String(text) => text.trim().replace(',', ".").parse::<f64>().ok(),
         _ => None,
     }
-}
-
-fn round1(value: f64) -> f64 {
-    (value * 10.0).round() / 10.0
-}
-
-fn round2(value: f64) -> f64 {
-    (value * 100.0).round() / 100.0
 }
 
 fn average(values: &[f64]) -> f64 {
@@ -2107,13 +2159,10 @@ mod tests {
             shoo_base_url: "https://shoo.dev".to_string(),
             trusted_origins: vec!["http://localhost:3000".to_string()],
             admin_owner_emails: vec![],
-            openrouter_api_key: None,
-            openrouter_model: None,
-            openrouter_fallback_models: None,
-            openrouter_model_timeout_ms: None,
             ai_gateway_url: None,
             ai_gateway_api_key: None,
             ai_gateway_models: None,
+            ai_gateway_model_timeout_ms: None,
             open_food_facts_base_url: provider_base_url.to_string(),
             albert_heijn_base_url: provider_base_url.to_string(),
             jumbo_base_url: provider_base_url.to_string(),
@@ -2195,20 +2244,18 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct OpenRouterStubResponse {
+    struct ChatStubResponse {
         status: StatusCode,
         delay: Duration,
         body: Value,
     }
 
-    struct OpenRouterStubState {
+    struct ChatStubState {
         requests: AtomicUsize,
-        responses: Vec<OpenRouterStubResponse>,
+        responses: Vec<ChatStubResponse>,
     }
 
-    async fn openrouter_stub_handler(
-        State(state): State<Arc<OpenRouterStubState>>,
-    ) -> impl IntoResponse {
+    async fn chat_stub_handler(State(state): State<Arc<ChatStubState>>) -> impl IntoResponse {
         let request_index = state.requests.fetch_add(1, Ordering::SeqCst);
         let response = state
             .responses
@@ -2220,15 +2267,13 @@ mod tests {
         (response.status, Json(response.body))
     }
 
-    async fn spawn_openrouter_stub(
-        responses: Vec<OpenRouterStubResponse>,
-    ) -> (String, Arc<OpenRouterStubState>) {
-        let state = Arc::new(OpenRouterStubState {
+    async fn spawn_chat_stub(responses: Vec<ChatStubResponse>) -> (String, Arc<ChatStubState>) {
+        let state = Arc::new(ChatStubState {
             requests: AtomicUsize::new(0),
             responses,
         });
         let app = Router::new()
-            .route("/chat/completions", post(openrouter_stub_handler))
+            .route("/chat/completions", post(chat_stub_handler))
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -2240,14 +2285,6 @@ mod tests {
                 .expect("stub server should run");
         });
         (format!("http://{addr}/chat/completions"), state)
-    }
-
-    fn openrouter_test_state(models: &str) -> AppState {
-        let mut state = test_state(None);
-        state.config.openrouter_api_key = Some("test-api-key".to_string());
-        state.config.openrouter_model = Some("test/primary:free".to_string());
-        state.config.openrouter_fallback_models = Some(models.to_string());
-        state
     }
 
     fn gateway_test_state(endpoint: &str, models: Option<&str>) -> AppState {
@@ -2318,7 +2355,7 @@ mod tests {
 
     #[tokio::test]
     async fn food_photo_stops_after_non_retryable_provider_response() {
-        let (endpoint, stub) = spawn_openrouter_stub(vec![OpenRouterStubResponse {
+        let (endpoint, stub) = spawn_chat_stub(vec![ChatStubResponse {
             status: StatusCode::UNAUTHORIZED,
             delay: Duration::ZERO,
             body: json!({ "error": { "message": "Invalid API key." } }),
@@ -2326,7 +2363,7 @@ mod tests {
         .await;
 
         let result = analyze_food_photo_url_with_limits(
-            &openrouter_test_state("test/fallback-1:free,test/fallback-2:free"),
+            &gateway_test_state(&endpoint, Some("test/model-1,test/model-2,test/model-3")),
             "data:image/png;base64,AA==",
             "",
             None,
@@ -2334,7 +2371,6 @@ mod tests {
             false,
             FoodPhotoRequestLimits {
                 chat_completions_url: &endpoint,
-                gateway: false,
                 model_timeout: Duration::from_millis(100),
                 request_timeout: Duration::from_secs(1),
             },
@@ -2355,13 +2391,13 @@ mod tests {
 
     #[tokio::test]
     async fn food_photo_uses_fallback_after_retryable_provider_response() {
-        let (endpoint, stub) = spawn_openrouter_stub(vec![
-            OpenRouterStubResponse {
+        let (endpoint, stub) = spawn_chat_stub(vec![
+            ChatStubResponse {
                 status: StatusCode::SERVICE_UNAVAILABLE,
                 delay: Duration::ZERO,
                 body: json!({ "error": { "message": "Provider temporarily unavailable." } }),
             },
-            OpenRouterStubResponse {
+            ChatStubResponse {
                 status: StatusCode::OK,
                 delay: Duration::ZERO,
                 body: json!({
@@ -2376,7 +2412,7 @@ mod tests {
         .await;
 
         let result = analyze_food_photo_url_with_limits(
-            &openrouter_test_state("test/fallback:free"),
+            &gateway_test_state(&endpoint, Some("test/model-1,test/model-2")),
             "data:image/png;base64,AA==",
             "",
             None,
@@ -2384,7 +2420,6 @@ mod tests {
             false,
             FoodPhotoRequestLimits {
                 chat_completions_url: &endpoint,
-                gateway: false,
                 model_timeout: Duration::from_millis(100),
                 request_timeout: Duration::from_secs(1),
             },
@@ -2398,17 +2433,18 @@ mod tests {
 
     #[tokio::test]
     async fn food_photo_fallback_chain_cannot_exceed_request_deadline() {
-        let delayed_retryable_failure = OpenRouterStubResponse {
+        let delayed_retryable_failure = ChatStubResponse {
             status: StatusCode::SERVICE_UNAVAILABLE,
             delay: Duration::from_millis(40),
             body: json!({ "error": { "message": "Provider temporarily unavailable." } }),
         };
-        let (endpoint, stub) = spawn_openrouter_stub(vec![delayed_retryable_failure]).await;
+        let (endpoint, stub) = spawn_chat_stub(vec![delayed_retryable_failure]).await;
         let started = Instant::now();
 
         let result = analyze_food_photo_url_with_limits(
-            &openrouter_test_state(
-                "test/fallback-1:free,test/fallback-2:free,test/fallback-3:free",
+            &gateway_test_state(
+                &endpoint,
+                Some("test/model-1,test/model-2,test/model-3,test/model-4"),
             ),
             "data:image/png;base64,AA==",
             "",
@@ -2417,7 +2453,6 @@ mod tests {
             false,
             FoodPhotoRequestLimits {
                 chat_completions_url: &endpoint,
-                gateway: false,
                 model_timeout: Duration::from_millis(60),
                 request_timeout: Duration::from_millis(100),
             },
@@ -2435,8 +2470,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gateway_mode_permits_non_free_models() {
-        let (endpoint, stub) = spawn_openrouter_stub(vec![OpenRouterStubResponse {
+    async fn food_photo_succeeds_through_the_gateway() {
+        let (endpoint, stub) = spawn_chat_stub(vec![ChatStubResponse {
             status: StatusCode::OK,
             delay: Duration::ZERO,
             body: json!({
@@ -2458,7 +2493,6 @@ mod tests {
             false,
             FoodPhotoRequestLimits {
                 chat_completions_url: &endpoint,
-                gateway: true,
                 model_timeout: Duration::from_millis(500),
                 request_timeout: Duration::from_secs(1),
             },
@@ -2487,7 +2521,6 @@ mod tests {
             false,
             FoodPhotoRequestLimits {
                 chat_completions_url: "http://127.0.0.1:9/unreachable",
-                gateway: true,
                 model_timeout: Duration::from_millis(100),
                 request_timeout: Duration::from_secs(1),
             },
@@ -2521,19 +2554,19 @@ mod tests {
     }
 
     #[test]
-    fn gateway_request_body_omits_openrouter_specific_fields() {
-        let body = serde_json::to_value(build_gateway_request_body(
+    fn food_photo_request_body_omits_fields_reasoning_models_reject() {
+        let body = serde_json::to_value(build_food_photo_request_body(
             "gpt-5.6-luna(low)",
             "data:image/png;base64,AA==",
             "",
             "user-1",
             false,
         ))
-        .expect("gateway body should serialize");
+        .expect("request body should serialize");
 
         assert_eq!(body["model"], json!("gpt-5.6-luna(low)"));
         assert_eq!(body["max_tokens"], json!(4000));
-        // Reasoning models reject temperature pins, and the OpenRouter
+        // Reasoning models reject temperature pins, and provider-specific
         // routing fields would be meaningless or rejected upstream.
         for absent in [
             "temperature",
@@ -2544,7 +2577,7 @@ mod tests {
         ] {
             assert!(
                 body.get(absent).is_none(),
-                "gateway body must not include {absent}"
+                "request body must not include {absent}"
             );
         }
         assert_eq!(
@@ -2553,9 +2586,271 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_content_less_upstream_200_is_sanitised_before_it_reaches_the_caller() {
+        // API-02: a 200 whose payload carries no usable `choices[0].message
+        // .content` is a common outcome. The payload names the provider, the
+        // model and the token spend; none of it may be echoed.
+        let (endpoint, _stub) = spawn_chat_stub(vec![ChatStubResponse {
+            status: StatusCode::OK,
+            delay: Duration::ZERO,
+            body: json!({
+                "provider": "SecretProvider",
+                "model": "internal/model",
+                "usage": { "total_tokens": 1234 },
+                "choices": [{ "message": { "content": null } }]
+            }),
+        }])
+        .await;
+
+        let result = analyze_food_photo_url_with_limits(
+            &gateway_test_state(&endpoint, Some("test/model-1")),
+            "data:image/png;base64,AA==",
+            "",
+            None,
+            "test-user",
+            false,
+            FoodPhotoRequestLimits {
+                chat_completions_url: &endpoint,
+                model_timeout: Duration::from_millis(100),
+                request_timeout: Duration::from_secs(1),
+            },
+        )
+        .await;
+
+        assert_eq!(result["kind"], json!("empty_response"));
+        assert_eq!(result["statusCode"], json!(502));
+        assert_eq!(
+            result["error"],
+            json!("The AI did not return a response. Please try again.")
+        );
+        assert!(
+            result.get("aiResponse").is_none(),
+            "the upstream payload must not be forwarded: {result}"
+        );
+        let serialized = result.to_string();
+        for leaked in ["SecretProvider", "internal/model", "1234"] {
+            assert!(
+                !serialized.contains(leaked),
+                "response leaked {leaked:?}: {serialized}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unparseable_model_output_is_not_echoed_back() {
+        // API-02, second branch: the model answered, but not with the JSON we
+        // asked for. The raw text is logged, not returned.
+        let (endpoint, _stub) = spawn_chat_stub(vec![ChatStubResponse {
+            status: StatusCode::OK,
+            delay: Duration::ZERO,
+            body: json!({
+                "choices": [{ "message": { "content": "I refuse. Internal note: SecretProvider" } }]
+            }),
+        }])
+        .await;
+
+        let result = analyze_food_photo_url_with_limits(
+            &gateway_test_state(&endpoint, Some("test/model-1")),
+            "data:image/png;base64,AA==",
+            "",
+            None,
+            "test-user",
+            false,
+            FoodPhotoRequestLimits {
+                chat_completions_url: &endpoint,
+                model_timeout: Duration::from_millis(100),
+                request_timeout: Duration::from_secs(1),
+            },
+        )
+        .await;
+
+        assert_eq!(result["kind"], json!("invalid_json"));
+        assert_eq!(result["statusCode"], json!(502));
+        assert!(result.get("aiResponse").is_none());
+        assert!(!result.to_string().contains("SecretProvider"));
+    }
+
+    #[tokio::test]
+    async fn a_transport_failure_never_reports_the_upstream_url() {
+        // API-12: `reqwest::Error`'s Display embeds the request URL. Point the
+        // client at a closed port so `send()` fails outright.
+        let result = analyze_food_photo_url_with_limits(
+            &gateway_test_state("http://127.0.0.1:1/chat/completions", Some("test/model-1")),
+            "data:image/png;base64,AA==",
+            "",
+            None,
+            "test-user",
+            false,
+            FoodPhotoRequestLimits {
+                chat_completions_url: "http://127.0.0.1:1/chat/completions",
+                model_timeout: Duration::from_millis(200),
+                request_timeout: Duration::from_secs(1),
+            },
+        )
+        .await;
+
+        assert_eq!(result["kind"], json!("provider_error"));
+        assert_eq!(result["statusCode"], json!(502));
+        assert_eq!(
+            result["error"],
+            json!("Photo analysis failed. Please try again.")
+        );
+        assert!(
+            !result.to_string().contains("127.0.0.1"),
+            "response leaked the upstream URL: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_model_that_cannot_see_images_is_reported_as_our_fault() {
+        // API-13, re-decided against the gateway code. The free-model allowlist
+        // is gone, so `unsupported_model` no longer describes a model the
+        // *caller* named — here it comes out of a server-configured model in
+        // `AI_GATEWAY_MODELS`, which is a deployment problem. It must not be
+        // returned as the caller's 400, and the provider's wording (which names
+        // the model) must not be forwarded either.
+        let (endpoint, _stub) = spawn_chat_stub(vec![ChatStubResponse {
+            status: StatusCode::BAD_REQUEST,
+            delay: Duration::ZERO,
+            body: json!({
+                "error": { "message": "Model internal/text-only does not support image input." }
+            }),
+        }])
+        .await;
+
+        let result = analyze_food_photo_url_with_limits(
+            &gateway_test_state(&endpoint, Some("test/model-1,test/model-2")),
+            "data:image/png;base64,AA==",
+            "",
+            None,
+            "test-user",
+            false,
+            FoodPhotoRequestLimits {
+                chat_completions_url: &endpoint,
+                model_timeout: Duration::from_millis(100),
+                request_timeout: Duration::from_secs(1),
+            },
+        )
+        .await;
+
+        assert_eq!(result["kind"], json!("unsupported_model"));
+        assert_eq!(result["statusCode"], json!(502));
+        assert_eq!(result["retryable"], json!(false));
+        assert!(
+            !result.to_string().contains("internal/text-only"),
+            "response leaked the provider's message: {result}"
+        );
+    }
+
+    #[test]
+    fn the_prompt_caps_how_much_clarification_reaches_the_model() {
+        // API-05: `clarification` had no cap while the image field was capped
+        // at 8 MB, so ~9 MB of prose could be billed as prompt tokens.
+        let huge = "x".repeat(MAX_CLARIFICATION_CHARS * 4);
+
+        let prompt = build_prompt(&huge, false);
+
+        let carried = prompt.lines().last().expect("prompt should have lines");
+        assert_eq!(carried.chars().count(), MAX_CLARIFICATION_CHARS);
+        assert!(prompt.len() < MAX_CLARIFICATION_CHARS + 1_000);
+    }
+
+    #[test]
+    fn a_short_clarification_survives_intact() {
+        let prompt = build_prompt("  the bowl holds 300 ml  ", false);
+
+        assert!(prompt.ends_with("the bowl holds 300 ml"));
+    }
+
+    #[test]
+    fn truncating_a_clarification_never_splits_a_character() {
+        // Multi-byte input must not be cut mid-code-point.
+        let prompt = build_prompt(&"é".repeat(MAX_CLARIFICATION_CHARS + 10), false);
+
+        let carried = prompt.lines().last().expect("prompt should have lines");
+        assert_eq!(carried.chars().count(), MAX_CLARIFICATION_CHARS);
+    }
+
+    #[test]
+    fn every_benchmark_fixture_points_at_a_direct_image_file() {
+        // CONCERN-C3: every fixture used to hand the provider a
+        // `commons.wikimedia.org/wiki/File:...` article URL, which serves
+        // `text/html`. Every benchmark was scoring models against a web page.
+        for fixture in BENCHMARK_FIXTURES {
+            assert!(
+                !fixture.image_url.contains("/wiki/"),
+                "{}: image_url is an article page, not an image: {}",
+                fixture.id,
+                fixture.image_url
+            );
+            assert!(
+                fixture.image_url.starts_with("https://"),
+                "{}: image_url must be https",
+                fixture.id
+            );
+
+            if fixture
+                .image_source_url
+                .starts_with("https://commons.wikimedia.org/")
+            {
+                assert!(
+                    fixture
+                        .image_url
+                        .starts_with("https://upload.wikimedia.org/wikipedia/commons/")
+                        && fixture.image_url.ends_with(".jpg"),
+                    "{}: a Commons fixture must fetch the direct file URL, got {}",
+                    fixture.id,
+                    fixture.image_url
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_unreproducible_benchmark_fixtures_are_the_known_ten() {
+        // `loremflickr.com` redirects to a different random photo per request,
+        // so these fixtures score models against an image nobody chose and
+        // cannot be compared across runs. Pinned so the set cannot grow
+        // unnoticed and so replacing them is visible as a test change.
+        let unreproducible = BENCHMARK_FIXTURES
+            .iter()
+            .filter(|fixture| fixture.image_url.contains("loremflickr.com"))
+            .map(|fixture| fixture.id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            unreproducible,
+            vec![
+                "medium-carrot",
+                "white-bread-slice",
+                "cheddar-ounce",
+                "almonds-ounce",
+                "rolled-oats-40g",
+                "cooked-shrimp-100g",
+                "cooked-salmon-100g",
+                "cooked-lentils-cup",
+                "whole-milk-cup",
+                "nonfat-greek-yogurt-170g",
+            ]
+        );
+    }
+
+    /// `BENCHMARK_LOCK` is process-global, so the tests that drive it have to
+    /// take turns.
+    static BENCHMARK_LOCK_TESTS: Mutex<()> = Mutex::new(());
+
+    fn clear_benchmark_lock() {
+        let lock = BENCHMARK_LOCK.get_or_init(|| Mutex::new(None));
+        *lock.lock().unwrap_or_else(|error| error.into_inner()) = None;
+    }
+
     #[test]
     fn benchmark_lock_guard_releases_on_drop() {
-        release_benchmark_lock();
+        let _serialized = BENCHMARK_LOCK_TESTS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        clear_benchmark_lock();
 
         let guard = acquire_benchmark_lock().expect("first acquire should succeed");
         assert!(
@@ -2569,7 +2864,30 @@ mod tests {
             acquire_benchmark_lock().is_some(),
             "dropping guard should release benchmark lock"
         );
-        release_benchmark_lock();
+        clear_benchmark_lock();
+    }
+
+    #[test]
+    fn an_overrunning_benchmark_run_cannot_release_its_successor() {
+        // API-08: run A overruns the TTL, so run B legitimately takes the lock.
+        // A finishing afterwards must not clear B's stamp — doing so let a
+        // third run start alongside B and doubled the upstream spend.
+        let _serialized = BENCHMARK_LOCK_TESTS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        clear_benchmark_lock();
+
+        let run_a =
+            acquire_benchmark_lock_with_ttl(Duration::ZERO).expect("run A should take the lock");
+        let _run_b = acquire_benchmark_lock().expect("run B should take the expired lock");
+
+        drop(run_a);
+
+        assert!(
+            acquire_benchmark_lock().is_none(),
+            "run B still holds the lock; a third run must not start"
+        );
+        clear_benchmark_lock();
     }
 
     async fn food_photo_test_handler(
@@ -2649,21 +2967,12 @@ mod tests {
 
     #[tokio::test]
     async fn barcode_route_falls_back_to_albert_heijn_after_open_food_facts_miss() {
+        // Drives the post-authentication half of the route: the account gate
+        // added for API-14 needs a real database, which this stub-backed test
+        // deliberately does not have.
         let base_url = spawn_barcode_provider_stub().await;
         let state = test_state(Some(&base_url));
-        let cookie = session_cookie(&state);
-        let app = router().with_state(state);
-        let response = app
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/api/barcode/8712345678901")
-                    .header("cookie", cookie)
-                    .body(Body::empty())
-                    .expect("request should build"),
-            )
-            .await
-            .expect("request should complete");
+        let response = lookup_barcode_for_user(&state, "8712345678901".to_string()).await;
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = response
@@ -2724,6 +3033,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn barcode_route_rejects_a_session_whose_account_cannot_be_loaded() {
+        // API-14: a correctly signed cookie used to be sufficient, so a 7-day
+        // session belonging to a deleted account still fanned out to five
+        // upstream providers. The account must now resolve.
+        let state = test_state(None);
+        let cookie = session_cookie(&state);
+        let app = router().with_state(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/barcode/8712345678901")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("request should complete");
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn the_benchmark_route_answers_the_same_way_whatever_an_anonymous_body_contains() {
+        // API-09: `Json<Value>` ran before the admin check, so malformed JSON
+        // returned 400 and well-formed JSON returned 401 — a reliable way for
+        // an unauthenticated caller to confirm a route that deliberately 404s
+        // to authenticated non-admins.
+        for body in ["{ not json", r#"{"model":"test/model:free"}"#] {
+            let app = router().with_state(test_state(None));
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/admin/ai-model-benchmark")
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .expect("request should build"),
+                )
+                .await
+                .expect("request should complete");
+
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "body {body:?} produced a distinguishable status"
+            );
+        }
+    }
+
+    #[test]
+    fn one_account_cannot_hold_every_food_photo_slot() {
+        // API-04: without per-user accounting a single account could take all
+        // four global permits and hold them for the full upstream round trip.
+        let noisy = Uuid::new_v4();
+        let other = Uuid::new_v4();
+
+        let held = (0..MAX_FOOD_PHOTO_UPLOADS_PER_USER)
+            .map(|_| {
+                acquire_food_photo_user_slot(noisy).expect("slots up to the cap should be granted")
+            })
+            .collect::<Vec<_>>();
+
+        assert!(
+            acquire_food_photo_user_slot(noisy).is_none(),
+            "an account past its cap must be refused"
+        );
+        assert!(
+            acquire_food_photo_user_slot(other).is_some(),
+            "one noisy account must not starve everyone else"
+        );
+
+        drop(held);
+        assert!(
+            acquire_food_photo_user_slot(noisy).is_some(),
+            "finishing an upload must return the slot"
+        );
+    }
+
+    #[test]
+    fn released_food_photo_slots_do_not_accumulate_per_account() {
+        let user_id = Uuid::new_v4();
+
+        drop(acquire_food_photo_user_slot(user_id).expect("slot should be granted"));
+
+        let slots = food_photo_user_slots()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert!(
+            !slots.contains_key(&user_id),
+            "the map must not grow one entry per account that ever uploaded"
+        );
+    }
+
+    #[tokio::test]
     async fn barcode_route_rejects_a_forged_session_cookie() {
         let app = router().with_state(test_state(None));
         let response = app
@@ -2758,6 +3162,23 @@ struct BenchmarkFixture {
     name: &'static str,
     serving_description: &'static str,
     asset_file_name: &'static str,
+    /// The URL whose bytes are handed to the model.
+    ///
+    /// For the Wikimedia fixtures this is the direct `upload.wikimedia.org`
+    /// file URL. **Do not "tidy" it back into a
+    /// `commons.wikimedia.org/wiki/File:...` article URL** — those serve
+    /// `text/html`, so every run would score the model against a web page
+    /// instead of a photo. The pasta fixture keeps its parentheses
+    /// percent-encoded for the same reason.
+    ///
+    /// The ten `loremflickr.com` fixtures are **not** yet resolved: that
+    /// service redirects to a different random keyword-matching photo on every
+    /// request, so those fixtures cannot be reproducible and their expected
+    /// macros describe a serving no particular photo shows. They are left
+    /// as-is pending replacement images.
+    image_url: &'static str,
+    /// Human-facing Commons article page, linked from the admin UI for
+    /// attribution and licensing. Never fetched.
     image_source_url: &'static str,
     expected_source: &'static str,
     category: &'static str,
@@ -2808,6 +3229,7 @@ const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "Medium banana",
         serving_description: "One medium banana, edible portion only.",
         asset_file_name: "banana.jpg",
+        image_url: "https://upload.wikimedia.org/wikipedia/commons/8/8a/Banana-Single.jpg",
         image_source_url: "https://commons.wikimedia.org/wiki/File:Banana-Single.jpg",
         expected_source: "USDA FoodData Central, one medium banana, rounded.",
         category: "fruit",
@@ -2821,6 +3243,7 @@ const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "Medium red apple",
         serving_description: "One medium raw apple with skin.",
         asset_file_name: "apple.jpg",
+        image_url: "https://upload.wikimedia.org/wikipedia/commons/1/15/Red_Apple.jpg",
         image_source_url: "https://commons.wikimedia.org/wiki/File:Red_Apple.jpg",
         expected_source: "USDA FoodData Central, one medium apple with skin, rounded.",
         category: "fruit",
@@ -2834,6 +3257,7 @@ const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "Large hard-boiled egg",
         serving_description: "One large hard-boiled egg.",
         asset_file_name: "hard-boiled-egg.jpg",
+        image_url: "https://upload.wikimedia.org/wikipedia/commons/c/c3/Hard_boiled_egg.jpg",
         image_source_url: "https://commons.wikimedia.org/wiki/File:Hard_boiled_egg.jpg",
         expected_source: "USDA FoodData Central, one large hard-boiled egg, rounded.",
         category: "protein",
@@ -2847,6 +3271,7 @@ const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "Medium orange",
         serving_description: "One medium raw orange, peeled edible portion.",
         asset_file_name: "orange.jpg",
+        image_url: "https://upload.wikimedia.org/wikipedia/commons/4/43/Ambersweet_oranges.jpg",
         image_source_url: "https://commons.wikimedia.org/wiki/File:Ambersweet_oranges.jpg",
         expected_source: "USDA FoodData Central, one medium orange, rounded.",
         category: "fruit",
@@ -2860,6 +3285,7 @@ const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "Cooked white rice",
         serving_description: "One cup cooked long-grain white rice.",
         asset_file_name: "white-rice.jpg",
+        image_url: "https://upload.wikimedia.org/wikipedia/commons/1/16/Cooked_white_rice.jpg",
         image_source_url: "https://commons.wikimedia.org/wiki/File:Cooked_white_rice.jpg",
         expected_source: "USDA FoodData Central, one cup cooked white rice, rounded.",
         category: "grain",
@@ -2873,6 +3299,7 @@ const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "Cooked spaghetti",
         serving_description: "One cup cooked plain spaghetti pasta.",
         asset_file_name: "pasta.jpg",
+        image_url: "https://upload.wikimedia.org/wikipedia/commons/3/3f/%28Pasta%29_by_David_Adam_Kess_%28pic.2%29.jpg",
         image_source_url: "https://commons.wikimedia.org/wiki/File:(Pasta)_by_David_Adam_Kess_(pic.2).jpg",
         expected_source: "USDA FoodData Central, one cup cooked spaghetti, rounded.",
         category: "grain",
@@ -2886,6 +3313,7 @@ const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "Half avocado",
         serving_description: "One half medium raw avocado.",
         asset_file_name: "avocado.jpg",
+        image_url: "https://upload.wikimedia.org/wikipedia/commons/f/f0/Liat_Portal_for_Foodie_Disorder_-_Avocado_halves.jpg",
         image_source_url: "https://commons.wikimedia.org/wiki/File:Liat_Portal_for_Foodie_Disorder_-_Avocado_halves.jpg",
         expected_source: "USDA FoodData Central, half medium avocado, rounded.",
         category: "fat",
@@ -2899,6 +3327,7 @@ const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "Cooked broccoli",
         serving_description: "One cup cooked chopped broccoli.",
         asset_file_name: "broccoli.jpg",
+        image_url: "https://upload.wikimedia.org/wikipedia/commons/4/48/Broccoli_florets_on_ice.jpg",
         image_source_url: "https://commons.wikimedia.org/wiki/File:Broccoli_florets_on_ice.jpg",
         expected_source: "USDA FoodData Central, one cup cooked broccoli, rounded.",
         category: "vegetable",
@@ -2912,6 +3341,9 @@ const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "Medium carrot",
         serving_description: "One medium raw carrot.",
         asset_file_name: "carrot.jpg",
+        // Unresolved: see `image_url` — this fixture has no stable
+        // source image.
+        image_url: "https://loremflickr.com/512/512/carrot,food",
         image_source_url: "https://loremflickr.com/512/512/carrot,food",
         expected_source: "USDA FoodData Central, one medium raw carrot, rounded.",
         category: "vegetable",
@@ -2925,6 +3357,9 @@ const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "White bread slice",
         serving_description: "One regular slice white bread.",
         asset_file_name: "white-bread.jpg",
+        // Unresolved: see `image_url` — this fixture has no stable
+        // source image.
+        image_url: "https://loremflickr.com/512/512/toast,food",
         image_source_url: "https://loremflickr.com/512/512/toast,food",
         expected_source: "USDA FoodData Central, one slice white bread, rounded.",
         category: "grain",
@@ -2938,6 +3373,9 @@ const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "Cheddar cheese",
         serving_description: "One ounce cheddar cheese.",
         asset_file_name: "cheddar.jpg",
+        // Unresolved: see `image_url` — this fixture has no stable
+        // source image.
+        image_url: "https://loremflickr.com/512/512/cheddar,food",
         image_source_url: "https://loremflickr.com/512/512/cheddar,food",
         expected_source: "USDA FoodData Central, one ounce cheddar cheese, rounded.",
         category: "dairy",
@@ -2951,6 +3389,9 @@ const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "Raw almonds",
         serving_description: "One ounce raw almonds.",
         asset_file_name: "almonds.jpg",
+        // Unresolved: see `image_url` — this fixture has no stable
+        // source image.
+        image_url: "https://loremflickr.com/512/512/almonds,food",
         image_source_url: "https://loremflickr.com/512/512/almonds,food",
         expected_source: "USDA FoodData Central, one ounce raw almonds, rounded.",
         category: "fat",
@@ -2964,6 +3405,9 @@ const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "Rolled oats",
         serving_description: "Forty grams dry rolled oats.",
         asset_file_name: "oats.jpg",
+        // Unresolved: see `image_url` — this fixture has no stable
+        // source image.
+        image_url: "https://loremflickr.com/512/512/oats,food",
         image_source_url: "https://loremflickr.com/512/512/oats,food",
         expected_source: "Common nutrition label serving, 40g dry rolled oats.",
         category: "grain",
@@ -2977,6 +3421,9 @@ const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "Cooked shrimp",
         serving_description: "One hundred grams cooked shrimp.",
         asset_file_name: "shrimp.jpg",
+        // Unresolved: see `image_url` — this fixture has no stable
+        // source image.
+        image_url: "https://loremflickr.com/512/512/prawn,food",
         image_source_url: "https://loremflickr.com/512/512/prawn,food",
         expected_source: "USDA FoodData Central, 100g cooked shrimp, rounded.",
         category: "protein",
@@ -2990,6 +3437,9 @@ const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "Cooked salmon",
         serving_description: "One hundred grams cooked Atlantic salmon.",
         asset_file_name: "salmon.jpg",
+        // Unresolved: see `image_url` — this fixture has no stable
+        // source image.
+        image_url: "https://loremflickr.com/512/512/salmon,food",
         image_source_url: "https://loremflickr.com/512/512/salmon,food",
         expected_source: "USDA FoodData Central, 100g cooked Atlantic salmon, rounded.",
         category: "protein",
@@ -3003,6 +3453,9 @@ const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "Cooked lentils",
         serving_description: "One cup cooked lentils.",
         asset_file_name: "lentils.jpg",
+        // Unresolved: see `image_url` — this fixture has no stable
+        // source image.
+        image_url: "https://loremflickr.com/512/512/lentils,food",
         image_source_url: "https://loremflickr.com/512/512/lentils,food",
         expected_source: "USDA FoodData Central, one cup cooked lentils, rounded.",
         category: "legume",
@@ -3016,6 +3469,9 @@ const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "Whole milk",
         serving_description: "One cup whole milk.",
         asset_file_name: "whole-milk.jpg",
+        // Unresolved: see `image_url` — this fixture has no stable
+        // source image.
+        image_url: "https://loremflickr.com/512/512/milk,food",
         image_source_url: "https://loremflickr.com/512/512/milk,food",
         expected_source: "USDA FoodData Central, one cup whole milk, rounded.",
         category: "dairy",
@@ -3029,6 +3485,9 @@ const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "Greek yogurt",
         serving_description: "One 170g serving plain nonfat Greek yogurt.",
         asset_file_name: "greek-yogurt.jpg",
+        // Unresolved: see `image_url` — this fixture has no stable
+        // source image.
+        image_url: "https://loremflickr.com/512/512/yogurt,food",
         image_source_url: "https://loremflickr.com/512/512/yogurt,food",
         expected_source: "USDA FoodData Central, 170g plain nonfat Greek yogurt, rounded.",
         category: "dairy",

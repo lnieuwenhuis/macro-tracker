@@ -35,6 +35,65 @@ function readRequiredEnv(name: string, fallback?: string) {
   return value;
 }
 
+/**
+ * Mirrors `validate_secret` in `apps/backend/src/config.rs`. The two services
+ * share one HMAC key, so a secret the backend refuses to start on must not be
+ * silently accepted here — `jose` enforces no minimum key length of its own,
+ * which previously made `SESSION_SECRET=x` a working HS256 signing key.
+ */
+const MIN_SESSION_SECRET_LENGTH = 32;
+
+/**
+ * Values that are published in this repository or its documentation, so
+ * "long enough" says nothing about whether they are secret.
+ */
+const KNOWN_INSECURE_SESSION_SECRETS = new Set([
+  // README setup instructions — 35 characters, so a length check alone passes.
+  "change-this-to-a-long-random-string",
+  // `LOCAL_SESSION_SECRET` in the backend config, and `playwright.config.ts`.
+  "macro-tracker-dev-session-secret",
+  // The sibling internal-secret default in `playwright.config.ts`.
+  "macro-tracker-local-backend-secret",
+]);
+
+const LOOPBACK_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+
+/**
+ * Mirrors `allows_insecure_internal_auth_for_app_url` in the backend config: a
+ * loopback `APP_URL` cannot be serving real users, so the committed development
+ * secrets stay usable there. Anything else is a deployment and must not run on
+ * a value published in this repository.
+ */
+function isLoopbackAppUrl(appUrl: string) {
+  try {
+    return LOOPBACK_HOSTNAMES.has(new URL(appUrl).hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+function readSessionSecret(appUrl: string) {
+  const value = readRequiredEnv("SESSION_SECRET");
+  // Measured on the trimmed value so 32 spaces cannot pass as a strong secret,
+  // but the raw value is what gets returned: the backend signs with the
+  // untrimmed bytes and the two must agree.
+  const trimmed = value.trim();
+
+  if (trimmed.length < MIN_SESSION_SECRET_LENGTH) {
+    throw new Error(
+      `SESSION_SECRET must be at least ${MIN_SESSION_SECRET_LENGTH} characters.`,
+    );
+  }
+
+  if (KNOWN_INSECURE_SESSION_SECRETS.has(trimmed) && !isLoopbackAppUrl(appUrl)) {
+    throw new Error(
+      "SESSION_SECRET must not be a known placeholder or development value. Generate one with `openssl rand -base64 48`.",
+    );
+  }
+
+  return value;
+}
+
 export function getServerEnv(): ServerEnv {
   if (cachedEnv) {
     return cachedEnv;
@@ -49,7 +108,7 @@ export function getServerEnv(): ServerEnv {
   // Required unconditionally. It used to fall back to a repo-visible literal
   // outside production, which meant one mis-set NODE_ENV made every HS256
   // session forgeable.
-  const sessionSecret = readRequiredEnv("SESSION_SECRET");
+  const sessionSecret = readSessionSecret(appUrl);
 
   cachedEnv = {
     appUrl,

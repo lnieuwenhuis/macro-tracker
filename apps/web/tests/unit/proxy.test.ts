@@ -59,6 +59,7 @@ describe("proxy session refresh", () => {
   beforeEach(() => {
     process.env.APP_URL = "http://app.internal";
     process.env.APP_TRUSTED_ORIGINS = "https://trusted.example";
+    process.env.SESSION_SECRET = "proxy-test-session-secret-32-chars-x";
     resetServerEnvForTests();
     vi.clearAllMocks();
     mocked.verifySessionToken.mockResolvedValue(sessionUser);
@@ -142,6 +143,58 @@ describe("proxy session refresh", () => {
 
     const response = await proxy(
       proxyRequest("trusted.example", { path: "/docs/api" }),
+    );
+
+    expect(response.headers.get("location")).toBeNull();
+  });
+
+  describe("public path allowlist", () => {
+    // The extension test used to be `pathname.endsWith(".png")`, which matched
+    // anywhere in the path and let any route skip the session gate.
+    it.each([
+      "/api/barcode/1234.png",
+      "/admin/barcodes/abc.png",
+      "/admin/users/evil.svg",
+      "/settings/api.ico",
+    ])("still gates %s", async (path) => {
+      mocked.verifySessionToken.mockResolvedValue(null);
+
+      const response = await proxy(proxyRequest("trusted.example", { path }));
+
+      expect(response.headers.get("location")).toContain("/login");
+    });
+
+    it.each(["/sw.js", "/manifest.webmanifest", "/icon.svg", "/favicon.ico"])(
+      "still serves %s without a session",
+      async (path) => {
+        mocked.verifySessionToken.mockResolvedValue(null);
+
+        const response = await proxy(proxyRequest("trusted.example", { path }));
+
+        expect(response.headers.get("location")).toBeNull();
+      },
+    );
+  });
+
+  it("redirects a signed-in user away from a bare /login", async () => {
+    const response = await proxy(
+      proxyRequest("trusted.example", {
+        path: "/login",
+        sessionToken: "session-token",
+      }),
+    );
+
+    expect(response.headers.get("location")).toBe("http://127.0.0.1:3000/");
+  });
+
+  it("lets /login render for a session that was just bounced with an error", async () => {
+    // Otherwise a token that verifies but whose account no longer resolves
+    // ping-pongs between `/login` and the page that rejected it.
+    const response = await proxy(
+      proxyRequest("trusted.example", {
+        path: "/login?error=session_expired",
+        sessionToken: "session-token",
+      }),
     );
 
     expect(response.headers.get("location")).toBeNull();

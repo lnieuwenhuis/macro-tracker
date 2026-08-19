@@ -1,5 +1,18 @@
-# Default Railway config for the frontend service.
-# Configure the Rust backend as a separate Railway service using /apps/backend/railway.toml.
+# Repository-root Railway config. Railway applies this to any service that has no
+# config-as-code path of its own, so it is NOT safe to treat as "the frontend's
+# config" alone - commit 8cac5bea had to add infra/cliproxyapi/railway.toml
+# precisely because this file's `pnpm start` was replacing the proxy service's
+# container entrypoint and failing that deploy.
+#
+# Each service therefore points at its own file:
+#   /railway.toml                  frontend (@macro-tracker/web), and the fallback
+#   /apps/web/railway.toml         frontend, service-scoped
+#   /apps/backend/railway.toml     Rust backend
+#   /infra/cliproxyapi/railway.toml  proxy
+#
+# OPS-05 in the audit proposed collapsing the frontend's two copies into one. Do
+# not: a service with no scoped config silently inherits this one. Keep them in
+# sync instead.
 
 [build]
 builder = "RAILPACK"

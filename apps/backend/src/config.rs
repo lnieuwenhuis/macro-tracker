@@ -6,7 +6,27 @@ use std::str::FromStr;
 
 pub const ALLOW_INSECURE_LOCAL_BACKEND_ENV: &str = "BACKEND_ALLOW_INSECURE_LOCAL";
 pub const LOCAL_SESSION_SECRET: &str = "macro-tracker-dev-session-secret";
+pub const ENABLE_TEST_ROUTES_ENV: &str = "BACKEND_ENABLE_TEST_ROUTES";
 const MIN_SECRET_LENGTH: usize = 32;
+
+/// SEC-08: values that are published in this repository or its documentation.
+/// Length says nothing about whether a secret is secret, and every one of these
+/// clears `MIN_SECRET_LENGTH` on its own — the README placeholder is 35
+/// characters. `apps/web/lib/env.ts` keeps the same list; the two services share
+/// one HMAC key, so a value one refuses must not start the other.
+///
+/// The CI literals (`macro-tracker-ci-*-secret-32-chars`) are deliberately
+/// absent: CI runs the backend with a loopback `APP_URL` and no insecure-local
+/// flag, so blocking them would break the hard gate without protecting any
+/// deployment.
+const KNOWN_INSECURE_SECRETS: &[&str] = &[
+    // `LOCAL_SESSION_SECRET`, also the `playwright.config.ts` session default.
+    LOCAL_SESSION_SECRET,
+    // The internal-secret default in `apps/web/playwright.config.ts`.
+    "macro-tracker-local-backend-secret",
+    // The README setup placeholder.
+    "change-this-to-a-long-random-string",
+];
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -23,13 +43,10 @@ pub struct Config {
     pub shoo_base_url: String,
     pub trusted_origins: Vec<String>,
     pub admin_owner_emails: Vec<String>,
-    pub openrouter_api_key: Option<String>,
-    pub openrouter_model: Option<String>,
-    pub openrouter_fallback_models: Option<String>,
-    pub openrouter_model_timeout_ms: Option<u64>,
     pub ai_gateway_url: Option<String>,
     pub ai_gateway_api_key: Option<String>,
     pub ai_gateway_models: Option<String>,
+    pub ai_gateway_model_timeout_ms: Option<u64>,
     pub open_food_facts_base_url: String,
     pub albert_heijn_base_url: String,
     pub jumbo_base_url: String,
@@ -68,6 +85,9 @@ impl Config {
         }
         let database_url = read_required(&mut read, "DATABASE_URL", None)?;
         validate_postgres_database_url(&database_url)?;
+        let enable_test_routes =
+            parse_env_bool(read_value(&mut read, ENABLE_TEST_ROUTES_ENV).as_deref());
+        validate_test_routes_mode(enable_test_routes, &app_url)?;
 
         let app_origin = url::Url::parse(&app_url)
             .context("APP_URL must be a valid URL")?
@@ -84,16 +104,18 @@ impl Config {
         Ok(Self {
             allow_insecure_internal_auth: allow_insecure_local,
             app_url,
-            enable_test_routes: parse_env_bool(
-                read_value(&mut read, "BACKEND_ENABLE_TEST_ROUTES").as_deref(),
-            ),
+            enable_test_routes,
             backend_internal_secret,
             database_url,
             port: parse_bounded(read_value(&mut read, "PORT"), "PORT", 4000, 1, u16::MAX)?,
+            // SEC-09: three permits is small enough that one burst of
+            // unauthenticated requests that touch the database *before* any
+            // credential check starves every real request behind the 10s acquire
+            // timeout. Ten still fits a personal Postgres instance.
             postgres_pool_max: parse_bounded(
                 read_value(&mut read, "POSTGRES_POOL_MAX"),
                 "POSTGRES_POOL_MAX",
-                3,
+                10,
                 1,
                 256,
             )?,
@@ -106,22 +128,19 @@ impl Config {
             )?,
             trusted_origins,
             admin_owner_emails: parse_csv_lower(read_value(&mut read, "ADMIN_OWNER_EMAILS")),
-            openrouter_api_key: read_value(&mut read, "OPENROUTER_API_KEY"),
-            openrouter_model: read_value(&mut read, "OPENROUTER_MODEL"),
-            openrouter_fallback_models: read_value(&mut read, "OPENROUTER_FALLBACK_MODELS"),
-            openrouter_model_timeout_ms: match read_value(&mut read, "OPENROUTER_MODEL_TIMEOUT_MS")
-            {
-                None => None,
-                Some(value) => Some(value.parse().with_context(|| {
-                    "OPENROUTER_MODEL_TIMEOUT_MS must be a non-negative integer".to_string()
-                })?),
-            },
             ai_gateway_url: parse_ai_gateway_url(
                 read_value(&mut read, "AI_GATEWAY_URL"),
                 allow_insecure_local,
             )?,
             ai_gateway_api_key: read_value(&mut read, "AI_GATEWAY_API_KEY"),
             ai_gateway_models: read_value(&mut read, "AI_GATEWAY_MODELS"),
+            ai_gateway_model_timeout_ms: match read_value(&mut read, "AI_GATEWAY_MODEL_TIMEOUT_MS")
+            {
+                None => None,
+                Some(value) => Some(value.parse().with_context(|| {
+                    "AI_GATEWAY_MODEL_TIMEOUT_MS must be a non-negative integer".to_string()
+                })?),
+            },
             open_food_facts_base_url: parse_https_base_url(
                 read_value(&mut read, "OPEN_FOOD_FACTS_BASE_URL"),
                 "OPEN_FOOD_FACTS_BASE_URL",
@@ -280,11 +299,36 @@ fn validate_secret(name: &str, value: &str, allow_insecure_local: bool) -> anyho
     if allow_insecure_local {
         return Ok(());
     }
-    if value == LOCAL_SESSION_SECRET {
-        bail!("{name} must not use the local development default secret.");
+    // SEC-08: checked on the trimmed value so 32 spaces cannot pass as a strong
+    // secret. Only the *check* trims — the untrimmed value is what gets signed
+    // with, and both services must agree on the exact key bytes.
+    let trimmed = value.trim();
+    if KNOWN_INSECURE_SECRETS.contains(&trimmed) {
+        bail!(
+            "{name} must not use a development or placeholder secret published in this repository. Generate one with `openssl rand -base64 48`."
+        );
     }
-    if value.len() < MIN_SECRET_LENGTH {
+    if trimmed.len() < MIN_SECRET_LENGTH {
         bail!("{name} must be at least {MIN_SECRET_LENGTH} characters long.");
+    }
+    Ok(())
+}
+
+/// SEC-05: `BACKEND_ENABLE_TEST_ROUTES` turns on `ensureUserRoleForTesting`, a
+/// bare `UPDATE users SET role` with none of the real admin path's guards — no
+/// actor, no `FOR UPDATE`, no last-owner refusal, no audit event. Anyone who can
+/// reach `/internal/rpc` with the shared secret can make themselves `owner`, or
+/// demote the last one and lock admin out entirely.
+/// `apps/web/playwright.config.ts` ships the flag inside a copy-pasteable env
+/// block, so the realistic failure is that block landing in a deployed service.
+///
+/// Refused unless `APP_URL` is loopback, exactly like the sibling
+/// `BACKEND_ALLOW_INSECURE_LOCAL`.
+fn validate_test_routes_mode(enable_test_routes: bool, app_url: &str) -> anyhow::Result<()> {
+    if enable_test_routes && !is_local_app_url(app_url) {
+        bail!(
+            "{ENABLE_TEST_ROUTES_ENV}=true is only allowed when APP_URL points to localhost or a loopback address."
+        );
     }
     Ok(())
 }
@@ -369,11 +413,11 @@ fn parse_https_base_url(
     Ok(raw)
 }
 
-/// The AI gateway is the OpenAI-compatible chat-completions endpoint that
-/// replaces OpenRouter for food-photo analysis (a CLIProxyAPI service).
-/// Railway's private network (`*.railway.internal`) has no TLS, so plain
-/// http is only allowed there and on loopback; anything else must be https
-/// or the API key would cross the public internet in cleartext.
+/// The AI gateway is the OpenAI-compatible chat-completions endpoint used
+/// for food-photo analysis (normally a CLIProxyAPI service). Railway's
+/// private network (`*.railway.internal`) has no TLS, so plain http is only
+/// allowed there and on loopback; anything else must be https or the API
+/// key would cross the public internet in cleartext.
 fn parse_ai_gateway_url(
     value: Option<String>,
     allow_insecure_local: bool,
@@ -427,6 +471,34 @@ fn parse_origin_list(value: Option<String>) -> anyhow::Result<Vec<String>> {
         .collect()
 }
 
+/// A fully-populated, valid `Config` for tests that need an `AppState` but
+/// don't care about specific values. Shared by `main.rs` and `api.rs` (both
+/// previously carried their own copy of this literal — CLEAN-10); callers
+/// that need a particular field value overwrite it after construction.
+#[cfg(test)]
+pub(crate) fn test_config() -> Config {
+    Config {
+        allow_insecure_internal_auth: false,
+        enable_test_routes: false,
+        app_url: "http://localhost:3000".to_string(),
+        backend_internal_secret: Some("internal-secret-with-at-least-32-chars".to_string()),
+        database_url: "postgres://postgres:postgres@127.0.0.1:5432/macro_tracker".to_string(),
+        port: 4000,
+        postgres_pool_max: 1,
+        session_secret: "session-secret-with-at-least-32-chars".to_string(),
+        shoo_base_url: "https://shoo.dev".to_string(),
+        trusted_origins: vec!["http://localhost:3000".to_string()],
+        admin_owner_emails: vec![],
+        ai_gateway_url: None,
+        ai_gateway_api_key: None,
+        ai_gateway_models: None,
+        ai_gateway_model_timeout_ms: None,
+        open_food_facts_base_url: "https://world.openfoodfacts.org".to_string(),
+        albert_heijn_base_url: "https://api.ah.nl".to_string(),
+        jumbo_base_url: "https://mobileapi.jumbo.com".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,10 +549,120 @@ mod tests {
         let config = config_from(&production_values()).expect("config should build");
         assert!(!config.enable_test_routes);
 
-        let mut values = production_values();
-        values.push(("BACKEND_ENABLE_TEST_ROUTES", "true"));
+        let mut values = local_values();
+        values.push((ENABLE_TEST_ROUTES_ENV, "true"));
         let config = config_from(&values).expect("config should build");
         assert!(config.enable_test_routes);
+    }
+
+    /// SEC-05.
+    #[test]
+    fn backend_test_routes_are_refused_for_a_non_local_app_url() {
+        let mut values = production_values();
+        values.push((ENABLE_TEST_ROUTES_ENV, "true"));
+
+        let error =
+            config_from(&values).expect_err("test routes must not be enabled for a deployment");
+
+        assert!(
+            error
+                .to_string()
+                .contains("only allowed when APP_URL points to localhost"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    /// SEC-05: the Playwright/CI `APP_URL` values must keep working.
+    #[test]
+    fn backend_test_routes_are_accepted_for_loopback_app_urls() {
+        for app_url in [
+            "http://localhost:3000",
+            "http://dev.localhost:3000",
+            "http://127.0.0.1:3000",
+            "http://[::1]:3000",
+        ] {
+            let mut values = production_values();
+            values.retain(|(key, _)| *key != "APP_URL");
+            values.push(("APP_URL", app_url));
+            values.push((ENABLE_TEST_ROUTES_ENV, "true"));
+
+            let config = config_from(&values)
+                .unwrap_or_else(|error| panic!("{app_url} should be accepted: {error:#}"));
+
+            assert!(config.enable_test_routes, "{app_url}");
+        }
+    }
+
+    /// SEC-08: `read_secret` deliberately keeps `SESSION_SECRET` untrimmed
+    /// (the signing bytes must match the web side exactly), but it used to
+    /// *measure* the untrimmed value too — so 40 spaces around `short` cleared
+    /// the 32-character floor while carrying five characters of entropy.
+    #[test]
+    fn production_config_measures_secret_length_on_the_trimmed_value() {
+        let padded_short = format!("   {}short   ", " ".repeat(40));
+        assert!(padded_short.len() > MIN_SECRET_LENGTH);
+        for name in ["SESSION_SECRET", "BACKEND_INTERNAL_SECRET"] {
+            let mut values = production_values();
+            values.retain(|(key, _)| *key != name);
+            values.push((name, &padded_short));
+
+            let Err(error) = config_from(&values) else {
+                panic!("{name} of only whitespace must be rejected");
+            };
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("must be at least 32 characters long"),
+                "unexpected error for {name}: {error:#}"
+            );
+        }
+    }
+
+    /// SEC-08: mirrors `KNOWN_INSECURE_SESSION_SECRETS` in `apps/web/lib/env.ts`.
+    #[test]
+    fn production_config_rejects_committed_development_secrets() {
+        for secret in [
+            "macro-tracker-dev-session-secret",
+            "macro-tracker-local-backend-secret",
+            // 35 characters, so a naive length check passes it.
+            "change-this-to-a-long-random-string",
+            // Padding must not smuggle a blocked value past the check either.
+            "  change-this-to-a-long-random-string  ",
+        ] {
+            for name in ["SESSION_SECRET", "BACKEND_INTERNAL_SECRET"] {
+                let mut values = production_values();
+                values.retain(|(key, _)| *key != name);
+                values.push((name, secret));
+
+                let Err(error) = config_from(&values) else {
+                    panic!("{name}={secret:?} must be rejected");
+                };
+
+                assert!(
+                    error.to_string().contains(
+                        "must not use a development or placeholder secret published in this repository"
+                    ),
+                    "unexpected error for {name}={secret:?}: {error:#}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn postgres_pool_defaults_above_the_unauthenticated_request_burst() {
+        let config = config_from(&production_values()).expect("config should build");
+
+        assert_eq!(config.postgres_pool_max, 10);
+    }
+
+    /// `production_values` with the loopback `APP_URL` a local or CI backend
+    /// actually runs on.
+    fn local_values() -> Vec<(&'static str, &'static str)> {
+        let mut values = production_values();
+        values.retain(|(key, _)| *key != "APP_URL");
+        values.push(("APP_URL", "http://localhost:3000"));
+        values
     }
 
     fn production_values() -> Vec<(&'static str, &'static str)> {
@@ -537,6 +719,7 @@ mod tests {
         assert!(config.ai_gateway_url.is_none());
         assert!(config.ai_gateway_api_key.is_none());
         assert!(config.ai_gateway_models.is_none());
+        assert!(config.ai_gateway_model_timeout_ms.is_none());
     }
 
     #[test]
@@ -572,9 +755,10 @@ mod tests {
         let error = config_from(&values).expect_err("local default should be rejected");
 
         assert!(
-            error
-                .to_string()
-                .contains("must not use the local development default")
+            error.to_string().contains(
+                "must not use a development or placeholder secret published in this repository"
+            ),
+            "unexpected error: {error:#}"
         );
     }
 

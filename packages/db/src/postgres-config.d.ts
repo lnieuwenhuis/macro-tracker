@@ -1,7 +1,10 @@
 export function isPgliteConnectionString(connectionString: string): boolean;
 
+export function isLocalDatabaseHost(hostname: string): boolean;
+
 export function getSslConfig(
   connectionString: string,
+  env?: Record<string, string | undefined>,
 ): false | { rejectUnauthorized: boolean };
 
 export type PostgresConnectionConfigOverrides = Partial<{

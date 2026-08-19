@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  check,
   date,
   boolean,
   index,
@@ -86,6 +87,15 @@ export const users = pgTable(
   (table) => [
     uniqueIndex("users_shoo_pairwise_sub_key").on(table.shooPairwiseSub),
     uniqueIndex("users_email_key").on(table.email),
+    // DB-09: matches ADMIN_ROLE_VALUES / WEIGHT_UNIT_VALUES in types.ts.
+    // Added NOT VALID in migration 0016 (see that file for why); Drizzle's
+    // schema builder always emits VALID syntax, so this reflects the target
+    // end state, not the exact migration SQL that got there.
+    check("users_role_check", sql`${table.role} IN ('user', 'admin', 'owner')`),
+    check(
+      "users_preferred_weight_unit_check",
+      sql`${table.preferredWeightUnit} IN ('kg', 'lb')`,
+    ),
   ],
 );
 
@@ -116,9 +126,14 @@ export const adminAuditEvents = pgTable(
   "admin_audit_events",
   {
     id: uuid("id").primaryKey().notNull(),
-    actorUserId: uuid("actor_user_id")
-      .notNull()
-      .references(() => users.id),
+    // Nullable + `set null` (migration 0015, DB-05): audit rows must outlive
+    // the actor's account. Every other user-referencing FK here is cascade
+    // or set-null; this one used to be the sole `NO ACTION` holdout, which
+    // would fail the first account-deletion feature for any user who ever
+    // performed an admin action.
+    actorUserId: uuid("actor_user_id").references(() => users.id, {
+      onDelete: "set null",
+    }),
     actorRole: text("actor_role").notNull(),
     action: text("action").notNull(),
     targetType: text("target_type").notNull(),
@@ -197,6 +212,16 @@ export const foodProducts = pgTable(
     index("food_products_deleted_at_idx").on(table.deletedAt),
     index("food_products_submitted_by_idx").on(table.submittedByUserId),
     index("food_products_corrected_from_idx").on(table.correctedFromProductId),
+    // DB-09: matches FOOD_PRODUCT_SCOPE_VALUES / FOOD_PRODUCT_SOURCE_VALUES
+    // in types.ts. Added NOT VALID in migration 0016 — see that file.
+    check(
+      "food_products_scope_check",
+      sql`${table.scope} IN ('global', 'personal', 'legacy')`,
+    ),
+    check(
+      "food_products_source_check",
+      sql`${table.source} IN ('manual', 'barcode', 'ai_photo', 'legacy', 'recipe')`,
+    ),
   ],
 );
 
@@ -223,6 +248,31 @@ export const foodProductRevisions = pgTable(
   ],
 );
 
+/**
+ * NOT modeled in this Drizzle schema (Drizzle has no trigger DSL); defined by
+ * hand-authored migration `0013_deduplicate_default_meal_groups.sql`:
+ *
+ *   CREATE TRIGGER "meal_groups_default_insert_compat"
+ *   BEFORE INSERT ON "meal_groups"
+ *   FOR EACH ROW
+ *   EXECUTE FUNCTION "ignore_duplicate_active_default_meal_group"();
+ *
+ * The function returns NULL when the inserted row would duplicate an
+ * already-active default group for the same (user_id, label) — i.e. it
+ * silently discards the INSERT instead of raising the unique-violation that
+ * `meal_groups_active_default_label_key` would otherwise throw. This exists
+ * to keep an older backend code path (which unconditionally inserts a
+ * default group) compatible after the 0013 dedupe.
+ *
+ * Consequence for callers: `INSERT INTO meal_groups ... RETURNING` followed
+ * by `fetch_one` (sqlx) on a duplicate default-group insert gets
+ * `RowNotFound`, not the inserted/existing row — there is nothing here to
+ * explain that failure mode without this comment.
+ *
+ * The trigger covers **INSERT only**. An `UPDATE` that clears `deleted_at`
+ * (or flips `is_default` to true) on a group that would collide is NOT
+ * covered and still raises a raw unique-violation from the index above.
+ */
 export const mealGroups = pgTable(
   "meal_groups",
   {
@@ -282,6 +332,12 @@ export const mealEntries = pgTable(
       table.userId,
       table.entryDate,
       table.sortOrder,
+    ),
+    // DB-09: matches MEAL_ENTRY_STATUS_VALUES in types.ts. Added NOT VALID
+    // in migration 0016 — see that file.
+    check(
+      "meal_entries_status_check",
+      sql`${table.status} IN ('planned', 'eaten', 'skipped')`,
     ),
   ],
 );
@@ -370,6 +426,11 @@ export const mealTemplates = pgTable(
   (table) => [
     index("meal_templates_user_type_idx").on(table.userId, table.type),
     index("meal_templates_deleted_at_idx").on(table.deletedAt),
+    // DB-09: matches MEAL_TEMPLATE_TYPE_VALUES in types.ts. Added NOT VALID
+    // in migration 0016 — see that file for why (the backend does not
+    // currently validate this column against the enum before writing it;
+    // API-07 tracks the write-path fix, owned by another group).
+    check("meal_templates_type_check", sql`${table.type} IN ('meal', 'day')`),
   ],
 );
 

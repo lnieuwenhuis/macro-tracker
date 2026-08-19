@@ -12,6 +12,7 @@ type RecipesShellProps = {
   canAccessAdmin: boolean;
   selectedDate: string;
   recipes: RecipeRecord[];
+  todayStr?: string;
 };
 
 export function RecipesShell({
@@ -19,6 +20,7 @@ export function RecipesShell({
   canAccessAdmin,
   selectedDate,
   recipes,
+  todayStr,
 }: RecipesShellProps) {
   const content = (
     <div className="space-y-5">
@@ -58,6 +60,7 @@ export function RecipesShell({
       selectedDate={selectedDate}
       title="Recipes"
       activeTab="recipes"
+      todayStr={todayStr}
       topBar={({ openSettings }) => (
         <div className="mb-4 flex items-center justify-between gap-3">
           <TransitionLink

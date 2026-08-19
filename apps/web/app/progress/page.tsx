@@ -18,8 +18,7 @@ export default async function ProgressPage({ searchParams }: ProgressPageProps) 
     selectedDate,
     userEmail,
     canAccessAdmin,
-    preferredWeightUnit,
-  } = await loadOnboardedPageContext(searchParams);
+    preferredWeightUnit, today} = await loadOnboardedPageContext(searchParams);
   const initialTab = normalizeProgressTab(params.tab);
 
   const [goals, weightData] = await Promise.all([
@@ -32,6 +31,7 @@ export default async function ProgressPage({ searchParams }: ProgressPageProps) 
       userEmail={userEmail}
       canAccessAdmin={canAccessAdmin}
       selectedDate={selectedDate}
+      todayStr={today}
       goals={goals}
       weightData={weightData}
       initialTab={initialTab}

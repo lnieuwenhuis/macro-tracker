@@ -549,24 +549,6 @@ input::placeholder {
   animation: macroLinkPending 1.1s ease-in-out 200ms infinite;
 }
 
-@keyframes slideIn {
-  from {
-    transform: translateX(-100%);
-  }
-  to {
-    transform: translateX(0);
-  }
-}
-
-@keyframes fadeIn {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-
 @keyframes macroScreenIntro {
   from {
     opacity: 0;

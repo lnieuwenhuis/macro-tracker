@@ -102,11 +102,7 @@ export function PresetModal({
         dayCount: dayPresets.length,
       }),
   );
-  const activeKind = resolvePresetModalActiveKind({
-    selectedKind,
-    foodItemCount: foodItemPresets.length,
-    dayCount: dayPresets.length,
-  });
+  const activeKind = resolvePresetModalActiveKind({ selectedKind });
   const visiblePresets = activeKind === "food" ? foodItemPresets : dayPresets;
   const activeLabel = activeKind === "food" ? "food item templates" : "day templates";
   useBodyScrollLock();

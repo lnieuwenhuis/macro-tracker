@@ -155,10 +155,6 @@ export async function deleteMealGroup(userId: string, groupId: string, ..._ignor
   });
 }
 
-export async function reorderMealGroups(userId: string, orderedIds: string[], ..._ignored: unknown[]) {
-  return backendRpc<MealGroup[]>("reorderMealGroups", { userId, orderedIds });
-}
-
 export async function getDailySummary(
   userId: string,
   date: string,
@@ -167,23 +163,12 @@ export async function getDailySummary(
   return backendRpc("getDailySummary", { userId, date });
 }
 
-export async function getDashboardData(userId: string, selectedDate: string, ..._ignored: unknown[]) {
-  return backendRpc<{ dailySummary: DailySummary; periodAverages: PeriodAverage[] }>(
-    "getDashboardData",
-    { userId, selectedDate },
-  );
-}
-
 export async function createMealEntry(
   userId: string,
   input: Omit<MealEntryInput, "sortOrder"> & { sortOrder?: number },
   ..._ignored: unknown[]
 ) {
   return backendRpc<MealEntryRecord>("createMealEntry", { userId, input });
-}
-
-export async function getMealEntryById(userId: string, entryId: string, ..._ignored: unknown[]) {
-  return backendRpc<MealEntryRecord | null>("getMealEntryById", { userId, entryId });
 }
 
 export async function updateMealEntry(
@@ -244,10 +229,6 @@ export async function setUserOnboardingForTesting(
   return backendRpc<AppUser>("setUserOnboardingForTesting", { userId, onboarded });
 }
 
-export async function listRecentMealEntries(userId: string, limit = 200, ..._ignored: unknown[]) {
-  return backendRpc<MealEntryRecord[]>("listRecentMealEntries", { userId, limit });
-}
-
 export async function searchMealEntries(userId: string, query: string, ..._ignored: unknown[]) {
   return backendRpc<MealEntryRecord[]>("searchMealEntries", { userId, query });
 }
@@ -262,19 +243,6 @@ export async function createPersonalFoodProduct(
   ..._ignored: unknown[]
 ) {
   return backendRpc<FoodProduct>("createPersonalFoodProduct", { userId, input });
-}
-
-export async function updatePersonalFoodProduct(
-  userId: string,
-  productId: string,
-  input: FoodProductInput,
-  ..._ignored: unknown[]
-) {
-  return backendRpc<FoodProduct>("updatePersonalFoodProduct", { userId, productId, input });
-}
-
-export async function getFoodProductByIdForUser(userId: string, productId: string, ..._ignored: unknown[]) {
-  return backendRpc<FoodProduct | null>("getFoodProductByIdForUser", { userId, productId });
 }
 
 export function resolveProductNutritionForQuantity(
@@ -369,16 +337,8 @@ export async function getStatsPageData(userId: string, today: string, ..._ignore
   return backendRpc<StatsPageData>("getStatsPageData", { userId, today });
 }
 
-export async function getWeightEntries(userId: string, ..._ignored: unknown[]) {
-  return backendRpc<WeightEntryRecord[]>("getWeightEntries", { userId });
-}
-
 export async function createWeightEntry(userId: string, input: WeightEntryInput, ..._ignored: unknown[]) {
   return backendRpc<WeightEntryRecord>("createWeightEntry", { userId, input });
-}
-
-export async function createWeightEntryNoOverwrite(userId: string, input: WeightEntryInput, ..._ignored: unknown[]) {
-  return backendRpc<WeightEntryRecord | null>("createWeightEntryNoOverwrite", { userId, input });
 }
 
 export async function updateWeightEntry(
@@ -392,10 +352,6 @@ export async function updateWeightEntry(
 
 export async function deleteWeightEntry(userId: string, entryId: string, ..._ignored: unknown[]) {
   return backendRpc<boolean>("deleteWeightEntry", { userId, entryId });
-}
-
-export async function getWeightGoal(userId: string, ..._ignored: unknown[]) {
-  return backendRpc<number | null>("getWeightGoal", { userId });
 }
 
 export async function saveWeightGoal(userId: string, goalWeightKg: number | null, ..._ignored: unknown[]) {

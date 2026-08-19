@@ -57,6 +57,7 @@ describe("POST /api/test/session", () => {
   beforeEach(() => {
     process.env.APP_URL = "http://app.internal";
     process.env.APP_TRUSTED_ORIGINS = "https://trusted.example";
+    process.env.SESSION_SECRET = "test-session-route-secret-32-chars-x";
     process.env.ENABLE_TEST_ROUTES = "true";
     process.env.TEST_ROUTES_SECRET = TEST_ROUTE_SECRET;
     resetServerEnvForTests();
@@ -120,7 +121,7 @@ describe("POST /api/test/session", () => {
       }),
     );
 
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(404);
     expect(mocked.upsertUserFromShooProfile).not.toHaveBeenCalled();
     expect(mocked.ensureUserRoleForTesting).not.toHaveBeenCalled();
   });

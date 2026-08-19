@@ -14,7 +14,7 @@ type HomePageProps = {
 };
 
 export default async function HomePage({ searchParams }: HomePageProps) {
-  const { params, sessionUser, selectedDate, userEmail, canAccessAdmin } =
+  const { params, sessionUser, selectedDate, userEmail, canAccessAdmin, today} =
     await loadOnboardedPageContext(searchParams);
   const initialComposeAction = normalizeComposeAction(params.compose);
   const initialPresetTemplateKind = normalizePresetTemplateKind(params.templateKind);
@@ -31,6 +31,7 @@ export default async function HomePage({ searchParams }: HomePageProps) {
       userEmail={userEmail}
       canAccessAdmin={canAccessAdmin}
       selectedDate={selectedDate}
+      todayStr={today}
       dailySummary={dailySummary}
       goals={goals}
       quickAddCandidates={quickAddCandidates}

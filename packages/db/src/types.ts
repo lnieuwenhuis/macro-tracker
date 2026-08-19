@@ -62,16 +62,8 @@ export type ApiTokenAuthResult =
 export const QUANTITY_UNIT_VALUES = ["g", "ml", "serving", "count"] as const;
 export type QuantityUnit = (typeof QUANTITY_UNIT_VALUES)[number];
 
-export function isQuantityUnit(value: string): value is QuantityUnit {
-  return QUANTITY_UNIT_VALUES.includes(value as QuantityUnit);
-}
-
 export const MEAL_ENTRY_STATUS_VALUES = ["planned", "eaten", "skipped"] as const;
 export type MealEntryStatus = (typeof MEAL_ENTRY_STATUS_VALUES)[number];
-
-export function isMealEntryStatus(value: string): value is MealEntryStatus {
-  return MEAL_ENTRY_STATUS_VALUES.includes(value as MealEntryStatus);
-}
 
 export const FOOD_PRODUCT_SCOPE_VALUES = ["global", "personal", "legacy"] as const;
 export type FoodProductScope = (typeof FOOD_PRODUCT_SCOPE_VALUES)[number];
@@ -88,27 +80,8 @@ export type FoodProductSource = (typeof FOOD_PRODUCT_SOURCE_VALUES)[number];
 export const WEIGHT_UNIT_VALUES = ["kg", "lb"] as const;
 export type WeightUnit = (typeof WEIGHT_UNIT_VALUES)[number];
 
-export function isWeightUnit(value: string): value is WeightUnit {
-  return WEIGHT_UNIT_VALUES.includes(value as WeightUnit);
-}
-
 export const MEAL_TEMPLATE_TYPE_VALUES = ["meal", "day"] as const;
 export type MealTemplateType = (typeof MEAL_TEMPLATE_TYPE_VALUES)[number];
-
-export function isMealTemplateType(value: string): value is MealTemplateType {
-  return MEAL_TEMPLATE_TYPE_VALUES.includes(value as MealTemplateType);
-}
-
-export const FOOD_PRODUCT_REVISION_ACTION_VALUES = [
-  "created",
-  "updated",
-  "corrected",
-  "deleted",
-  "restored",
-  "imported",
-] as const;
-export type FoodProductRevisionAction =
-  (typeof FOOD_PRODUCT_REVISION_ACTION_VALUES)[number];
 
 export type MacroGoals = {
   proteinG: number | null;
@@ -168,15 +141,6 @@ export type FoodProduct = Required<
   createdAt: string;
   updatedAt: string;
   deletedAt: string | null;
-};
-
-export type FoodProductRevision = {
-  id: string;
-  productId: string;
-  actorUserId: string | null;
-  action: FoodProductRevisionAction;
-  snapshot: Record<string, unknown>;
-  createdAt: string;
 };
 
 export type MealGroup = {
@@ -244,10 +208,6 @@ export const ADMIN_ROLE_VALUES = ["user", "admin", "owner"] as const;
 
 export type AdminRole = (typeof ADMIN_ROLE_VALUES)[number];
 
-export function isAdminRole(value: string): value is AdminRole {
-  return ADMIN_ROLE_VALUES.includes(value as AdminRole);
-}
-
 export function canAccessAdmin(role: AdminRole) {
   return role === "admin" || role === "owner";
 }
@@ -275,11 +235,6 @@ export type AppUser = {
   goalCarbsG: number | null;
   goalFatG: number | null;
   goalWeightKg: number | null;
-  onboardingCompletedAt: string | null;
-  preferredWeightUnit: WeightUnit;
-};
-
-export type UserPreferences = {
   onboardingCompletedAt: string | null;
   preferredWeightUnit: WeightUnit;
 };
@@ -412,26 +367,6 @@ export type AdminBarcodeReviewQueueItem = FoodProduct & {
   latestAuditAt: string | null;
 };
 
-export type AdminBarcodeRecord = {
-  id: string;
-  barcode: string;
-  name: string;
-  brands: string;
-  proteinG: number;
-  carbsG: number;
-  fatG: number;
-  caloriesKcal: number;
-  servingSizeG: number | null;
-  addedByUserId: string | null;
-  addedByEmail: string | null;
-  deletedByUserId: string | null;
-  deletedByEmail: string | null;
-  createdAt: string;
-  updatedAt: string;
-  deletedAt: string | null;
-  status: "active" | "deleted";
-};
-
 export type AdminRecipeSummary = {
   id: string;
   label: string;
@@ -511,12 +446,6 @@ export type AdminUserHealthSegment = {
 export type AdminUserHealthSummary = {
   segments: AdminUserHealthSegment[];
 };
-
-export type AdminUserHealthFilter =
-  | "onboarded_no_logs"
-  | "no_goals"
-  | "no_weight_entries"
-  | "heavy_barcode_submitters";
 
 export type AdminDashboardData = {
   totalUsers: number;
