@@ -1341,6 +1341,48 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
             ensure_default_meal_groups(pool, user_id).await?;
             daily_summary_json(pool, user_id, &date).await
         }
+        "getHealthkitSyncEntries" => {
+            let user_id = uuid_arg(&args, "userId")?;
+            let days = args
+                .get("days")
+                .and_then(Value::as_i64)
+                .unwrap_or(7)
+                .clamp(1, 30) as i32;
+            let limit = args
+                .get("limit")
+                .and_then(Value::as_i64)
+                .unwrap_or(100)
+                .clamp(1, 200) as i32;
+            healthkit_sync_entries_json(pool, user_id, days, limit).await
+        }
+        "ackHealthkitSyncEntries" => {
+            let user_id = uuid_arg(&args, "userId")?;
+            let ids = args
+                .get("entryIds")
+                .and_then(Value::as_array)
+                .ok_or_else(|| AppError::BadRequest("entryIds is required.".to_string()))?;
+            if ids.len() > 500 {
+                return Err(AppError::BadRequest(
+                    "entryIds must contain at most 500 IDs.".to_string(),
+                ));
+            }
+            let entry_ids = ids
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .ok_or_else(|| {
+                            AppError::BadRequest("entryIds must contain strings.".to_string())
+                        })
+                        .and_then(|value| {
+                            Uuid::parse_str(value).map_err(|_| {
+                                AppError::BadRequest("entryIds must contain UUIDs.".to_string())
+                            })
+                        })
+                })
+                .collect::<AppResult<Vec<_>>>()?;
+            ack_healthkit_sync_entries_json(pool, user_id, entry_ids).await
+        }
         "getDashboardData" => {
             let user_id = uuid_arg(&args, "userId")?;
             let selected_date =
@@ -1914,6 +1956,99 @@ async fn daily_summary_json(pool: &PgPool, user_id: Uuid, date: &str) -> AppResu
     .fetch_one(pool)
     .await?;
     Ok(row.try_get("data")?)
+}
+
+/// Eaten meal entries not yet mirrored into Apple Health, oldest first. The
+/// day window and row limit keep a first-ever sync (or a long backlog) from
+/// flooding the on-device consumer; `pendingTotal` counts everything in the
+/// window so the caller knows another pass is needed when it exceeds the
+/// returned page.
+async fn healthkit_sync_entries_json(
+    pool: &PgPool,
+    user_id: Uuid,
+    days: i32,
+    limit: i32,
+) -> AppResult<Value> {
+    let row = sqlx::query(
+        r#"
+        WITH pending AS (
+          SELECT
+            id,
+            entry_date,
+            label,
+            protein_g,
+            carbs_g,
+            fat_g,
+            calories_kcal,
+            created_at,
+            -- Clamp the sample timestamp into the entry's own calendar day so
+            -- backfilled and pre-logged entries land on the date the food was
+            -- eaten, while LEAST(updated_at, ...) keeps it from ever sitting
+            -- in the future — HealthKit rejects future-dated samples.
+            GREATEST(
+              LEAST(
+                updated_at,
+                (entry_date::timestamp + interval '18 hours') AT TIME ZONE 'UTC'
+              ),
+              entry_date::timestamp AT TIME ZONE 'UTC'
+            ) AS sample_time,
+            count(*) OVER () AS pending_total
+          FROM meal_entries
+          WHERE user_id = $1
+            AND status = 'eaten'
+            AND healthkit_synced_at IS NULL
+            AND entry_date <= (now() AT TIME ZONE 'UTC')::date
+            AND entry_date >= (now() AT TIME ZONE 'UTC')::date - $2
+          ORDER BY entry_date, created_at, id
+          LIMIT $3
+        )
+        SELECT jsonb_build_object(
+          'entries', coalesce(jsonb_agg(
+            jsonb_build_object(
+              'id', id,
+              'date', entry_date,
+              'label', label,
+              'proteinG', round(protein_g::numeric, 1)::float8,
+              'carbsG', round(carbs_g::numeric, 1)::float8,
+              'fatG', round(fat_g::numeric, 1)::float8,
+              'caloriesKcal', calories_kcal,
+              'sampleTime', to_char(sample_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+            )
+            ORDER BY entry_date, created_at, id
+          ), '[]'::jsonb),
+          'pendingTotal', coalesce(max(pending_total), 0)
+        ) AS data
+        FROM pending
+        "#,
+    )
+    .bind(user_id)
+    .bind(days)
+    .bind(limit)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.try_get("data")?)
+}
+
+async fn ack_healthkit_sync_entries_json(
+    pool: &PgPool,
+    user_id: Uuid,
+    entry_ids: Vec<Uuid>,
+) -> AppResult<Value> {
+    if entry_ids.is_empty() {
+        return Ok(json!({ "acked": 0 }));
+    }
+    let result = sqlx::query(
+        r#"
+        UPDATE meal_entries
+        SET healthkit_synced_at = now()
+        WHERE user_id = $1 AND id = ANY($2) AND healthkit_synced_at IS NULL
+        "#,
+    )
+    .bind(user_id)
+    .bind(&entry_ids)
+    .execute(pool)
+    .await?;
+    Ok(json!({ "acked": result.rows_affected() }))
 }
 
 async fn templates_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {

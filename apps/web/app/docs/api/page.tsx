@@ -14,6 +14,7 @@ const endpointGroups = [
   "Templates",
   "Recipes",
   "Weight and stats",
+  "Apple Health sync",
 ];
 
 export default function ApiDocsPage() {

@@ -814,6 +814,35 @@ async fn dispatch_api_request(
             )
             .await?,
         )),
+        (Some("sync"), Some("healthkit"), None, "GET") => {
+            let days = bounded_query_int(uri, "days", 7, 1, 30)?;
+            let limit = bounded_query_int(uri, "limit", 100, 1, 200)?;
+            Ok((
+                StatusCode::OK,
+                rpc(
+                    state,
+                    "getHealthkitSyncEntries",
+                    json!({ "userId": auth.user_id, "days": days, "limit": limit }),
+                )
+                .await?,
+            ))
+        }
+        (Some("sync"), Some("healthkit"), Some("ack"), "POST") => {
+            let body = require_object(read_json(&body)?)?;
+            let entry_ids = body
+                .get("entryIds")
+                .cloned()
+                .ok_or_else(|| bad_request("entryIds must be an array of meal entry IDs."))?;
+            Ok((
+                StatusCode::OK,
+                rpc(
+                    state,
+                    "ackHealthkitSyncEntries",
+                    json!({ "userId": auth.user_id, "entryIds": entry_ids }),
+                )
+                .await?,
+            ))
+        }
         _ => Err(ApiFailure::new(
             StatusCode::NOT_FOUND,
             "not_found",
@@ -948,6 +977,12 @@ fn endpoint_for(path: &[String]) -> Option<Endpoint> {
         )),
         (Some("leaderboard"), None, None, 1) => {
             Some(endpoint(&["GET"], &[("GET", &["read:stats"])]))
+        }
+        (Some("sync"), Some("healthkit"), None, 2) => {
+            Some(endpoint(&["GET"], &[("GET", &["read:daily"])]))
+        }
+        (Some("sync"), Some("healthkit"), Some("ack"), 3) => {
+            Some(endpoint(&["POST"], &[("POST", &["write:daily"])]))
         }
         (Some("openapi.json"), None, None, 1) => Some(endpoint(&["GET"], &[("GET", &[])])),
         _ => None,
@@ -1316,6 +1351,25 @@ fn reference_date(uri: &Uri) -> ApiResult<String> {
         query_param(uri, "date").unwrap_or_else(|| chrono::Utc::now().date_naive().to_string());
     require_date(&date)?;
     Ok(date)
+}
+
+fn bounded_query_int(
+    uri: &Uri,
+    name: &str,
+    default: i64,
+    min: i64,
+    max: i64,
+) -> ApiResult<i64> {
+    match query_param(uri, name) {
+        None => Ok(default),
+        Some(raw) => raw
+            .parse::<i64>()
+            .ok()
+            .filter(|value| (min..=max).contains(value))
+            .ok_or_else(|| {
+                bad_request(format!("{name} must be an integer between {min} and {max}."))
+            }),
+    }
 }
 
 fn bad_request(message: impl Into<String>) -> ApiFailure {

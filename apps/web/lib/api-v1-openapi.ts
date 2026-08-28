@@ -5,6 +5,7 @@ type ApiRequestBodyKey =
   | "foodMutation"
   | "foodPatch"
   | "goalPatch"
+  | "healthkitSyncAck"
   | "mealEntryCreate"
   | "mealEntryPatch"
   | "mealEntryStatus"
@@ -200,6 +201,27 @@ export const API_V1_ENDPOINTS: ApiEndpoint[] = [
   {
     path: "/leaderboard",
     methods: [{ method: "get", summary: "Read personal leaderboard stats", scopes: ["read:stats"] }],
+  },
+  {
+    path: "/sync/healthkit",
+    methods: [
+      {
+        method: "get",
+        summary: "List eaten meal entries not yet synced to Apple Health",
+        scopes: ["read:daily"],
+      },
+    ],
+  },
+  {
+    path: "/sync/healthkit/ack",
+    methods: [
+      {
+        method: "post",
+        summary: "Mark meal entries as synced to Apple Health",
+        scopes: ["write:daily"],
+        requestBody: "healthkitSyncAck",
+      },
+    ],
   },
   {
     path: "/openapi.json",
