@@ -2186,6 +2186,14 @@ describe("Macro Tracker API v1", () => {
     expect(newest).toMatchObject({ id: eaten.id, date: today });
     expect(new Date(newest!.sampleTime).getTime()).toBeLessThanOrEqual(Date.now() + 1000);
 
+    // pendingTotal reports the whole backlog even when the page is smaller.
+    const limited = await apiRequest("GET", "/sync/healthkit?limit=1", { token: fullToken });
+    const limitedPayload = (await limited.json()) as {
+      data: { pendingTotal: number; entries: Array<{ id: string }> };
+    };
+    expect(limitedPayload.data.pendingTotal).toBe(2);
+    expect(limitedPayload.data.entries.map((entry) => entry.id)).toEqual([backfilled.id]);
+
     const ack = await apiRequest("POST", "/sync/healthkit/ack", {
       token: fullToken,
       body: { entryIds: [backfilled.id] },

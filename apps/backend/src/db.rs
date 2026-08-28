@@ -1963,6 +1963,14 @@ async fn daily_summary_json(pool: &PgPool, user_id: Uuid, date: &str) -> AppResu
 /// flooding the on-device consumer; `pendingTotal` counts everything in the
 /// window so the caller knows another pass is needed when it exceeds the
 /// returned page.
+///
+/// An acked entry never re-enters the queue, even after edits or status
+/// flips: the consumer cannot retract HealthKit samples, so re-queueing
+/// would double-count the meal. The sample-time clamp is anchored to the
+/// UTC day: backfilled entries land at 18:00 UTC, which stays on the same
+/// local day for timezones west of UTC+6 (all of Europe included). Zones
+/// at UTC+6 and beyond would need a per-user timezone to place backfilled
+/// samples on the right local day.
 async fn healthkit_sync_entries_json(
     pool: &PgPool,
     user_id: Uuid,
