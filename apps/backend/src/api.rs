@@ -1353,13 +1353,7 @@ fn reference_date(uri: &Uri) -> ApiResult<String> {
     Ok(date)
 }
 
-fn bounded_query_int(
-    uri: &Uri,
-    name: &str,
-    default: i64,
-    min: i64,
-    max: i64,
-) -> ApiResult<i64> {
+fn bounded_query_int(uri: &Uri, name: &str, default: i64, min: i64, max: i64) -> ApiResult<i64> {
     match query_param(uri, name) {
         None => Ok(default),
         Some(raw) => raw
@@ -1367,7 +1361,9 @@ fn bounded_query_int(
             .ok()
             .filter(|value| (min..=max).contains(value))
             .ok_or_else(|| {
-                bad_request(format!("{name} must be an integer between {min} and {max}."))
+                bad_request(format!(
+                    "{name} must be an integer between {min} and {max}."
+                ))
             }),
     }
 }
