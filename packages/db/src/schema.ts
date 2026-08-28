@@ -263,6 +263,7 @@ export const mealEntries = pgTable(
     sortOrder: integer("sort_order").notNull(),
     ...mealMacroColumns(),
     clientMutationId: text("client_mutation_id"),
+    healthkitSyncedAt: timestamp("healthkit_synced_at", { withTimezone: true }),
     ...createdUpdatedTimestamps(),
   },
   (table) => [
@@ -283,6 +284,9 @@ export const mealEntries = pgTable(
       table.entryDate,
       table.sortOrder,
     ),
+    index("meal_entries_healthkit_unsynced_idx")
+      .on(table.userId, table.entryDate)
+      .where(sql`${table.healthkitSyncedAt} IS NULL AND ${table.status} = 'eaten'`),
   ],
 );
 
