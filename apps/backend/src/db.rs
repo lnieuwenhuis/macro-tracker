@@ -296,6 +296,59 @@ CREATE TABLE IF NOT EXISTS meal_template_items (
 );
 CREATE INDEX IF NOT EXISTS meal_template_items_template_idx ON meal_template_items USING btree (template_id);
 CREATE INDEX IF NOT EXISTS meal_template_items_product_idx ON meal_template_items USING btree (product_id);
+
+CREATE TABLE IF NOT EXISTS gym_slots (
+  id uuid PRIMARY KEY NOT NULL,
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE cascade,
+  title text NOT NULL,
+  description text,
+  recurrence text NOT NULL,
+  slot_date date,
+  weekday integer,
+  start_minute integer NOT NULL,
+  end_minute integer NOT NULL,
+  created_at timestamptz DEFAULT now() NOT NULL,
+  updated_at timestamptz DEFAULT now() NOT NULL,
+  CONSTRAINT gym_slots_recurrence_check
+    CHECK (recurrence IN ('once', 'weekly')),
+  CONSTRAINT gym_slots_recurrence_shape_check
+    CHECK (
+      (recurrence = 'once' AND slot_date IS NOT NULL AND weekday IS NULL)
+      OR (recurrence = 'weekly' AND weekday BETWEEN 1 AND 7 AND slot_date IS NULL)
+    ),
+  CONSTRAINT gym_slots_minutes_check
+    CHECK (start_minute >= 0 AND end_minute <= 1440 AND start_minute < end_minute)
+);
+CREATE INDEX IF NOT EXISTS gym_slots_user_date_idx ON gym_slots USING btree (user_id, slot_date);
+CREATE INDEX IF NOT EXISTS gym_slots_user_weekday_idx ON gym_slots USING btree (user_id, weekday);
+
+CREATE TABLE IF NOT EXISTS gym_slot_statuses (
+  id uuid PRIMARY KEY NOT NULL,
+  slot_id uuid NOT NULL REFERENCES gym_slots(id) ON DELETE cascade,
+  status_date date NOT NULL,
+  status text NOT NULL,
+  created_at timestamptz DEFAULT now() NOT NULL,
+  updated_at timestamptz DEFAULT now() NOT NULL,
+  CONSTRAINT gym_slot_statuses_status_check
+    CHECK (status IN ('going', 'maybe', 'skipped', 'done'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS gym_slot_statuses_slot_date_key ON gym_slot_statuses USING btree (slot_id, status_date);
+
+CREATE TABLE IF NOT EXISTS gym_buddies (
+  id uuid PRIMARY KEY NOT NULL,
+  requester_user_id uuid NOT NULL REFERENCES users(id) ON DELETE cascade,
+  addressee_user_id uuid NOT NULL REFERENCES users(id) ON DELETE cascade,
+  status text DEFAULT 'pending' NOT NULL,
+  created_at timestamptz DEFAULT now() NOT NULL,
+  updated_at timestamptz DEFAULT now() NOT NULL,
+  CONSTRAINT gym_buddies_not_self_check
+    CHECK (requester_user_id <> addressee_user_id),
+  CONSTRAINT gym_buddies_status_check
+    CHECK (status IN ('pending', 'accepted', 'declined'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS gym_buddies_pair_key ON gym_buddies USING btree (LEAST(requester_user_id, addressee_user_id), GREATEST(requester_user_id, addressee_user_id));
+CREATE INDEX IF NOT EXISTS gym_buddies_addressee_idx ON gym_buddies USING btree (addressee_user_id, status);
+CREATE INDEX IF NOT EXISTS gym_buddies_requester_idx ON gym_buddies USING btree (requester_user_id, status);
 "#;
 
 const DRIZZLE_MIGRATION_JOURNAL: &str =
@@ -358,6 +411,9 @@ const REQUIRED_TABLES: &[&str] = &[
     "recipe_ingredients",
     "meal_templates",
     "meal_template_items",
+    "gym_slots",
+    "gym_slot_statuses",
+    "gym_buddies",
 ];
 
 fn expected_drizzle_migrations() -> AppResult<Vec<(String, i64)>> {

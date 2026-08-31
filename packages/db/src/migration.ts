@@ -182,6 +182,9 @@ export async function createMigratedTestDatabase() {
     await migratePostgresTestDatabaseOnce(runtime, databaseUrl);
     await runtime.db.execute(sql.raw(`
       TRUNCATE TABLE
+        gym_slot_statuses,
+        gym_buddies,
+        gym_slots,
         admin_audit_events,
         api_tokens,
         meal_template_items,
