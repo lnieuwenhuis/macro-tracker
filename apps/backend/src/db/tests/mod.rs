@@ -2421,57 +2421,6 @@ fn only_admin_and_owner_roles_are_admin_actors() {
     assert!(!is_admin_actor_role(""));
 }
 
-#[test]
-fn api_token_scope_validation_rejects_empty_unknown_and_non_string_scopes() {
-    assert_eq!(
-        bad_request_message(normalize_api_token_scopes(Some(&json!([])))),
-        "API token must include at least one scope."
-    );
-    assert_eq!(
-        bad_request_message(normalize_api_token_scopes(Some(&json!([
-            "read:daily",
-            "admin:*"
-        ])))),
-        "API token scope is invalid."
-    );
-    assert_eq!(
-        bad_request_message(normalize_api_token_scopes(Some(&json!(["read:daily", 42])))),
-        "API token scope is invalid."
-    );
-}
-
-#[test]
-fn api_token_scope_validation_dedupes_valid_scopes_in_order() {
-    let scopes =
-        normalize_api_token_scopes(Some(&json!(["read:daily", "write:daily", "read:daily"])))
-            .expect("valid scopes should normalize");
-
-    assert_eq!(scopes, vec!["read:daily", "write:daily"]);
-}
-
-#[test]
-fn api_token_expiry_validation_preserves_defaults_and_nulls() {
-    let default = normalize_api_token_expiry(None)
-        .expect("missing expiry should default")
-        .expect("default expiry should be set");
-    let days = default.signed_duration_since(Utc::now()).num_days();
-    assert!((89..=90).contains(&days));
-
-    assert!(
-        normalize_api_token_expiry(Some(&Value::Null))
-            .expect("null expiry should be accepted")
-            .is_none()
-    );
-}
-
-#[test]
-fn api_token_expiry_validation_rejects_invalid_strings() {
-    assert_eq!(
-        bad_request_message(normalize_api_token_expiry(Some(&json!("not-a-date")))),
-        "API token expiry is invalid."
-    );
-}
-
 /// Applies every Drizzle migration into one scratch schema and `SCHEMA_SQL`
 /// into another, then compares the resulting catalogs. This is what stops
 /// the integration-test schema from drifting away from the migrations that
@@ -3128,3 +3077,5 @@ async fn stats_page_reports_the_same_streaks_as_the_leaderboard() {
 
     test_db.cleanup().await;
 }
+
+mod api_tokens;
