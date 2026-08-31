@@ -11,7 +11,9 @@ watchPatterns = [
 
 [deploy]
 startCommand = "pnpm --filter @macro-tracker/web start"
-healthcheckPath = "/"
+# Kept in sync with /railway.toml — see the comment there for why this is
+# /login and must not go back to "/".
+healthcheckPath = "/login"
 healthcheckTimeout = 120
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
