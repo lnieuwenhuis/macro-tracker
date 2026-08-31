@@ -2155,7 +2155,11 @@ fn ensure_gym_status(value: &str) -> AppResult<()> {
     }
 }
 
-fn gym_minute(input: &serde_json::Map<String, Value>, key: &str, field_name: &str) -> AppResult<i32> {
+fn gym_minute(
+    input: &serde_json::Map<String, Value>,
+    key: &str,
+    field_name: &str,
+) -> AppResult<i32> {
     let value = input
         .get(key)
         .and_then(Value::as_i64)
