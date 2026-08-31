@@ -424,9 +424,6 @@ export function GymShell({
                 </span>
               </button>
             ))}
-            <p className="pt-1 text-xs text-[var(--color-muted)]">
-              Skipping never removes the slot — it just marks this day.
-            </p>
           </div>
         </CompactModal>
       ) : null}
