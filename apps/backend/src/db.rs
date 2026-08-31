@@ -3,13 +3,14 @@ use crate::{
     shared::{round1, round2},
     types::{AppUser, MacroGoals, ShooProfile},
 };
-use chrono::{DateTime, Duration, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, Row, postgres::PgRow};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 mod api_tokens;
+mod weight;
 
 pub use api_tokens::authenticate_api_token;
 
@@ -53,14 +54,6 @@ struct MealFoodValues {
     unit: String,
     serving_multiplier: f64,
     macros: MacroValues,
-}
-
-#[derive(Clone, Debug)]
-struct WeightEntryValues {
-    date: String,
-    weight_kg: f64,
-    body_fat_pct: Option<f64>,
-    notes: Option<String>,
 }
 
 const DRIZZLE_MIGRATION_JOURNAL: &str =
@@ -747,7 +740,7 @@ async fn complete_onboarding_setup_json(
     // fail as a bad request, not as a database error mid-transaction.
     let current_weight = match input.get("currentWeight") {
         None | Some(Value::Null) => None,
-        Some(Value::Object(weight)) => Some(normalize_weight_entry_input(weight)?),
+        Some(Value::Object(weight)) => Some(weight::normalize_weight_entry_input(weight)?),
         Some(_) => {
             return Err(AppError::BadRequest(
                 "currentWeight must be an object.".to_string(),
@@ -1312,14 +1305,14 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
         }
         "getWeightEntries" => {
             let user_id = uuid_arg(&args, "userId")?;
-            weight_entries_json(pool, user_id).await
+            weight::weight_entries_json(pool, user_id).await
         }
         // Fetches one row instead of the account's whole weight history, which
         // the PATCH handler used to load and linear-scan.
         "getWeightEntryById" => {
             let user_id = uuid_arg(&args, "userId")?;
             let entry_id = uuid_arg(&args, "entryId")?;
-            weight_entry_by_id_json(pool, user_id, entry_id).await
+            weight::weight_entry_by_id_json(pool, user_id, entry_id).await
         }
         "getWeightGoal" => {
             let user_id = uuid_arg(&args, "userId")?;
@@ -1345,36 +1338,28 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
         "getWeightPageData" => {
             let user_id = uuid_arg(&args, "userId")?;
             let selected_date = date_arg(&args, "selectedDate")?;
-            weight_page_data_json(pool, user_id, &selected_date).await
+            weight::weight_page_data_json(pool, user_id, &selected_date).await
         }
         "createWeightEntry" => {
             let user_id = uuid_arg(&args, "userId")?;
             let input = object_arg(&args, "input")?;
-            create_weight_entry_json(pool, user_id, input, true).await
+            weight::create_weight_entry_json(pool, user_id, input, true).await
         }
         "createWeightEntryNoOverwrite" => {
             let user_id = uuid_arg(&args, "userId")?;
             let input = object_arg(&args, "input")?;
-            create_weight_entry_json(pool, user_id, input, false).await
+            weight::create_weight_entry_json(pool, user_id, input, false).await
         }
         "updateWeightEntry" => {
             let user_id = uuid_arg(&args, "userId")?;
             let entry_id = uuid_arg(&args, "entryId")?;
             let input = object_arg(&args, "input")?;
-            update_weight_entry_json(pool, user_id, entry_id, input).await
+            weight::update_weight_entry_json(pool, user_id, entry_id, input).await
         }
         "deleteWeightEntry" => {
             let user_id = uuid_arg(&args, "userId")?;
             let entry_id = uuid_arg(&args, "entryId")?;
-            let deleted = sqlx::query(
-                "DELETE FROM weight_entries WHERE user_id = $1 AND id = $2 RETURNING id",
-            )
-            .bind(user_id)
-            .bind(entry_id)
-            .fetch_optional(pool)
-            .await?
-            .is_some();
-            Ok(json!(deleted))
+            weight::delete_weight_entry_json(pool, user_id, entry_id).await
         }
         "getRecentQuickAddCandidates" => {
             let user_id = uuid_arg(&args, "userId")?;
@@ -5067,7 +5052,7 @@ async fn get_admin_user_detail_json(pool: &PgPool, user_id: Uuid) -> AppResult<V
         tokio::try_join!(
             recipes_json_filtered(pool, user_id, None, ADMIN_DETAIL_ROWS),
             templates_json_filtered(pool, user_id, None, ADMIN_DETAIL_ROWS),
-            weight_entries_json_limited(pool, user_id, ADMIN_DETAIL_ROWS),
+            weight::weight_entries_json_limited(pool, user_id, ADMIN_DETAIL_ROWS),
             get_user_goals(pool, user_id),
             list_recent_meal_entries_json(pool, user_id, 10, false),
             recent_barcode_submissions_json(pool, user_id, 10),
@@ -6211,246 +6196,6 @@ async fn insert_recipe_ingredients(
 async fn recipe_by_id_json(pool: &PgPool, user_id: Uuid, recipe_id: Uuid) -> AppResult<Value> {
     first_json_item(recipes_json_filtered(pool, user_id, Some(recipe_id), 1).await?)
         .ok_or_else(|| AppError::NotFound("Recipe not found.".to_string()))
-}
-
-async fn weight_entries_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
-    weight_entries_json_limited(pool, user_id, MAX_COLLECTION_ROWS).await
-}
-
-/// PERF-03: the row set is selected most-recent-first so a limit keeps the
-/// newest entries, then re-sorted ascending because every consumer charts the
-/// series forwards in time.
-async fn weight_entries_json_limited(pool: &PgPool, user_id: Uuid, limit: i64) -> AppResult<Value> {
-    let row = sqlx::query(
-        r#"
-        SELECT coalesce(jsonb_agg(
-          jsonb_build_object(
-            'id', id,
-            'userId', user_id,
-            'date', entry_date,
-            'weightKg', weight_kg::float8,
-            'bodyFatPct', body_fat_pct::float8,
-            'notes', notes
-          )
-          ORDER BY entry_date ASC
-        ), '[]'::jsonb) AS data
-        FROM (
-          SELECT id, user_id, entry_date, weight_kg, body_fat_pct, notes
-          FROM weight_entries
-          WHERE user_id = $1
-          ORDER BY entry_date DESC
-          LIMIT $2
-        ) recent
-        "#,
-    )
-    .bind(user_id)
-    .bind(limit)
-    .fetch_one(pool)
-    .await?;
-    Ok(row.try_get("data")?)
-}
-
-#[derive(Clone, Copy)]
-struct WeightStatEntry {
-    date: NaiveDate,
-    weight_kg: f64,
-}
-
-fn weight_stat_entry(entry: &Value) -> AppResult<WeightStatEntry> {
-    let date = entry
-        .get("date")
-        .and_then(Value::as_str)
-        .ok_or_else(|| AppError::BadRequest("weight entry date is required.".to_string()))
-        .and_then(|value| {
-            NaiveDate::parse_from_str(value, "%Y-%m-%d")
-                .map_err(|_| AppError::BadRequest("weight entry date is invalid.".to_string()))
-        })?;
-    let weight_kg = entry
-        .get("weightKg")
-        .and_then(Value::as_f64)
-        .ok_or_else(|| AppError::BadRequest("weight entry weightKg is required.".to_string()))?;
-    Ok(WeightStatEntry { date, weight_kg })
-}
-
-fn closest_weight_on_or_before(
-    entries: &[WeightStatEntry],
-    target_date: NaiveDate,
-) -> Option<WeightStatEntry> {
-    entries
-        .iter()
-        .copied()
-        .filter(|entry| entry.date <= target_date)
-        .min_by_key(|entry| {
-            entry
-                .date
-                .signed_duration_since(target_date)
-                .num_days()
-                .abs()
-        })
-}
-
-fn trend_direction_from_diff(diff: f64) -> &'static str {
-    if diff > 0.1 {
-        "up"
-    } else if diff < -0.1 {
-        "down"
-    } else {
-        "stable"
-    }
-}
-
-async fn weight_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppResult<Value> {
-    let entries = weight_entries_json(pool, user_id).await?;
-    let row =
-        sqlx::query("SELECT goal_weight_kg::float8 AS goal_weight_kg FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_one(pool)
-            .await?;
-    let goal_weight_kg: Option<f64> = row.try_get("goal_weight_kg")?;
-    let entry_array = entries.as_array().cloned().unwrap_or_default();
-    let stat_entries = entry_array
-        .iter()
-        .map(weight_stat_entry)
-        .collect::<AppResult<Vec<_>>>()?;
-    let today_date = NaiveDate::parse_from_str(today, "%Y-%m-%d")
-        .map_err(|_| AppError::BadRequest("selectedDate must be YYYY-MM-DD.".to_string()))?;
-    let latest = stat_entries.last().copied();
-    let current_weight = latest.map(|entry| entry.weight_kg);
-    let week_change = latest.and_then(|latest| {
-        closest_weight_on_or_before(&stat_entries, today_date - Duration::days(7))
-            .map(|entry| round2(latest.weight_kg - entry.weight_kg))
-    });
-    let month_change = latest.and_then(|latest| {
-        closest_weight_on_or_before(&stat_entries, today_date - Duration::days(30))
-            .map(|entry| round2(latest.weight_kg - entry.weight_kg))
-    });
-    let trend_direction = match stat_entries.len() {
-        0 | 1 => None,
-        2 => {
-            let diff = stat_entries[1].weight_kg - stat_entries[0].weight_kg;
-            Some(trend_direction_from_diff(diff))
-        }
-        len => {
-            let last3 = &stat_entries[len - 3..];
-            let first_diff = last3[1].weight_kg - last3[0].weight_kg;
-            let second_diff = last3[2].weight_kg - last3[1].weight_kg;
-            Some(trend_direction_from_diff((first_diff + second_diff) / 2.0))
-        }
-    };
-    Ok(json!({
-        "entries": entries,
-        "goalWeightKg": goal_weight_kg,
-        "stats": {
-            "currentWeight": current_weight,
-            "weekChange": week_change,
-            "monthChange": month_change,
-            "trendDirection": trend_direction
-        }
-    }))
-}
-
-async fn create_weight_entry_json(
-    pool: &PgPool,
-    user_id: Uuid,
-    input: &serde_json::Map<String, Value>,
-    overwrite: bool,
-) -> AppResult<Value> {
-    let id = Uuid::new_v4();
-    let values = normalize_weight_entry_input(input)?;
-    let row = if overwrite {
-        sqlx::query(
-            r#"
-            INSERT INTO weight_entries (id, user_id, entry_date, weight_kg, body_fat_pct, notes, updated_at)
-            VALUES ($1, $2, $3::date, $4, $5, $6, now())
-            ON CONFLICT (user_id, entry_date)
-            DO UPDATE SET weight_kg = EXCLUDED.weight_kg, body_fat_pct = EXCLUDED.body_fat_pct, notes = EXCLUDED.notes, updated_at = now()
-            RETURNING id
-            "#,
-        )
-        .bind(id)
-        .bind(user_id)
-        .bind(&values.date)
-        .bind(values.weight_kg)
-        .bind(values.body_fat_pct)
-        .bind(values.notes.as_deref())
-        .fetch_optional(pool)
-        .await?
-    } else {
-        sqlx::query(
-            r#"
-            INSERT INTO weight_entries (id, user_id, entry_date, weight_kg, body_fat_pct, notes, updated_at)
-            VALUES ($1, $2, $3::date, $4, $5, $6, now())
-            ON CONFLICT (user_id, entry_date) DO NOTHING
-            RETURNING id
-            "#,
-        )
-        .bind(id)
-        .bind(user_id)
-        .bind(&values.date)
-        .bind(values.weight_kg)
-        .bind(values.body_fat_pct)
-        .bind(values.notes.as_deref())
-        .fetch_optional(pool)
-        .await?
-    };
-    let Some(row) = row else {
-        return Ok(Value::Null);
-    };
-    weight_entry_by_id_json(pool, user_id, row.try_get("id")?).await
-}
-
-async fn update_weight_entry_json(
-    pool: &PgPool,
-    user_id: Uuid,
-    entry_id: Uuid,
-    input: &serde_json::Map<String, Value>,
-) -> AppResult<Value> {
-    let values = normalize_weight_entry_input(input)?;
-    let updated = sqlx::query(
-        r#"
-        UPDATE weight_entries
-        SET entry_date = $3::date, weight_kg = $4, body_fat_pct = $5, notes = $6, updated_at = now()
-        WHERE user_id = $1 AND id = $2
-        RETURNING id
-        "#,
-    )
-    .bind(user_id)
-    .bind(entry_id)
-    .bind(values.date)
-    .bind(values.weight_kg)
-    .bind(values.body_fat_pct)
-    .bind(values.notes.as_deref())
-    .fetch_optional(pool)
-    .await?
-    .is_some();
-    if !updated {
-        return Err(AppError::NotFound("Weight entry not found.".to_string()));
-    }
-    weight_entry_by_id_json(pool, user_id, entry_id).await
-}
-
-async fn weight_entry_by_id_json(pool: &PgPool, user_id: Uuid, entry_id: Uuid) -> AppResult<Value> {
-    let row = sqlx::query(
-        r#"
-        SELECT jsonb_build_object(
-          'id', id,
-          'userId', user_id,
-          'date', entry_date,
-          'weightKg', weight_kg::float8,
-          'bodyFatPct', body_fat_pct::float8,
-          'notes', notes
-        ) AS data
-        FROM weight_entries
-        WHERE user_id = $1 AND id = $2
-        "#,
-    )
-    .bind(user_id)
-    .bind(entry_id)
-    .fetch_optional(pool)
-    .await?;
-    Ok(row
-        .ok_or_else(|| AppError::NotFound("Weight entry not found.".to_string()))?
-        .try_get("data")?)
 }
 
 async fn recent_quick_add_json(pool: &PgPool, user_id: Uuid, limit: i32) -> AppResult<Value> {
@@ -7714,37 +7459,6 @@ fn normalize_food_product_input(
         source_confidence,
         source_metadata: normalize_source_metadata(input)?,
         corrected_from_product_id: optional_uuid(input, "correctedFromProductId")?,
-    })
-}
-
-fn normalize_weight_entry_input(
-    input: &serde_json::Map<String, Value>,
-) -> AppResult<WeightEntryValues> {
-    // Rounded before the bound check: `weight_kg` lands in a `numeric(5, 2)`
-    // column, so a value that only overflows *after* rounding (999.995) has to
-    // be rejected too.
-    let weight_kg = optional_f64(input, "weightKg")
-        .map(round2)
-        .filter(|value| value.is_finite() && *value > 0.0)
-        .ok_or_else(|| AppError::BadRequest("Weight must be a positive number.".to_string()))?;
-    if weight_kg >= 1000.0 {
-        return Err(AppError::BadRequest(
-            "Weight must be less than 1000 kg.".to_string(),
-        ));
-    }
-    let body_fat_pct = optional_f64(input, "bodyFatPct");
-    if let Some(value) = body_fat_pct
-        && (!value.is_finite() || !(0.0..=100.0).contains(&value))
-    {
-        return Err(AppError::BadRequest(
-            "Body fat percentage must be between 0 and 100.".to_string(),
-        ));
-    }
-    Ok(WeightEntryValues {
-        date: required_date(input, "date")?,
-        weight_kg: round2(weight_kg),
-        body_fat_pct: body_fat_pct.map(round1),
-        notes: trim_optional_string(input, "notes"),
     })
 }
 
