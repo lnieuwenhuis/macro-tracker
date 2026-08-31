@@ -555,10 +555,6 @@ function BuddiesPanel({
             {copied ? "Copied!" : "Copy"}
           </button>
         </div>
-        <p className="mt-2 text-xs text-[var(--color-muted)]">
-          Share this instead of your email — anyone with it can send you a
-          buddy invite.
-        </p>
       </section>
 
       <section>
@@ -588,10 +584,6 @@ function BuddiesPanel({
             {notice}
           </p>
         ) : null}
-        <p className="mt-2 text-xs text-[var(--color-muted)]">
-          Buddies see each other&rsquo;s gym times and statuses — never slot
-          descriptions.
-        </p>
       </section>
 
       {lists.pendingIncoming.length > 0 ? (
@@ -875,11 +867,6 @@ function GymSlotFormModal({
               </button>
             ))}
           </div>
-          {mode === "edit" ? (
-            <p className="mt-1 text-xs text-[var(--color-muted)]">
-              A slot&rsquo;s repeat kind can&rsquo;t change after creation.
-            </p>
-          ) : null}
         </div>
 
         {recurrence === "weekly" ? (
