@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { formatMinutesAsTime } from "@/lib/formatting";
 import {
+  formatFriendCode,
   gymStatusLabel,
   minutesToTimeInput,
   timeInputToMinutes,
@@ -27,6 +28,14 @@ describe("gym time helpers", () => {
     expect(formatMinutesAsTime(1440)).toBe("00:00");
     expect(formatMinutesAsTime(1439)).toBe("23:59");
     expect(formatMinutesAsTime(9 * 60 + 5)).toBe("09:05");
+  });
+
+  it("formats bare friend codes with a dash and passes everything else through", () => {
+    expect(formatFriendCode("AB23CD45")).toBe("AB23-CD45");
+    // Already-formatted codes, emails, and unexpected data are untouched.
+    expect(formatFriendCode("AB23-CD45")).toBe("AB23-CD45");
+    expect(formatFriendCode("bob@example.com")).toBe("bob@example.com");
+    expect(formatFriendCode("")).toBe("");
   });
 });
 

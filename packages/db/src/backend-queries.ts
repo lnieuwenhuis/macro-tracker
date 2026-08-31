@@ -588,10 +588,15 @@ export async function setGymSlotStatus(
   );
 }
 
-export async function inviteGymBuddy(userId: string, email: string, ..._ignored: unknown[]) {
+/** `identifier` is an email address or a friend code; the backend classifies. */
+export async function inviteGymBuddy(
+  userId: string,
+  identifier: string,
+  ..._ignored: unknown[]
+) {
   return backendRpc<{ id: string; result: "invited" | "accepted" }>("inviteGymBuddy", {
     userId,
-    email,
+    identifier,
   });
 }
 
