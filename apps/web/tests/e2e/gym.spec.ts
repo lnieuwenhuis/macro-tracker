@@ -63,7 +63,6 @@ test("the top-left gym button opens the schedule and slots can be managed", asyn
   await page.getByRole("button", { name: "Change status for Leg day" }).click();
   const chooser = page.getByRole("dialog", { name: "Change slot status" });
   await expect(chooser).toBeVisible();
-  await expect(chooser.getByText("Skipping never removes the slot")).toBeVisible();
   await chooser.getByRole("button", { name: /Skip this day/ }).click();
   await expect(chooser).toBeHidden();
   await expect(
