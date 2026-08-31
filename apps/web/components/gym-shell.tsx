@@ -158,6 +158,8 @@ export function GymShell({
         activeTab="log"
         showDateNavigation
         basePath="/gym"
+        showGymShortcut
+        gymShortcutActive
         todayStr={todayStr}
       >
         <div className="mb-4 rounded-[1.45rem] border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-surface-strong)_92%,transparent)] p-1 shadow-[0_16px_30px_rgba(0,0,0,0.12)] backdrop-blur-xl">
