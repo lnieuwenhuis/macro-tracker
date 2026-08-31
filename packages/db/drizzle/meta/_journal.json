@@ -120,6 +120,13 @@
       "when": 1785369600000,
       "tag": "0016_enum_check_constraints",
       "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1788134400000,
+      "tag": "0017_gym_schedule",
+      "breakpoints": true
     }
   ]
 }

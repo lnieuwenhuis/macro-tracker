@@ -27,6 +27,17 @@ type AppShellProps = {
   title: string;
   activeTab: "log" | "progress" | "recipes" | "summary";
   showDateNavigation?: boolean;
+  /**
+   * Where the day chevrons / date picker navigate. Defaults to the tab's
+   * home ("/" or "/summary") for existing callers; screens like /gym that
+   * reuse `activeTab="log"` must pass their own path or day navigation would
+   * bounce them back to the dashboard.
+   */
+  basePath?: string;
+  /** Renders the top-left gym shortcut (dashboard only). */
+  showGymShortcut?: boolean;
+  /** Pending gym-buddy invites; > 0 shows a dot on the gym shortcut. */
+  gymPendingInviteCount?: number;
   onComposeAction?: (action: ComposeAction) => void;
   topBar?: (controls: { openSettings: () => void }) => ReactNode;
   children: ReactNode;
@@ -43,6 +54,9 @@ export function AppShell({
   selectedDate,
   activeTab,
   showDateNavigation = false,
+  basePath: basePathProp,
+  showGymShortcut = false,
+  gymPendingInviteCount = 0,
   onComposeAction,
   topBar,
   children,
@@ -58,7 +72,7 @@ export function AppShell({
     [todayStrProp],
   );
   const isToday = selectedDate === todayStr;
-  const basePath = activeTab === "summary" ? "/summary" : "/";
+  const basePath = basePathProp ?? (activeTab === "summary" ? "/summary" : "/");
   const previousDateHref = `${basePath}?date=${previousDateString(selectedDate)}`;
   const nextDateHref = `${basePath}?date=${nextDateString(selectedDate)}`;
   const screenKey = `${pathname}?date=${selectedDate}`;
@@ -187,6 +201,30 @@ export function AppShell({
             {showDateNavigation ? (
               <div className="sticky top-0 z-20 px-4 pb-3 pt-[calc(0.75rem+env(safe-area-inset-top))] sm:px-6">
                 <div className="flex items-center gap-3">
+                  {showGymShortcut ? (
+                    <TransitionLink
+                      href={`/gym?date=${selectedDate}`}
+                      motion="screen"
+                      className={`relative ${ROUND_SHELL_BUTTON_CLASS} shrink-0`}
+                      aria-label="Open gym schedule"
+                    >
+                      <LinkPendingPulse className="flex items-center justify-center">
+                        <svg width="17" height="17" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+                          <line x1="6.7" y1="9" x2="11.3" y2="9" />
+                          <rect x="4.4" y="5.2" width="2.3" height="7.6" rx="1" />
+                          <rect x="11.3" y="5.2" width="2.3" height="7.6" rx="1" />
+                          <line x1="2.4" y1="6.8" x2="2.4" y2="11.2" />
+                          <line x1="15.6" y1="6.8" x2="15.6" y2="11.2" />
+                        </svg>
+                      </LinkPendingPulse>
+                      {gymPendingInviteCount > 0 ? (
+                        <span
+                          className="absolute right-1 top-1 h-2.5 w-2.5 rounded-full bg-[var(--color-accent)] ring-2 ring-[var(--color-surface-strong)]"
+                          aria-hidden="true"
+                        />
+                      ) : null}
+                    </TransitionLink>
+                  ) : null}
                   <div className="min-w-0 flex-1 rounded-[1.45rem] border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-surface-strong)_92%,transparent)] p-1 shadow-[0_16px_30px_rgba(0,0,0,0.12)] backdrop-blur-xl">
                     <div className="flex h-12 items-center justify-between gap-2 rounded-[1.05rem] bg-[var(--color-shell-panel)] px-1.5">
                       <TransitionLink
@@ -310,6 +348,10 @@ export function AppShell({
   );
 }
 
+/** The round header-button look shared by the settings and gym buttons. */
+const ROUND_SHELL_BUTTON_CLASS =
+  "flex h-12 w-12 items-center justify-center rounded-full border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-surface-strong)_92%,transparent)] text-[var(--color-ink)] shadow-[0_10px_20px_rgba(0,0,0,0.12)] backdrop-blur-xl transition hover:bg-[var(--color-card-muted)]";
+
 export function SettingsButton({
   onClick,
   className = "",
@@ -321,10 +363,7 @@ export function SettingsButton({
     <button
       type="button"
       onClick={onClick}
-      className={[
-        "flex h-12 w-12 items-center justify-center rounded-full border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-surface-strong)_92%,transparent)] text-[var(--color-ink)] shadow-[0_10px_20px_rgba(0,0,0,0.12)] backdrop-blur-xl transition hover:bg-[var(--color-card-muted)]",
-        className,
-      ].join(" ")}
+      className={[ROUND_SHELL_BUTTON_CLASS, className].join(" ")}
       aria-label="Open settings"
     >
       <svg width="17" height="17" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">

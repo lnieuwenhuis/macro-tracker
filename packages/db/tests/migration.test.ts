@@ -28,6 +28,7 @@ const migrationFiles = [
   "0014_food_product_search_trigram.sql",
   "0015_admin_audit_events_actor_set_null.sql",
   "0016_enum_check_constraints.sql",
+  "0017_gym_schedule.sql",
 ] as const;
 
 /** Index of `0013_deduplicate_default_meal_groups.sql`, which several tests
@@ -592,8 +593,13 @@ describe("database migrations", () => {
 
     // Apply everything up to (not including) 0016 so an out-of-union row can
     // be seeded exactly the way it could already exist in a production
-    // database the CHECK constraint migration runs against.
-    for (const fileName of migrationFiles.slice(0, -1)) {
+    // database the CHECK constraint migration runs against. Sliced by index,
+    // not `slice(0, -1)`: appending a later migration to `migrationFiles`
+    // must not silently apply 0016 here and break the seed insert.
+    const enumCheckMigrationIndex = migrationFiles.indexOf(
+      "0016_enum_check_constraints.sql",
+    );
+    for (const fileName of migrationFiles.slice(0, enumCheckMigrationIndex)) {
       await applyMigration(runtime, fileName);
     }
 
@@ -633,6 +639,76 @@ describe("database migrations", () => {
       SELECT "type" FROM "meal_templates" WHERE "id" = 'b6666666-6666-4666-8666-666666666666'
     `));
     expect(acceptedRow.rows).toEqual([{ type: "day" }]);
+  });
+
+  it("enforces the gym schedule pair uniqueness and shape constraints (0017)", async () => {
+    runtime = await createDatabaseRuntime("memory:");
+
+    for (const fileName of migrationFiles) {
+      await applyMigration(runtime, fileName);
+    }
+
+    const requesterId = "c1111111-1111-4111-8111-111111111111";
+    const addresseeId = "c2222222-2222-4222-8222-222222222222";
+
+    await runtime.db.execute(sql.raw(`
+      INSERT INTO "users" ("id", "shoo_pairwise_sub", "email")
+      VALUES
+        ('${requesterId}', 'gym_requester', 'gym-requester@example.com'),
+        ('${addresseeId}', 'gym_addressee', 'gym-addressee@example.com')
+    `));
+    await runtime.db.execute(sql.raw(`
+      INSERT INTO "gym_buddies" ("id", "requester_user_id", "addressee_user_id", "status")
+      VALUES ('c3333333-3333-4333-8333-333333333333', '${requesterId}', '${addresseeId}', 'pending')
+    `));
+
+    // The LEAST/GREATEST pair index must reject the REVERSE direction too.
+    await expect(
+      runtime.db.execute(sql.raw(`
+        INSERT INTO "gym_buddies" ("id", "requester_user_id", "addressee_user_id", "status")
+        VALUES ('c4444444-4444-4444-8444-444444444444', '${addresseeId}', '${requesterId}', 'pending')
+      `)),
+    ).rejects.toThrow();
+
+    // A weekly slot carrying a date violates the recurrence-shape CHECK.
+    await expect(
+      runtime.db.execute(sql.raw(`
+        INSERT INTO "gym_slots" (
+          "id", "user_id", "title", "recurrence", "slot_date", "weekday", "start_minute", "end_minute"
+        )
+        VALUES ('c5555555-5555-4555-8555-555555555555', '${requesterId}', 'Push day', 'weekly', '2026-09-01', 1, 1020, 1110)
+      `)),
+    ).rejects.toThrow();
+
+    // 23:00 until midnight is representable (end_minute = 1440)...
+    await runtime.db.execute(sql.raw(`
+      INSERT INTO "gym_slots" (
+        "id", "user_id", "title", "recurrence", "weekday", "start_minute", "end_minute"
+      )
+      VALUES ('c6666666-6666-4666-8666-666666666666', '${requesterId}', 'Night lift', 'weekly', 1, 1380, 1440)
+    `));
+    // ...but an overnight slot is not.
+    await expect(
+      runtime.db.execute(sql.raw(`
+        INSERT INTO "gym_slots" (
+          "id", "user_id", "title", "recurrence", "weekday", "start_minute", "end_minute"
+        )
+        VALUES ('c7777777-7777-4777-8777-777777777777', '${requesterId}', 'Overnight', 'weekly', 2, 1320, 120)
+      `)),
+    ).rejects.toThrow();
+
+    // Deleting a slot cascades its per-date statuses.
+    await runtime.db.execute(sql.raw(`
+      INSERT INTO "gym_slot_statuses" ("id", "slot_id", "status_date", "status")
+      VALUES ('c8888888-8888-4888-8888-888888888888', 'c6666666-6666-4666-8666-666666666666', '2026-09-07', 'skipped')
+    `));
+    await runtime.db.execute(sql.raw(`
+      DELETE FROM "gym_slots" WHERE "id" = 'c6666666-6666-4666-8666-666666666666'
+    `));
+    const orphanedStatuses = await runtime.db.execute<{ id: string }>(sql.raw(`
+      SELECT "id" FROM "gym_slot_statuses"
+    `));
+    expect(orphanedStatuses.rows).toEqual([]);
   });
 });
 

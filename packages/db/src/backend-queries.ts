@@ -20,6 +20,11 @@ import type {
   DailySummary,
   FoodProduct,
   FoodProductInput,
+  GymHomeSummary,
+  GymPageData,
+  GymSlot,
+  GymSlotInput,
+  GymSlotStatus,
   MacroGoals,
   MealEntryInput,
   MealEntryRecord,
@@ -547,4 +552,70 @@ export async function getAdminAuditEventById(
     actorUserId,
     eventId,
   });
+}
+
+export async function createGymSlot(
+  userId: string,
+  input: GymSlotInput,
+  ..._ignored: unknown[]
+) {
+  return backendRpc<GymSlot>("createGymSlot", { userId, input });
+}
+
+export async function updateGymSlot(
+  userId: string,
+  slotId: string,
+  input: GymSlotInput,
+  ..._ignored: unknown[]
+) {
+  return backendRpc<GymSlot>("updateGymSlot", { userId, slotId, input });
+}
+
+export async function deleteGymSlot(userId: string, slotId: string, ..._ignored: unknown[]) {
+  return backendRpc<{ deleted: boolean }>("deleteGymSlot", { userId, slotId });
+}
+
+export async function setGymSlotStatus(
+  userId: string,
+  slotId: string,
+  date: string,
+  status: GymSlotStatus,
+  ..._ignored: unknown[]
+) {
+  return backendRpc<{ slotId: string; date: string; status: GymSlotStatus }>(
+    "setGymSlotStatus",
+    { userId, slotId, date, status },
+  );
+}
+
+export async function inviteGymBuddy(userId: string, email: string, ..._ignored: unknown[]) {
+  return backendRpc<{ id: string; result: "invited" | "accepted" }>("inviteGymBuddy", {
+    userId,
+    email,
+  });
+}
+
+export async function respondGymBuddyInvite(
+  userId: string,
+  buddyId: string,
+  accept: boolean,
+  ..._ignored: unknown[]
+) {
+  return backendRpc<{ status: "accepted" | "declined" }>("respondGymBuddyInvite", {
+    userId,
+    buddyId,
+    accept,
+  });
+}
+
+export async function removeGymBuddy(userId: string, buddyId: string, ..._ignored: unknown[]) {
+  return backendRpc<{ removed: boolean }>("removeGymBuddy", { userId, buddyId });
+}
+
+export async function getGymPageData(userId: string, date: string, ..._ignored: unknown[]) {
+  return backendRpc<GymPageData>("getGymPageData", { userId, date });
+}
+
+export async function getGymHomeSummary(userId: string, date: string, ..._ignored: unknown[]) {
+  return backendRpc<GymHomeSummary>("getGymHomeSummary", { userId, date });
 }
