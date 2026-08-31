@@ -911,7 +911,7 @@ function GymSlotFormModal({
             </div>
           </div>
         ) : (
-          <label className="block">
+          <label className="block min-w-0">
             <span className="mb-1 block text-xs font-semibold text-[var(--color-muted-strong)]">
               Date
             </span>
@@ -919,13 +919,21 @@ function GymSlotFormModal({
               type="date"
               value={slotDate}
               onChange={(event) => setSlotDate(event.target.value)}
-              className={TEXT_INPUT_CLASS}
+              className={`${TEXT_INPUT_CLASS} min-w-0 appearance-none`}
             />
           </label>
         )}
 
+        {/*
+          iOS Safari gives date/time inputs a large intrinsic minimum width
+          that a 1fr grid track cannot shrink (grid items default to
+          min-width auto), so the "Until" field overflowed the modal on
+          phones. `min-w-0` on both the grid items and the inputs plus
+          `appearance-none` (so WebKit respects the width at all) keeps the
+          pair inside the form.
+        */}
         <div className="grid grid-cols-2 gap-2">
-          <label className="block">
+          <label className="block min-w-0">
             <span className="mb-1 block text-xs font-semibold text-[var(--color-muted-strong)]">
               From
             </span>
@@ -934,10 +942,10 @@ function GymSlotFormModal({
               value={startTime}
               onChange={(event) => setStartTime(event.target.value)}
               required
-              className={TEXT_INPUT_CLASS}
+              className={`${TEXT_INPUT_CLASS} min-w-0 appearance-none`}
             />
           </label>
-          <label className="block">
+          <label className="block min-w-0">
             <span className="mb-1 block text-xs font-semibold text-[var(--color-muted-strong)]">
               Until
             </span>
@@ -946,7 +954,7 @@ function GymSlotFormModal({
               value={endTime}
               onChange={(event) => setEndTime(event.target.value)}
               required
-              className={TEXT_INPUT_CLASS}
+              className={`${TEXT_INPUT_CLASS} min-w-0 appearance-none`}
             />
           </label>
         </div>
