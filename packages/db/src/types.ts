@@ -77,6 +77,88 @@ export const FOOD_PRODUCT_SOURCE_VALUES = [
 ] as const;
 export type FoodProductSource = (typeof FOOD_PRODUCT_SOURCE_VALUES)[number];
 
+export const GYM_SLOT_STATUS_VALUES = ["going", "maybe", "skipped", "done"] as const;
+export type GymSlotStatus = (typeof GYM_SLOT_STATUS_VALUES)[number];
+
+export const GYM_RECURRENCE_VALUES = ["once", "weekly"] as const;
+export type GymRecurrence = (typeof GYM_RECURRENCE_VALUES)[number];
+
+export type GymSlot = {
+  id: string;
+  title: string;
+  description: string | null;
+  recurrence: GymRecurrence;
+  slotDate: string | null;
+  weekday: number | null;
+  startMinute: number;
+  endMinute: number;
+};
+
+export type GymSlotInput = {
+  title?: string;
+  description?: string | null;
+  recurrence: GymRecurrence;
+  slotDate?: string | null;
+  weekday?: number | null;
+  startMinute: number;
+  endMinute: number;
+};
+
+/** A slot as it occurs on one specific day, with its effective status. */
+export type GymResolvedSlot = {
+  id: string;
+  title: string;
+  /** Present only on the caller's own slots — never on a buddy's. */
+  description?: string | null;
+  recurrence: GymRecurrence;
+  startMinute: number;
+  endMinute: number;
+  status: GymSlotStatus;
+};
+
+export type GymBuddyUser = {
+  id: string;
+  name: string;
+};
+
+export type GymOverlapWindow = {
+  startMinute: number;
+  endMinute: number;
+  tentative: boolean;
+};
+
+export type GymOverlap = {
+  buddy: GymBuddyUser;
+  windows: GymOverlapWindow[];
+  /** True when the buddy has no confirmed window at all (only "maybe"s). */
+  tentative: boolean;
+};
+
+export type GymBuddyLists = {
+  accepted: { id: string; user: GymBuddyUser }[];
+  pendingIncoming: { id: string; user: GymBuddyUser }[];
+  /** Shows only the invited email — never the target's display name. */
+  pendingOutgoing: { id: string; email: string }[];
+  /** Invites this user declined; visible only to the decliner (= the block list). */
+  declined: { id: string; user: GymBuddyUser }[];
+};
+
+export type GymPageData = {
+  date: string;
+  slots: GymSlot[];
+  day: {
+    own: GymResolvedSlot[];
+    buddies: { user: GymBuddyUser; slots: GymResolvedSlot[] }[];
+  };
+  buddies: GymBuddyLists;
+  overlaps: GymOverlap[];
+};
+
+export type GymHomeSummary = {
+  overlaps: GymOverlap[];
+  pendingInviteCount: number;
+};
+
 export const WEIGHT_UNIT_VALUES = ["kg", "lb"] as const;
 export type WeightUnit = (typeof WEIGHT_UNIT_VALUES)[number];
 
