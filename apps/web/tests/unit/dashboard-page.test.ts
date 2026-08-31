@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocked = vi.hoisted(() => ({
   getDailySummary: vi.fn(),
   getDashboardQuickAddCandidates: vi.fn(),
+  getGymHomeSummary: vi.fn(),
   getUserGoals: vi.fn(),
   loadOnboardedPageContext: vi.fn(),
 }));
@@ -10,6 +11,7 @@ const mocked = vi.hoisted(() => ({
 vi.mock("@macro-tracker/db", () => ({
   getDailySummary: mocked.getDailySummary,
   getDashboardQuickAddCandidates: mocked.getDashboardQuickAddCandidates,
+  getGymHomeSummary: mocked.getGymHomeSummary,
   getUserGoals: mocked.getUserGoals,
 }));
 
@@ -28,6 +30,10 @@ describe("dashboard page", () => {
     vi.clearAllMocks();
     mocked.getDailySummary.mockResolvedValue({ meals: [], mealGroups: [] });
     mocked.getDashboardQuickAddCandidates.mockResolvedValue([]);
+    mocked.getGymHomeSummary.mockResolvedValue({
+      overlaps: [],
+      pendingInviteCount: 0,
+    });
     mocked.getUserGoals.mockResolvedValue(null);
   });
 
