@@ -10,7 +10,7 @@ corresponding snapshot was ever generated for them.
 
 `drizzle-kit generate` diffs `schema.ts` against the **last snapshot in `meta/`**, not against
 the journal and not against a live database. Because `meta/` only goes up to
-`0004_snapshot.json` while `_journal.json` has 15 entries (`0000`–`0014`), the last snapshot
+`0004_snapshot.json` while `_journal.json` has 20 entries (`0000`–`0019`), the last snapshot
 drizzle-kit would diff against describes the schema as of migration `0004` — six tables that
 existed at that point (`food_presets`, `meal_entries`, `recipe_ingredients`, `recipes`, `users`,
 `weight_entries`), missing every table and column added since (`food_products`, `meal_groups`,
@@ -18,7 +18,7 @@ existed at that point (`food_presets`, `meal_entries`, `recipe_ingredients`, `re
 `food_product_revisions`, and more).
 
 Running `drizzle-kit generate` today would therefore diff the *current* `schema.ts` against that
-stale `0004` state and emit a migration that tries to recreate everything added in `0005`–`0014`
+stale `0004` state and emit a migration that tries to recreate everything added in `0005`–`0019`
 from scratch — including `DROP`/`CREATE` pairs for tables drizzle-kit would (incorrectly) treat as
 renames. Applying it would fail immediately (`relation already exists`) or, worse, silently
 destroy data if a rename prompt is answered wrong.
@@ -32,16 +32,16 @@ does that backfill.
 ## Adding a new migration by hand
 
 1. Write the migration SQL directly in `packages/db/drizzle/`, named `NNNN_description.sql`
-   where `NNNN` is the next zero-padded index (e.g. `0015_add_thing.sql`). Use
+   where `NNNN` is the next zero-padded index (e.g. `0020_add_thing.sql`). Use
    `--> statement-breakpoint` to separate statements the way existing hand-authored migrations do
    (see `0013_deduplicate_default_meal_groups.sql` for an example).
 2. Append a new entry to `meta/_journal.json`:
    ```json
    {
-     "idx": 15,
+     "idx": 20,
      "version": "7",
      "when": 1785283200000,
-     "tag": "0015_add_thing",
+     "tag": "0020_add_thing",
      "breakpoints": true
    }
    ```
