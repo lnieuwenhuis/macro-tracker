@@ -456,6 +456,113 @@ export const mealTemplateItems = pgTable(
   ],
 );
 
+export const gymSlots = pgTable(
+  "gym_slots",
+  {
+    id: uuid("id").primaryKey().notNull(),
+    userId: uuid("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    description: text("description"),
+    recurrence: text("recurrence").notNull(),
+    slotDate: date("slot_date"),
+    weekday: integer("weekday"),
+    startMinute: integer("start_minute").notNull(),
+    endMinute: integer("end_minute").notNull(),
+    ...createdUpdatedTimestamps(),
+  },
+  (table) => [
+    index("gym_slots_user_date_idx").on(table.userId, table.slotDate),
+    index("gym_slots_user_weekday_idx").on(table.userId, table.weekday),
+    check(
+      "gym_slots_recurrence_check",
+      sql`${table.recurrence} IN ('once', 'weekly')`,
+    ),
+    // A slot is either one-off (has a date, no weekday) or weekly recurring
+    // (ISO weekday 1-7, no date). The kind is immutable after creation.
+    check(
+      "gym_slots_recurrence_shape_check",
+      sql`(${table.recurrence} = 'once' AND ${table.slotDate} IS NOT NULL AND ${table.weekday} IS NULL) OR (${table.recurrence} = 'weekly' AND ${table.weekday} BETWEEN 1 AND 7 AND ${table.slotDate} IS NULL)`,
+    ),
+    // end_minute may be 1440 ("until midnight") so 23:00-00:00 stays
+    // representable; overnight slots are out of scope.
+    check(
+      "gym_slots_minutes_check",
+      sql`${table.startMinute} >= 0 AND ${table.endMinute} <= 1440 AND ${table.startMinute} < ${table.endMinute}`,
+    ),
+  ],
+);
+
+/**
+ * Per-date status for a slot (both recurrence kinds). No row for a date means
+ * the implicit default 'going' — status belongs to a day, never to the slot
+ * definition, so editing a slot cannot silently rewrite past days.
+ */
+export const gymSlotStatuses = pgTable(
+  "gym_slot_statuses",
+  {
+    id: uuid("id").primaryKey().notNull(),
+    slotId: uuid("slot_id")
+      .notNull()
+      .references(() => gymSlots.id, { onDelete: "cascade" }),
+    statusDate: date("status_date").notNull(),
+    status: text("status").notNull(),
+    ...createdUpdatedTimestamps(),
+  },
+  (table) => [
+    uniqueIndex("gym_slot_statuses_slot_date_key").on(
+      table.slotId,
+      table.statusDate,
+    ),
+    check(
+      "gym_slot_statuses_status_check",
+      sql`${table.status} IN ('going', 'maybe', 'skipped', 'done')`,
+    ),
+  ],
+);
+
+/**
+ * One row per unordered user pair (enforced by the LEAST/GREATEST expression
+ * index — an index, not a constraint, because constraints cannot use
+ * expressions). A 'declined' row doubles as a block: it survives, keeps the
+ * pair index occupied so re-invites fail, and only the decliner (addressee)
+ * may delete it.
+ */
+export const gymBuddies = pgTable(
+  "gym_buddies",
+  {
+    id: uuid("id").primaryKey().notNull(),
+    requesterUserId: uuid("requester_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    addresseeUserId: uuid("addressee_user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    status: text("status").notNull().default("pending"),
+    ...createdUpdatedTimestamps(),
+  },
+  (table) => [
+    uniqueIndex("gym_buddies_pair_key").on(
+      sql`LEAST(${table.requesterUserId}, ${table.addresseeUserId})`,
+      sql`GREATEST(${table.requesterUserId}, ${table.addresseeUserId})`,
+    ),
+    index("gym_buddies_addressee_idx").on(table.addresseeUserId, table.status),
+    // The accepted-buddies lookup is an OR over both sides; the expression
+    // index above cannot serve `requester_user_id = $1`, so without this
+    // btree the lookup seq-scans.
+    index("gym_buddies_requester_idx").on(table.requesterUserId, table.status),
+    check(
+      "gym_buddies_not_self_check",
+      sql`${table.requesterUserId} <> ${table.addresseeUserId}`,
+    ),
+    check(
+      "gym_buddies_status_check",
+      sql`${table.status} IN ('pending', 'accepted', 'declined')`,
+    ),
+  ],
+);
+
 export type WeightEntryRow = typeof weightEntries.$inferSelect;
 export type NewWeightEntryRow = typeof weightEntries.$inferInsert;
 export type RecipeRow = typeof recipes.$inferSelect;
@@ -474,3 +581,9 @@ export type MealTemplateItemRow = typeof mealTemplateItems.$inferSelect;
 export type NewMealTemplateItemRow = typeof mealTemplateItems.$inferInsert;
 export type AdminAuditEventRow = typeof adminAuditEvents.$inferSelect;
 export type NewAdminAuditEventRow = typeof adminAuditEvents.$inferInsert;
+export type GymSlotRow = typeof gymSlots.$inferSelect;
+export type NewGymSlotRow = typeof gymSlots.$inferInsert;
+export type GymSlotStatusRow = typeof gymSlotStatuses.$inferSelect;
+export type NewGymSlotStatusRow = typeof gymSlotStatuses.$inferInsert;
+export type GymBuddyRow = typeof gymBuddies.$inferSelect;
+export type NewGymBuddyRow = typeof gymBuddies.$inferInsert;
