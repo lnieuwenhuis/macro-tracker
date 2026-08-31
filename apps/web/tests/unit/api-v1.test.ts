@@ -1325,6 +1325,7 @@ describe("Macro Tracker API v1", () => {
       ["POST", "/recipes/recipe-id/log", null],
       ["POST", "/weight/entries", {}],
       ["PATCH", "/weight/goal", null],
+      ["POST", "/sync/healthkit/ack", {}],
     ] as const;
 
     for (const [method, path, body] of writeRequests) {
@@ -2194,6 +2195,185 @@ describe("Macro Tracker API v1", () => {
         currentStreak: 0,
         longestStreak: 3,
       },
+    });
+  });
+
+  it("feeds and acknowledges the Apple Health sync queue exactly once", async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+
+    const eaten = await createMealEntry(
+      userId,
+      {
+        date: today,
+        mealGroupId: null,
+        status: "eaten",
+        label: "Chicken bowl",
+        proteinG: 40,
+        carbsG: 50,
+        fatG: 12,
+        caloriesKcal: 480,
+      },
+      runtime.db,
+    );
+    const planned = await createMealEntry(
+      userId,
+      {
+        date: today,
+        mealGroupId: null,
+        status: "planned",
+        label: "Planned dinner",
+        proteinG: 30,
+        carbsG: 40,
+        fatG: 15,
+        caloriesKcal: 420,
+      },
+      runtime.db,
+    );
+    const backfilled = await createMealEntry(
+      userId,
+      {
+        date: yesterday,
+        mealGroupId: null,
+        status: "eaten",
+        label: "Backfilled lunch",
+        proteinG: 20,
+        carbsG: 60,
+        fatG: 10,
+        caloriesKcal: 400,
+      },
+      runtime.db,
+    );
+
+    const first = await apiRequest("GET", "/sync/healthkit", { token: fullToken });
+    expect(first.status).toBe(200);
+    const firstPayload = (await first.json()) as {
+      data: {
+        pendingTotal: number;
+        entries: Array<Record<string, unknown> & { sampleTime: string }>;
+      };
+    };
+    expect(firstPayload.data.pendingTotal).toBe(2);
+    expect(firstPayload.data.entries).toHaveLength(2);
+    const [oldest, newest] = firstPayload.data.entries;
+    expect(oldest).toMatchObject({
+      id: backfilled.id,
+      date: yesterday,
+      label: "Backfilled lunch",
+      proteinG: 20,
+      carbsG: 60,
+      fatG: 10,
+      caloriesKcal: 400,
+    });
+    // A backfilled entry must land on the day it was eaten, not the day it
+    // was logged, and no sample may ever sit in the future.
+    expect(oldest!.sampleTime.startsWith(yesterday)).toBe(true);
+    expect(newest).toMatchObject({ id: eaten.id, date: today });
+    expect(new Date(newest!.sampleTime).getTime()).toBeLessThanOrEqual(Date.now() + 1000);
+
+    // pendingTotal reports the whole backlog even when the page is smaller.
+    const limited = await apiRequest("GET", "/sync/healthkit?limit=1", { token: fullToken });
+    const limitedPayload = (await limited.json()) as {
+      data: { pendingTotal: number; entries: Array<{ id: string }> };
+    };
+    expect(limitedPayload.data.pendingTotal).toBe(2);
+    expect(limitedPayload.data.entries.map((entry) => entry.id)).toEqual([backfilled.id]);
+
+    const ack = await apiRequest("POST", "/sync/healthkit/ack", {
+      token: fullToken,
+      body: { entryIds: [backfilled.id] },
+    });
+    expect(ack.status).toBe(200);
+    await expect(ack.json()).resolves.toMatchObject({ ok: true, data: { acked: 1 } });
+
+    const second = await apiRequest("GET", "/sync/healthkit", { token: fullToken });
+    const secondPayload = (await second.json()) as {
+      data: { pendingTotal: number; entries: Array<{ id: string }> };
+    };
+    expect(secondPayload.data.pendingTotal).toBe(1);
+    expect(secondPayload.data.entries.map((entry) => entry.id)).toEqual([eaten.id]);
+
+    // Re-acking is idempotent: already-acked IDs no longer count.
+    const reAck = await apiRequest("POST", "/sync/healthkit/ack", {
+      token: fullToken,
+      body: { entryIds: [backfilled.id, eaten.id] },
+    });
+    await expect(reAck.json()).resolves.toMatchObject({ ok: true, data: { acked: 1 } });
+
+    const drained = await apiRequest("GET", "/sync/healthkit", { token: fullToken });
+    await expect(drained.json()).resolves.toMatchObject({
+      ok: true,
+      data: { pendingTotal: 0, entries: [] },
+    });
+
+    // A planned entry joins the queue only once it is marked eaten.
+    const statusResponse = await apiRequest("PATCH", `/meal-entries/${planned.id}/status`, {
+      token: fullToken,
+      body: { status: "eaten" },
+    });
+    expect(statusResponse.status).toBe(200);
+
+    const afterEaten = await apiRequest("GET", "/sync/healthkit", { token: fullToken });
+    const afterEatenPayload = (await afterEaten.json()) as {
+      data: { pendingTotal: number; entries: Array<{ id: string }> };
+    };
+    expect(afterEatenPayload.data.pendingTotal).toBe(1);
+    expect(afterEatenPayload.data.entries.map((entry) => entry.id)).toEqual([planned.id]);
+  });
+
+  it("validates Apple Health sync parameters, payloads, and scopes", async () => {
+    for (const path of [
+      "/sync/healthkit?days=0",
+      "/sync/healthkit?days=31",
+      "/sync/healthkit?limit=0",
+      "/sync/healthkit?limit=201",
+      "/sync/healthkit?days=abc",
+    ]) {
+      const response = await apiRequest("GET", path, { token: fullToken });
+      expect(response.status, path).toBe(400);
+      await expect(response.json()).resolves.toMatchObject({
+        ok: false,
+        error: { code: "bad_request" },
+      });
+    }
+
+    const invalidIds = await apiRequest("POST", "/sync/healthkit/ack", {
+      token: fullToken,
+      body: { entryIds: ["not-a-uuid"] },
+    });
+    expect(invalidIds.status).toBe(400);
+    await expect(invalidIds.json()).resolves.toMatchObject({
+      ok: false,
+      error: { code: "bad_request" },
+    });
+
+    const readOnly = await createApiToken(
+      userId,
+      { name: "Read daily only", scopes: ["read:daily"] },
+      runtime.db,
+    );
+    const forbiddenAck = await apiRequest("POST", "/sync/healthkit/ack", {
+      token: readOnly.token,
+      body: { entryIds: [] },
+    });
+    expect(forbiddenAck.status).toBe(403);
+    await expect(forbiddenAck.json()).resolves.toMatchObject({
+      ok: false,
+      error: { code: "insufficient_scope" },
+    });
+
+    const writeOnly = await createApiToken(
+      userId,
+      { name: "Write daily only", scopes: ["write:daily"] },
+      runtime.db,
+    );
+    const forbiddenFeed = await apiRequest("GET", "/sync/healthkit", {
+      token: writeOnly.token,
+    });
+    expect(forbiddenFeed.status).toBe(403);
+    await expect(forbiddenFeed.json()).resolves.toMatchObject({
+      ok: false,
+      error: { code: "insufficient_scope" },
     });
   });
 });

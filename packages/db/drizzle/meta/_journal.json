@@ -110,14 +110,14 @@
     {
       "idx": 15,
       "version": "7",
-      "when": 1785283200000,
+      "when": 1787961600000,
       "tag": "0015_admin_audit_events_actor_set_null",
       "breakpoints": true
     },
     {
       "idx": 16,
       "version": "7",
-      "when": 1785369600000,
+      "when": 1788048000000,
       "tag": "0016_enum_check_constraints",
       "breakpoints": true
     },
@@ -133,6 +133,13 @@
       "version": "7",
       "when": 1788220800000,
       "tag": "0018_gym_friend_codes",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1788307200000,
+      "tag": "0019_meal_entries_healthkit_sync",
       "breakpoints": true
     }
   ]

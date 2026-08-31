@@ -3,7 +3,7 @@
   "info": {
     "title": "Macro Tracker API",
     "version": "1.0.0",
-    "description": "User-scoped API for normal Macro Tracker objects. Every response is the same envelope: `{\"ok\": true, \"data\": ...}` on success, `{\"ok\": false, \"error\": {\"code\", \"message\"}}` otherwise. 405 is a property of the path rather than of one operation: any known path answers an unsupported method with 405 and an `Allow` header, so every operation lists it. Any request may additionally receive 413 (body over 2 MB) or 504 (the 30 second request deadline elapsed). The whole /api/v1 surface \u2014 including this document \u2014 sits behind a per-client rate limit and answers 429 when it is exceeded."
+    "description": "User-scoped API for normal Macro Tracker objects. Every response is the same envelope: `{\"ok\": true, \"data\": ...}` on success, `{\"ok\": false, \"error\": {\"code\", \"message\"}}` otherwise. 405 is a property of the path rather than of one operation: any known path answers an unsupported method with 405 and an `Allow` header, so every operation lists it. Any request may additionally receive 413 (body over 2 MB) or 504 (the 30 second request deadline elapsed). The whole /api/v1 surface — including this document — sits behind a per-client rate limit and answers 429 when it is exceeded."
   },
   "servers": [
     {
@@ -3744,6 +3744,199 @@
         }
       }
     },
+    "/sync/healthkit": {
+      "get": {
+        "summary": "List eaten meal entries not yet synced to Apple Health",
+        "description": "Oldest first within the day window. An acked entry never re-enters the queue, even after edits, because the consumer cannot retract HealthKit samples. `pendingTotal` counts every entry in the window, so a value above the returned page size means another pass is needed.",
+        "x-required-scopes": [
+          "read:daily"
+        ],
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 30,
+              "default": 7
+            },
+            "description": "How many days back to look."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 100
+            },
+            "description": "Maximum entries returned in one page."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "required": [
+                        "entries",
+                        "pendingTotal"
+                      ],
+                      "properties": {
+                        "entries": {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/HealthkitSyncEntry"
+                          }
+                        },
+                        "pendingTotal": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "504": {
+            "$ref": "#/components/responses/GatewayTimeout"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/sync/healthkit/ack": {
+      "post": {
+        "summary": "Mark meal entries as synced to Apple Health",
+        "description": "Idempotent: already-acked IDs are ignored, and `acked` reports only the rows this call transitioned.",
+        "x-required-scopes": [
+          "write:daily"
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "entryIds"
+                ],
+                "properties": {
+                  "entryIds": {
+                    "type": "array",
+                    "maxItems": 500,
+                    "items": {
+                      "type": "string",
+                      "format": "uuid"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "data"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "const": true
+                    },
+                    "data": {
+                      "type": "object",
+                      "required": [
+                        "acked"
+                      ],
+                      "properties": {
+                        "acked": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "405": {
+            "$ref": "#/components/responses/MethodNotAllowed"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "429": {
+            "$ref": "#/components/responses/TooManyRequests"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalServerError"
+          },
+          "504": {
+            "$ref": "#/components/responses/GatewayTimeout"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
     "/openapi.json": {
       "get": {
         "summary": "Read the OpenAPI document",
@@ -5045,6 +5238,49 @@
           },
           "goals": {
             "$ref": "#/components/schemas/MacroGoals"
+          }
+        }
+      },
+      "HealthkitSyncEntry": {
+        "type": "object",
+        "required": [
+          "id",
+          "date",
+          "label",
+          "proteinG",
+          "carbsG",
+          "fatG",
+          "caloriesKcal",
+          "sampleTime"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "date": {
+            "type": "string",
+            "format": "date"
+          },
+          "label": {
+            "type": "string"
+          },
+          "proteinG": {
+            "type": "number"
+          },
+          "carbsG": {
+            "type": "number"
+          },
+          "fatG": {
+            "type": "number"
+          },
+          "caloriesKcal": {
+            "type": "integer"
+          },
+          "sampleTime": {
+            "type": "string",
+            "format": "date-time",
+            "description": "UTC sample timestamp, clamped into the entry's own calendar day and never in the future."
           }
         }
       }

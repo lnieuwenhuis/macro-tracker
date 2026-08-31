@@ -30,6 +30,7 @@ const migrationFiles = [
   "0016_enum_check_constraints.sql",
   "0017_gym_schedule.sql",
   "0018_gym_friend_codes.sql",
+  "0019_meal_entries_healthkit_sync.sql",
 ] as const;
 
 /** Index of `0013_deduplicate_default_meal_groups.sql`, which several tests
