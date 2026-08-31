@@ -28,7 +28,12 @@ watchPatterns = [
 
 [deploy]
 startCommand = "pnpm --filter @macro-tracker/web start"
-healthcheckPath = "/"
+# NOT "/": the session proxy 307-redirects unauthenticated requests, and as of
+# 2026-08-31 Railway's healthcheck rejects non-2xx (the 2026-08-19 deploy
+# passed with the identical app returning 307 on "/", so the platform
+# tightened redirect handling). /login is public and returns 200 while still
+# exercising the full Next server + proxy stack.
+healthcheckPath = "/login"
 healthcheckTimeout = 120
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
