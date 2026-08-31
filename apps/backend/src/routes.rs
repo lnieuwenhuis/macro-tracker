@@ -13,6 +13,11 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::sync::Mutex as TokioMutex;
 
 pub fn internal_router() -> Router<AppState> {
     Router::new()
@@ -21,25 +26,55 @@ pub fn internal_router() -> Router<AppState> {
         .route("/auth/shoo/verify", post(verify_shoo))
 }
 
-pub async fn health(State(state): State<AppState>) -> (StatusCode, Json<Value>) {
-    match sqlx::query_scalar::<_, i32>("SELECT 1")
-        .fetch_one(&state.db)
-        .await
-    {
-        Ok(1) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))),
-        Ok(_) => (
+/// SEC-09: `/health` is unauthenticated and used to run `SELECT 1` per request,
+/// so a flood of probes could take every connection permit and starve real
+/// traffic — which then made `/health` itself 503 and tripped the platform's
+/// restart policy, turning a load spike into a restart loop.
+///
+/// The readiness signal is still real, just sampled: one probe per
+/// `HEALTH_CACHE_TTL` at most, shared by all concurrent callers.
+const HEALTH_CACHE_TTL: Duration = Duration::from_secs(1);
+
+#[derive(Default)]
+pub struct HealthCache {
+    last: TokioMutex<Option<(Instant, bool)>>,
+}
+
+impl HealthCache {
+    async fn database_is_ready(&self, db: &sqlx::PgPool) -> bool {
+        // Held across the probe so a burst collapses into a single query
+        // instead of one per request.
+        let mut last = self.last.lock().await;
+        if let Some((checked_at, ready)) = *last
+            && checked_at.elapsed() < HEALTH_CACHE_TTL
+        {
+            return ready;
+        }
+
+        let ready = match sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(db).await {
+            Ok(1) => true,
+            Ok(_) => false,
+            Err(error) => {
+                tracing::warn!(error = ?error, "database readiness check failed");
+                false
+            }
+        };
+        *last = Some((Instant::now(), ready));
+        ready
+    }
+}
+
+pub async fn health(
+    cache: Arc<HealthCache>,
+    State(state): State<AppState>,
+) -> (StatusCode, Json<Value>) {
+    if cache.database_is_ready(&state.db).await {
+        (StatusCode::OK, Json(serde_json::json!({ "ok": true })))
+    } else {
+        (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({ "ok": false, "error": "database readiness check failed" })),
-        ),
-        Err(error) => {
-            tracing::warn!(error = ?error, "database readiness check failed");
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(
-                    serde_json::json!({ "ok": false, "error": "database readiness check failed" }),
-                ),
-            )
-        }
+        )
     }
 }
 
@@ -60,12 +95,19 @@ async fn config_scoped_rpc(state: &AppState, op: &str, args: &Value) -> AppResul
             let user = auth::reconcile_configured_owner(state, user).await?;
             Ok(Some(serde_json::to_value(user)?))
         }
+        // SEC-11: `setUserOnboardingForTesting` is dispatched from
+        // `db::rpc_json`, which only sees the pool and so cannot consult
+        // `enable_test_routes`. Gating it here refuses it before it reaches that
+        // dispatch. It already needs the internal secret, so this is
+        // defence-in-depth - but it is the only test-only op that had no
+        // server-side switch at all.
+        "setUserOnboardingForTesting" => {
+            require_test_routes(state)?;
+            // Fall through to `db::rpc_json`, which owns the implementation.
+            Ok(None)
+        }
         "ensureUserRoleForTesting" => {
-            if !state.config.enable_test_routes {
-                return Err(AppError::Forbidden(
-                    "Test routes are not enabled on this backend.".to_string(),
-                ));
-            }
+            require_test_routes(state)?;
             let user_id = rpc_uuid(args, "userId")?;
             let role = args
                 .get("role")
@@ -77,6 +119,16 @@ async fn config_scoped_rpc(state: &AppState, op: &str, args: &Value) -> AppResul
             )?))
         }
         _ => Ok(None),
+    }
+}
+
+fn require_test_routes(state: &AppState) -> AppResult<()> {
+    if state.config.enable_test_routes {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden(
+            "Test routes are not enabled on this backend.".to_string(),
+        ))
     }
 }
 

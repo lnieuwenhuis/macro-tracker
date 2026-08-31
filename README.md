@@ -1,7 +1,7 @@
 # Macro Tracker
 
 [![Try Macro Tracker](https://img.shields.io/badge/try-macro.safasfly.dev-1f7a4d?style=flat-square)](https://macro.safasfly.dev)
-[![CI](https://github.com/lnieuwenhuis/marco-tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/lnieuwenhuis/marco-tracker/actions/workflows/ci.yml)
+[![CI](https://github.com/lnieuwenhuis/macro-tracker/actions/workflows/ci.yml/badge.svg)](https://github.com/lnieuwenhuis/macro-tracker/actions/workflows/ci.yml)
 ![Next.js](https://img.shields.io/badge/Next.js-16-black?style=flat-square&logo=nextdotjs)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?style=flat-square&logo=typescript&logoColor=white)
 ![Drizzle](https://img.shields.io/badge/Drizzle-ORM-c5f74f?style=flat-square)
@@ -10,7 +10,7 @@
 
 Macro Tracker is a phone-first macro tracking app for the day-to-day work of eating like you meant to. It is built around the stuff I actually want when I am logging food: fast daily entries, planned meals, reusable meals and days, barcode scanning, recipes, weight tracking, and enough stats to see patterns without turning breakfast into a spreadsheet ceremony.
 
-Current app version: `v3.01`
+The current app version is defined in [`apps/web/lib/app-version.ts`](apps/web/lib/app-version.ts) (`APP_VERSION`), which is the single source of truth — it is not duplicated here so this line cannot drift out of sync.
 
 ## Try It
 
@@ -45,7 +45,7 @@ Requirements:
 Clone and install:
 
 ```bash
-git clone https://github.com/lnieuwenhuis/marco-tracker.git macro-tracker
+git clone https://github.com/lnieuwenhuis/macro-tracker.git macro-tracker
 cd macro-tracker
 pnpm install
 ```
@@ -54,8 +54,8 @@ Export the required environment variables in the shell or deployment environment
 
 ```bash
 export APP_URL=http://localhost:3000
-export SESSION_SECRET=change-this-to-a-long-random-string
-export BACKEND_INTERNAL_SECRET=change-this-to-another-long-random-string
+export SESSION_SECRET=$(openssl rand -base64 48)
+export BACKEND_INTERNAL_SECRET=$(openssl rand -base64 48)
 export BACKEND_URL=http://127.0.0.1:4000
 export DATABASE_URL=postgres://macro:macro@localhost:5432/macro_tracker
 ```
@@ -66,7 +66,7 @@ Required runtime variables:
 | --- | --- | --- |
 | `DATABASE_URL` | Backend and migration commands | PostgreSQL connection string for the Rust backend database. Must be `postgres://` or `postgresql://`, not `file:` or `memory:`. |
 | `APP_URL` | Backend and frontend | Public URL of the web app, for example `http://localhost:3000` locally. |
-| `SESSION_SECRET` | Backend and frontend | Long random secret used for sessions. Required in every environment, including local development — there is no built-in fallback. |
+| `SESSION_SECRET` | Backend and frontend | Long random secret used for sessions. Required in every environment, including local development — there is no built-in fallback. Generate a fresh value per environment (for example `openssl rand -base64 48`); never reuse a value from this README, a sample `.env`, or another environment, and keep it secret. |
 | `BACKEND_INTERNAL_SECRET` | Backend and frontend | Shared secret the frontend sends when calling backend internal routes. |
 | `BACKEND_URL` | Frontend | URL the Next.js app uses to reach the Rust backend. Defaults to `http://127.0.0.1:4000` outside production, but set it explicitly in deployments. |
 
@@ -101,7 +101,7 @@ pnpm --filter @macro-tracker/web start
 
 For a deployed instance, set `APP_URL` to the public URL, `BACKEND_URL` to the backend service URL reachable from the frontend server, and use real random values for `SESSION_SECRET` and `BACKEND_INTERNAL_SECRET`. If you use remote PostgreSQL, `DATABASE_URL` uses TLS with certificate verification by default when `sslmode` is omitted or set to `verify-full`; use `sslmode=require` only when your provider requires encrypted TLS without certificate verification.
 
-The production build uses Next.js standalone output and starts that smaller server automatically when it is present. PostgreSQL pools default to a small personal-instance footprint of 3 connections; set `POSTGRES_POOL_MAX` if you need a different cap.
+The production build uses Next.js standalone output and starts that smaller server automatically when it is present. PostgreSQL pools default to 10 connections; set `POSTGRES_POOL_MAX` if you need a different cap. The old default of 3 was low enough that a burst of unauthenticated requests could exhaust it before any credential check ran.
 
 ## API Access
 
@@ -116,19 +116,16 @@ Useful optional environment variables:
 | Variable | Use |
 | --- | --- |
 | `APP_TRUSTED_ORIGINS` | Extra comma-separated origins that are allowed during auth flows. |
-| `SHOO_BASE_URL` | Alternate Shoo base URL. Defaults to `https://shoo.dev`. Must also be set in the **build** environment: the Content-Security-Policy is baked in at build time and has to allow the browser to reach this origin for the sign-in token exchange. |
+| `SHOO_BASE_URL` | Alternate Shoo base URL. Defaults to `https://shoo.dev`. The Content-Security-Policy is built per request in `apps/web/proxy.ts`, so the runtime value is the one that matters; `connect-src` is derived from it so the browser can reach this origin for the sign-in token exchange. |
 | `ADMIN_OWNER_EMAILS` | Comma-separated emails that should get owner-level admin access. |
 | `POSTGRES_POOL_MAX` | Optional PostgreSQL pool cap. Defaults to `3` for small deployments. |
 | `POSTGRES_POOL_IDLE_TIMEOUT_MS` | Optional idle timeout for pooled PostgreSQL clients. Defaults to `10000`. |
 | `POSTGRES_POOL_CONNECTION_TIMEOUT_MS` | Optional PostgreSQL connection timeout. Defaults to `5000`. |
 | `NEXT_CACHE_MAX_MEMORY_MB` | Optional Next.js in-memory cache cap in MB. Defaults to `0`, which disables the in-memory data cache entirely; set a non-zero value where cached fetches are expected to hit. |
-| `OPENROUTER_API_KEY` | Enables food-photo estimates via OpenRouter. |
-| `OPENROUTER_MODEL` | Optional primary OpenRouter model. Must be free, for example `google/gemma-4-26b-a4b-it:free`. |
-| `OPENROUTER_FALLBACK_MODELS` | Optional comma-separated free fallback models. |
-| `OPENROUTER_MODEL_TIMEOUT_MS` | Optional per-model attempt timeout for food-photo estimates (applies to OpenRouter and the AI gateway). |
-| `AI_GATEWAY_URL` | Optional OpenAI-compatible chat-completions URL that replaces OpenRouter for food-photo estimates, for example `http://cliproxyapi.railway.internal:8317/v1/chat/completions`. Must be `https` unless the host is loopback or `*.railway.internal`. See `infra/cliproxyapi/`. Set on the backend service, and also on the web service (URL only) so the admin benchmark page shows the right models. |
-| `AI_GATEWAY_API_KEY` | Backend-only bearer key for the AI gateway. Required when `AI_GATEWAY_URL` is set. |
-| `AI_GATEWAY_MODELS` | Optional comma-separated gateway model list. Defaults to `gpt-5.6-luna(low),gpt-5.6-luna(medium)`; the effort suffix is translated by CLIProxyAPI into the reasoning-effort parameter. |
+| `AI_GATEWAY_URL` | OpenAI-compatible chat-completions URL that powers food-photo estimates, for example `http://cliproxyapi.railway.internal:8317/v1/chat/completions`. Must be `https` unless the host is loopback or `*.railway.internal`. See `infra/cliproxyapi/`. Food-photo analysis is unavailable without it. |
+| `AI_GATEWAY_API_KEY` | Backend-only bearer key for the AI gateway. Required for food-photo estimates. |
+| `AI_GATEWAY_MODELS` | Optional comma-separated model list. Defaults to `gpt-5.6-luna(low),gpt-5.6-luna(medium)`; the effort suffix is translated by CLIProxyAPI into the reasoning-effort parameter. Set on the web service too (for the admin benchmark page) if customized. |
+| `AI_GATEWAY_MODEL_TIMEOUT_MS` | Optional per-model attempt timeout for food-photo estimates. Defaults to `20000`, clamped to 3–30s. |
 | `ENABLE_TEST_ROUTES` | Enables controlled test-only routes. Leave off in production unless you are doing a controlled test run. |
 | `TEST_ROUTES_SECRET` | Required whenever `ENABLE_TEST_ROUTES=true`; send it in the `x-test-route-secret` header. |
 | `BACKEND_ENABLE_TEST_ROUTES` | Backend-side counterpart to `ENABLE_TEST_ROUTES`. Enables the test-only role-assignment RPC that Playwright uses. Never set this on a deployed backend. |
@@ -191,10 +188,29 @@ DATABASE_URL="$E2E_DATABASE_URL" pnpm test:e2e
 Database helpers:
 
 ```bash
-pnpm db:generate
 pnpm db:migrate
 pnpm db:studio
 ```
+
+Migrations in this repo are hand-authored rather than generated — see
+[`packages/db/MIGRATIONS.md`](packages/db/MIGRATIONS.md) for why and for the steps to add one.
+
+### Railway build configuration
+
+Both services build from the repository root, so Railpack resolves the single
+root `railpack.json` for each of them. That is why it installs a Rust toolchain
+even though the frontend service only builds `@macro-tracker/web` — removing the
+`rust` package to slim the frontend build would break the backend build, which
+runs `cargo build --release -p macro-tracker-backend` from that same root.
+
+Adding `apps/backend/railpack.json` does not help: Railpack reads its config from
+the build root, so a per-directory file is never loaded. Giving each service its
+own config means pointing it at one with the `RAILPACK_CONFIG_FILE` service
+variable in the Railway dashboard — a deployment change, not a repository one.
+The cost today is frontend build time only, so this is left alone deliberately.
+
+The root `railway.toml` is the frontend service's config and the single source
+for it; `apps/backend/railway.toml` configures the backend service.
 
 ### Destructive migrations
 

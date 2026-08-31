@@ -1,18 +1,25 @@
 "use server";
 
 import {
+  createGymSlot,
   createMealEntry,
   createMealGroup,
   createRecipe,
   createTemplate,
   createTemplateFromDate,
   completeOnboardingSetup,
+  deleteGymSlot,
   deleteMealGroup,
   createWeightEntry,
   deleteMealEntry,
   deleteRecipe,
   deleteTemplate,
   deleteWeightEntry,
+  inviteGymBuddy,
+  removeGymBuddy,
+  respondGymBuddyInvite,
+  setGymSlotStatus,
+  updateGymSlot,
   getRecipes,
   getRecipeById,
   getTemplates,
@@ -33,6 +40,9 @@ import {
 import type {
   BarcodeFoodProductInput,
   FoodProduct,
+  GymSlot,
+  GymSlotInput,
+  GymSlotStatus,
   MacroFoodInput,
   MealEntryRecord,
   MealEntryStatus,
@@ -524,6 +534,11 @@ type LogRecipePortionInput = {
   status: MealEntryStatus;
   portionCount?: number;
   gramsConsumed?: number | null;
+  /**
+   * Idempotency key minted by the caller and reused across retries of the same
+   * intent, so a double-tap collapses into one row instead of two.
+   */
+  clientMutationId?: string;
 };
 
 export async function logRecipePortionAction(
@@ -550,6 +565,7 @@ export async function logRecipePortionAction(
     await createMealEntry(
       sessionUser.userId,
       buildRecipePortionMealEntryInput({
+        clientMutationId: input.clientMutationId,
         date: input.date,
         gramsConsumed,
         portionCount,
@@ -577,4 +593,82 @@ export async function saveBarcodeFoodProductAction(
     const product = await saveBarcodeFoodProduct(sessionUser.userId, input);
     return { ok: true, product };
   });
+}
+
+// ---------------------------------------------------------------------------
+// Gym schedule sharing
+//
+// User-facing copy for validation/conflict errors is authored in the Rust
+// error strings; `toActionError` passes conflict/bad_request/not_found
+// messages through verbatim, so nothing needs mapping here.
+// ---------------------------------------------------------------------------
+
+const GYM_REVALIDATE = [["/gym", "page"], ["/", "page"]] as const;
+
+type GymSlotResult = ActionResult & { slot?: GymSlot };
+
+export async function saveGymSlotAction(
+  input: GymSlotInput & { id?: string },
+): Promise<GymSlotResult> {
+  return runSessionAction(async (sessionUser) => {
+    const { id, ...fields } = input;
+    const slot = id
+      ? await updateGymSlot(sessionUser.userId, id, fields)
+      : await createGymSlot(sessionUser.userId, fields);
+    return { ok: true, slot };
+  }, { revalidate: GYM_REVALIDATE });
+}
+
+export async function deleteGymSlotAction(
+  input: { id: string },
+): Promise<ActionResult> {
+  return runSessionAction(async (sessionUser) => {
+    await deleteGymSlot(sessionUser.userId, input.id);
+    return { ok: true };
+  }, { revalidate: GYM_REVALIDATE });
+}
+
+export async function setGymSlotStatusAction(
+  input: { slotId: string; date: string; status: GymSlotStatus },
+): Promise<ActionResult> {
+  return runSessionAction(async (sessionUser) => {
+    await setGymSlotStatus(
+      sessionUser.userId,
+      input.slotId,
+      input.date,
+      input.status,
+    );
+    return { ok: true };
+  }, { revalidate: GYM_REVALIDATE });
+}
+
+type InviteGymBuddyResult = ActionResult & {
+  result?: "invited" | "accepted";
+};
+
+export async function inviteGymBuddyAction(
+  input: { identifier: string },
+): Promise<InviteGymBuddyResult> {
+  return runSessionAction(async (sessionUser) => {
+    const invite = await inviteGymBuddy(sessionUser.userId, input.identifier);
+    return { ok: true, result: invite.result };
+  }, { revalidate: GYM_REVALIDATE });
+}
+
+export async function respondGymBuddyInviteAction(
+  input: { buddyId: string; accept: boolean },
+): Promise<ActionResult> {
+  return runSessionAction(async (sessionUser) => {
+    await respondGymBuddyInvite(sessionUser.userId, input.buddyId, input.accept);
+    return { ok: true };
+  }, { revalidate: GYM_REVALIDATE });
+}
+
+export async function removeGymBuddyAction(
+  input: { buddyId: string },
+): Promise<ActionResult> {
+  return runSessionAction(async (sessionUser) => {
+    await removeGymBuddy(sessionUser.userId, input.buddyId);
+    return { ok: true };
+  }, { revalidate: GYM_REVALIDATE });
 }

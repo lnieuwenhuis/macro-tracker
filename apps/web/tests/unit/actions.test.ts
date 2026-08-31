@@ -239,6 +239,63 @@ describe("server actions", () => {
     expect(mocked.revalidatePath).not.toHaveBeenCalled();
   });
 
+  it("forwards the recipe idempotency key so a double-tap dedupes", async () => {
+    // The backend dedupes on a unique index over a NULLABLE
+    // `client_mutation_id`, and multiple NULLs do not collide — so a recipe log
+    // that omits the key is exactly the double-write `client-mutation-id` was
+    // added to prevent.
+    mocked.getRecipeById.mockResolvedValue({
+      id: "recipe-1",
+      userId: "user-1",
+      label: "Rice bowl",
+      portions: 4,
+      totalCookedWeightG: 800,
+      perPortionMacros: { proteinG: 20, carbsG: 60, fatG: 10, caloriesKcal: 420 },
+      totalMacros: { proteinG: 80, carbsG: 240, fatG: 40, caloriesKcal: 1680 },
+      ingredients: [],
+    });
+
+    const input = {
+      recipeId: "recipe-1",
+      date: "2026-05-10",
+      status: "eaten" as const,
+      portionCount: 1,
+      clientMutationId: "mutation-1",
+    };
+
+    await expect(logRecipePortionAction(input)).resolves.toEqual({ ok: true });
+    await expect(logRecipePortionAction(input)).resolves.toEqual({ ok: true });
+
+    expect(mocked.createMealEntry).toHaveBeenCalledTimes(2);
+    for (const call of mocked.createMealEntry.mock.calls) {
+      expect(call[0]).toBe("user-1");
+      expect(call[1]).toMatchObject({ clientMutationId: "mutation-1" });
+    }
+  });
+
+  it("omits the idempotency key rather than sending an empty one", async () => {
+    mocked.getRecipeById.mockResolvedValue({
+      id: "recipe-1",
+      userId: "user-1",
+      label: "Rice bowl",
+      portions: 4,
+      totalCookedWeightG: 800,
+      perPortionMacros: { proteinG: 20, carbsG: 60, fatG: 10, caloriesKcal: 420 },
+      totalMacros: { proteinG: 80, carbsG: 240, fatG: 40, caloriesKcal: 1680 },
+      ingredients: [],
+    });
+
+    await logRecipePortionAction({
+      recipeId: "recipe-1",
+      date: "2026-05-10",
+      status: "eaten",
+    });
+
+    expect(mocked.createMealEntry.mock.calls[0]?.[1]).not.toHaveProperty(
+      "clientMutationId",
+    );
+  });
+
   it.each([0, -10, Number.NaN])(
     "rejects invalid recipe grams before creating a meal",
     async (gramsConsumed) => {

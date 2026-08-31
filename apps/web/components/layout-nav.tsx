@@ -20,6 +20,7 @@ const APP_PATHNAMES = [
   "/goals",
   "/weight",
   "/stats",
+  "/gym",
 ];
 
 function isAppPathname(pathname: string) {

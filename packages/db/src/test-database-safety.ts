@@ -1,4 +1,4 @@
-import { isPgliteConnectionString } from "./postgres-config.js";
+import { isLocalDatabaseHost, isPgliteConnectionString } from "./postgres-config.js";
 
 type TestDatabaseEnv = Record<string, string | undefined>;
 
@@ -8,9 +8,9 @@ type ResolveDestructiveTestDatabaseUrlOptions = {
   purpose: string;
 };
 
-const LOCAL_DATABASE_HOSTS = new Set(["localhost", "127.0.0.1", "::1", "[::1]"]);
 const TEST_DATABASE_MARKER_PATTERN = /(^|[-_])(test|tests|e2e|ci)([-_]|$)/;
 const ALLOW_DESTRUCTIVE_LOCAL_DB_ENV = "ALLOW_DESTRUCTIVE_LOCAL_DB";
+const ALLOW_DESTRUCTIVE_REMOTE_DB_ENV = "ALLOW_DESTRUCTIVE_REMOTE_DB";
 
 function readEnvValue(env: TestDatabaseEnv, name: string) {
   const value = env[name]?.trim();
@@ -21,16 +21,17 @@ function getDatabaseName(url: URL) {
   return decodeURIComponent(url.pathname.replace(/^\/+/, "")).toLowerCase();
 }
 
-function isLocalDatabaseHost(hostname: string) {
-  return LOCAL_DATABASE_HOSTS.has(hostname.toLowerCase());
-}
-
 function isClearlyTestDatabaseName(name: string) {
   return TEST_DATABASE_MARKER_PATTERN.test(name);
 }
 
 function allowsDestructiveLocalDatabase(env: TestDatabaseEnv) {
   const value = env[ALLOW_DESTRUCTIVE_LOCAL_DB_ENV]?.trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes" || value === "on";
+}
+
+function allowsDestructiveRemoteDatabase(env: TestDatabaseEnv) {
+  const value = env[ALLOW_DESTRUCTIVE_REMOTE_DB_ENV]?.trim().toLowerCase();
   return value === "1" || value === "true" || value === "yes" || value === "on";
 }
 
@@ -60,11 +61,32 @@ export function assertSafeDestructiveTestDatabaseUrl(
 
   const url = parsePostgresUrl(connectionString, source);
   const databaseName = getDatabaseName(url);
-  if (isClearlyTestDatabaseName(databaseName)) {
+  const isTestName = isClearlyTestDatabaseName(databaseName);
+  const isLocal = isLocalDatabaseHost(url.hostname);
+
+  // DB-08: a database-name match alone used to be enough regardless of host,
+  // so `TEST_DATABASE_URL=postgres://...@shared-staging.example.com/app_test`
+  // would let this through and a caller would `TRUNCATE ... CASCADE` every
+  // table on a shared remote host. A remote host now always needs an
+  // explicit opt-in, on top of (not instead of) the test-name check.
+  if (!isLocal) {
+    if (isTestName && allowsDestructiveRemoteDatabase(env)) {
+      return connectionString;
+    }
+
+    throw new Error(
+      `Refusing to truncate ${source} because its host is not local. ` +
+        "A database name containing test, tests, e2e, or ci is not enough on its own for " +
+        `a remote host -- set ${ALLOW_DESTRUCTIVE_REMOTE_DB_ENV}=true to deliberately allow ` +
+        "truncating a remote database.",
+    );
+  }
+
+  if (isTestName) {
     return connectionString;
   }
 
-  if (isLocalDatabaseHost(url.hostname) && allowsDestructiveLocalDatabase(env)) {
+  if (allowsDestructiveLocalDatabase(env)) {
     return connectionString;
   }
 

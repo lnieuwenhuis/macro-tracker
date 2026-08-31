@@ -8,7 +8,7 @@ type LibraryPageProps = {
 };
 
 export default async function LibraryPage({ searchParams }: LibraryPageProps) {
-  const { params, sessionUser, selectedDate, userEmail, canAccessAdmin } =
+  const { params, sessionUser, selectedDate, userEmail, canAccessAdmin, today} =
     await loadOnboardedPageContext(searchParams);
   const query = params.q ?? "";
   const [templates, recipes, products] = await Promise.all([
@@ -22,6 +22,7 @@ export default async function LibraryPage({ searchParams }: LibraryPageProps) {
       userEmail={userEmail}
       canAccessAdmin={canAccessAdmin}
       selectedDate={selectedDate}
+      todayStr={today}
       query={query}
       products={products}
       templates={templates}

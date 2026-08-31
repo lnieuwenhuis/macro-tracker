@@ -18,18 +18,20 @@ Open [http://localhost:3000](http://localhost:3000) with your browser to see the
 
 ## AI food photo estimates
 
-The food log photo estimator uses OpenRouter from the server. Add these values
-to your local or deployment environment:
+The food log photo estimator calls an OpenAI-compatible AI gateway from the
+Rust backend (see `infra/cliproxyapi/` for the CLIProxyAPI service that wraps
+a ChatGPT/Codex subscription). Configure it on the backend environment:
 
 ```bash
-OPENROUTER_API_KEY=...
-OPENROUTER_MODEL=google/gemma-4-26b-a4b-it:free
-OPENROUTER_FALLBACK_MODELS=google/gemma-4-31b-it:free,nvidia/nemotron-nano-12b-v2-vl:free,openrouter/free
-OPENROUTER_MODEL_TIMEOUT_MS=10000
+AI_GATEWAY_URL=http://cliproxyapi.railway.internal:8317/v1/chat/completions
+AI_GATEWAY_API_KEY=...
+AI_GATEWAY_MODELS=gpt-5.6-luna(low),gpt-5.6-luna(medium)
+AI_GATEWAY_MODEL_TIMEOUT_MS=20000
 ```
 
-Only free OpenRouter food-photo models are allowed. Model values must either
-end in `:free` or use the `openrouter/free` router.
+`AI_GATEWAY_MODELS` and the timeout are optional (the values above are the
+defaults). Set `AI_GATEWAY_MODELS` on the web service too if customized, so
+the admin benchmark page shows the configured models.
 
 ## API access
 

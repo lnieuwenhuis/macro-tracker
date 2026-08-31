@@ -10,7 +10,7 @@ type RecipesPageProps = {
 };
 
 export default async function RecipesPage({ searchParams }: RecipesPageProps) {
-  const { sessionUser, selectedDate, userEmail, canAccessAdmin } =
+  const { sessionUser, selectedDate, userEmail, canAccessAdmin, today} =
     await loadOnboardedPageContext(searchParams);
   const recipes = await getRecipes(sessionUser.userId);
 
@@ -19,6 +19,7 @@ export default async function RecipesPage({ searchParams }: RecipesPageProps) {
       userEmail={userEmail}
       canAccessAdmin={canAccessAdmin}
       selectedDate={selectedDate}
+      todayStr={today}
       recipes={recipes}
     />
   );

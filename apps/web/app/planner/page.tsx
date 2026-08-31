@@ -9,7 +9,7 @@ type PlannerPageProps = {
 };
 
 export default async function PlannerPage({ searchParams }: PlannerPageProps) {
-  const { sessionUser, selectedDate, userEmail, canAccessAdmin } =
+  const { sessionUser, selectedDate, userEmail, canAccessAdmin, today} =
     await loadOnboardedPageContext(searchParams);
   const shoppingDates = Array.from({ length: 7 }).reduce<string[]>(
     (dates) => [
@@ -33,6 +33,7 @@ export default async function PlannerPage({ searchParams }: PlannerPageProps) {
       userEmail={userEmail}
       canAccessAdmin={canAccessAdmin}
       selectedDate={selectedDate}
+      todayStr={today}
       templates={templates}
       recipeCount={recipeCount}
       dailySummary={dailySummary}

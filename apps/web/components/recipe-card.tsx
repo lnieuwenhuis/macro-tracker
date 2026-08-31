@@ -2,9 +2,10 @@
 
 import type { MealEntryStatus, RecipeRecord } from "@macro-tracker/db";
 import { useRouter } from "next/navigation";
-import { memo, useState, useTransition } from "react";
+import { memo, useRef, useState, useTransition } from "react";
 
 import { deleteRecipeAction, logRecipePortionAction, saveRecipeAction } from "@/lib/actions";
+import { createClientMutationIdStore } from "@/lib/client-mutation-id";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
 import { getLocalDateString } from "@/lib/startup-date";
 
@@ -26,6 +27,7 @@ export const RecipeCard = memo(function RecipeCard({
   const [error, setError] = useState<string | null>(null);
   const [portionCount, setPortionCount] = useState("1");
   const [gramsConsumed, setGramsConsumed] = useState("");
+  const mutationIds = useRef(createClientMutationIdStore());
 
   function handleLogPortion() {
     setError(null);
@@ -45,6 +47,11 @@ export const RecipeCard = memo(function RecipeCard({
       return;
     }
 
+    // One key per (recipe, day, amount) intent, so a repeat tap while the first
+    // save is still in flight reuses the same id and the backend's unique index
+    // collapses the duplicate instead of writing a second row.
+    const mutationKey = `${recipe.id}:${selectedDate}:${safePortionCount}:${parsedGrams ?? ""}`;
+
     startTransition(async () => {
       const status: MealEntryStatus =
         selectedDate > getLocalDateString() ? "planned" : "eaten";
@@ -54,11 +61,13 @@ export const RecipeCard = memo(function RecipeCard({
         status,
         portionCount: safePortionCount,
         gramsConsumed: parsedGrams,
+        clientMutationId: mutationIds.current.take(mutationKey),
       });
       if (!result.ok) {
         setError(result.error ?? "Unable to log portion.");
         return;
       }
+      mutationIds.current.settle(mutationKey);
       router.refresh();
     });
   }

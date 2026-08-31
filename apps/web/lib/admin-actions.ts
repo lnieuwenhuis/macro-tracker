@@ -84,6 +84,15 @@ async function redirectAfterAdminAction(input: {
   redirect(destination);
 }
 
+/**
+ * Not an open redirect today — every destination starts with a literal
+ * `/admin/` — but the ids come straight off `formData`, so they are encoded
+ * rather than trusted to be UUID-shaped. A real id is unchanged by this.
+ */
+function encodePathSegment(value: string) {
+  return encodeURIComponent(value);
+}
+
 function revalidateAdminPaths(detailPath?: string) {
   revalidatePath("/admin");
   revalidatePath("/admin/barcodes");
@@ -98,9 +107,9 @@ export async function changeUserRoleAction(formData: FormData) {
   const role = getRequiredText(formData, "role") as AdminRole;
 
   await redirectAfterAdminAction({
-    successDestination: `/admin/users/${userId}?saved=role`,
+    successDestination: `/admin/users/${encodePathSegment(userId)}?saved=role`,
     errorDestination: (error) =>
-      `/admin/users/${userId}?error=${encodeURIComponent(toActionError(error))}`,
+      `/admin/users/${encodePathSegment(userId)}?error=${encodeURIComponent(toActionError(error))}`,
     action: async () => {
       await setUserRole(owner.id, userId, role);
       revalidatePath("/admin");
@@ -123,7 +132,7 @@ export async function createAdminBarcodeProductAction(formData: FormData) {
         getBarcodeProductInput(formData),
       );
       revalidateAdminPaths();
-      return `/admin/barcodes/${product.id}?saved=created`;
+      return `/admin/barcodes/${encodePathSegment(product.id)}?saved=created`;
     },
   });
 }
@@ -133,9 +142,9 @@ export async function updateAdminBarcodeProductAction(formData: FormData) {
   const id = getRequiredText(formData, "id");
 
   await redirectAfterAdminAction({
-    successDestination: `/admin/barcodes/${id}?saved=updated`,
+    successDestination: `/admin/barcodes/${encodePathSegment(id)}?saved=updated`,
     errorDestination: (error) =>
-      `/admin/barcodes/${id}?error=${encodeURIComponent(toActionError(error))}`,
+      `/admin/barcodes/${encodePathSegment(id)}?error=${encodeURIComponent(toActionError(error))}`,
     action: async () => {
       await updateAdminBarcodeProduct(admin.id, id, getBarcodeProductInput(formData));
       revalidateAdminPaths(`/admin/barcodes/${id}`);
@@ -148,9 +157,9 @@ export async function softDeleteAdminBarcodeProductAction(formData: FormData) {
   const id = getRequiredText(formData, "id");
 
   await redirectAfterAdminAction({
-    successDestination: `/admin/barcodes/${id}?saved=deleted`,
+    successDestination: `/admin/barcodes/${encodePathSegment(id)}?saved=deleted`,
     errorDestination: (error) =>
-      `/admin/barcodes/${id}?error=${encodeURIComponent(toActionError(error))}`,
+      `/admin/barcodes/${encodePathSegment(id)}?error=${encodeURIComponent(toActionError(error))}`,
     action: async () => {
       await softDeleteAdminBarcodeProduct(admin.id, id);
       revalidateAdminPaths(`/admin/barcodes/${id}`);
@@ -163,9 +172,9 @@ export async function restoreAdminBarcodeProductAction(formData: FormData) {
   const id = getRequiredText(formData, "id");
 
   await redirectAfterAdminAction({
-    successDestination: `/admin/barcodes/${id}?saved=restored`,
+    successDestination: `/admin/barcodes/${encodePathSegment(id)}?saved=restored`,
     errorDestination: (error) =>
-      `/admin/barcodes/${id}?error=${encodeURIComponent(toActionError(error))}`,
+      `/admin/barcodes/${encodePathSegment(id)}?error=${encodeURIComponent(toActionError(error))}`,
     action: async () => {
       await restoreAdminBarcodeProduct(admin.id, id);
       revalidateAdminPaths(`/admin/barcodes/${id}`);

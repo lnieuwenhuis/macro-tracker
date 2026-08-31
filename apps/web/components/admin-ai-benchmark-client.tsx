@@ -437,7 +437,7 @@ export function AdminAiBenchmarkClient({
             type="text"
             value={model}
             onChange={(event) => setModel(event.target.value)}
-            placeholder="google/gemma-4-31b-it:free"
+            placeholder="gpt-5.6-luna(low)"
             className="w-full rounded-2xl border border-[var(--color-border)] bg-[var(--color-app-bg)] px-4 py-3 font-mono text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
           />
         </label>

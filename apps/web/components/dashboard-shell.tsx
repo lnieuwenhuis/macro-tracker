@@ -1,6 +1,6 @@
 "use client";
 
-import type { DailySummary, MacroGoals, MealEntryRecord, MealEntryStatus, MealGroup, MealTemplate, QuickAddCandidate, RecipeRecord } from "@macro-tracker/db";
+import type { DailySummary, GymHomeSummary, MacroGoals, MealEntryRecord, MealEntryStatus, MealGroup, MealTemplate, QuickAddCandidate, RecipeRecord } from "@macro-tracker/db";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, useTransition } from "react";
@@ -25,7 +25,9 @@ import {
   ModalChunkFallback,
   OverlayBackdropFallback,
 } from "./modal-chunk-fallback";
+import { GymOverlapList } from "./gym-overlap-list";
 import { QuickAddRail } from "./quick-add-rail";
+import { TransitionLink } from "./transition-link";
 import { useTemplateMutations } from "./use-template-mutations";
 
 // Modals only mount behind a flag, so keep them out of the log screen's initial
@@ -79,8 +81,14 @@ type DashboardShellProps = {
   dailySummary: DailySummary;
   goals: MacroGoals;
   quickAddCandidates: QuickAddCandidate[];
+  gymSummary?: GymHomeSummary | null;
   initialComposeAction?: ComposeAction | null;
   initialPresetTemplateKind?: PresetTemplateKind | null;
+  // Resolved server-side (user's timezone) via `getRequestToday()` so the
+  // client render agrees with the server render on hydration. Falls back to
+  // the local runtime's day when a caller has not been updated to pass it
+  // yet -- see AUDIT-REMEDIATION.md UI-02.
+  todayStr?: string;
 };
 
 type ErrorState = Record<string, string | null>;
@@ -307,8 +315,10 @@ export function DashboardShell({
   dailySummary,
   goals,
   quickAddCandidates,
+  gymSummary = null,
   initialComposeAction = null,
   initialPresetTemplateKind = null,
+  todayStr: todayStrProp,
 }: DashboardShellProps) {
   const router = useRouter();
   const composeHandledRef = useRef<string | null>(null);
@@ -405,6 +415,19 @@ export function DashboardShell({
   // Tracks cards that were recently copied to today so the button can give
   // brief visual confirmation before returning to its normal state.
   const [copiedCardIds, setCopiedCardIds] = useState<Set<string>>(new Set());
+  // Pending "copied" flash timers, keyed by clientId, cleared on unmount so a
+  // navigation away mid-flash doesn't call setState on an unmounted tree.
+  const copiedTimersRef = useRef<Map<string, number>>(new Map());
+
+  useEffect(() => {
+    const timers = copiedTimersRef.current;
+    return () => {
+      for (const timer of timers.values()) {
+        window.clearTimeout(timer);
+      }
+      timers.clear();
+    };
+  }, []);
 
   // Barcode scanner state
   const [showScanner, setShowScanner] = useState(false);
@@ -428,7 +451,10 @@ export function DashboardShell({
   const liveTotals = totalsByStatus.eaten;
   const livePlannedTotals = totalsByStatus.planned;
   const liveSkippedTotals = totalsByStatus.skipped;
-  const todayStr = useMemo(() => getLocalDateString(), []);
+  const todayStr = useMemo(
+    () => todayStrProp ?? getLocalDateString(),
+    [todayStrProp],
+  );
   const defaultEntryStatus: MealEntryStatus =
     selectedDate > todayStr ? "planned" : "eaten";
 
@@ -500,6 +526,8 @@ export function DashboardShell({
     const draft = drafts.find((entry) => entry.clientId === clientId);
     if (!draft) return;
 
+    const previousMealGroupId = draft.mealGroupId;
+
     setDrafts((currentDrafts) =>
       currentDrafts.map((item) =>
         item.clientId === clientId ? { ...item, mealGroupId } : item,
@@ -522,6 +550,13 @@ export function DashboardShell({
       }));
 
       if (!result.ok) {
+        setDrafts((currentDrafts) =>
+          currentDrafts.map((item) =>
+            item.clientId === clientId
+              ? { ...item, mealGroupId: previousMealGroupId }
+              : item,
+          ),
+        );
         setErrors((currentErrors) => ({
           ...currentErrors,
           [clientId]: result.error ?? "Unable to update group.",
@@ -1028,13 +1063,21 @@ export function DashboardShell({
       } else {
         // Show a brief "copied" confirmation on the button, then clear it.
         setCopiedCardIds((prev) => new Set([...prev, clientId]));
-        setTimeout(() => {
-          setCopiedCardIds((prev) => {
-            const next = new Set(prev);
-            next.delete(clientId);
-            return next;
-          });
-        }, 2000);
+        const existingTimer = copiedTimersRef.current.get(clientId);
+        if (existingTimer !== undefined) {
+          window.clearTimeout(existingTimer);
+        }
+        copiedTimersRef.current.set(
+          clientId,
+          window.setTimeout(() => {
+            copiedTimersRef.current.delete(clientId);
+            setCopiedCardIds((prev) => {
+              const next = new Set(prev);
+              next.delete(clientId);
+              return next;
+            });
+          }, 2000),
+        );
       }
 
       setActiveMutation(null);
@@ -1191,6 +1234,22 @@ export function DashboardShell({
           ) : null}
         </div>
       </section>
+
+      {gymSummary && gymSummary.overlaps.length > 0 ? (
+        <section>
+          <h2 className="mb-2.5 text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
+            Gym Buddies
+          </h2>
+          <TransitionLink
+            href={`/gym?date=${selectedDate}`}
+            motion="screen"
+            className="block"
+            aria-label="Open gym schedule"
+          >
+            <GymOverlapList overlaps={gymSummary.overlaps} />
+          </TransitionLink>
+        </section>
+      ) : null}
 
       <section>
         <div className="mb-3 flex items-end justify-between gap-3">
@@ -1400,7 +1459,10 @@ export function DashboardShell({
         title="Food Log"
         activeTab="log"
         showDateNavigation
+        showGymShortcut
+        gymPendingInviteCount={gymSummary?.pendingInviteCount ?? 0}
         onComposeAction={handleComposeAction}
+        todayStr={todayStr}
       >
         {content}
       </AppShell>

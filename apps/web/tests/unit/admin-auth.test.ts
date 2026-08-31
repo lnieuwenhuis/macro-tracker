@@ -60,7 +60,7 @@ function buildUser(overrides?: Partial<Awaited<ReturnType<typeof getCurrentAppUs
 describe("admin auth helpers", () => {
   beforeEach(() => {
     process.env.APP_URL = "http://localhost:3000";
-    process.env.SESSION_SECRET = "test-secret";
+    process.env.SESSION_SECRET = "admin-auth-test-session-secret-32ch";
     process.env.SHOO_BASE_URL = "https://shoo.dev";
     process.env.ADMIN_OWNER_EMAILS = "owner@example.com";
     resetServerEnvForTests();

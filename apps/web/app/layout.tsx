@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Fraunces, Space_Grotesk } from "next/font/google";
+import { headers } from "next/headers";
 import Script from "next/script";
 import { Suspense } from "react";
 
@@ -11,6 +12,7 @@ import {
   TIMEZONE_COOKIE_MAX_AGE_SECONDS,
   TIMEZONE_COOKIE_NAME,
 } from "@/lib/timezone";
+import { NONCE_HEADER } from "@/proxy";
 
 import "./globals.css";
 
@@ -76,11 +78,29 @@ const timeZoneInitScript = `
   } catch (e) {}
 `;
 
-export default function RootLayout({
+/**
+ * `script-src` is nonce-based (see `buildContentSecurityPolicy` in
+ * `proxy.ts`), so both bootstraps have to carry the request's nonce or the
+ * browser blocks them — silently, which for the timezone bootstrap means
+ * `mt_tz` is never set and every non-UTC user gets the server's "today".
+ *
+ * The `nonce` prop is load-bearing rather than cosmetic: `next/script` only
+ * renders the nonce it took from context onto the *wrapper* script, while the
+ * bootstrap body is replayed later by Next's runtime from `self.__next_s`,
+ * which reproduces only the props it was given. Passing `nonce` explicitly is
+ * what puts it on the element that actually executes.
+ *
+ * Reading `headers()` here opts every route into dynamic rendering. That is
+ * unavoidable: a nonce is per request, and a prerendered page's HTML is
+ * written before any request exists.
+ */
+export default async function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const nonce = (await headers()).get(NONCE_HEADER) ?? undefined;
+
   return (
     <html
       lang="en"
@@ -88,10 +108,10 @@ export default function RootLayout({
       className={`${spaceGrotesk.variable} ${fraunces.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">
-        <Script id="theme-init" strategy="beforeInteractive">
+        <Script id="theme-init" strategy="beforeInteractive" nonce={nonce}>
           {themeInitScript}
         </Script>
-        <Script id="timezone-init" strategy="beforeInteractive">
+        <Script id="timezone-init" strategy="beforeInteractive" nonce={nonce}>
           {timeZoneInitScript}
         </Script>
         <OrientationLock />

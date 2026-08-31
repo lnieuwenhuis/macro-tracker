@@ -20,8 +20,6 @@ describe("preset modal state", () => {
     expect(
       resolvePresetModalActiveKind({
         selectedKind: "food",
-        foodItemCount: 0,
-        dayCount: 1,
       }),
     ).toBe("food");
   });

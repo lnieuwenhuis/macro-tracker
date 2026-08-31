@@ -1,8 +1,10 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
+  "ignoreExportsUsedInFile": true,
   "ignore": [
     "apps/web/public/sw.js",
-    "packages/db/drizzle.config.ts"
+    "packages/db/drizzle.config.ts",
+    "packages/db/src/postgres-config.d.ts"
   ],
   "workspaces": {
     "apps/web": {
@@ -17,7 +19,6 @@
     },
     "packages/db": {
       "drizzle": false,
-      "//": "Without this, `export *` in src/index.ts marks every re-exported symbol as reachable and dead modules stay invisible.",
       "includeEntryExports": true,
       "entry": [
         "src/index.ts",

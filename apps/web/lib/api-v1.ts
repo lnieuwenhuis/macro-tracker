@@ -1,12 +1,23 @@
 import { backendFetch } from "@macro-tracker/db";
 
-import { createBackendProxyResponse } from "./backend-response";
+import { createBackendProxyResponse, stripHopByHopHeaders } from "./backend-response";
 
 const CORS_HEADERS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET, POST, PATCH, DELETE, OPTIONS",
   "access-control-allow-headers": "Authorization, Content-Type",
   "access-control-max-age": "86400",
+};
+
+/**
+ * These responses are per-token and wildcard-CORS'd. RFC 9111 §3.5 already
+ * keeps a compliant shared cache from storing an `Authorization`-bearing
+ * request, but a single misconfigured CDN rule would turn that into cross-user
+ * cache poisoning, so the intent is stated rather than assumed.
+ */
+const NO_SHARED_CACHE_HEADERS = {
+  vary: "Authorization",
+  "cache-control": "no-store",
 };
 
 export async function handleApiV1Request(
@@ -30,7 +41,7 @@ export async function handleApiV1Request(
         ok: false,
         error: { code: "not_found", message: "Unknown API route." },
       },
-      { status: 404, headers: CORS_HEADERS },
+      { status: 404, headers: { ...CORS_HEADERS, ...NO_SHARED_CACHE_HEADERS } },
     );
   }
 
@@ -40,8 +51,7 @@ export async function handleApiV1Request(
   const requestUrl = new URL(request.url);
   const encodedPath = segments.map(encodeURIComponent).join("/");
   const backendPath = `/api/v1/${encodedPath}${requestUrl.search}`;
-  const headers = new Headers(request.headers);
-  headers.delete("host");
+  const headers = stripHopByHopHeaders(new Headers(request.headers));
 
   const init: RequestInit & { duplex?: "half"; attachInternalSecret?: boolean } = {
     method,
@@ -58,7 +68,10 @@ export async function handleApiV1Request(
 
   try {
     const backendResponse = await backendFetch(backendPath, init);
-    return createBackendProxyResponse(backendResponse, { includeBody: method !== "HEAD" });
+    return createBackendProxyResponse(backendResponse, {
+      includeBody: method !== "HEAD",
+      extraHeaders: NO_SHARED_CACHE_HEADERS,
+    });
   } catch (error) {
     console.error("API v1 backend proxy failure", error);
     return Response.json(
@@ -69,7 +82,7 @@ export async function handleApiV1Request(
           message: "Backend service is unavailable.",
         },
       },
-      { status: 502, headers: CORS_HEADERS },
+      { status: 502, headers: { ...CORS_HEADERS, ...NO_SHARED_CACHE_HEADERS } },
     );
   }
 }

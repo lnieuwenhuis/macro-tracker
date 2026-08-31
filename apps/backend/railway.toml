@@ -6,7 +6,7 @@ watchPatterns = [
   "/packages/db/drizzle/**",
   "/packages/db/src/migrate.ts",
   "/packages/db/src/migration.ts",
-  "/packages/db/src/postgres-config.ts",
+  "/packages/db/src/postgres-config.js",
   "/packages/db/package.json",
   "/package.json",
   "/pnpm-lock.yaml",

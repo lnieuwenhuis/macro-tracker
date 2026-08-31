@@ -43,24 +43,13 @@ export type AnalyzeFoodPhotoResult =
       retryable?: boolean;
     };
 
-export const DEFAULT_FOOD_PHOTO_MODEL =
-  "google/gemma-4-26b-a4b-it:free";
-export const DEFAULT_FOOD_PHOTO_FALLBACK_MODELS = [
-  "google/gemma-4-31b-it:free",
-  "nvidia/nemotron-nano-12b-v2-vl:free",
-  "openrouter/free",
-] as const;
-// Mirrors the backend's gateway defaults: when AI_GATEWAY_URL is set, food
-// photos go to an OpenAI-compatible gateway (CLIProxyAPI in front of the
-// Codex backend) and the free-OpenRouter-model restriction does not apply.
-export const DEFAULT_GATEWAY_FOOD_PHOTO_MODELS = [
+// Mirrors the backend's defaults: food photos go to the AI gateway (an
+// OpenAI-compatible endpoint, normally CLIProxyAPI in front of the Codex
+// backend); the effort suffix is translated into the reasoning parameter.
+export const DEFAULT_FOOD_PHOTO_MODELS = [
   "gpt-5.6-luna(low)",
   "gpt-5.6-luna(medium)",
 ] as const;
-
-const DEPRECATED_FOOD_PHOTO_MODELS = new Set([
-  "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
-]);
 
 function parseModelList(value: string | undefined) {
   return (
@@ -71,57 +60,11 @@ function parseModelList(value: string | undefined) {
   );
 }
 
-export function isFreeOpenRouterModel(model: string) {
-  const trimmedModel = model.trim();
-  return trimmedModel === "openrouter/free" || trimmedModel.endsWith(":free");
-}
-
-function uniqueFreeFoodPhotoModels(models: string[]) {
-  const seen = new Set<string>();
-  return models.filter((model) => {
-    const trimmedModel = model.trim();
-    if (
-      !trimmedModel ||
-      !isFreeOpenRouterModel(trimmedModel) ||
-      DEPRECATED_FOOD_PHOTO_MODELS.has(trimmedModel) ||
-      seen.has(trimmedModel)
-    ) {
-      return false;
-    }
-    seen.add(trimmedModel);
-    return true;
-  });
-}
-
-function isGatewayConfigured() {
-  return Boolean(process.env.AI_GATEWAY_URL?.trim());
-}
-
 export function getConfiguredFoodPhotoModels() {
-  if (isGatewayConfigured()) {
-    const models = [...new Set(parseModelList(process.env.AI_GATEWAY_MODELS))];
-    return models.length > 0 ? models : [...DEFAULT_GATEWAY_FOOD_PHOTO_MODELS];
-  }
-
-  const configuredPrimary = process.env.OPENROUTER_MODEL?.trim();
-  const primary =
-    configuredPrimary &&
-    isFreeOpenRouterModel(configuredPrimary) &&
-    !DEPRECATED_FOOD_PHOTO_MODELS.has(configuredPrimary)
-      ? configuredPrimary
-      : DEFAULT_FOOD_PHOTO_MODEL;
-  const configuredFallbacks = parseModelList(
-    process.env.OPENROUTER_FALLBACK_MODELS,
-  );
-  const fallbacks =
-    configuredFallbacks.length > 0
-      ? configuredFallbacks
-      : [...DEFAULT_FOOD_PHOTO_FALLBACK_MODELS];
-  const models = uniqueFreeFoodPhotoModels([primary, ...fallbacks]);
-
-  return models.length > 0 ? models : [DEFAULT_FOOD_PHOTO_MODEL];
+  const models = [...new Set(parseModelList(process.env.AI_GATEWAY_MODELS))];
+  return models.length > 0 ? models : [...DEFAULT_FOOD_PHOTO_MODELS];
 }
 
 export function getConfiguredFoodPhotoModel() {
-  return getConfiguredFoodPhotoModels()[0] ?? DEFAULT_FOOD_PHOTO_MODEL;
+  return getConfiguredFoodPhotoModels()[0] ?? DEFAULT_FOOD_PHOTO_MODELS[0];
 }

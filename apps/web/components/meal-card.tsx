@@ -9,6 +9,7 @@ import {
 } from "@/lib/floating-menu";
 
 import { NumberInputField } from "./number-input-field";
+import { useDismissableLayer } from "./overlay-portal";
 
 type MealDraft = {
   clientId: string;
@@ -59,6 +60,7 @@ function MealCardComponent({ draft, busy, error, isCopied = false, mealGroups = 
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const menuContainerRef = useRef<HTMLDivElement>(null);
 
   const heading = draft.label.trim() || "New item";
   // A macro chip is only worth showing when the value is meaningfully positive.
@@ -114,6 +116,23 @@ function MealCardComponent({ draft, busy, error, isCopied = false, mealGroups = 
       window.removeEventListener("scroll", updateMenuLayout, true);
     };
   }, [confirmingDelete, menuOpen, updateMenuLayout]);
+
+  const closeMenu = useCallback(() => {
+    setConfirmingDelete(false);
+    setMenuLayout(null);
+    setMenuOpen(false);
+  }, []);
+
+  // Matches the outside-pointerdown + Escape dismissal every other dropdown
+  // in this codebase gets via this hook (see add-food-button.tsx). The menu
+  // and menuitem roles stay -- this only fixes the missing dismiss paths a
+  // keyboard or screen-reader user needs; it does not add roving-tabindex
+  // arrow-key navigation, which is a separate, larger change.
+  useDismissableLayer({
+    active: menuOpen,
+    layerRef: menuContainerRef,
+    onDismiss: closeMenu,
+  });
 
   function toggleExpanded() {
     if (isExpanded) {
@@ -209,7 +228,7 @@ function MealCardComponent({ draft, busy, error, isCopied = false, mealGroups = 
             </button>
           ) : null}
 
-          <div className="relative shrink-0">
+          <div ref={menuContainerRef} className="relative shrink-0">
             <button
               ref={menuButtonRef}
               type="button"
@@ -217,9 +236,7 @@ function MealCardComponent({ draft, busy, error, isCopied = false, mealGroups = 
               onClick={(e) => {
                 e.stopPropagation();
                 if (menuOpen) {
-                  setConfirmingDelete(false);
-                  setMenuLayout(null);
-                  setMenuOpen(false);
+                  closeMenu();
                   return;
                 }
 

@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { readFileSync, existsSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createDatabaseRuntime, type DatabaseRuntime } from "../src/client";
@@ -25,6 +26,11 @@ const migrationFiles = [
   "0012_api_tokens.sql",
   "0013_deduplicate_default_meal_groups.sql",
   "0014_food_product_search_trigram.sql",
+  "0015_admin_audit_events_actor_set_null.sql",
+  "0016_enum_check_constraints.sql",
+  "0017_gym_schedule.sql",
+  "0018_gym_friend_codes.sql",
+  "0019_meal_entries_healthkit_sync.sql",
 ] as const;
 
 /** Index of `0013_deduplicate_default_meal_groups.sql`, which several tests
@@ -554,6 +560,206 @@ describe("database migrations", () => {
     `));
     expect(indexResult.rows).toEqual([{ indexname: "api_tokens_token_hash_key" }]);
   });
+
+  it("nulls out admin_audit_events.actor_user_id on actor deletion instead of blocking it (DB-05)", async () => {
+    runtime = await createDatabaseRuntime("memory:");
+
+    for (const fileName of migrationFiles) {
+      await applyMigration(runtime, fileName);
+    }
+
+    const actorId = "b1111111-1111-4111-8111-111111111111";
+    const auditId = "b2222222-2222-4222-8222-222222222222";
+
+    await runtime.db.execute(sql.raw(`
+      INSERT INTO "users" ("id", "shoo_pairwise_sub", "email")
+      VALUES ('${actorId}', 'db05_actor', 'db05-actor@example.com')
+    `));
+    await runtime.db.execute(sql.raw(`
+      INSERT INTO "admin_audit_events" (
+        "id", "actor_user_id", "actor_role", "action", "target_type", "target_id"
+      )
+      VALUES ('${auditId}', '${actorId}', 'admin', 'user.role_changed', 'user', '${actorId}')
+    `));
+
+    await runtime.db.execute(sql.raw(`DELETE FROM "users" WHERE "id" = '${actorId}'`));
+
+    const auditRow = await runtime.db.execute<{ actor_user_id: string | null }>(sql.raw(`
+      SELECT "actor_user_id" FROM "admin_audit_events" WHERE "id" = '${auditId}'
+    `));
+    expect(auditRow.rows).toEqual([{ actor_user_id: null }]);
+  });
+
+  it("enforces the enum CHECK constraints for new writes without invalidating pre-existing rows (DB-09)", async () => {
+    runtime = await createDatabaseRuntime("memory:");
+
+    // Apply everything up to (not including) 0016 so an out-of-union row can
+    // be seeded exactly the way it could already exist in a production
+    // database the CHECK constraint migration runs against. Sliced by index,
+    // not `slice(0, -1)`: appending a later migration to `migrationFiles`
+    // must not silently apply 0016 here and break the seed insert.
+    const enumCheckMigrationIndex = migrationFiles.indexOf(
+      "0016_enum_check_constraints.sql",
+    );
+    for (const fileName of migrationFiles.slice(0, enumCheckMigrationIndex)) {
+      await applyMigration(runtime, fileName);
+    }
+
+    const userId = "b3333333-3333-4333-8333-333333333333";
+    const legacyTemplateId = "b4444444-4444-4444-8444-444444444444";
+
+    await runtime.db.execute(sql.raw(`
+      INSERT INTO "users" ("id", "shoo_pairwise_sub", "email")
+      VALUES ('${userId}', 'db09_user', 'db09-user@example.com')
+    `));
+    await runtime.db.execute(sql.raw(`
+      INSERT INTO "meal_templates" ("id", "user_id", "type", "label")
+      VALUES ('${legacyTemplateId}', '${userId}', 'not_a_real_type', 'Legacy template')
+    `));
+
+    // Migration 0016 must apply cleanly even though the row above violates
+    // the constraint it adds -- that's the point of NOT VALID.
+    await applyMigration(runtime, "0016_enum_check_constraints.sql");
+
+    const legacyRow = await runtime.db.execute<{ type: string }>(sql.raw(`
+      SELECT "type" FROM "meal_templates" WHERE "id" = '${legacyTemplateId}'
+    `));
+    expect(legacyRow.rows).toEqual([{ type: "not_a_real_type" }]);
+
+    await expect(
+      runtime.db.execute(sql.raw(`
+        INSERT INTO "meal_templates" ("id", "user_id", "type", "label")
+        VALUES ('b5555555-5555-4555-8555-555555555555', '${userId}', 'still_not_real', 'Rejected')
+      `)),
+    ).rejects.toThrow();
+
+    await runtime.db.execute(sql.raw(`
+      INSERT INTO "meal_templates" ("id", "user_id", "type", "label")
+      VALUES ('b6666666-6666-4666-8666-666666666666', '${userId}', 'day', 'Accepted')
+    `));
+    const acceptedRow = await runtime.db.execute<{ type: string }>(sql.raw(`
+      SELECT "type" FROM "meal_templates" WHERE "id" = 'b6666666-6666-4666-8666-666666666666'
+    `));
+    expect(acceptedRow.rows).toEqual([{ type: "day" }]);
+  });
+
+  it("enforces the gym schedule pair uniqueness and shape constraints (0017)", async () => {
+    runtime = await createDatabaseRuntime("memory:");
+
+    for (const fileName of migrationFiles) {
+      await applyMigration(runtime, fileName);
+    }
+
+    const requesterId = "c1111111-1111-4111-8111-111111111111";
+    const addresseeId = "c2222222-2222-4222-8222-222222222222";
+
+    await runtime.db.execute(sql.raw(`
+      INSERT INTO "users" ("id", "shoo_pairwise_sub", "email")
+      VALUES
+        ('${requesterId}', 'gym_requester', 'gym-requester@example.com'),
+        ('${addresseeId}', 'gym_addressee', 'gym-addressee@example.com')
+    `));
+    await runtime.db.execute(sql.raw(`
+      INSERT INTO "gym_buddies" ("id", "requester_user_id", "addressee_user_id", "status")
+      VALUES ('c3333333-3333-4333-8333-333333333333', '${requesterId}', '${addresseeId}', 'pending')
+    `));
+
+    // The LEAST/GREATEST pair index must reject the REVERSE direction too.
+    await expect(
+      runtime.db.execute(sql.raw(`
+        INSERT INTO "gym_buddies" ("id", "requester_user_id", "addressee_user_id", "status")
+        VALUES ('c4444444-4444-4444-8444-444444444444', '${addresseeId}', '${requesterId}', 'pending')
+      `)),
+    ).rejects.toThrow();
+
+    // A weekly slot carrying a date violates the recurrence-shape CHECK.
+    await expect(
+      runtime.db.execute(sql.raw(`
+        INSERT INTO "gym_slots" (
+          "id", "user_id", "title", "recurrence", "slot_date", "weekday", "start_minute", "end_minute"
+        )
+        VALUES ('c5555555-5555-4555-8555-555555555555', '${requesterId}', 'Push day', 'weekly', '2026-09-01', 1, 1020, 1110)
+      `)),
+    ).rejects.toThrow();
+
+    // 23:00 until midnight is representable (end_minute = 1440)...
+    await runtime.db.execute(sql.raw(`
+      INSERT INTO "gym_slots" (
+        "id", "user_id", "title", "recurrence", "weekday", "start_minute", "end_minute"
+      )
+      VALUES ('c6666666-6666-4666-8666-666666666666', '${requesterId}', 'Night lift', 'weekly', 1, 1380, 1440)
+    `));
+    // ...but an overnight slot is not.
+    await expect(
+      runtime.db.execute(sql.raw(`
+        INSERT INTO "gym_slots" (
+          "id", "user_id", "title", "recurrence", "weekday", "start_minute", "end_minute"
+        )
+        VALUES ('c7777777-7777-4777-8777-777777777777', '${requesterId}', 'Overnight', 'weekly', 2, 1320, 120)
+      `)),
+    ).rejects.toThrow();
+
+    // Deleting a slot cascades its per-date statuses.
+    await runtime.db.execute(sql.raw(`
+      INSERT INTO "gym_slot_statuses" ("id", "slot_id", "status_date", "status")
+      VALUES ('c8888888-8888-4888-8888-888888888888', 'c6666666-6666-4666-8666-666666666666', '2026-09-07', 'skipped')
+    `));
+    await runtime.db.execute(sql.raw(`
+      DELETE FROM "gym_slots" WHERE "id" = 'c6666666-6666-4666-8666-666666666666'
+    `));
+    const orphanedStatuses = await runtime.db.execute<{ id: string }>(sql.raw(`
+      SELECT "id" FROM "gym_slot_statuses"
+    `));
+    expect(orphanedStatuses.rows).toEqual([]);
+  });
+
+  it("backfills invite identifiers and enforces friend-code uniqueness (0018)", async () => {
+    runtime = await createDatabaseRuntime("memory:");
+
+    // Apply everything before 0018 so a pre-existing email invite can be
+    // seeded the way production rows exist, then let 0018 backfill it.
+    const friendCodeMigrationIndex = migrationFiles.indexOf(
+      "0018_gym_friend_codes.sql",
+    );
+    for (const fileName of migrationFiles.slice(0, friendCodeMigrationIndex)) {
+      await applyMigration(runtime, fileName);
+    }
+
+    const requesterId = "d1111111-1111-4111-8111-111111111111";
+    const addresseeId = "d2222222-2222-4222-8222-222222222222";
+    await runtime.db.execute(sql.raw(`
+      INSERT INTO "users" ("id", "shoo_pairwise_sub", "email")
+      VALUES
+        ('${requesterId}', 'fc_requester', 'fc-requester@example.com'),
+        ('${addresseeId}', 'fc_addressee', 'fc-addressee@example.com')
+    `));
+    await runtime.db.execute(sql.raw(`
+      INSERT INTO "gym_buddies" ("id", "requester_user_id", "addressee_user_id", "status")
+      VALUES ('d3333333-3333-4333-8333-333333333333', '${requesterId}', '${addresseeId}', 'pending')
+    `));
+
+    await applyMigration(runtime, "0018_gym_friend_codes.sql");
+
+    // Pre-existing invites were all made by email, so the backfill must echo
+    // the addressee's email as the invite identifier.
+    const backfilled = await runtime.db.execute<{ invite_identifier: string }>(sql.raw(`
+      SELECT "invite_identifier" FROM "gym_buddies"
+      WHERE "id" = 'd3333333-3333-4333-8333-333333333333'
+    `));
+    expect(backfilled.rows).toEqual([
+      { invite_identifier: "fc-addressee@example.com" },
+    ]);
+
+    // The partial unique index tolerates many NULL codes but blocks duplicates.
+    await runtime.db.execute(sql.raw(`
+      UPDATE "users" SET "friend_code" = 'AB23CD45' WHERE "id" = '${requesterId}'
+    `));
+    await expect(
+      runtime.db.execute(sql.raw(`
+        UPDATE "users" SET "friend_code" = 'AB23CD45' WHERE "id" = '${addresseeId}'
+      `)),
+    ).rejects.toThrow();
+  });
 });
 
 describe.skipIf(!process.env.TEST_DATABASE_URL)("PostgreSQL migration regressions", () => {
@@ -667,7 +873,13 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PostgreSQL migration regression
       await migrationPool.query(
         "DROP SCHEMA public CASCADE; DROP SCHEMA IF EXISTS drizzle CASCADE; DROP EXTENSION IF EXISTS pg_trgm; CREATE SCHEMA public",
       );
-      for (const fileName of migrationFiles.slice(0, -1)) {
+      // Everything except 0014 (applied below, manually, under the
+      // restricted role) and everything after it, which was added later and
+      // is irrelevant to this trigram-specific regression.
+      const trigramMigrationIndex = migrationFiles.indexOf(
+        "0014_food_product_search_trigram.sql",
+      );
+      for (const fileName of migrationFiles.slice(0, trigramMigrationIndex)) {
         await applyMigration(postgresRuntime, fileName);
       }
 
@@ -860,9 +1072,169 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PostgreSQL migration regression
       await rm(migrationsFolder, { recursive: true, force: true });
     }
   });
+
+  it("sets lock_timeout and statement_timeout on the migration connection before migrating (DB-02)", async () => {
+    const databaseUrl = resolveDestructiveTestDatabaseUrl(process.env, {
+      explicitEnvNames: ["TEST_DATABASE_URL"],
+      purpose: "migration connection timeout regression test",
+    });
+    if (!databaseUrl) {
+      throw new Error("TEST_DATABASE_URL is required");
+    }
+
+    const previousPoolMax = process.env.POSTGRES_POOL_MAX;
+    // Force a single physical connection so the connection the migration ran
+    // on is the same one we inspect afterwards.
+    process.env.POSTGRES_POOL_MAX = "1";
+
+    const postgresRuntime = await createDatabaseRuntime(databaseUrl);
+    try {
+      await postgresRuntime.db.execute(
+        sql.raw(
+          "DROP SCHEMA public CASCADE; DROP SCHEMA IF EXISTS drizzle CASCADE; CREATE SCHEMA public",
+        ),
+      );
+
+      await migrateDatabase(postgresRuntime);
+
+      // The pool has exactly one physical connection (POSTGRES_POOL_MAX=1),
+      // and `SET` (not `SET LOCAL`) persists for the life of the session, so
+      // this reconnect observes the settings the migration itself ran with.
+      const lockTimeoutResult = await postgresRuntime.migrationPool?.query<{
+        lock_timeout: string;
+      }>("SHOW lock_timeout");
+      const statementTimeoutResult = await postgresRuntime.migrationPool?.query<{
+        statement_timeout: string;
+      }>("SHOW statement_timeout");
+
+      expect(lockTimeoutResult?.rows[0]?.lock_timeout).toBe("3s");
+      expect(statementTimeoutResult?.rows[0]?.statement_timeout).toBe("5min");
+    } finally {
+      await postgresRuntime.db.execute(
+        sql.raw(
+          "DROP SCHEMA public CASCADE; DROP SCHEMA IF EXISTS drizzle CASCADE; CREATE SCHEMA public",
+        ),
+      );
+      await migrateDatabase(postgresRuntime);
+      await postgresRuntime.close();
+      if (previousPoolMax === undefined) {
+        delete process.env.POSTGRES_POOL_MAX;
+      } else {
+        process.env.POSTGRES_POOL_MAX = previousPoolMax;
+      }
+    }
+  });
+
+  it("gives up acquiring the migration advisory lock after a bounded timeout instead of hanging forever (DB-07)", async () => {
+    const databaseUrl = resolveDestructiveTestDatabaseUrl(process.env, {
+      explicitEnvNames: ["TEST_DATABASE_URL"],
+      purpose: "migration advisory lock timeout regression test",
+    });
+    if (!databaseUrl) {
+      throw new Error("TEST_DATABASE_URL is required");
+    }
+
+    const previousAcquireTimeout = process.env.MIGRATION_LOCK_ACQUIRE_TIMEOUT_MS;
+    process.env.MIGRATION_LOCK_ACQUIRE_TIMEOUT_MS = "1500";
+
+    const lockHolderRuntime = await createDatabaseRuntime(databaseUrl);
+    const contendingRuntime = await createDatabaseRuntime(databaseUrl);
+    try {
+      const holderClient = await lockHolderRuntime.migrationPool?.connect();
+      if (!holderClient) {
+        throw new Error("Expected a migration pool connection");
+      }
+      // Simulate a hung previous migration: it holds the advisory lock and
+      // never releases it.
+      await holderClient.query("SELECT pg_advisory_lock(1836027411)");
+
+      try {
+        const start = Date.now();
+        await expect(migrateDatabase(contendingRuntime)).rejects.toThrow(
+          /Timed out after 1500ms waiting for the database migration advisory lock/,
+        );
+        // Bounded: must not have hung anywhere near "forever". Generous
+        // upper bound to absorb CI scheduling jitter around the 1s retry
+        // interval.
+        expect(Date.now() - start).toBeLessThan(10_000);
+      } finally {
+        await holderClient.query("SELECT pg_advisory_unlock(1836027411)");
+        holderClient.release();
+      }
+    } finally {
+      await contendingRuntime.close();
+      await lockHolderRuntime.close();
+      if (previousAcquireTimeout === undefined) {
+        delete process.env.MIGRATION_LOCK_ACQUIRE_TIMEOUT_MS;
+      } else {
+        process.env.MIGRATION_LOCK_ACQUIRE_TIMEOUT_MS = previousAcquireTimeout;
+      }
+    }
+  });
 });
 
 describe("test database safety", () => {
+  it("refuses a remote test-named database without ALLOW_DESTRUCTIVE_REMOTE_DB (DB-08)", () => {
+    expect(() =>
+      resolveDestructiveTestDatabaseUrl(
+        {
+          TEST_DATABASE_URL:
+            "postgres://user:pass@shared-staging.example.com:5432/app_test",
+        },
+        {
+          explicitEnvNames: ["TEST_DATABASE_URL"],
+          purpose: "database unit tests",
+        },
+      ),
+    ).toThrow(/its host is not local/);
+  });
+
+  it("accepts a remote test-named database once ALLOW_DESTRUCTIVE_REMOTE_DB=true is set (DB-08)", () => {
+    const remoteUrl = "postgres://user:pass@shared-staging.example.com:5432/app_test";
+
+    expect(
+      resolveDestructiveTestDatabaseUrl(
+        {
+          TEST_DATABASE_URL: remoteUrl,
+          ALLOW_DESTRUCTIVE_REMOTE_DB: "true",
+        },
+        {
+          explicitEnvNames: ["TEST_DATABASE_URL"],
+          purpose: "database unit tests",
+        },
+      ),
+    ).toBe(remoteUrl);
+  });
+
+  it("still refuses a remote non-test-named database even with ALLOW_DESTRUCTIVE_REMOTE_DB=true", () => {
+    expect(() =>
+      resolveDestructiveTestDatabaseUrl(
+        {
+          TEST_DATABASE_URL: "postgres://user:pass@shared-staging.example.com:5432/production",
+          ALLOW_DESTRUCTIVE_REMOTE_DB: "true",
+        },
+        {
+          explicitEnvNames: ["TEST_DATABASE_URL"],
+          purpose: "database unit tests",
+        },
+      ),
+    ).toThrow(/its host is not local/);
+  });
+
+  it("keeps working for the loopback TEST_DATABASE_URL this suite itself runs against", () => {
+    const loopbackUrl = "postgres://postgres:postgres@127.0.0.1:55432/macro_tracker_db_test";
+
+    expect(
+      resolveDestructiveTestDatabaseUrl(
+        { TEST_DATABASE_URL: loopbackUrl },
+        {
+          explicitEnvNames: ["TEST_DATABASE_URL"],
+          purpose: "database unit tests",
+        },
+      ),
+    ).toBe(loopbackUrl);
+  });
+
   it("refuses to truncate a plain non-test DATABASE_URL", () => {
     expect(() =>
       resolveDestructiveTestDatabaseUrl(
@@ -923,5 +1295,71 @@ describe("test database safety", () => {
         },
       ),
     ).toBe(ciDatabaseUrl);
+  });
+});
+
+describe("migration tooling invariants", () => {
+  const packageJsonPath = fileURLToPath(new URL("../package.json", import.meta.url));
+  const migrationsFolderPath = fileURLToPath(new URL("../drizzle", import.meta.url));
+  const journalPath = fileURLToPath(
+    new URL("../drizzle/meta/_journal.json", import.meta.url),
+  );
+
+  it("does not offer db:generate now that migrations 0005+ are hand-authored (DB-01)", () => {
+    // `meta/` only has snapshots for 0000-0004 while the journal has many
+    // more entries; `drizzle-kit generate` would diff schema.ts against that
+    // stale 0004 baseline and emit a destructive migration. See MIGRATIONS.md.
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
+      scripts?: Record<string, string>;
+    };
+
+    expect(packageJson.scripts ?? {}).not.toHaveProperty("db:generate");
+    expect(existsSync(fileURLToPath(new URL("../MIGRATIONS.md", import.meta.url)))).toBe(
+      true,
+    );
+  });
+
+  it("keeps the snapshot/journal divergence documented so it cannot silently return", () => {
+    const migrationsGuide = readFileSync(
+      fileURLToPath(new URL("../MIGRATIONS.md", import.meta.url)),
+      "utf8",
+    );
+
+    expect(migrationsGuide).toMatch(/hand-authored/i);
+    expect(migrationsGuide.toLowerCase()).toContain("db:generate");
+  });
+
+  it("has strictly increasing journal `when` values (DB-03)", () => {
+    const journal = JSON.parse(readFileSync(journalPath, "utf8")) as {
+      entries: { idx: number; when: number; tag: string }[];
+    };
+
+    expect(journal.entries.length).toBeGreaterThan(0);
+
+    for (let index = 1; index < journal.entries.length; index++) {
+      const previous = journal.entries[index - 1]!;
+      const current = journal.entries[index]!;
+
+      expect(
+        current.when,
+        `journal entry "${current.tag}" (when=${current.when}) must be strictly ` +
+          `greater than the previous entry "${previous.tag}" (when=${previous.when}); ` +
+          "drizzle selects pending migrations by comparing `when`, not by hash, so a " +
+          "non-increasing value is a silent permanent no-op.",
+      ).toBeGreaterThan(previous.when);
+    }
+  });
+
+  it("has a migration SQL file and matching journal tag for every journal entry", async () => {
+    const journal = JSON.parse(readFileSync(journalPath, "utf8")) as {
+      entries: { tag: string }[];
+    };
+
+    for (const entry of journal.entries) {
+      const sqlPath = join(migrationsFolderPath, `${entry.tag}.sql`);
+      expect(existsSync(sqlPath), `missing migration file for journal tag "${entry.tag}"`).toBe(
+        true,
+      );
+    }
   });
 });

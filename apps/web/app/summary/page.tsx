@@ -14,7 +14,7 @@ type SummaryPageProps = {
 };
 
 export default async function SummaryPage({ searchParams }: SummaryPageProps) {
-  const { sessionUser, selectedDate, userEmail, canAccessAdmin } =
+  const { sessionUser, selectedDate, userEmail, canAccessAdmin, today} =
     await loadOnboardedPageContext(searchParams);
 
   const [periodAverages, goals, statsData] = await Promise.all([
@@ -28,6 +28,7 @@ export default async function SummaryPage({ searchParams }: SummaryPageProps) {
       userEmail={userEmail}
       canAccessAdmin={canAccessAdmin}
       selectedDate={selectedDate}
+      todayStr={today}
       periodAverages={periodAverages}
       goals={goals}
       statsData={statsData}

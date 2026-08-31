@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { getPostgresConnectionConfig, getSslConfig } from "../src";
 
@@ -14,6 +14,7 @@ const originalPoolEnv = {
   POSTGRES_POOL_IDLE_TIMEOUT_MS: process.env.POSTGRES_POOL_IDLE_TIMEOUT_MS,
   POSTGRES_POOL_CONNECTION_TIMEOUT_MS:
     process.env.POSTGRES_POOL_CONNECTION_TIMEOUT_MS,
+  ALLOW_UNVERIFIED_DB_TLS: process.env.ALLOW_UNVERIFIED_DB_TLS,
 };
 
 describe("database client SSL config", () => {
@@ -21,6 +22,7 @@ describe("database client SSL config", () => {
     delete process.env.POSTGRES_POOL_MAX;
     delete process.env.POSTGRES_POOL_IDLE_TIMEOUT_MS;
     delete process.env.POSTGRES_POOL_CONNECTION_TIMEOUT_MS;
+    delete process.env.ALLOW_UNVERIFIED_DB_TLS;
   });
 
   afterEach(() => {
@@ -37,6 +39,49 @@ describe("database client SSL config", () => {
     expect(getSslConfig("postgres://user:pass@db.example.com:5432/macro")).toEqual({
       rejectUnauthorized: true,
     });
+  });
+
+  it("verifies the certificate for sslmode=require", () => {
+    expect(
+      getSslConfig("postgres://user:***@db.example.com:5432/macro?sslmode=require"),
+    ).toEqual({ rejectUnauthorized: true });
+  });
+
+  it("accepts Railway private-network certificates for sslmode=require", () => {
+    expect(
+      getSslConfig(
+        "postgresql://user:***@postgres.railway.internal:5432/macro?sslmode=require",
+      ),
+    ).toEqual({ rejectUnauthorized: false });
+  });
+
+  it("verifies the certificate for sslmode=verify-full", () => {
+    expect(
+      getSslConfig(
+        "postgres://user:pass@db.example.com:5432/macro?sslmode=verify-full",
+      ),
+    ).toEqual({ rejectUnauthorized: true });
+  });
+
+  it("disables verification for sslmode=require only when ALLOW_UNVERIFIED_DB_TLS=true, and warns loudly", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      process.env.ALLOW_UNVERIFIED_DB_TLS = "true";
+      expect(
+        getSslConfig("postgres://user:pass@db.example.com:5432/macro?sslmode=require"),
+      ).toEqual({ rejectUnauthorized: false });
+      expect(errorSpy).toHaveBeenCalled();
+      expect(errorSpy.mock.calls[0]?.[0]).toContain("ALLOW_UNVERIFIED_DB_TLS");
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("does not accept a non-'true' value for ALLOW_UNVERIFIED_DB_TLS", () => {
+    process.env.ALLOW_UNVERIFIED_DB_TLS = "1";
+    expect(
+      getSslConfig("postgres://user:pass@db.example.com:5432/macro?sslmode=require"),
+    ).toEqual({ rejectUnauthorized: true });
   });
 
   it("rejects insecure remote sslmode values", () => {
@@ -59,14 +104,14 @@ describe("database client SSL config", () => {
     expect(getSslConfig("postgres://user:pass@127.0.0.1:5432/macro")).toBe(false);
   });
 
-  it("strips sslmode=require before constructing remote pool config", () => {
+  it("verifies the certificate for sslmode=require by default when building the pool config", () => {
     expect(
       getPostgresConnectionConfig(
         "postgres://user:pass@db.example.com:5432/macro?sslmode=require",
       ),
     ).toEqual({
       connectionString: "postgres://user:pass@db.example.com:5432/macro",
-      ssl: { rejectUnauthorized: false },
+      ssl: { rejectUnauthorized: true },
       ...poolDefaults,
     });
   });

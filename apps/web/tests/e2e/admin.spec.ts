@@ -49,7 +49,12 @@ test("owner bootstrap account sees the admin entry and can open /admin", async (
   await page.getByRole("link", { name: "Admin Panel" }).click();
 
   await expect(page).toHaveURL(/\/admin$/);
-  await expect(page.getByText("Operations Panel")).toBeVisible();
+  // Scoped to the heading: Next's route announcer (#__next-route-announcer__)
+  // mirrors the page heading into a live region after a client-side navigation,
+  // so a bare getByText matches twice and trips strict mode.
+  await expect(
+    page.getByRole("heading", { name: "Operations Panel" }),
+  ).toBeVisible();
 });
 
 test("non-admin users do not see the admin link and get a 404 at /admin", async ({

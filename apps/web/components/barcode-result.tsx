@@ -198,11 +198,16 @@ function NotFoundForm({
     <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center">
       <div
         className="absolute inset-0 bg-black/40 backdrop-blur-sm"
-        onClick={onClose}
+        onClick={() => {
+          if (!isSaving) {
+            onClose();
+          }
+        }}
       />
       <ModalSurface
         ariaLabel="Add a product"
         onClose={onClose}
+        dismissable={!isSaving}
         className="relative z-10 mx-4 mb-4 w-full max-w-sm rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] shadow-2xl outline-none sm:mb-0"
       >
         {/* Header */}
@@ -216,7 +221,14 @@ function NotFoundForm({
               <span className="font-mono">{barcode}</span>
             </p>
           </div>
-          <CloseButton onClick={onClose} />
+          <CloseButton
+            onClick={() => {
+              if (!isSaving) {
+                onClose();
+              }
+            }}
+            disabled={isSaving}
+          />
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-3 p-5">

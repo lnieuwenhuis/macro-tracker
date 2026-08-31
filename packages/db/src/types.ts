@@ -62,16 +62,8 @@ export type ApiTokenAuthResult =
 export const QUANTITY_UNIT_VALUES = ["g", "ml", "serving", "count"] as const;
 export type QuantityUnit = (typeof QUANTITY_UNIT_VALUES)[number];
 
-export function isQuantityUnit(value: string): value is QuantityUnit {
-  return QUANTITY_UNIT_VALUES.includes(value as QuantityUnit);
-}
-
 export const MEAL_ENTRY_STATUS_VALUES = ["planned", "eaten", "skipped"] as const;
 export type MealEntryStatus = (typeof MEAL_ENTRY_STATUS_VALUES)[number];
-
-export function isMealEntryStatus(value: string): value is MealEntryStatus {
-  return MEAL_ENTRY_STATUS_VALUES.includes(value as MealEntryStatus);
-}
 
 export const FOOD_PRODUCT_SCOPE_VALUES = ["global", "personal", "legacy"] as const;
 export type FoodProductScope = (typeof FOOD_PRODUCT_SCOPE_VALUES)[number];
@@ -85,30 +77,99 @@ export const FOOD_PRODUCT_SOURCE_VALUES = [
 ] as const;
 export type FoodProductSource = (typeof FOOD_PRODUCT_SOURCE_VALUES)[number];
 
+export const GYM_SLOT_STATUS_VALUES = ["going", "maybe", "skipped", "done"] as const;
+export type GymSlotStatus = (typeof GYM_SLOT_STATUS_VALUES)[number];
+
+export const GYM_RECURRENCE_VALUES = ["once", "weekly"] as const;
+export type GymRecurrence = (typeof GYM_RECURRENCE_VALUES)[number];
+
+export type GymSlot = {
+  id: string;
+  title: string;
+  description: string | null;
+  recurrence: GymRecurrence;
+  slotDate: string | null;
+  weekday: number | null;
+  startMinute: number;
+  endMinute: number;
+};
+
+export type GymSlotInput = {
+  title?: string;
+  description?: string | null;
+  recurrence: GymRecurrence;
+  slotDate?: string | null;
+  weekday?: number | null;
+  startMinute: number;
+  endMinute: number;
+};
+
+/** A slot as it occurs on one specific day, with its effective status. */
+export type GymResolvedSlot = {
+  id: string;
+  title: string;
+  /** Present only on the caller's own slots — never on a buddy's. */
+  description?: string | null;
+  recurrence: GymRecurrence;
+  startMinute: number;
+  endMinute: number;
+  status: GymSlotStatus;
+};
+
+export type GymBuddyUser = {
+  id: string;
+  name: string;
+};
+
+export type GymOverlapWindow = {
+  startMinute: number;
+  endMinute: number;
+  tentative: boolean;
+};
+
+export type GymOverlap = {
+  buddy: GymBuddyUser;
+  windows: GymOverlapWindow[];
+  /** True when the buddy has no confirmed window at all (only "maybe"s). */
+  tentative: boolean;
+};
+
+export type GymBuddyLists = {
+  accepted: { id: string; user: GymBuddyUser }[];
+  pendingIncoming: { id: string; user: GymBuddyUser }[];
+  /**
+   * Echoes exactly what the inviter typed (normalized email or friend code) —
+   * never the target's display name, and never the email when the invite was
+   * made by code (a code invite must not reveal the target's address).
+   */
+  pendingOutgoing: { id: string; identifier: string }[];
+  /** Invites this user declined; visible only to the decliner (= the block list). */
+  declined: { id: string; user: GymBuddyUser }[];
+};
+
+export type GymPageData = {
+  date: string;
+  /** The caller's static shareable friend code (generated on first access). */
+  friendCode: string;
+  slots: GymSlot[];
+  day: {
+    own: GymResolvedSlot[];
+    buddies: { user: GymBuddyUser; slots: GymResolvedSlot[] }[];
+  };
+  buddies: GymBuddyLists;
+  overlaps: GymOverlap[];
+};
+
+export type GymHomeSummary = {
+  overlaps: GymOverlap[];
+  pendingInviteCount: number;
+};
+
 export const WEIGHT_UNIT_VALUES = ["kg", "lb"] as const;
 export type WeightUnit = (typeof WEIGHT_UNIT_VALUES)[number];
 
-export function isWeightUnit(value: string): value is WeightUnit {
-  return WEIGHT_UNIT_VALUES.includes(value as WeightUnit);
-}
-
 export const MEAL_TEMPLATE_TYPE_VALUES = ["meal", "day"] as const;
 export type MealTemplateType = (typeof MEAL_TEMPLATE_TYPE_VALUES)[number];
-
-export function isMealTemplateType(value: string): value is MealTemplateType {
-  return MEAL_TEMPLATE_TYPE_VALUES.includes(value as MealTemplateType);
-}
-
-export const FOOD_PRODUCT_REVISION_ACTION_VALUES = [
-  "created",
-  "updated",
-  "corrected",
-  "deleted",
-  "restored",
-  "imported",
-] as const;
-export type FoodProductRevisionAction =
-  (typeof FOOD_PRODUCT_REVISION_ACTION_VALUES)[number];
 
 export type MacroGoals = {
   proteinG: number | null;
@@ -168,15 +229,6 @@ export type FoodProduct = Required<
   createdAt: string;
   updatedAt: string;
   deletedAt: string | null;
-};
-
-export type FoodProductRevision = {
-  id: string;
-  productId: string;
-  actorUserId: string | null;
-  action: FoodProductRevisionAction;
-  snapshot: Record<string, unknown>;
-  createdAt: string;
 };
 
 export type MealGroup = {
@@ -244,10 +296,6 @@ export const ADMIN_ROLE_VALUES = ["user", "admin", "owner"] as const;
 
 export type AdminRole = (typeof ADMIN_ROLE_VALUES)[number];
 
-export function isAdminRole(value: string): value is AdminRole {
-  return ADMIN_ROLE_VALUES.includes(value as AdminRole);
-}
-
 export function canAccessAdmin(role: AdminRole) {
   return role === "admin" || role === "owner";
 }
@@ -275,11 +323,6 @@ export type AppUser = {
   goalCarbsG: number | null;
   goalFatG: number | null;
   goalWeightKg: number | null;
-  onboardingCompletedAt: string | null;
-  preferredWeightUnit: WeightUnit;
-};
-
-export type UserPreferences = {
   onboardingCompletedAt: string | null;
   preferredWeightUnit: WeightUnit;
 };
@@ -412,26 +455,6 @@ export type AdminBarcodeReviewQueueItem = FoodProduct & {
   latestAuditAt: string | null;
 };
 
-export type AdminBarcodeRecord = {
-  id: string;
-  barcode: string;
-  name: string;
-  brands: string;
-  proteinG: number;
-  carbsG: number;
-  fatG: number;
-  caloriesKcal: number;
-  servingSizeG: number | null;
-  addedByUserId: string | null;
-  addedByEmail: string | null;
-  deletedByUserId: string | null;
-  deletedByEmail: string | null;
-  createdAt: string;
-  updatedAt: string;
-  deletedAt: string | null;
-  status: "active" | "deleted";
-};
-
 export type AdminRecipeSummary = {
   id: string;
   label: string;
@@ -511,12 +534,6 @@ export type AdminUserHealthSegment = {
 export type AdminUserHealthSummary = {
   segments: AdminUserHealthSegment[];
 };
-
-export type AdminUserHealthFilter =
-  | "onboarded_no_logs"
-  | "no_goals"
-  | "no_weight_entries"
-  | "heavy_barcode_submitters";
 
 export type AdminDashboardData = {
   totalUsers: number;
