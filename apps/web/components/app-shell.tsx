@@ -34,8 +34,15 @@ type AppShellProps = {
    * bounce them back to the dashboard.
    */
   basePath?: string;
-  /** Renders the top-left gym shortcut (dashboard only). */
+  /** Renders the top-left gym shortcut (dashboard and gym screens). */
   showGymShortcut?: boolean;
+  /**
+   * True on the /gym screen itself: the dumbbell renders in the accent
+   * "you are here" state and toggles BACK to the food log. Without this the
+   * button vanished inside the gym section, and the installed PWA (standalone,
+   * no browser chrome) had no header affordance to leave it.
+   */
+  gymShortcutActive?: boolean;
   /** Pending gym-buddy invites; > 0 shows a dot on the gym shortcut. */
   gymPendingInviteCount?: number;
   onComposeAction?: (action: ComposeAction) => void;
@@ -56,6 +63,7 @@ export function AppShell({
   showDateNavigation = false,
   basePath: basePathProp,
   showGymShortcut = false,
+  gymShortcutActive = false,
   gymPendingInviteCount = 0,
   onComposeAction,
   topBar,
@@ -203,10 +211,24 @@ export function AppShell({
                 <div className="flex items-center gap-3">
                   {showGymShortcut ? (
                     <TransitionLink
-                      href={`/gym?date=${selectedDate}`}
-                      motion="screen"
-                      className={`relative ${ROUND_SHELL_BUTTON_CLASS} shrink-0`}
-                      aria-label="Open gym schedule"
+                      href={
+                        gymShortcutActive
+                          ? `/?date=${selectedDate}`
+                          : `/gym?date=${selectedDate}`
+                      }
+                      motion={gymShortcutActive ? "screen-backward" : "screen"}
+                      className={[
+                        "relative shrink-0",
+                        gymShortcutActive
+                          ? ROUND_SHELL_BUTTON_ACTIVE_CLASS
+                          : ROUND_SHELL_BUTTON_CLASS,
+                      ].join(" ")}
+                      aria-label={
+                        gymShortcutActive
+                          ? "Back to food log"
+                          : "Open gym schedule"
+                      }
+                      aria-current={gymShortcutActive ? "page" : undefined}
                     >
                       <LinkPendingPulse className="flex items-center justify-center">
                         <svg width="17" height="17" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
@@ -351,6 +373,15 @@ export function AppShell({
 /** The round header-button look shared by the settings and gym buttons. */
 const ROUND_SHELL_BUTTON_CLASS =
   "flex h-12 w-12 items-center justify-center rounded-full border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-surface-strong)_92%,transparent)] text-[var(--color-ink)] shadow-[0_10px_20px_rgba(0,0,0,0.12)] backdrop-blur-xl transition hover:bg-[var(--color-card-muted)]";
+
+/**
+ * Same geometry, accent-filled: the gym button's "you are here" state on the
+ * /gym screen itself. A separate full string (not an override appended to
+ * ROUND_SHELL_BUTTON_CLASS) because conflicting Tailwind utilities are not
+ * resolved by class order.
+ */
+const ROUND_SHELL_BUTTON_ACTIVE_CLASS =
+  "flex h-12 w-12 items-center justify-center rounded-full border border-[var(--color-accent)] bg-[var(--color-accent)] text-white shadow-[0_10px_20px_rgba(0,0,0,0.12)] backdrop-blur-xl transition hover:bg-[var(--color-accent-strong)]";
 
 export function SettingsButton({
   onClick,
