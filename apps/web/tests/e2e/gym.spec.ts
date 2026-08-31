@@ -44,6 +44,11 @@ test("the top-left gym button opens the schedule and slots can be managed", asyn
   await gymLink.click();
   await expect(page).toHaveURL(/\/gym\?date=2026-12-17$/);
 
+  // The dumbbell must NOT disappear inside the gym section: it stays in the
+  // header in its active state and toggles back to the food log.
+  const backLink = page.getByRole("link", { name: "Back to food log" });
+  await expect(backLink).toBeVisible();
+
   await expect(page.getByRole("tab", { name: "Schedule" })).toBeVisible();
   await expect(page.getByText("Your slots")).toBeVisible();
 
@@ -70,6 +75,13 @@ test("the top-left gym button opens the schedule and slots can be managed", asyn
   ).toHaveText("Skipping");
   // The slot is still there — skipping never deletes it.
   await expect(page.getByText("Leg day").first()).toBeVisible();
+
+  // The active dumbbell returns to the food log for the same date.
+  await backLink.click();
+  await expect(page).toHaveURL(/\/\?date=2026-12-17$/);
+  await expect(
+    page.getByRole("link", { name: "Open gym schedule" }),
+  ).toBeVisible();
 });
 
 test("buddies share schedules and overlapping slots surface on the home page", async ({
