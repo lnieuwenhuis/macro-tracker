@@ -647,10 +647,10 @@ type InviteGymBuddyResult = ActionResult & {
 };
 
 export async function inviteGymBuddyAction(
-  input: { email: string },
+  input: { identifier: string },
 ): Promise<InviteGymBuddyResult> {
   return runSessionAction(async (sessionUser) => {
-    const invite = await inviteGymBuddy(sessionUser.userId, input.email);
+    const invite = await inviteGymBuddy(sessionUser.userId, input.identifier);
     return { ok: true, result: invite.result };
   }, { revalidate: GYM_REVALIDATE });
 }

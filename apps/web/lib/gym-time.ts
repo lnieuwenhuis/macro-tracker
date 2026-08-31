@@ -14,6 +14,17 @@ export function timeInputToMinutes(value: string, role: "start" | "end") {
   return total;
 }
 
+/**
+ * Friend codes are stored as 8 bare characters; display them as "AB23-CD45"
+ * for readability. Anything unexpected (old data, emails) passes through.
+ */
+export function formatFriendCode(code: string) {
+  if (/^[A-Z0-9]{8}$/.test(code)) {
+    return `${code.slice(0, 4)}-${code.slice(4)}`;
+  }
+  return code;
+}
+
 /** The inverse mapping for populating a time input (1440 renders as 00:00). */
 export function minutesToTimeInput(minute: number) {
   const normalized = minute === 1440 ? 0 : minute;

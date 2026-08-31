@@ -83,10 +83,16 @@ export const users = pgTable(
     preferredWeightUnit: text("preferred_weight_unit")
       .notNull()
       .default("kg"),
+    // Static gym-buddy friend code; generated lazily by the backend so it is
+    // app-generated like every other identifier (no gen_random_uuid()).
+    friendCode: text("friend_code"),
   },
   (table) => [
     uniqueIndex("users_shoo_pairwise_sub_key").on(table.shooPairwiseSub),
     uniqueIndex("users_email_key").on(table.email),
+    uniqueIndex("users_friend_code_key")
+      .on(table.friendCode)
+      .where(sql`${table.friendCode} IS NOT NULL`),
     // DB-09: matches ADMIN_ROLE_VALUES / WEIGHT_UNIT_VALUES in types.ts.
     // Added NOT VALID in migration 0016 (see that file for why); Drizzle's
     // schema builder always emits VALID syntax, so this reflects the target
@@ -540,6 +546,10 @@ export const gymBuddies = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     status: text("status").notNull().default("pending"),
+    // Exactly what the requester typed (normalized email or friend code); the
+    // sent-invites list echoes this back so a code invite never reveals the
+    // target's email. Nullable only for pre-0018 rows (backfilled with email).
+    inviteIdentifier: text("invite_identifier"),
     ...createdUpdatedTimestamps(),
   },
   (table) => [

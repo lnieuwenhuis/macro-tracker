@@ -85,15 +85,29 @@ test("buddies share schedules and overlapping slots surface on the home page", a
   const alice = await newSessionPage(browser, aliceEmail);
 
   try {
-    // Alice invites Bob by email.
+    // Bob reads his static friend code from the Buddies tab.
+    await bob.page.goto(`/gym?date=${date}`);
+    await bob.page.getByRole("tab", { name: "Buddies" }).click();
+    const bobCode = (
+      await bob.page.getByTestId("gym-friend-code").innerText()
+    ).trim();
+    expect(bobCode).toMatch(/^[2-9A-HJKMNP-Z]{4}-[2-9A-HJKMNP-Z]{4}$/);
+
+    // Alice invites Bob by that code (typed sloppily — lowercase), never
+    // needing his email.
     await alice.page.goto(`/gym?date=${date}`);
     await alice.page.getByRole("tab", { name: "Buddies" }).click();
-    await alice.page.getByLabel("Buddy email address").fill(bobEmail);
+    await alice.page
+      .getByLabel("Buddy email address or friend code")
+      .fill(bobCode.toLowerCase());
     await alice.page.getByRole("button", { name: "Invite" }).click();
     await expect(alice.page.getByText("Invite sent.")).toBeVisible();
+    // The sent-invites list shows the code, not Bob's email.
+    await expect(alice.page.getByText(bobCode)).toBeVisible();
+    await expect(alice.page.getByText(bobEmail, { exact: true })).toHaveCount(0);
 
     // Bob sees the pending invite (dot on the Buddies tab) and accepts.
-    await bob.page.goto(`/gym?date=${date}`);
+    await bob.page.reload();
     await bob.page.getByRole("tab", { name: "Buddies" }).click();
     await bob.page.getByRole("button", { name: "Accept" }).click();
     await expect(bob.page.getByText("No gym buddies yet")).toHaveCount(0);
