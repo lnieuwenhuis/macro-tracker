@@ -498,6 +498,15 @@ input::placeholder {
   }
 }
 
+/* iOS/WebKit renders the value of date/time inputs in an inner pseudo-element
+   that stays center-aligned (and adds its own margins) even after
+   `appearance: none`, so a styled time field looks different from every
+   text input beside it. Inherit the field's own alignment instead. */
+input::-webkit-date-and-time-value {
+  text-align: inherit;
+  margin: 0;
+}
+
 .font-serif {
   font-family: var(--font-fraunces), serif;
 }
