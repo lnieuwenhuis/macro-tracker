@@ -20,6 +20,7 @@ import {
 import { formatMinutesAsTime, formatSelectedDate } from "@/lib/formatting";
 import { useGymNowMinute } from "@/lib/gym-clock";
 import {
+  formatFriendCode,
   gymStatusLabel,
   minutesToTimeInput,
   timeInputToMinutes,
@@ -370,11 +371,12 @@ export function GymShell({
         ) : (
           <BuddiesPanel
             lists={buddyLists}
+            friendCode={data.friendCode}
             isPending={isPending}
-            onInvite={(email, done) => {
+            onInvite={(identifier, done) => {
               setError(null);
               startTransition(async () => {
-                const result = await inviteGymBuddyAction({ email });
+                const result = await inviteGymBuddyAction({ identifier });
                 if (!result.ok) {
                   setError(result.error ?? "Something went wrong.");
                   return;
@@ -488,52 +490,95 @@ function TrashIcon() {
 
 type BuddiesPanelProps = {
   lists: GymPageData["buddies"];
+  friendCode: string;
   isPending: boolean;
-  onInvite: (email: string, done: (message: string) => void) => void;
+  onInvite: (identifier: string, done: (message: string) => void) => void;
   onRespond: (buddyId: string, accept: boolean) => void;
   onRemove: (buddyId: string) => void;
 };
 
 function BuddiesPanel({
   lists,
+  friendCode,
   isPending,
   onInvite,
   onRespond,
   onRemove,
 }: BuddiesPanelProps) {
-  const [email, setEmail] = useState("");
+  const [identifier, setIdentifier] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
   const [showDeclined, setShowDeclined] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   function handleInvite(event: FormEvent) {
     event.preventDefault();
-    const trimmed = email.trim();
+    const trimmed = identifier.trim();
     if (!trimmed) {
       return;
     }
     setNotice(null);
     onInvite(trimmed, (message) => {
-      setEmail("");
+      setIdentifier("");
       setNotice(message);
     });
+  }
+
+  function handleCopyCode() {
+    void navigator.clipboard
+      .writeText(formatFriendCode(friendCode))
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 2000);
+      })
+      .catch(() => {
+        // Clipboard access can be denied; the code is still visible to copy
+        // by hand, so silently doing nothing beats an error state here.
+      });
   }
 
   return (
     <div className="space-y-6">
       <section>
+        <h2 className={SECTION_HEADING_CLASS}>Your friend code</h2>
+        <div className={`${CARD_CLASS} mt-2 flex items-center justify-between gap-3`}>
+          <p
+            data-testid="gym-friend-code"
+            className="font-mono text-lg font-bold tracking-[0.12em] text-[var(--color-ink)]"
+          >
+            {formatFriendCode(friendCode)}
+          </p>
+          <button
+            type="button"
+            onClick={handleCopyCode}
+            className={`${SECONDARY_BUTTON_CLASS} shrink-0`}
+            aria-label="Copy your friend code"
+          >
+            {copied ? "Copied!" : "Copy"}
+          </button>
+        </div>
+        <p className="mt-2 text-xs text-[var(--color-muted)]">
+          Share this instead of your email — anyone with it can send you a
+          buddy invite.
+        </p>
+      </section>
+
+      <section>
         <h2 className={SECTION_HEADING_CLASS}>Invite a buddy</h2>
         <form onSubmit={handleInvite} className="mt-2 flex gap-2">
           <input
-            type="email"
-            value={email}
-            onChange={(event) => setEmail(event.target.value)}
-            placeholder="their@email.com"
-            aria-label="Buddy email address"
+            type="text"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            value={identifier}
+            onChange={(event) => setIdentifier(event.target.value)}
+            placeholder="their@email.com or AB23-CD45"
+            aria-label="Buddy email address or friend code"
             className={TEXT_INPUT_CLASS}
           />
           <button
             type="submit"
-            disabled={isPending || email.trim().length === 0}
+            disabled={isPending || identifier.trim().length === 0}
             className={`${PRIMARY_BUTTON_CLASS} shrink-0`}
           >
             Invite
@@ -626,11 +671,11 @@ function BuddiesPanel({
                 className={`${CARD_CLASS} flex items-center justify-between gap-3`}
               >
                 <p className="min-w-0 truncate text-sm text-[var(--color-muted-strong)]">
-                  {invite.email}
+                  {formatFriendCode(invite.identifier)}
                 </p>
                 <ConfirmDeleteButton
                   onConfirm={() => onRemove(invite.id)}
-                  ariaLabel={`Cancel invite to ${invite.email}`}
+                  ariaLabel={`Cancel invite to ${formatFriendCode(invite.identifier)}`}
                   disabled={isPending}
                 >
                   <TrashIcon />

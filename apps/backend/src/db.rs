@@ -100,10 +100,12 @@ CREATE TABLE IF NOT EXISTS users (
   goal_fat_g numeric(6, 1),
   goal_weight_kg numeric(5, 2),
   onboarding_completed_at timestamptz,
-  preferred_weight_unit text DEFAULT 'kg' NOT NULL
+  preferred_weight_unit text DEFAULT 'kg' NOT NULL,
+  friend_code text
 );
 CREATE UNIQUE INDEX IF NOT EXISTS users_shoo_pairwise_sub_key ON users USING btree (shoo_pairwise_sub);
 CREATE UNIQUE INDEX IF NOT EXISTS users_email_key ON users USING btree (email);
+CREATE UNIQUE INDEX IF NOT EXISTS users_friend_code_key ON users USING btree (friend_code) WHERE friend_code IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS api_tokens (
   id uuid PRIMARY KEY NOT NULL,
@@ -339,6 +341,7 @@ CREATE TABLE IF NOT EXISTS gym_buddies (
   requester_user_id uuid NOT NULL REFERENCES users(id) ON DELETE cascade,
   addressee_user_id uuid NOT NULL REFERENCES users(id) ON DELETE cascade,
   status text DEFAULT 'pending' NOT NULL,
+  invite_identifier text,
   created_at timestamptz DEFAULT now() NOT NULL,
   updated_at timestamptz DEFAULT now() NOT NULL,
   CONSTRAINT gym_buddies_not_self_check
@@ -1979,8 +1982,12 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
         }
         "inviteGymBuddy" => {
             let user_id = uuid_arg(&args, "userId")?;
-            let email = string_arg(&args, "email")?;
-            invite_gym_buddy_json(pool, user_id, &email).await
+            // `identifier` (email or friend code) with an `email` fallback so
+            // a not-yet-redeployed web service keeps working during the skew
+            // window between the two services' deploys.
+            let identifier =
+                string_arg(&args, "identifier").or_else(|_| string_arg(&args, "email"))?;
+            invite_gym_buddy_json(pool, user_id, &identifier).await
         }
         "respondGymBuddyInvite" => {
             let user_id = uuid_arg(&args, "userId")?;
@@ -2153,6 +2160,107 @@ fn ensure_gym_status(value: &str) -> AppResult<()> {
             "Status must be one of going, maybe, skipped or done.".to_string(),
         ))
     }
+}
+
+/// No 0/O, 1/I/L: friend codes are read aloud and typed back, so every
+/// character must be unambiguous. 31^8 ≈ 8.5e11 codes — unguessable enough
+/// that the code path (unlike the email path) is not an account oracle.
+const GYM_FRIEND_CODE_ALPHABET: &[u8] = b"23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+const GYM_FRIEND_CODE_LENGTH: usize = 8;
+
+/// UUIDv4 as the entropy source — the same idiom `create_api_token_json`
+/// uses, so no new dependency. The modulo bias (~3% per char) is irrelevant
+/// for a shareable identifier whose only property is non-guessability.
+fn generate_gym_friend_code() -> String {
+    Uuid::new_v4()
+        .as_bytes()
+        .iter()
+        .take(GYM_FRIEND_CODE_LENGTH)
+        .map(|byte| {
+            GYM_FRIEND_CODE_ALPHABET[*byte as usize % GYM_FRIEND_CODE_ALPHABET.len()] as char
+        })
+        .collect()
+}
+
+enum GymInviteIdentifier {
+    Email(String),
+    FriendCode(String),
+}
+
+/// An '@' anywhere means email (lowercased); otherwise the input is treated
+/// as a friend code — uppercased with separators stripped, so "ab23-cd45",
+/// "AB23 CD45" and "ab23cd45" all resolve to the same stored code.
+fn classify_gym_invite_identifier(raw: &str) -> AppResult<GymInviteIdentifier> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(AppError::BadRequest(
+            "Enter an email address or friend code.".to_string(),
+        ));
+    }
+    ensure_text_length(trimmed, MAX_TEXT_FIELD_LENGTH, "Identifier")?;
+    if trimmed.contains('@') {
+        return Ok(GymInviteIdentifier::Email(trimmed.to_lowercase()));
+    }
+    let code: String = trimmed
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .map(|character| character.to_ascii_uppercase())
+        .collect();
+    if code.is_empty() {
+        return Err(AppError::BadRequest(
+            "Enter an email address or friend code.".to_string(),
+        ));
+    }
+    Ok(GymInviteIdentifier::FriendCode(code))
+}
+
+/// Returns the user's static friend code, generating it on first use. The
+/// guarded UPDATE (`WHERE friend_code IS NULL`) makes concurrent generation
+/// settle on one winner, and the partial unique index turns the astronomically
+/// unlikely cross-user collision into a retry.
+async fn ensure_gym_friend_code(pool: &PgPool, user_id: Uuid) -> AppResult<String> {
+    let existing: Option<Option<String>> =
+        sqlx::query_scalar("SELECT friend_code FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await?;
+    let Some(existing) = existing else {
+        return Err(AppError::NotFound("User not found.".to_string()));
+    };
+    if let Some(code) = existing {
+        return Ok(code);
+    }
+
+    for _ in 0..5 {
+        let candidate = generate_gym_friend_code();
+        let updated = sqlx::query_scalar::<_, String>(
+            "UPDATE users SET friend_code = $2 WHERE id = $1 AND friend_code IS NULL RETURNING friend_code",
+        )
+        .bind(user_id)
+        .bind(&candidate)
+        .fetch_optional(pool)
+        .await;
+        match updated {
+            Ok(Some(code)) => return Ok(code),
+            Ok(None) => {
+                // A concurrent request won the race; read its code.
+                let code: Option<String> =
+                    sqlx::query_scalar("SELECT friend_code FROM users WHERE id = $1")
+                        .bind(user_id)
+                        .fetch_one(pool)
+                        .await?;
+                if let Some(code) = code {
+                    return Ok(code);
+                }
+            }
+            Err(sqlx::Error::Database(database_error))
+                if database_error.code().as_deref() == Some("23505") => {}
+            Err(error) => return Err(AppError::Sqlx(error)),
+        }
+    }
+    Err(AppError::Anyhow(anyhow::anyhow!(
+        "could not allocate a unique friend code after 5 attempts"
+    )))
 }
 
 fn gym_minute(
@@ -2486,23 +2594,35 @@ async fn set_gym_slot_status_json(
     Ok(row.try_get("data")?)
 }
 
-async fn invite_gym_buddy_json(pool: &PgPool, user_id: Uuid, email: &str) -> AppResult<Value> {
-    let email = email.trim().to_lowercase();
-    if email.is_empty() {
-        return Err(AppError::BadRequest("Email is required.".to_string()));
-    }
-    ensure_text_length(&email, MAX_TEXT_FIELD_LENGTH, "Email")?;
-
-    // Accepted risk (documented in the feature plan): a clear miss/hit answer
-    // is an account-existence oracle; kept for usability at this app's scale.
-    let target_id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM users WHERE email = $1")
-        .bind(&email)
-        .fetch_optional(pool)
-        .await?;
+async fn invite_gym_buddy_json(pool: &PgPool, user_id: Uuid, identifier: &str) -> AppResult<Value> {
+    let identifier = classify_gym_invite_identifier(identifier)?;
+    // The email path is a clear miss/hit answer and therefore an
+    // account-existence oracle — accepted risk (documented in the feature
+    // plan) at this app's scale. The friend-code path is NOT: codes are
+    // 31^8 random, so a miss reveals nothing enumerable.
+    let (stored_identifier, target_id): (String, Option<Uuid>) = match &identifier {
+        GymInviteIdentifier::Email(email) => (
+            email.clone(),
+            sqlx::query_scalar("SELECT id FROM users WHERE email = $1")
+                .bind(email)
+                .fetch_optional(pool)
+                .await?,
+        ),
+        GymInviteIdentifier::FriendCode(code) => (
+            code.clone(),
+            sqlx::query_scalar("SELECT id FROM users WHERE friend_code = $1")
+                .bind(code)
+                .fetch_optional(pool)
+                .await?,
+        ),
+    };
     let Some(target_id) = target_id else {
-        return Err(AppError::NotFound(
-            "No user with that email is on Macro Tracker.".to_string(),
-        ));
+        return Err(AppError::NotFound(match identifier {
+            GymInviteIdentifier::Email(_) => {
+                "No user with that email is on Macro Tracker.".to_string()
+            }
+            GymInviteIdentifier::FriendCode(_) => "No user with that friend code.".to_string(),
+        }));
     };
     if target_id == user_id {
         return Err(AppError::BadRequest(
@@ -2541,14 +2661,15 @@ async fn invite_gym_buddy_json(pool: &PgPool, user_id: Uuid, email: &str) -> App
             }
             let row = sqlx::query(
                 r#"
-                INSERT INTO gym_buddies (id, requester_user_id, addressee_user_id)
-                VALUES ($1, $2, $3)
+                INSERT INTO gym_buddies (id, requester_user_id, addressee_user_id, invite_identifier)
+                VALUES ($1, $2, $3, $4)
                 RETURNING jsonb_build_object('id', id, 'result', 'invited') AS data
                 "#,
             )
             .bind(Uuid::new_v4())
             .bind(user_id)
             .bind(target_id)
+            .bind(&stored_identifier)
             .fetch_one(&mut *tx)
             .await
             .map_err(|error| {
@@ -2800,6 +2921,7 @@ async fn gym_overlap_entries(pool: &PgPool, user_id: Uuid, date: &str) -> AppRes
 }
 
 async fn get_gym_page_data_json(pool: &PgPool, user_id: Uuid, date: &str) -> AppResult<Value> {
+    let friend_code = ensure_gym_friend_code(pool, user_id).await?;
     let day_row = sqlx::query(concat!(
         "WITH ",
         gym_accepted_buddies_cte!(),
@@ -2911,7 +3033,7 @@ async fn get_gym_page_data_json(pool: &PgPool, user_id: Uuid, date: &str) -> App
             FROM (
               SELECT b.created_at, b.id, jsonb_build_object(
                 'id', b.id,
-                'email', u.email
+                'identifier', coalesce(b.invite_identifier, u.email)
               ) AS value
               FROM gym_buddies b
               JOIN users u ON u.id = b.addressee_user_id
@@ -2946,6 +3068,7 @@ async fn get_gym_page_data_json(pool: &PgPool, user_id: Uuid, date: &str) -> App
 
     Ok(json!({
         "date": date,
+        "friendCode": friend_code,
         "slots": day.get("slots").cloned().unwrap_or_else(|| json!([])),
         "day": {
             "own": day.get("own").cloned().unwrap_or_else(|| json!([])),
@@ -9961,6 +10084,40 @@ mod tests {
             ]))
             .is_err()
         );
+    }
+
+    #[test]
+    fn gym_friend_codes_use_the_unambiguous_alphabet() {
+        for _ in 0..50 {
+            let code = generate_gym_friend_code();
+            assert_eq!(code.len(), GYM_FRIEND_CODE_LENGTH);
+            for character in code.bytes() {
+                assert!(
+                    GYM_FRIEND_CODE_ALPHABET.contains(&character),
+                    "unexpected friend-code character {character:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gym_invite_identifiers_classify_and_normalize() {
+        // '@' anywhere → email, lowercased.
+        match classify_gym_invite_identifier("  BOB@Example.com ").unwrap() {
+            GymInviteIdentifier::Email(email) => assert_eq!(email, "bob@example.com"),
+            GymInviteIdentifier::FriendCode(_) => panic!("expected email"),
+        }
+        // No '@' → friend code, uppercased with separators stripped so
+        // "ab23-cd45", "AB23 CD45" and "ab23cd45" all resolve identically.
+        for raw in ["ab23-cd45", "AB23 CD45", "ab23cd45"] {
+            match classify_gym_invite_identifier(raw).unwrap() {
+                GymInviteIdentifier::FriendCode(code) => assert_eq!(code, "AB23CD45"),
+                GymInviteIdentifier::Email(_) => panic!("expected friend code for {raw:?}"),
+            }
+        }
+        // Empty and separator-only inputs are rejected.
+        assert!(classify_gym_invite_identifier("   ").is_err());
+        assert!(classify_gym_invite_identifier("---").is_err());
     }
 
     #[test]

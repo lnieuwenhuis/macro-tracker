@@ -137,14 +137,20 @@ export type GymOverlap = {
 export type GymBuddyLists = {
   accepted: { id: string; user: GymBuddyUser }[];
   pendingIncoming: { id: string; user: GymBuddyUser }[];
-  /** Shows only the invited email — never the target's display name. */
-  pendingOutgoing: { id: string; email: string }[];
+  /**
+   * Echoes exactly what the inviter typed (normalized email or friend code) —
+   * never the target's display name, and never the email when the invite was
+   * made by code (a code invite must not reveal the target's address).
+   */
+  pendingOutgoing: { id: string; identifier: string }[];
   /** Invites this user declined; visible only to the decliner (= the block list). */
   declined: { id: string; user: GymBuddyUser }[];
 };
 
 export type GymPageData = {
   date: string;
+  /** The caller's static shareable friend code (generated on first access). */
+  friendCode: string;
   slots: GymSlot[];
   day: {
     own: GymResolvedSlot[];

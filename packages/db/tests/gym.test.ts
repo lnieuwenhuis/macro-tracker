@@ -240,10 +240,10 @@ describe("gym schedule sharing", () => {
       "You already invited this user.",
     );
 
-    // Outgoing shows only the email; incoming shows the requester's name.
+    // Outgoing echoes the typed email; incoming shows the requester's name.
     const alicePage = await getGymPageData(aliceId, MONDAY);
     expect(alicePage.buddies.pendingOutgoing).toEqual([
-      { id: invite.id, email: "bob@example.com" },
+      { id: invite.id, identifier: "bob@example.com" },
     ]);
     const bobPage = await getGymPageData(bobId, MONDAY);
     expect(bobPage.buddies.pendingIncoming).toEqual([
@@ -285,6 +285,43 @@ describe("gym schedule sharing", () => {
     await removeGymBuddy(bobId, reinvite.id);
     const afterRemoval = await getGymPageData(aliceId, MONDAY);
     expect(afterRemoval.buddies.accepted).toEqual([]);
+  });
+
+  it("supports static friend codes without revealing the target's email", async () => {
+    // The code is generated on first gym-page access and stays static.
+    const bobPage = await getGymPageData(bobId, MONDAY);
+    expect(bobPage.friendCode).toMatch(/^[2-9A-HJKMNP-Z]{8}$/);
+    const bobPageAgain = await getGymPageData(bobId, MONDAY);
+    expect(bobPageAgain.friendCode).toBe(bobPage.friendCode);
+    // Distinct per user.
+    const alicePage = await getGymPageData(aliceId, MONDAY);
+    expect(alicePage.friendCode).not.toBe(bobPage.friendCode);
+
+    // Unknown codes miss with a code-specific error (codes are random, so
+    // this is not an account oracle the way the email path is).
+    await expect(inviteGymBuddy(aliceId, "ZZZZ-ZZZZ")).rejects.toThrow(
+      "No user with that friend code.",
+    );
+
+    // Lowercased, dash-separated input resolves to the same stored code.
+    const sloppyCode = `${bobPage.friendCode.slice(0, 4).toLowerCase()}-${bobPage.friendCode.slice(4).toLowerCase()}`;
+    const invite = await inviteGymBuddy(aliceId, sloppyCode);
+    expect(invite.result).toBe("invited");
+
+    // The sent-invites list must echo the CODE — a code invite would leak the
+    // target's email if the projection fell back to it.
+    const afterInvite = await getGymPageData(aliceId, MONDAY);
+    expect(afterInvite.buddies.pendingOutgoing).toEqual([
+      { id: invite.id, identifier: bobPage.friendCode },
+    ]);
+    expect(JSON.stringify(afterInvite.buddies.pendingOutgoing)).not.toContain(
+      "bob@example.com",
+    );
+
+    // The rest of the lifecycle is identical to email invites.
+    await respondGymBuddyInvite(bobId, invite.id, true);
+    const accepted = await getGymPageData(aliceId, MONDAY);
+    expect(accepted.buddies.accepted).toHaveLength(1);
   });
 
   it("auto-accepts when both users invite each other", async () => {

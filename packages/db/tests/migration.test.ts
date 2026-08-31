@@ -29,6 +29,7 @@ const migrationFiles = [
   "0015_admin_audit_events_actor_set_null.sql",
   "0016_enum_check_constraints.sql",
   "0017_gym_schedule.sql",
+  "0018_gym_friend_codes.sql",
 ] as const;
 
 /** Index of `0013_deduplicate_default_meal_groups.sql`, which several tests
@@ -709,6 +710,54 @@ describe("database migrations", () => {
       SELECT "id" FROM "gym_slot_statuses"
     `));
     expect(orphanedStatuses.rows).toEqual([]);
+  });
+
+  it("backfills invite identifiers and enforces friend-code uniqueness (0018)", async () => {
+    runtime = await createDatabaseRuntime("memory:");
+
+    // Apply everything before 0018 so a pre-existing email invite can be
+    // seeded the way production rows exist, then let 0018 backfill it.
+    const friendCodeMigrationIndex = migrationFiles.indexOf(
+      "0018_gym_friend_codes.sql",
+    );
+    for (const fileName of migrationFiles.slice(0, friendCodeMigrationIndex)) {
+      await applyMigration(runtime, fileName);
+    }
+
+    const requesterId = "d1111111-1111-4111-8111-111111111111";
+    const addresseeId = "d2222222-2222-4222-8222-222222222222";
+    await runtime.db.execute(sql.raw(`
+      INSERT INTO "users" ("id", "shoo_pairwise_sub", "email")
+      VALUES
+        ('${requesterId}', 'fc_requester', 'fc-requester@example.com'),
+        ('${addresseeId}', 'fc_addressee', 'fc-addressee@example.com')
+    `));
+    await runtime.db.execute(sql.raw(`
+      INSERT INTO "gym_buddies" ("id", "requester_user_id", "addressee_user_id", "status")
+      VALUES ('d3333333-3333-4333-8333-333333333333', '${requesterId}', '${addresseeId}', 'pending')
+    `));
+
+    await applyMigration(runtime, "0018_gym_friend_codes.sql");
+
+    // Pre-existing invites were all made by email, so the backfill must echo
+    // the addressee's email as the invite identifier.
+    const backfilled = await runtime.db.execute<{ invite_identifier: string }>(sql.raw(`
+      SELECT "invite_identifier" FROM "gym_buddies"
+      WHERE "id" = 'd3333333-3333-4333-8333-333333333333'
+    `));
+    expect(backfilled.rows).toEqual([
+      { invite_identifier: "fc-addressee@example.com" },
+    ]);
+
+    // The partial unique index tolerates many NULL codes but blocks duplicates.
+    await runtime.db.execute(sql.raw(`
+      UPDATE "users" SET "friend_code" = 'AB23CD45' WHERE "id" = '${requesterId}'
+    `));
+    await expect(
+      runtime.db.execute(sql.raw(`
+        UPDATE "users" SET "friend_code" = 'AB23CD45' WHERE "id" = '${addresseeId}'
+      `)),
+    ).rejects.toThrow();
   });
 });
 
