@@ -101,6 +101,16 @@ export function AppShell({
   // back to today, discarding the user's choice.
   const hasCheckedStartupDate = useRef(false);
 
+  // Hydration beacon for the Playwright suite. Effects only run once React
+  // has hydrated and attached its event listeners, so this attribute is the
+  // earliest reliable "the page is interactive" signal. Without it, tests on
+  // slow runners fill the date picker before hydration and the controlled
+  // input snaps back to the server-rendered day, silently discarding the
+  // interaction. `tests/e2e/test-users.ts#waitForAppReady` waits for this.
+  useEffect(() => {
+    document.documentElement.dataset.appHydrated = "true";
+  }, []);
+
   useEffect(() => {
     if (hasCheckedStartupDate.current) {
       return;
