@@ -34,6 +34,7 @@ const originalTz = process.env.TZ;
 
 afterEach(() => {
   process.env.TZ = originalTz;
+  delete document.documentElement.dataset.appHydrated;
 });
 
 function renderShell(props: { selectedDate: string; todayStr?: string }) {
@@ -92,5 +93,18 @@ describe("AppShell todayStr", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("marks the document as hydrated after mount so E2E tests can wait for interactivity", () => {
+    // The Playwright suite fills the date picker and clicks buttons that only
+    // work once React has hydrated; on slow CI runners those interactions
+    // raced hydration and got swallowed (the controlled date input snapped
+    // back to today). `test-users.ts#waitForAppReady` waits for this beacon,
+    // so removing it silently re-introduces that flake class.
+    expect(document.documentElement.dataset.appHydrated).toBeUndefined();
+
+    renderShell({ selectedDate: "2026-08-18", todayStr: "2026-08-18" });
+
+    expect(document.documentElement.dataset.appHydrated).toBe("true");
   });
 });

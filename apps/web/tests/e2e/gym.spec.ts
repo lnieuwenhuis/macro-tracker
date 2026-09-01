@@ -1,6 +1,6 @@
 import { expect, test, type Browser, type Page } from "@playwright/test";
 
-import { createTestSession, uniqueTestEmail } from "./test-users";
+import { createTestSession, uniqueTestEmail, waitForAppReady } from "./test-users";
 
 async function newSessionPage(browser: Browser, email: string) {
   const context = await browser.newContext();
@@ -35,6 +35,7 @@ test("the top-left gym button opens the schedule and slots can be managed", asyn
   // window rejects dates more than ~400 days out.
   await createTestSession(page, uniqueTestEmail("user", testInfo));
   await page.goto("/?date=2026-12-17");
+  await waitForAppReady(page);
 
   // The date label is shortened so the pill fits between TWO round buttons.
   await expect(page.getByText("Thu, 17 Dec")).toBeVisible();
@@ -98,6 +99,7 @@ test("buddies share schedules and overlapping slots surface on the home page", a
   try {
     // Bob reads his static friend code from the Buddies tab.
     await bob.page.goto(`/gym?date=${date}`);
+    await waitForAppReady(bob.page);
     await bob.page.getByRole("tab", { name: "Buddies" }).click();
     const bobCode = (
       await bob.page.getByTestId("gym-friend-code").innerText()
@@ -107,6 +109,7 @@ test("buddies share schedules and overlapping slots surface on the home page", a
     // Alice invites Bob by that code (typed sloppily — lowercase), never
     // needing his email.
     await alice.page.goto(`/gym?date=${date}`);
+    await waitForAppReady(alice.page);
     await alice.page.getByRole("tab", { name: "Buddies" }).click();
     await alice.page
       .getByLabel("Buddy email address or friend code")
@@ -136,12 +139,14 @@ test("buddies share schedules and overlapping slots surface on the home page", a
 
     // The overlap is highlighted on Alice's home page for that day.
     await alice.page.goto(`/?date=${date}`);
+    await waitForAppReady(alice.page);
     await expect(alice.page.getByText("Gym Buddies")).toBeVisible();
     await expect(alice.page.getByText(/You and /)).toBeVisible();
     await expect(alice.page.getByText(/18:00–18:30/)).toBeVisible();
 
     // And on Bob's gym screen Alice's slot is visible without her description.
     await bob.page.goto(`/gym?date=${date}`);
+    await waitForAppReady(bob.page);
     await expect(bob.page.getByText(/You and /)).toBeVisible();
   } finally {
     await alice.context.close();
