@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { createTestSession, uniqueTestEmail } from "./test-users";
+import { createTestSession, uniqueTestEmail, waitForAppReady } from "./test-users";
 
 /**
  * TEST-03: `app/recipes/new`, `app/recipes/[id]/edit` and
@@ -25,6 +25,7 @@ async function buildRecipe(
   },
 ) {
   await page.goto(`/recipes/new?date=${input.date}`);
+  await waitForAppReady(page);
   await expect(page.getByRole("heading", { name: "Ingredients" })).toBeVisible();
 
   await page.getByLabel("Recipe Name").fill(input.label);
@@ -91,6 +92,7 @@ test("builds a recipe, logs a portion, and the logged entry reflects the scaled 
   await expect(recipeCard.getByRole("button", { name: /^Log/ })).toBeVisible();
 
   await page.goto(`/?date=${date}`);
+  await waitForAppReady(page);
   const loggedCard = page.locator("article").filter({
     has: page.getByRole("heading", { name: `${recipeLabel} (1 portion)` }),
   });
@@ -143,6 +145,7 @@ test("DATA-04: logging a recipe portion twice in rapid succession only creates o
   await page.waitForTimeout(1000);
 
   await page.goto(`/?date=${date}`);
+  await waitForAppReady(page);
   const loggedCards = page.locator("article").filter({
     has: page.getByRole("heading", { name: `${recipeLabel} (1 portion)` }),
   });
