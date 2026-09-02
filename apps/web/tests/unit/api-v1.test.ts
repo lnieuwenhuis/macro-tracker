@@ -68,15 +68,7 @@ describe("Macro Tracker API v1", () => {
     );
     userId = user.id;
     await completeUserOnboarding(userId, { preferredWeightUnit: "kg" });
-    fullToken = (
-      await createApiToken(
-        userId,
-        {
-          name: "Full API",
-          scopes: getApiScopes(),
-        },
-      )
-    ).token;
+    fullToken = await createScopedToken(getApiScopes(), "Full API");
   });
 
   afterEach(async () => {
@@ -201,15 +193,9 @@ describe("Macro Tracker API v1", () => {
       error: { code: "revoked_token" },
     });
 
-    const goalsOnly = await createApiToken(
-      userId,
-      {
-        name: "Goals",
-        scopes: ["read:goals"],
-      },
-    );
+    const goalsOnly = await createScopedToken(["read:goals"], "Goals");
     const insufficient = await apiRequest("GET", "/days/2026-03-19", {
-      token: goalsOnly.token,
+      token: goalsOnly,
     });
     expect(insufficient.status).toBe(403);
     await expect(insufficient.json()).resolves.toMatchObject({
@@ -242,7 +228,25 @@ describe("Macro Tracker API v1", () => {
     });
   });
 
-  it("requires every scope represented by summary data", async () => {
+  async function createScopedToken(scopes: string[], name = scopes.join("+") || "No scopes") {
+    return (await createApiToken(userId, { name, scopes })).token;
+  }
+
+  async function createFood(overrides: Partial<Parameters<typeof createPersonalFoodProduct>[1]> = {}) {
+    return createPersonalFoodProduct(userId, {
+      name: "Private oats",
+      brand: "Macro Mill",
+      source: "manual",
+      barcode: "6234567890123",
+      proteinPer100: 13,
+      carbsPer100: 68,
+      fatPer100: 7,
+      caloriesPer100: 389,
+      ...overrides,
+    });
+  }
+
+  async function seedGoalsAndSummaryEntry() {
     await apiRequest("PATCH", "/goals", {
       token: fullToken,
       body: { caloriesKcal: 2400, proteinG: 150 },
@@ -265,61 +269,16 @@ describe("Macro Tracker API v1", () => {
         caloriesKcal: 300,
       },
     });
+  }
 
-    const statsOnly = await createApiToken(
-      userId,
-      {
-        name: "Stats only",
-        scopes: ["read:stats"],
-      },
-    );
-    const response = await apiRequest("GET", "/summary?date=2026-03-19", {
-      token: statsOnly.token,
-    });
-
-    expect(response.status).toBe(403);
-    await expect(response.json()).resolves.toMatchObject({
-      ok: false,
-      error: { code: "insufficient_scope" },
-    });
-  });
-
-  it("requires read:weight before stats endpoints can expose weight-derived data", async () => {
+  async function seedWeightEntry() {
     await apiRequest("POST", "/weight/entries", {
       token: fullToken,
       body: { date: "2026-03-19", weightKg: 80 },
     });
+  }
 
-    const statsOnly = await createApiToken(
-      userId,
-      {
-        name: "Stats only",
-        scopes: ["read:stats"],
-      },
-    );
-    const summaryWithoutWeight = await createApiToken(
-      userId,
-      {
-        name: "Summary without weight",
-        scopes: ["read:stats", "read:daily", "read:goals"],
-      },
-    );
-
-    for (const [path, token] of [
-      ["/stats?date=2026-03-19", statsOnly.token],
-      ["/summary?date=2026-03-19", summaryWithoutWeight.token],
-    ] as const) {
-      const response = await apiRequest("GET", path, { token });
-
-      expect(response.status).toBe(403);
-      await expect(response.json()).resolves.toMatchObject({
-        ok: false,
-        error: { code: "insufficient_scope" },
-      });
-    }
-  });
-
-  it("requires read:goals before stats endpoints expose goal-derived stats", async () => {
+  async function seedGoalsAndStatsEntry() {
     await apiRequest("PATCH", "/goals", {
       token: fullToken,
       body: { caloriesKcal: 2400, proteinG: 150, carbsG: 260, fatG: 80 },
@@ -336,18 +295,132 @@ describe("Macro Tracker API v1", () => {
         caloriesKcal: 2400,
       },
     });
+  }
 
-    const statsAndWeightOnly = await createApiToken(
-      userId,
-      {
-        name: "Stats and weight only",
-        scopes: ["read:stats", "read:weight"],
-      },
-    );
-
-    const response = await apiRequest("GET", "/stats?date=2026-03-19", {
-      token: statsAndWeightOnly.token,
+  async function seedGoalsViaReadWriteToken() {
+    const readWriteGoals = await createScopedToken(["write:goals", "read:goals"], "Read/write goals");
+    const seeded = await apiRequest("PATCH", "/goals", {
+      token: readWriteGoals,
+      body: { caloriesKcal: 2400, proteinG: 150, carbsG: 260, fatG: 80 },
     });
+    expect(seeded.status).toBe(200);
+  }
+
+  async function seedMealEntry(body: Record<string, unknown>) {
+    const created = await apiRequest("POST", "/days/2026-03-19/entries", { token: fullToken, body });
+    expect(created.status).toBe(201);
+    return ((await created.json()).data as { id: string }).id;
+  }
+
+  async function seedWeightEntryForPatch() {
+    const created = await apiRequest("POST", "/weight/entries", {
+      token: fullToken,
+      body: { date: "2026-03-19", weightKg: 80, bodyFatPct: 18.5, notes: "Private notes" },
+    });
+    expect(created.status).toBe(201);
+    return ((await created.json()).data as { id: string }).id;
+  }
+
+  type ScopeGateCase = {
+    name: string;
+    scopes: string[];
+    method: string;
+    path: string | ((id: string) => string);
+    body?: unknown;
+    setup?: () => Promise<string | void>;
+  };
+
+  const scopeGateCases: ScopeGateCase[] = [
+    {
+      name: "read:stats alone before GET /summary can expose goal, food and meal-derived summary data",
+      scopes: ["read:stats"],
+      method: "GET",
+      path: "/summary?date=2026-03-19",
+      setup: seedGoalsAndSummaryEntry,
+    },
+    {
+      name: "read:stats alone before GET /stats can expose weight-derived data",
+      scopes: ["read:stats"],
+      method: "GET",
+      path: "/stats?date=2026-03-19",
+      setup: seedWeightEntry,
+    },
+    {
+      name: "read:stats, read:daily and read:goals without read:weight before GET /summary can expose weight-derived data",
+      scopes: ["read:stats", "read:daily", "read:goals"],
+      method: "GET",
+      path: "/summary?date=2026-03-19",
+      setup: seedWeightEntry,
+    },
+    {
+      name: "read:stats and read:weight without read:goals before GET /stats can expose goal-derived data",
+      scopes: ["read:stats", "read:weight"],
+      method: "GET",
+      path: "/stats?date=2026-03-19",
+      setup: seedGoalsAndStatsEntry,
+    },
+    {
+      name: "read:goals alone before GET /me can expose account metadata and goals",
+      scopes: ["read:goals"],
+      method: "GET",
+      path: "/me",
+    },
+    {
+      name: "read:account alone before GET /me can expose account metadata and goals",
+      scopes: ["read:account"],
+      method: "GET",
+      path: "/me",
+    },
+    {
+      name: "write:goals alone before PATCH /goals returns merged goal values",
+      scopes: ["write:goals"],
+      method: "PATCH",
+      path: "/goals",
+      body: {},
+      setup: seedGoalsViaReadWriteToken,
+    },
+    {
+      name: "write:daily alone before PATCH /meal-entries/{id} returns merged entry data",
+      scopes: ["write:daily"],
+      method: "PATCH",
+      path: (id) => `/meal-entries/${id}`,
+      body: {},
+      setup: () =>
+        seedMealEntry({ label: "Private snack", proteinG: 17, carbsG: 7, fatG: 0, caloriesKcal: 100 }),
+    },
+    {
+      name: "write:daily alone before PATCH /meal-entries/{id}/status returns entry data",
+      scopes: ["write:daily"],
+      method: "PATCH",
+      path: (id) => `/meal-entries/${id}/status`,
+      body: { status: "planned" },
+      setup: () =>
+        seedMealEntry({ label: "Private dinner", proteinG: 20, carbsG: 30, fatG: 10, caloriesKcal: 300 }),
+    },
+    {
+      name: "write:foods alone before PATCH /foods/{id} can return merged product data",
+      scopes: ["write:foods"],
+      method: "PATCH",
+      path: (id) => `/foods/${id}`,
+      body: { name: "Renamed oats" },
+      setup: async () => (await createFood()).id,
+    },
+    {
+      name: "write:weight alone before PATCH /weight/entries/{id} can return merged entry data",
+      scopes: ["write:weight"],
+      method: "PATCH",
+      path: (id) => `/weight/entries/${id}`,
+      body: { weightKg: 79.8 },
+      setup: seedWeightEntryForPatch,
+    },
+  ];
+
+  it.each(scopeGateCases)("denies insufficient scope: $name", async ({ scopes, method, path, body, setup }) => {
+    const id = setup ? await setup() : undefined;
+    const token = await createScopedToken(scopes);
+    const resolvedPath = typeof path === "function" ? path(id as string) : path;
+
+    const response = await apiRequest(method, resolvedPath, { token, body });
 
     expect(response.status).toBe(403);
     await expect(response.json()).resolves.toMatchObject({
@@ -356,46 +429,13 @@ describe("Macro Tracker API v1", () => {
     });
   });
 
-  it("requires account and goals scopes before /me exposes account metadata and goals", async () => {
-    const goalsOnly = await createApiToken(
-      userId,
-      {
-        name: "Goals only",
-        scopes: ["read:goals"],
-      },
-    );
-    const accountOnly = await createApiToken(
-      userId,
-      {
-        name: "Account only",
-        scopes: ["read:account"],
-      },
-    );
-    const accountAndGoals = await createApiToken(
-      userId,
-      {
-        name: "Account and goals",
-        scopes: ["read:account", "read:goals"],
-      },
-    );
+  it("allows /me to expose account metadata and goals with read:account and read:goals scopes", async () => {
+    const token = await createScopedToken(["read:account", "read:goals"], "Account and goals");
 
-    const rejected = await apiRequest("GET", "/me", { token: goalsOnly.token });
-    expect(rejected.status).toBe(403);
-    await expect(rejected.json()).resolves.toMatchObject({
-      ok: false,
-      error: { code: "insufficient_scope" },
-    });
+    const response = await apiRequest("GET", "/me", { token });
 
-    const accountRejected = await apiRequest("GET", "/me", { token: accountOnly.token });
-    expect(accountRejected.status).toBe(403);
-    await expect(accountRejected.json()).resolves.toMatchObject({
-      ok: false,
-      error: { code: "insufficient_scope" },
-    });
-
-    const accepted = await apiRequest("GET", "/me", { token: accountAndGoals.token });
-    expect(accepted.status).toBe(200);
-    await expect(accepted.json()).resolves.toMatchObject({
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
       ok: true,
       data: {
         user: {
@@ -412,180 +452,8 @@ describe("Macro Tracker API v1", () => {
     });
   });
 
-  it("requires read:goals before PATCH /goals returns merged goal values", async () => {
-    const readWriteGoals = await createApiToken(
-      userId,
-      {
-        name: "Read/write goals",
-        scopes: ["write:goals", "read:goals"],
-      },
-    );
-    const writeOnlyGoals = await createApiToken(
-      userId,
-      {
-        name: "Write-only goals",
-        scopes: ["write:goals"],
-      },
-    );
-
-    const seeded = await apiRequest("PATCH", "/goals", {
-      token: readWriteGoals.token,
-      body: { caloriesKcal: 2400, proteinG: 150, carbsG: 260, fatG: 80 },
-    });
-    expect(seeded.status).toBe(200);
-
-    const rejected = await apiRequest("PATCH", "/goals", {
-      token: writeOnlyGoals.token,
-      body: {},
-    });
-
-    expect(rejected.status).toBe(403);
-    await expect(rejected.json()).resolves.toMatchObject({
-      ok: false,
-      error: { code: "insufficient_scope" },
-    });
-  });
-
-  it("requires read:daily before PATCH /meal-entries/{id} returns merged entry data", async () => {
-    const writeOnlyDaily = await createApiToken(
-      userId,
-      {
-        name: "Write-only daily",
-        scopes: ["write:daily"],
-      },
-    );
-    const created = await apiRequest("POST", "/days/2026-03-19/entries", {
-      token: fullToken,
-      body: {
-        label: "Private snack",
-        proteinG: 17,
-        carbsG: 7,
-        fatG: 0,
-        caloriesKcal: 100,
-      },
-    });
-    expect(created.status).toBe(201);
-    const entry = (await created.json()).data;
-
-    const rejected = await apiRequest("PATCH", `/meal-entries/${entry.id}`, {
-      token: writeOnlyDaily.token,
-      body: {},
-    });
-
-    expect(rejected.status).toBe(403);
-    await expect(rejected.json()).resolves.toMatchObject({
-      ok: false,
-      error: { code: "insufficient_scope" },
-    });
-  });
-
-  it("requires read:daily before PATCH /meal-entries/{id}/status returns entry data", async () => {
-    const writeOnlyDaily = await createApiToken(
-      userId,
-      {
-        name: "Write-only daily",
-        scopes: ["write:daily"],
-      },
-    );
-    const created = await apiRequest("POST", "/days/2026-03-19/entries", {
-      token: fullToken,
-      body: {
-        label: "Private dinner",
-        proteinG: 20,
-        carbsG: 30,
-        fatG: 10,
-        caloriesKcal: 300,
-      },
-    });
-    expect(created.status).toBe(201);
-    const entry = (await created.json()).data;
-
-    const rejected = await apiRequest("PATCH", `/meal-entries/${entry.id}/status`, {
-      token: writeOnlyDaily.token,
-      body: { status: "planned" },
-    });
-
-    expect(rejected.status).toBe(403);
-    await expect(rejected.json()).resolves.toMatchObject({
-      ok: false,
-      error: { code: "insufficient_scope" },
-    });
-  });
-
-  it("requires read:foods before PATCH /foods/{id} can return merged product data", async () => {
-    const existing = await createPersonalFoodProduct(
-      userId,
-      {
-        name: "Private oats",
-        brand: "Macro Mill",
-        source: "manual",
-        barcode: "6234567890123",
-        proteinPer100: 13,
-        carbsPer100: 68,
-        fatPer100: 7,
-        caloriesPer100: 389,
-      },
-    );
-    const writeOnlyFoods = await createApiToken(
-      userId,
-      {
-        name: "Write-only foods",
-        scopes: ["write:foods"],
-      },
-    );
-
-    const rejected = await apiRequest("PATCH", `/foods/${existing.id}`, {
-      token: writeOnlyFoods.token,
-      body: { name: "Renamed oats" },
-    });
-
-    expect(rejected.status).toBe(403);
-    await expect(rejected.json()).resolves.toMatchObject({
-      ok: false,
-      error: { code: "insufficient_scope" },
-    });
-  });
-
-  it("requires read:weight before PATCH /weight/entries/{id} can return merged entry data", async () => {
-    const writeOnlyWeight = await createApiToken(
-      userId,
-      {
-        name: "Write-only weight",
-        scopes: ["write:weight"],
-      },
-    );
-    const created = await apiRequest("POST", "/weight/entries", {
-      token: fullToken,
-      body: {
-        date: "2026-03-19",
-        weightKg: 80,
-        bodyFatPct: 18.5,
-        notes: "Private notes",
-      },
-    });
-    expect(created.status).toBe(201);
-    const entry = (await created.json()).data;
-
-    const rejected = await apiRequest("PATCH", `/weight/entries/${entry.id}`, {
-      token: writeOnlyWeight.token,
-      body: { weightKg: 79.8 },
-    });
-
-    expect(rejected.status).toBe(403);
-    await expect(rejected.json()).resolves.toMatchObject({
-      ok: false,
-      error: { code: "insufficient_scope" },
-    });
-  });
-
   it("allows read/write daily tokens to update meal entries and status", async () => {
-    const readWriteDaily = await createApiToken(
-      userId,
-      {
-        name: "Read/write daily",
-        scopes: ["write:daily", "read:daily"],
-      },
-    );
+    const readWriteDaily = await createScopedToken(["write:daily", "read:daily"], "Read/write daily");
     const created = await apiRequest("POST", "/days/2026-03-19/entries", {
       token: fullToken,
       body: {
@@ -600,7 +468,7 @@ describe("Macro Tracker API v1", () => {
     const entry = (await created.json()).data;
 
     const updated = await apiRequest("PATCH", `/meal-entries/${entry.id}`, {
-      token: readWriteDaily.token,
+      token: readWriteDaily,
       body: { label: "Updated lunch" },
     });
     expect(updated.status).toBe(200);
@@ -617,7 +485,7 @@ describe("Macro Tracker API v1", () => {
     });
 
     const status = await apiRequest("PATCH", `/meal-entries/${entry.id}/status`, {
-      token: readWriteDaily.token,
+      token: readWriteDaily,
       body: { status: "planned" },
     });
     expect(status.status).toBe(200);
@@ -644,23 +512,14 @@ describe("Macro Tracker API v1", () => {
         caloriesPer100: 96,
       },
     );
-    const writeDailyOnly = await createApiToken(
-      userId,
-      {
-        name: "Write daily only",
-        scopes: ["write:daily"],
-      },
-    );
-    const writeDailyAndReadFoods = await createApiToken(
-      userId,
-      {
-        name: "Write daily and read foods",
-        scopes: ["write:daily", "read:foods"],
-      },
+    const writeDailyOnly = await createScopedToken(["write:daily"], "Write daily only");
+    const writeDailyAndReadFoods = await createScopedToken(
+      ["write:daily", "read:foods"],
+      "Write daily and read foods",
     );
 
     const rejected = await apiRequest("POST", "/days/2026-03-19/entries", {
-      token: writeDailyOnly.token,
+      token: writeDailyOnly,
       body: {
         productId: food.id,
         quantity: 100,
@@ -675,7 +534,7 @@ describe("Macro Tracker API v1", () => {
     });
 
     const accepted = await apiRequest("POST", "/days/2026-03-19/entries", {
-      token: writeDailyAndReadFoods.token,
+      token: writeDailyAndReadFoods,
       body: {
         productId: food.id,
         quantity: 100,
@@ -722,23 +581,17 @@ describe("Macro Tracker API v1", () => {
     });
     expect(entryResponse.status).toBe(201);
     const entry = (await entryResponse.json()).data;
-    const readWriteDaily = await createApiToken(
-      userId,
-      {
-        name: "Read/write daily without foods",
-        scopes: ["write:daily", "read:daily"],
-      },
+    const readWriteDaily = await createScopedToken(
+      ["write:daily", "read:daily"],
+      "Read/write daily without foods",
     );
-    const readWriteDailyAndFoods = await createApiToken(
-      userId,
-      {
-        name: "Read/write daily and foods",
-        scopes: ["write:daily", "read:daily", "read:foods"],
-      },
+    const readWriteDailyAndFoods = await createScopedToken(
+      ["write:daily", "read:daily", "read:foods"],
+      "Read/write daily and foods",
     );
 
     const rejected = await apiRequest("PATCH", `/meal-entries/${entry.id}`, {
-      token: readWriteDaily.token,
+      token: readWriteDaily,
       body: { productId: food.id, quantity: 100, unit: "g" },
     });
 
@@ -749,7 +602,7 @@ describe("Macro Tracker API v1", () => {
     });
 
     const accepted = await apiRequest("PATCH", `/meal-entries/${entry.id}`, {
-      token: readWriteDailyAndFoods.token,
+      token: readWriteDailyAndFoods,
       body: { productId: food.id, quantity: 100, unit: "g" },
     });
 
@@ -978,16 +831,10 @@ describe("Macro Tracker API v1", () => {
   });
 
   it("sanitizes food create responses and ignores caller-controlled internal metadata", async () => {
-    const foodsOnly = await createApiToken(
-      userId,
-      {
-        name: "Foods only",
-        scopes: ["write:foods"],
-      },
-    );
+    const foodsOnly = await createScopedToken(["write:foods"], "Foods only");
 
     const response = await apiRequest("POST", "/foods", {
-      token: foodsOnly.token,
+      token: foodsOnly,
       body: {
         name: "Client yogurt",
         brand: "Client Dairy",
@@ -1052,16 +899,10 @@ describe("Macro Tracker API v1", () => {
         sourceMetadata: { imported: true },
       },
     );
-    const foodsOnly = await createApiToken(
-      userId,
-      {
-        name: "Foods only",
-        scopes: ["write:foods", "read:foods"],
-      },
-    );
+    const foodsOnly = await createScopedToken(["write:foods", "read:foods"], "Foods only");
 
     const response = await apiRequest("PATCH", `/foods/${existing.id}`, {
-      token: foodsOnly.token,
+      token: foodsOnly,
       body: {
         name: "Updated yogurt",
         brand: "Updated Dairy",
@@ -1154,16 +995,10 @@ describe("Macro Tracker API v1", () => {
   });
 
   it("does not allow write:foods tokens to mutate shared barcode foods", async () => {
-    const foodsOnly = await createApiToken(
-      userId,
-      {
-        name: "Foods only",
-        scopes: ["write:foods"],
-      },
-    );
+    const foodsOnly = await createScopedToken(["write:foods"], "Foods only");
 
     const response = await apiRequest("POST", "/barcode-foods", {
-      token: foodsOnly.token,
+      token: foodsOnly,
       body: {
         barcode: "1234567890123",
         name: "Shared oats",
@@ -2308,12 +2143,9 @@ describe("Macro Tracker API v1", () => {
       error: { code: "bad_request" },
     });
 
-    const readOnly = await createApiToken(
-      userId,
-      { name: "Read daily only", scopes: ["read:daily"] },
-    );
+    const readOnly = await createScopedToken(["read:daily"], "Read daily only");
     const forbiddenAck = await apiRequest("POST", "/sync/healthkit/ack", {
-      token: readOnly.token,
+      token: readOnly,
       body: { entryIds: [] },
     });
     expect(forbiddenAck.status).toBe(403);
@@ -2322,12 +2154,9 @@ describe("Macro Tracker API v1", () => {
       error: { code: "insufficient_scope" },
     });
 
-    const writeOnly = await createApiToken(
-      userId,
-      { name: "Write daily only", scopes: ["write:daily"] },
-    );
+    const writeOnly = await createScopedToken(["write:daily"], "Write daily only");
     const forbiddenFeed = await apiRequest("GET", "/sync/healthkit", {
-      token: writeOnly.token,
+      token: writeOnly,
     });
     expect(forbiddenFeed.status).toBe(403);
     await expect(forbiddenFeed.json()).resolves.toMatchObject({
