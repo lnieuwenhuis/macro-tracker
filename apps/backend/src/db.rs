@@ -2580,8 +2580,7 @@ async fn update_meal_entry_json(
         .bind_columns(update)
         .execute(pool)
         .await
-        // LOW-B1: a `clientMutationId` another entry already holds is a
-        // client-visible collision, not an internal fault.
+        // LOW-B1: a duplicate clientMutationId is a client-visible collision, not a fault.
         .map_err(map_unique_violation(
             "That clientMutationId is already used by another meal entry.",
         ))?;
@@ -2614,8 +2613,7 @@ async fn meal_entry_json(pool: &PgPool, user_id: Uuid, entry_id: Uuid) -> AppRes
         .try_get("data")?)
 }
 
-/// Read back a batch of freshly written entries in one round trip, preserving
-/// the caller's id order via `WITH ORDINALITY`.
+/// `WITH ORDINALITY` preserves the caller's id order across the batch read.
 async fn meal_entries_json_by_ids(
     pool: &PgPool,
     user_id: Uuid,
@@ -2788,9 +2786,7 @@ async fn insert_template_items(
     Ok(())
 }
 
-/// Column-major staging buffer for a multi-row `unnest` insert. Template items
-/// and recipe ingredients share every column except `meal_group_label`, which
-/// recipe rows leave empty.
+/// Column-major staging buffer for a multi-row `unnest` insert.
 #[derive(Default)]
 struct TemplateItemColumns {
     ids: Vec<Uuid>,
@@ -2858,9 +2854,7 @@ impl TemplateItemColumns {
     }
 }
 
-/// Loads every product a template's items reference in one round trip, using
-/// the same visibility predicate as `food_product_json_by_id` so a prefetched
-/// product is indistinguishable from an individually fetched one (PERF-02).
+/// PERF-02: prefetches a template's products under `food_product_json_by_id`'s visibility rule.
 async fn food_products_json_by_ids(
     pool: &PgPool,
     user_id: Uuid,
@@ -4030,13 +4024,7 @@ async fn admin_food_products_json(
         .bind(filters.submitter_pattern.as_deref())
         .fetch_all(pool)
         .await?;
-    // PERF-04: outside the review queue the outer predicate below is
-    // `NOT false`, i.e. always true — so the whole review-metadata chain
-    // (`regexp_replace` over every catalogue row, the duplicate-name GROUP BY,
-    // the revision and audit rollups and three LEFT JOINs) was computed and
-    // then discarded. Every ordinary admin page view paid for it, and
-    // `admin_dashboard_json` paid for it again to render five rows. The count
-    // is the same either way; only the review queue actually needs the rollups.
+    // PERF-04: only the review queue needs the rollups; the count is the same either way.
     let total_row = if review_queue {
         sqlx::query(
         r#"
@@ -4704,8 +4692,7 @@ async fn insert_recipe_ingredients(
 
     let mut rows = TemplateItemColumns::with_capacity(ingredients.len());
     for (index, ingredient) in ingredients.iter().enumerate() {
-        // Kept per item so injected faults still abort at the same ingredient;
-        // the surrounding transaction rolls back either way.
+        // Per item so an injected fault aborts at the same ingredient it would in production.
         maybe_trigger_test_fault(test_fault, index + 1)?;
         let ingredient = ingredient.as_object().ok_or_else(|| {
             AppError::BadRequest("Recipe ingredient must be an object.".to_string())
