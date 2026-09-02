@@ -55,7 +55,7 @@ export function buildContentSecurityPolicy(
 ) {
   return [
     "default-src 'self'",
-    // No 'strict-dynamic': nothing here serves attacker-controlled JS, so 'self' isn't a usable injection source.
+    // The nonce forces every route to render dynamically: app/layout.tsx reads it from headers(). No strict-dynamic: nothing here serves attacker-controlled JS.
     `script-src 'self' 'nonce-${nonce}'${dev ? " 'unsafe-eval'" : ""}`,
     // No nonce: that would make the browser ignore 'unsafe-inline' and break Next/next/font inline styles.
     "style-src 'self' 'unsafe-inline'",
@@ -69,7 +69,7 @@ export function buildContentSecurityPolicy(
     "base-uri 'self'",
     "frame-ancestors 'none'",
     "upgrade-insecure-requests",
-    // (form-action omitted: Chromium enforces it across the redirect chain, blocking this app's POST-then-redirect sign-out and admin actions.)
+    // form-action omitted: Chromium enforces it across redirects, breaking POST-then-redirect sign-out; safe only while no form takes a caller-supplied action.
   ].join("; ");
 }
 
@@ -106,7 +106,7 @@ export async function proxy(request: NextRequest) {
 
   // `set`, never `append`: a caller-supplied header here would be trusted by the renderer.
   const requestHeaders = new Headers(request.headers);
-  // Next parses the nonce back out of this request-header CSP to nonce its own bootstrap/RSC scripts.
+  // Next (getScriptNonceFromHeader) parses the nonce back out of this request-header CSP for its own bootstrap/RSC scripts.
   requestHeaders.set(CSP_HEADER, contentSecurityPolicy);
   requestHeaders.set(NONCE_HEADER, nonce);
 

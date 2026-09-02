@@ -35,7 +35,7 @@ function readRequiredEnv(name: string, fallback?: string) {
   return value;
 }
 
-// Mirrors `validate_secret` in apps/backend/src/config.rs: the two services share one HMAC key.
+// Mirrors `validate_secret` in apps/backend/src/config.rs (shared HMAC key); jose enforces no minimum of its own.
 const MIN_SESSION_SECRET_LENGTH = 32;
 
 // Values published in this repository or its docs, so "long enough" says nothing about secrecy.

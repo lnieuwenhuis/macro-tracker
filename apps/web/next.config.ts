@@ -14,7 +14,7 @@ function getCacheMaxMemorySize() {
   return Math.floor(memoryMb * 1024 * 1024);
 }
 
-// Content-Security-Policy is not here: it needs a per-request nonce, but headers() is baked into the routes manifest at build time; it lives in proxy.ts instead.
+// CSP lives in proxy.ts (it needs a per-request nonce); never add a static one here, browsers enforce both policies.
 const securityHeaders = [
   { key: "X-Content-Type-Options", value: "nosniff" },
   { key: "X-Frame-Options", value: "DENY" },
