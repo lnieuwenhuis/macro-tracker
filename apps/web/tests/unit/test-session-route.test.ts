@@ -18,12 +18,7 @@ vi.mock("@/lib/session", async (importOriginal) => {
   };
 });
 
-vi.mock("@macro-tracker/db", () => ({
-  completeUserOnboarding: mocked.completeUserOnboarding,
-  ensureUserRoleForTesting: mocked.ensureUserRoleForTesting,
-  getDb: mocked.getDb,
-  upsertUserFromShooProfile: mocked.upsertUserFromShooProfile,
-}));
+vi.mock("@macro-tracker/db", async () => (await import("./helpers/mock-db")).mockDbModule(mocked));
 
 import { POST } from "@/app/api/test/session/route";
 
