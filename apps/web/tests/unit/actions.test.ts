@@ -21,9 +21,6 @@ const mocked = vi.hoisted(() => ({
   revalidatePath: vi.fn(),
 }));
 
-// lib/actions.ts imports more db functions than this file configures (e.g.
-// createMealGroup, deleteMealGroup); mockDbModule stubs the rest with a
-// no-op vi.fn().
 vi.mock("@macro-tracker/db", async () => (await import("./helpers/mock-db")).mockDbModule(mocked));
 
 vi.mock("@/lib/auth", () => ({

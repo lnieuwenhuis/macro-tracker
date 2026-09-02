@@ -10,9 +10,6 @@ const mocked = vi.hoisted(() => ({
   requireOwnerUser: vi.fn(),
 }));
 
-// Other admin-actions.ts db imports (restoreAdminBarcodeProduct, setUserRole,
-// softDeleteAdminBarcodeProduct, updateAdminBarcodeProduct) are stubbed by
-// mockDbModule's default; this file only configures/asserts on the create path.
 vi.mock("@macro-tracker/db", async () => (await import("./helpers/mock-db")).mockDbModule(mocked));
 
 vi.mock("@/lib/auth", () => ({
