@@ -65,10 +65,9 @@ describe("Macro Tracker API v1", () => {
         email: "api@example.com",
         displayName: "API User",
       },
-      runtime.db,
     );
     userId = user.id;
-    await completeUserOnboarding(userId, { preferredWeightUnit: "kg" }, runtime.db);
+    await completeUserOnboarding(userId, { preferredWeightUnit: "kg" });
     fullToken = (
       await createApiToken(
         userId,
@@ -76,7 +75,6 @@ describe("Macro Tracker API v1", () => {
           name: "Full API",
           scopes: getApiScopes(),
         },
-        runtime.db,
       )
     ).token;
   });
@@ -176,7 +174,6 @@ describe("Macro Tracker API v1", () => {
         scopes: ["read:goals"],
         expiresAt: new Date(Date.now() - 60_000),
       },
-      runtime.db,
     );
     const expiredResponse = await apiRequest("GET", "/goals", {
       token: expired.token,
@@ -193,9 +190,8 @@ describe("Macro Tracker API v1", () => {
         name: "Revoked",
         scopes: ["read:goals"],
       },
-      runtime.db,
     );
-    await revokeApiToken(userId, revoked.record.id, runtime.db);
+    await revokeApiToken(userId, revoked.record.id);
     const revokedResponse = await apiRequest("GET", "/goals", {
       token: revoked.token,
     });
@@ -211,7 +207,6 @@ describe("Macro Tracker API v1", () => {
         name: "Goals",
         scopes: ["read:goals"],
       },
-      runtime.db,
     );
     const insufficient = await apiRequest("GET", "/days/2026-03-19", {
       token: goalsOnly.token,
@@ -229,7 +224,6 @@ describe("Macro Tracker API v1", () => {
         pairwiseSub: "api-not-onboarded-user",
         email: "api-not-onboarded@example.com",
       },
-      runtime.db,
     );
     const token = await createApiToken(
       user.id,
@@ -237,7 +231,6 @@ describe("Macro Tracker API v1", () => {
         name: "Not onboarded",
         scopes: getApiScopes(),
       },
-      runtime.db,
     );
 
     const response = await apiRequest("GET", "/goals", { token: token.token });
@@ -279,7 +272,6 @@ describe("Macro Tracker API v1", () => {
         name: "Stats only",
         scopes: ["read:stats"],
       },
-      runtime.db,
     );
     const response = await apiRequest("GET", "/summary?date=2026-03-19", {
       token: statsOnly.token,
@@ -304,7 +296,6 @@ describe("Macro Tracker API v1", () => {
         name: "Stats only",
         scopes: ["read:stats"],
       },
-      runtime.db,
     );
     const summaryWithoutWeight = await createApiToken(
       userId,
@@ -312,7 +303,6 @@ describe("Macro Tracker API v1", () => {
         name: "Summary without weight",
         scopes: ["read:stats", "read:daily", "read:goals"],
       },
-      runtime.db,
     );
 
     for (const [path, token] of [
@@ -353,7 +343,6 @@ describe("Macro Tracker API v1", () => {
         name: "Stats and weight only",
         scopes: ["read:stats", "read:weight"],
       },
-      runtime.db,
     );
 
     const response = await apiRequest("GET", "/stats?date=2026-03-19", {
@@ -374,7 +363,6 @@ describe("Macro Tracker API v1", () => {
         name: "Goals only",
         scopes: ["read:goals"],
       },
-      runtime.db,
     );
     const accountOnly = await createApiToken(
       userId,
@@ -382,7 +370,6 @@ describe("Macro Tracker API v1", () => {
         name: "Account only",
         scopes: ["read:account"],
       },
-      runtime.db,
     );
     const accountAndGoals = await createApiToken(
       userId,
@@ -390,7 +377,6 @@ describe("Macro Tracker API v1", () => {
         name: "Account and goals",
         scopes: ["read:account", "read:goals"],
       },
-      runtime.db,
     );
 
     const rejected = await apiRequest("GET", "/me", { token: goalsOnly.token });
@@ -433,7 +419,6 @@ describe("Macro Tracker API v1", () => {
         name: "Read/write goals",
         scopes: ["write:goals", "read:goals"],
       },
-      runtime.db,
     );
     const writeOnlyGoals = await createApiToken(
       userId,
@@ -441,7 +426,6 @@ describe("Macro Tracker API v1", () => {
         name: "Write-only goals",
         scopes: ["write:goals"],
       },
-      runtime.db,
     );
 
     const seeded = await apiRequest("PATCH", "/goals", {
@@ -469,7 +453,6 @@ describe("Macro Tracker API v1", () => {
         name: "Write-only daily",
         scopes: ["write:daily"],
       },
-      runtime.db,
     );
     const created = await apiRequest("POST", "/days/2026-03-19/entries", {
       token: fullToken,
@@ -503,7 +486,6 @@ describe("Macro Tracker API v1", () => {
         name: "Write-only daily",
         scopes: ["write:daily"],
       },
-      runtime.db,
     );
     const created = await apiRequest("POST", "/days/2026-03-19/entries", {
       token: fullToken,
@@ -543,7 +525,6 @@ describe("Macro Tracker API v1", () => {
         fatPer100: 7,
         caloriesPer100: 389,
       },
-      runtime.db,
     );
     const writeOnlyFoods = await createApiToken(
       userId,
@@ -551,7 +532,6 @@ describe("Macro Tracker API v1", () => {
         name: "Write-only foods",
         scopes: ["write:foods"],
       },
-      runtime.db,
     );
 
     const rejected = await apiRequest("PATCH", `/foods/${existing.id}`, {
@@ -573,7 +553,6 @@ describe("Macro Tracker API v1", () => {
         name: "Write-only weight",
         scopes: ["write:weight"],
       },
-      runtime.db,
     );
     const created = await apiRequest("POST", "/weight/entries", {
       token: fullToken,
@@ -606,7 +585,6 @@ describe("Macro Tracker API v1", () => {
         name: "Read/write daily",
         scopes: ["write:daily", "read:daily"],
       },
-      runtime.db,
     );
     const created = await apiRequest("POST", "/days/2026-03-19/entries", {
       token: fullToken,
@@ -665,7 +643,6 @@ describe("Macro Tracker API v1", () => {
         fatPer100: 4,
         caloriesPer100: 96,
       },
-      runtime.db,
     );
     const writeDailyOnly = await createApiToken(
       userId,
@@ -673,7 +650,6 @@ describe("Macro Tracker API v1", () => {
         name: "Write daily only",
         scopes: ["write:daily"],
       },
-      runtime.db,
     );
     const writeDailyAndReadFoods = await createApiToken(
       userId,
@@ -681,7 +657,6 @@ describe("Macro Tracker API v1", () => {
         name: "Write daily and read foods",
         scopes: ["write:daily", "read:foods"],
       },
-      runtime.db,
     );
 
     const rejected = await apiRequest("POST", "/days/2026-03-19/entries", {
@@ -734,7 +709,6 @@ describe("Macro Tracker API v1", () => {
         fatPer100: 2,
         caloriesPer100: 90,
       },
-      runtime.db,
     );
     const entryResponse = await apiRequest("POST", "/days/2026-03-19/entries", {
       token: fullToken,
@@ -754,7 +728,6 @@ describe("Macro Tracker API v1", () => {
         name: "Read/write daily without foods",
         scopes: ["write:daily", "read:daily"],
       },
-      runtime.db,
     );
     const readWriteDailyAndFoods = await createApiToken(
       userId,
@@ -762,7 +735,6 @@ describe("Macro Tracker API v1", () => {
         name: "Read/write daily and foods",
         scopes: ["write:daily", "read:daily", "read:foods"],
       },
-      runtime.db,
     );
 
     const rejected = await apiRequest("PATCH", `/meal-entries/${entry.id}`, {
@@ -963,7 +935,6 @@ describe("Macro Tracker API v1", () => {
         caloriesKcal: 405,
         servingSizeG: 55,
       },
-      runtime.db,
     );
 
     const response = await apiRequest("GET", "/foods/search?q=protein", { token: fullToken });
@@ -992,7 +963,6 @@ describe("Macro Tracker API v1", () => {
         caloriesKcal: 389,
         servingSizeG: 100,
       },
-      runtime.db,
     );
 
     const response = await apiRequest("GET", "/barcodes/3234567890123", { token: fullToken });
@@ -1014,7 +984,6 @@ describe("Macro Tracker API v1", () => {
         name: "Foods only",
         scopes: ["write:foods"],
       },
-      runtime.db,
     );
 
     const response = await apiRequest("POST", "/foods", {
@@ -1082,7 +1051,6 @@ describe("Macro Tracker API v1", () => {
         sourceConfidence: 0.8,
         sourceMetadata: { imported: true },
       },
-      runtime.db,
     );
     const foodsOnly = await createApiToken(
       userId,
@@ -1090,7 +1058,6 @@ describe("Macro Tracker API v1", () => {
         name: "Foods only",
         scopes: ["write:foods", "read:foods"],
       },
-      runtime.db,
     );
 
     const response = await apiRequest("PATCH", `/foods/${existing.id}`, {
@@ -1193,7 +1160,6 @@ describe("Macro Tracker API v1", () => {
         name: "Foods only",
         scopes: ["write:foods"],
       },
-      runtime.db,
     );
 
     const response = await apiRequest("POST", "/barcode-foods", {
@@ -1215,7 +1181,7 @@ describe("Macro Tracker API v1", () => {
       ok: false,
       error: { code: "not_found" },
     });
-    await expect(lookupBarcodeFoodProduct("1234567890123", runtime.db)).resolves.toBeNull();
+    await expect(lookupBarcodeFoodProduct("1234567890123")).resolves.toBeNull();
   });
 
   it("rejects invalid date query params while defaulting omitted dates", async () => {
@@ -1771,11 +1737,10 @@ describe("Macro Tracker API v1", () => {
         email: "api-other@example.com",
         displayName: "Other API User",
       },
-      runtime.db,
     );
-    await completeUserOnboarding(otherUser.id, { preferredWeightUnit: "kg" }, runtime.db);
+    await completeUserOnboarding(otherUser.id, { preferredWeightUnit: "kg" });
     const otherToken = (
-      await createApiToken(otherUser.id, { name: "Other", scopes: getApiScopes() }, runtime.db)
+      await createApiToken(otherUser.id, { name: "Other", scopes: getApiScopes() })
     ).token;
     const otherGroupsResponse = await apiRequest("GET", "/meal-groups", { token: otherToken });
     const otherGroupId = (await otherGroupsResponse.json()).data[0].id;
@@ -2175,7 +2140,6 @@ describe("Macro Tracker API v1", () => {
           fatG: 10,
           caloriesKcal: 420,
         },
-        runtime.db,
       );
     }
 
@@ -2214,7 +2178,6 @@ describe("Macro Tracker API v1", () => {
         fatG: 12,
         caloriesKcal: 480,
       },
-      runtime.db,
     );
     const planned = await createMealEntry(
       userId,
@@ -2228,7 +2191,6 @@ describe("Macro Tracker API v1", () => {
         fatG: 15,
         caloriesKcal: 420,
       },
-      runtime.db,
     );
     const backfilled = await createMealEntry(
       userId,
@@ -2242,7 +2204,6 @@ describe("Macro Tracker API v1", () => {
         fatG: 10,
         caloriesKcal: 400,
       },
-      runtime.db,
     );
 
     const first = await apiRequest("GET", "/sync/healthkit", { token: fullToken });
@@ -2350,7 +2311,6 @@ describe("Macro Tracker API v1", () => {
     const readOnly = await createApiToken(
       userId,
       { name: "Read daily only", scopes: ["read:daily"] },
-      runtime.db,
     );
     const forbiddenAck = await apiRequest("POST", "/sync/healthkit/ack", {
       token: readOnly.token,
@@ -2365,7 +2325,6 @@ describe("Macro Tracker API v1", () => {
     const writeOnly = await createApiToken(
       userId,
       { name: "Write daily only", scopes: ["write:daily"] },
-      runtime.db,
     );
     const forbiddenFeed = await apiRequest("GET", "/sync/healthkit", {
       token: writeOnly.token,

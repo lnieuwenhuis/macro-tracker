@@ -1,6 +1,7 @@
 export * from "./dates";
 export * from "./backend-client";
 export * from "./backend-queries";
+export type { DatabaseRuntime } from "./client";
 export {
   getPostgresConnectionConfig,
   getSslConfig,
