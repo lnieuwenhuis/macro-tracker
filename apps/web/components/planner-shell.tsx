@@ -1,13 +1,7 @@
 "use client";
 
 import type { DailySummary, MealTemplate } from "@macro-tracker/db";
-import { useRouter } from "next/navigation";
-import {
-  useDeferredValue,
-  useMemo,
-  useState,
-  useTransition,
-} from "react";
+import { useDeferredValue, useMemo, useState } from "react";
 
 import {
   applyTemplateAction,
@@ -23,6 +17,7 @@ import {
   buildShoppingList,
   formatShoppingListText,
 } from "@/lib/shopping-list";
+import { useActionRunner } from "@/lib/use-action-runner";
 
 import { AppShell, SettingsButton } from "./app-shell";
 import { LibraryHubNav } from "./library-hub-nav";
@@ -57,9 +52,7 @@ export function PlannerShell({
   shoppingSummaries,
   todayStr,
 }: PlannerShellProps) {
-  const router = useRouter();
-  const [isPending, startTransition] = useTransition();
-  const [error, setError] = useState<string | null>(null);
+  const { run, isPending, error, setError } = useActionRunner();
   const [templateLabel, setTemplateLabel] = useState("");
   const [templateSearch, setTemplateSearch] = useState("");
   const [activeMode, setActiveMode] = useState<PlannerMode>("templates");
@@ -132,21 +125,15 @@ export function PlannerShell({
   ];
 
   function applyTemplate(templateId: string) {
-    setError(null);
-    startTransition(async () => {
-      const result = await applyTemplateAction({
-        templateId,
-        date: selectedDate,
-        status: "planned",
-      });
-
-      if (!result.ok) {
-        setError(result.error ?? "Unable to apply template.");
-        return;
-      }
-
-      router.refresh();
-    });
+    run(
+      () =>
+        applyTemplateAction({
+          templateId,
+          date: selectedDate,
+          status: "planned",
+        }),
+      { fallbackError: "Unable to apply template.", refresh: true },
+    );
   }
 
   function saveDateAsTemplate() {
@@ -156,22 +143,15 @@ export function PlannerShell({
       return;
     }
 
-    setError(null);
-    startTransition(async () => {
-      const result = await createTemplateFromDateAction({
-        date: selectedDate,
-        type: "day",
-        label,
-      });
-
-      if (!result.ok) {
-        setError(result.error ?? "Unable to create template.");
-        return;
-      }
-
-      setTemplateLabel("");
-      router.refresh();
-    });
+    run(
+      () =>
+        createTemplateFromDateAction({ date: selectedDate, type: "day", label }),
+      {
+        fallbackError: "Unable to create template.",
+        refresh: true,
+        onSuccess: () => setTemplateLabel(""),
+      },
+    );
   }
 
   function updateShoppingStartDate(value: string) {
