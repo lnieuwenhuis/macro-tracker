@@ -23,7 +23,6 @@ describe("API token queries", () => {
         email: "coach@example.com",
         displayName: "Coach",
       },
-      runtime.db,
     );
     userId = user.id;
   });
@@ -39,7 +38,6 @@ describe("API token queries", () => {
         name: "Mobile app",
         scopes: ["read:daily", "write:daily"],
       },
-      runtime.db,
     );
 
     expect(created.token).toMatch(/^mtk_v1_/);
@@ -60,7 +58,7 @@ describe("API token queries", () => {
     expect(stored?.tokenHash).not.toBe(created.token);
     expect(stored?.tokenPrefix).not.toContain(rawTokenSecretPrefix);
 
-    const listed = await listApiTokens(userId, runtime.db);
+    const listed = await listApiTokens(userId);
     expect(listed).toHaveLength(1);
     expect(listed[0]?.tokenPrefix).not.toContain(rawTokenSecretPrefix);
     expect(JSON.stringify(listed)).not.toContain(stored!.tokenHash);
@@ -75,7 +73,6 @@ describe("API token queries", () => {
         scopes: ["read:stats"],
         expiresAt: null,
       },
-      runtime.db,
     );
 
     expect(created.record.expiresAt).toBeNull();
@@ -83,10 +80,10 @@ describe("API token queries", () => {
 
   it("validates and dedupes API token scopes", async () => {
     await expect(
-      createApiToken(userId, { name: "Empty", scopes: [] }, runtime.db),
+      createApiToken(userId, { name: "Empty", scopes: [] }),
     ).rejects.toThrow("API token must include at least one scope.");
     await expect(
-      createApiToken(userId, { name: "Bad", scopes: ["read:daily", "admin:*"] }, runtime.db),
+      createApiToken(userId, { name: "Bad", scopes: ["read:daily", "admin:*"] }),
     ).rejects.toThrow("API token scope is invalid.");
 
     const created = await createApiToken(
@@ -95,7 +92,6 @@ describe("API token queries", () => {
         name: "Duplicates",
         scopes: ["read:daily", "write:daily", "read:daily"],
       },
-      runtime.db,
     );
 
     expect(created.record.scopes).toEqual(["read:daily", "write:daily"]);
@@ -110,7 +106,6 @@ describe("API token queries", () => {
           scopes: ["read:daily"],
           expiresAt: "not-a-date",
         },
-        runtime.db,
       ),
     ).rejects.toThrow("API token expiry is invalid.");
   });
@@ -123,7 +118,6 @@ describe("API token queries", () => {
         name: "Default expiry",
         scopes: ["read:daily"],
       },
-      runtime.db,
     );
     const after = Date.now();
     const expiresAt = new Date(created.record.expiresAt!).getTime();
@@ -139,10 +133,9 @@ describe("API token queries", () => {
         name: "Reader",
         scopes: ["read:daily"],
       },
-      runtime.db,
     );
 
-    const result = await authenticateApiToken(created.token, runtime.db);
+    const result = await authenticateApiToken(created.token);
 
     expect(result.ok).toBe(true);
     if (result.ok) {
@@ -151,7 +144,7 @@ describe("API token queries", () => {
       expect(result.token.lastUsedAt).toBeTruthy();
     }
 
-    const listed = await listApiTokens(userId, runtime.db);
+    const listed = await listApiTokens(userId);
     expect(listed[0]?.lastUsedAt).toBeTruthy();
   });
 
@@ -162,15 +155,14 @@ describe("API token queries", () => {
         name: "Reader",
         scopes: ["read:daily"],
       },
-      runtime.db,
     );
 
-    const first = await authenticateApiToken(created.token, runtime.db);
+    const first = await authenticateApiToken(created.token);
     expect(first.ok).toBe(true);
     const firstLastUsedAt = first.ok ? first.token.lastUsedAt : null;
     expect(firstLastUsedAt).toBeTruthy();
 
-    const second = await authenticateApiToken(created.token, runtime.db);
+    const second = await authenticateApiToken(created.token);
     expect(second.ok).toBe(true);
     expect(second.ok ? second.token.lastUsedAt : null).toEqual(firstLastUsedAt);
     const [storedAfterSecond] = await runtime.db.select().from(apiTokens);
@@ -184,7 +176,7 @@ describe("API token queries", () => {
       .set({ lastUsedAt: staleLastUsedAt })
       .where(eq(apiTokens.id, created.record.id));
 
-    const stale = await authenticateApiToken(created.token, runtime.db);
+    const stale = await authenticateApiToken(created.token);
     expect(stale.ok).toBe(true);
     expect(stale.ok ? new Date(stale.token.lastUsedAt!).getTime() : 0).toBeGreaterThan(
       staleLastUsedAt.getTime(),
@@ -192,16 +184,16 @@ describe("API token queries", () => {
   });
 
   it("rejects malformed, unknown, expired, and revoked API tokens", async () => {
-    await expect(authenticateApiToken(null, runtime.db)).resolves.toEqual({
+    await expect(authenticateApiToken(null)).resolves.toEqual({
       ok: false,
       reason: "missing",
     });
-    await expect(authenticateApiToken("not-a-token", runtime.db)).resolves.toEqual({
+    await expect(authenticateApiToken("not-a-token")).resolves.toEqual({
       ok: false,
       reason: "malformed",
     });
     await expect(
-      authenticateApiToken("mtk_v1_unknown", runtime.db),
+      authenticateApiToken("mtk_v1_unknown"),
     ).resolves.toEqual({
       ok: false,
       reason: "invalid",
@@ -214,13 +206,12 @@ describe("API token queries", () => {
         scopes: ["read:daily"],
         expiresAt: new Date(Date.now() - 60_000),
       },
-      runtime.db,
     );
-    await expect(authenticateApiToken(expired.token, runtime.db)).resolves.toEqual({
+    await expect(authenticateApiToken(expired.token)).resolves.toEqual({
       ok: false,
       reason: "expired",
     });
-    await expect(listApiTokens(userId, runtime.db)).resolves.toContainEqual(
+    await expect(listApiTokens(userId)).resolves.toContainEqual(
       expect.objectContaining({
         id: expired.record.id,
         lastUsedAt: null,
@@ -233,16 +224,15 @@ describe("API token queries", () => {
         name: "Revoked",
         scopes: ["read:daily"],
       },
-      runtime.db,
     );
     await expect(
-      revokeApiToken(userId, active.record.id, runtime.db),
+      revokeApiToken(userId, active.record.id),
     ).resolves.toBe(true);
-    await expect(authenticateApiToken(active.token, runtime.db)).resolves.toEqual({
+    await expect(authenticateApiToken(active.token)).resolves.toEqual({
       ok: false,
       reason: "revoked",
     });
-    await expect(listApiTokens(userId, runtime.db)).resolves.toContainEqual(
+    await expect(listApiTokens(userId)).resolves.toContainEqual(
       expect.objectContaining({
         id: active.record.id,
         lastUsedAt: null,

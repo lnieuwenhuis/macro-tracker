@@ -19,7 +19,6 @@ describe("weight queries", () => {
         email: "coach@example.com",
         displayName: "Coach",
       },
-      runtime.db,
     );
     userId = user.id;
   });
@@ -44,11 +43,10 @@ describe("weight queries", () => {
           bodyFatPct: null,
           notes: null,
         },
-        runtime.db,
       );
     }
 
-    const weightData = await getWeightPageData(userId, "2026-06-30", runtime.db);
+    const weightData = await getWeightPageData(userId, "2026-06-30");
 
     expect(weightData.entries.map((entry) => entry.date)).toEqual([
       "2026-05-29",

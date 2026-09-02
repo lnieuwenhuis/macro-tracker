@@ -63,7 +63,6 @@ describe("API token settings actions", () => {
         pairwiseSub: `settings-api-user-${testUserKey}`,
         email: `settings-api-${testUserKey}@example.com`,
       },
-      runtime.db,
     );
     mocked.userId = user.id;
     mocked.requireOnboardedSessionUser.mockResolvedValue({
@@ -103,7 +102,7 @@ describe("API token settings actions", () => {
     expect(created.record.tokenPrefix).not.toContain(rawTokenSecretPrefix);
     expect(mocked.revalidatePath).toHaveBeenCalledWith("/settings/api");
 
-    const listed = await listApiTokens(mocked.userId, runtime.db);
+    const listed = await listApiTokens(mocked.userId);
     expect(listed).toHaveLength(1);
     expect(listed[0]?.tokenPrefix).not.toContain(rawTokenSecretPrefix);
     expect(JSON.stringify(listed)).not.toContain(created.token);
@@ -112,7 +111,7 @@ describe("API token settings actions", () => {
     revokeData.set("tokenId", listed[0]!.id);
     await revokeApiTokenAction(revokeData);
 
-    const [revoked] = await listApiTokens(mocked.userId, runtime.db);
+    const [revoked] = await listApiTokens(mocked.userId);
     expect(revoked?.revokedAt).toBeTruthy();
   });
 
@@ -150,7 +149,7 @@ describe("API token settings actions", () => {
     formData.append("scopes", "read:daily");
 
     await expect(createApiTokenAction({}, formData)).rejects.toThrow("redirect:/onboarding");
-    await expect(listApiTokens(mocked.userId, runtime.db)).resolves.toHaveLength(0);
+    await expect(listApiTokens(mocked.userId)).resolves.toHaveLength(0);
     expect(mocked.revalidatePath).not.toHaveBeenCalled();
   });
 
@@ -161,14 +160,13 @@ describe("API token settings actions", () => {
         name: "Shortcut",
         scopes: ["read:daily"],
       },
-      runtime.db,
     );
     mocked.requireOnboardedSessionUser.mockRejectedValue(new Error("redirect:/onboarding"));
     const formData = new FormData();
     formData.set("tokenId", created.record.id);
 
     await expect(revokeApiTokenAction(formData)).rejects.toThrow("redirect:/onboarding");
-    await expect(listApiTokens(mocked.userId, runtime.db)).resolves.toContainEqual(
+    await expect(listApiTokens(mocked.userId)).resolves.toContainEqual(
       expect.objectContaining({ id: created.record.id, revokedAt: null }),
     );
     expect(mocked.revalidatePath).not.toHaveBeenCalled();
@@ -197,7 +195,7 @@ describe("API token settings actions", () => {
       ok: false,
       error: "API scope is invalid: write:unknown",
     });
-    await expect(listApiTokens(mocked.userId, runtime.db)).resolves.toHaveLength(0);
+    await expect(listApiTokens(mocked.userId)).resolves.toHaveLength(0);
     expect(mocked.revalidatePath).not.toHaveBeenCalled();
   });
 
@@ -211,7 +209,7 @@ describe("API token settings actions", () => {
       ok: false,
       error: "API token expiry is invalid.",
     });
-    await expect(listApiTokens(mocked.userId, runtime.db)).resolves.toHaveLength(0);
+    await expect(listApiTokens(mocked.userId)).resolves.toHaveLength(0);
     expect(mocked.revalidatePath).not.toHaveBeenCalled();
   });
 
