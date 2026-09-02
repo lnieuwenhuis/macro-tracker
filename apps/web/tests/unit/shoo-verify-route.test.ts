@@ -6,9 +6,7 @@ const mocked = vi.hoisted(() => ({
   backendFetch: vi.fn(),
 }));
 
-vi.mock("@macro-tracker/db", () => ({
-  backendFetch: mocked.backendFetch,
-}));
+vi.mock("@macro-tracker/db", async () => (await import("./helpers/mock-db")).mockDbModule(mocked));
 
 vi.mock("@/lib/session", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/session")>();

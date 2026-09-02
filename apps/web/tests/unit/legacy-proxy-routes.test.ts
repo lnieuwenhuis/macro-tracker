@@ -4,9 +4,7 @@ const mocked = vi.hoisted(() => ({
   backendFetch: vi.fn(),
 }));
 
-vi.mock("@macro-tracker/db", () => ({
-  backendFetch: mocked.backendFetch,
-}));
+vi.mock("@macro-tracker/db", async () => (await import("./helpers/mock-db")).mockDbModule(mocked));
 
 import { POST as benchmarkPost } from "@/app/api/admin/ai-model-benchmark/route";
 import { POST as foodPhotoPost } from "@/app/api/ai/food-photo/route";
