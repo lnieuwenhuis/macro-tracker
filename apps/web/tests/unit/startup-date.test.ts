@@ -52,9 +52,7 @@ describe("getStartupDateRedirect", () => {
 
 describe("startup redirect is a one-shot", () => {
   it("would bounce a user-picked day back to today if it re-ran mid-navigation", () => {
-    // Reproduces the race the mount guard exists to prevent: after picking a
-    // day, the pushed URL has not landed yet, so `window.location.search` still
-    // has no `date` while `selectedDate` already holds the new day.
+    // The pushed URL has not landed yet, so search has no `date` while selectedDate already does.
     expect(
       getStartupDateRedirect({
         requestedDate: null,

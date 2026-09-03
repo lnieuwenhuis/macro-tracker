@@ -27,8 +27,7 @@ function shooVerifyRequest(
     "content-type": "application/json",
     "x-forwarded-proto": "https",
     "x-forwarded-host": forwardedHost,
-    // What a browser sends for the `fetch` in `auth-callback-client.tsx`.
-    "sec-fetch-site": "same-origin",
+    "sec-fetch-site": "same-origin", // what the auth-callback-client fetch sends
     origin: `https://${forwardedHost}`,
     ...overrides.headers,
   };
@@ -78,9 +77,7 @@ describe("POST /api/auth/shoo/verify", () => {
   });
 
   describe("login CSRF gate", () => {
-    // The response to this route sets `mt_session`, and `SameSite=Lax` governs
-    // *sending* a cookie rather than *setting* one — so a cross-site POST that
-    // is answered at all pins the victim to the attacker's account.
+    // SameSite=Lax governs sending a cookie, not setting one, so an answered cross-site POST still pins a session.
     it("rejects a cross-site Origin without setting a session cookie", async () => {
       const response = await POST(
         shooVerifyRequest("attacker-id-token", "trusted.example", {
@@ -133,8 +130,7 @@ describe("POST /api/auth/shoo/verify", () => {
     });
 
     it("rejects the CORS-safelisted content type the exploit form uses", async () => {
-      // `enctype="text/plain"` is what removes the preflight, and
-      // `request.json()` happily parses the resulting body.
+      // enctype="text/plain" removes the preflight, and request.json() parses the body anyway.
       const response = await POST(
         shooVerifyRequest("attacker-id-token", "trusted.example", {
           headers: { "content-type": "text/plain;charset=UTF-8" },

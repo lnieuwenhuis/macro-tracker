@@ -1,18 +1,9 @@
 /**
  * @vitest-environment jsdom
  *
- * TEST-04: this used to read `dashboard-shell.tsx` / `recipe-builder-shell.tsx`
- * as raw source text and assert on substrings (`source.indexOf("<BarcodeCaptureModals")`,
- * `.toContain('{showPresetsModal && (')`). That verifies the source text survives,
- * not that the guard actually withholds mounting at runtime -- renaming the guard
- * variable, moving the conditional into a helper, or flipping `&&`/`||` in the
- * boolean all still pass as long as the literal substring is present somewhere.
- *
- * These tests render the real shells with React Testing Library and assert on
- * the DOM: the lazy chunk's content (a "Close scanner" button from the real,
- * dynamically-imported `BarcodeScanner`, or a `role="dialog"` from the real
- * `PresetModal`) must be absent before the flow starts, present once it starts,
- * and absent again once it is dismissed.
+ * These assert on the rendered DOM rather than source-text substrings, so a
+ * lazy chunk's content must be absent before the flow starts, present once
+ * it starts, and absent again once it is dismissed.
  */
 import type { DailySummary, MacroGoals, MealEntryRecord, MealGroup } from "@macro-tracker/db";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
@@ -145,9 +136,7 @@ describe("dashboard shell lazy modal mounting", () => {
       />,
     );
 
-    // `initialComposeAction="scan"` is the same prop `app/page.tsx` derives
-    // from `?compose=scan`, so this drives the real `showScanner` state path
-    // rather than reaching into internals.
+    // `initialComposeAction="scan"` is the same prop `app/page.tsx` derives from `?compose=scan`.
     const closeScannerButton = await screen.findByRole("button", {
       name: "Close scanner",
     });

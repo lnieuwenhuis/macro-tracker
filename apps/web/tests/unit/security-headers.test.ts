@@ -270,8 +270,7 @@ describe("root layout nonce threading", () => {
     const response = await proxy(proxyRequest("/login"));
     const nonce = nonceFromPolicy(response.headers.get(CSP_HEADER));
 
-    // The renderer reads the header the proxy forwarded, so the rendered
-    // script tags must carry exactly the value the browser was told to trust.
+    // The renderer reads the header the proxy forwarded, so the script tags must carry that exact value.
     mocked.headers.mockResolvedValue(
       new Headers({ [NONCE_HEADER]: forwardedNonce(response) ?? "" }),
     );

@@ -134,15 +134,8 @@ describe("DashboardShell handleGroupChange", () => {
       expect(mocked.saveMealEntryAction).toHaveBeenCalledTimes(1);
     });
 
-    // Changing the group moves the entry from the "Breakfast" section to the
-    // "Lunch" section, which -- since each section is a separately-keyed list
-    // -- remounts the card and collapses it back to its default state, taking
-    // both the group <select> and the error text out of the DOM until it is
-    // re-expanded. The "Edit details for Oatmeal" (collapsed-state) label
-    // only reappears once that remount has happened, i.e. once the mutation
-    // has settled -- re-expand it to check the *original* group and the
-    // error are showing: the dropdown must never keep claiming a
-    // reassignment that was never persisted.
+    // Group change remounts the card into the new section, collapsing it; re-expand
+    // to confirm the rollback (original group, error shown) rather than a stale reassignment.
     const collapsedButton = await screen.findByRole("button", {
       name: /Edit details for Oatmeal/i,
     });

@@ -48,9 +48,7 @@ async function proveDismissalStaysClosed({
     const [open, setOpen] = useState(true);
     if (!open) return null;
 
-    // JSX rather than `createElement`: the provider's props require
-    // `children`, which `createElement`'s props argument cannot satisfy when
-    // children are passed positionally.
+    // JSX, not createElement: the provider's required `children` prop can't be passed positionally.
     return (
       <ModalChunkDismissProvider onDismiss={() => setOpen(false)}>
         <Suspense fallback={fallback}>

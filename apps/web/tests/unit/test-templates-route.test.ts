@@ -67,8 +67,7 @@ describe("POST /api/test/templates", () => {
   it("rejects missing test route secrets before reading the session", async () => {
     const response = await POST(testTemplatesRequest());
 
-    // 404 for both a wrong secret and disabled test routes, so the response
-    // does not tell a prober that ENABLE_TEST_ROUTES is on.
+    // Same 404 as disabled test routes, so a prober can't tell ENABLE_TEST_ROUTES is on.
     expect(response.status).toBe(404);
     expect(mocked.getSessionUserFromCookies).not.toHaveBeenCalled();
     expect(mocked.createTemplate).not.toHaveBeenCalled();

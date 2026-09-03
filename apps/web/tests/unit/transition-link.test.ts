@@ -26,9 +26,7 @@ describe("TransitionLink", () => {
       "utf8",
     );
 
-    // Links must opt in to prefetching individually (the bottom-nav tabs do);
-    // defaulting it on would render every linked route on the server for every
-    // page view, which the constrained hosting cannot afford.
+    // Defaulting prefetch on would server-render every linked route on every page view.
     expect(source).toContain("prefetch = false");
     expect(source).not.toMatch(/onMouseEnter|onFocus|onTouchStart|prefetchFullRoute/);
   });

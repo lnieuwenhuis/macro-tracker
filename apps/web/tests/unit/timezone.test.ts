@@ -33,8 +33,7 @@ describe("isValidTimeZone", () => {
 
 describe("dateStringInTimeZone", () => {
   it("resolves the calendar day in the user's zone, not UTC", () => {
-    // 02:30 UTC on the 16th is still 21:30 on the 15th in New York — the
-    // onboarding weigh-in bug.
+    // 02:30 UTC on the 16th is still 21:30 on the 15th in New York.
     const instant = new Date("2026-01-16T02:30:00Z");
 
     expect(dateStringInTimeZone("UTC", instant)).toBe("2026-01-16");
@@ -42,8 +41,7 @@ describe("dateStringInTimeZone", () => {
   });
 
   it("resolves a day ahead of UTC for zones east of the line", () => {
-    // 20:00 UTC on the 14th is already 09:00 on the 15th in Auckland — the
-    // planned-vs-eaten bug.
+    // 20:00 UTC on the 14th is already 09:00 on the 15th in Auckland.
     const instant = new Date("2026-01-14T20:00:00Z");
 
     expect(dateStringInTimeZone("UTC", instant)).toBe("2026-01-14");

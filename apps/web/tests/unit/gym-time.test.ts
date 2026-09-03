@@ -12,8 +12,7 @@ describe("gym time helpers", () => {
   it("maps time-input values to minutes with the midnight-end special case", () => {
     expect(timeInputToMinutes("00:00", "start")).toBe(0);
     expect(timeInputToMinutes("17:30", "start")).toBe(1050);
-    // An END of 00:00 means "until midnight" (minute 1440), so a plain
-    // 23:00-00:00 slot stays representable.
+    // An END of 00:00 means "until midnight" (minute 1440), keeping 23:00-00:00 representable.
     expect(timeInputToMinutes("00:00", "end")).toBe(1440);
     expect(timeInputToMinutes("23:59", "end")).toBe(1439);
   });

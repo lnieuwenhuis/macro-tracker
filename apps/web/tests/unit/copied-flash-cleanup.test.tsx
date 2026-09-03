@@ -1,12 +1,8 @@
 /**
  * @vitest-environment jsdom
  *
- * UI-04: the "Copied"/"Added" confirmation flash in `dashboard-shell.tsx`
- * and `food-search-modal.tsx` scheduled a bare `setTimeout` with no
- * `clearTimeout` on unmount. Navigating away, or closing the modal, inside
- * the flash window called `setState` after the component was gone. The fix
- * tracks the pending timer in a ref and clears it in a cleanup effect, the
- * same pattern `confirm-delete-button.tsx` already uses.
+ * The confirmation flash's pending timer must be cleared on unmount, or a
+ * late `setState` fires after the component is gone.
  *
  * These tests spy on the real `window.setTimeout`/`clearTimeout` (not fake
  * timers, so `waitFor`'s own internal polling keeps working) and check that

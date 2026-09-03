@@ -1,12 +1,7 @@
 /**
- * iOS Safari zooms the page in whenever a focused form control renders text
- * below 16px, and it never zooms back out on blur. `globals.css` prevents that
- * by rebasing `--text-sm` to 16px inside form controls on coarse pointers, so
- * the guard here is that no control reaches for a size the rebase misses.
- *
- * Reading the source is deliberate: the defect is a class on a control that no
- * assertion about rendered output would catch, and it only shows up on a real
- * touch device.
+ * iOS Safari zooms in on any focused form control rendering text below 16px
+ * and never zooms back out. This scans source rather than rendered output,
+ * since the defect is a class on a control and only shows on a real device.
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -86,14 +81,12 @@ describe("mobile input zoom", () => {
     expect(rule).toContain("select");
     expect(rule).toContain("textarea");
     expect(rule).toContain("--text-sm: 16px");
-    // 16px x 1.25 is the same 20px line box text-sm has at 14px, so pinning the
-    // ratio is what keeps every field its current height.
+    // 16px x 1.25 is the same 20px line box text-sm has at 14px, keeping field height unchanged.
     expect(rule).toContain("--text-sm--line-height: 1.25");
   });
 
   it("finds the app's form controls", () => {
-    // Guards the scan itself: a regex that silently matched nothing would make
-    // the assertion below pass for the wrong reason.
+    // Guards the scan itself: a silently-matching-nothing regex would pass the assertion below for the wrong reason.
     expect(collectFormControls().length).toBeGreaterThan(30);
   });
 

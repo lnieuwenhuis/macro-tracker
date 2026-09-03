@@ -2,12 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { canAccessAdmin, isOwnerRole, type AdminRole } from "@macro-tracker/db";
 
-/**
- * TEST-05: `admin-auth.test.ts` mocks `@macro-tracker/db` and reimplements
- * `canAccessAdmin`/`isOwnerRole` inline, so a bug in the real implementation
- * (e.g. dropping "owner") would not be caught by the suite named "admin
- * auth". These tests import and exercise the real functions directly.
- */
+// Exercises the real canAccessAdmin/isOwnerRole, unlike admin-auth.test.ts's mocked reimplementation.
 describe("canAccessAdmin", () => {
   it("grants admin role access", () => {
     expect(canAccessAdmin("admin")).toBe(true);

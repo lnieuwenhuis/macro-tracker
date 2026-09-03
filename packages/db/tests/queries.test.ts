@@ -464,8 +464,7 @@ describe("database queries", () => {
 
     expect(stats.totalDaysTracked).toBe(1);
     expect(stats.totalCaloriesKcal).toBe(588);
-    // All-time totals keep the future-dated eaten row, but a 7-day average
-    // ending on the 19th must not reach forward into the 20th.
+    // All-time totals keep the future-dated eaten row; rolling averages must not.
     expect(stats.rollingAverages.days7.caloriesKcal).toBe(0);
     expect(stats.rollingAverages.days30.caloriesKcal).toBe(0);
     expect(stats.allDailyTotals).toEqual([
