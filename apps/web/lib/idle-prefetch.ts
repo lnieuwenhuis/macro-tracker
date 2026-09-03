@@ -1,13 +1,4 @@
-/**
- * Warm lazily-imported chunks once the browser goes idle.
- *
- * Modal code is deliberately kept out of the initial bundle, but a user who
- * opens one should never wait on a network round trip. Fetching the chunks
- * shortly after hydration keeps the smaller first load without changing how
- * the UI behaves when it is actually used.
- *
- * Returns a cleanup function suitable for returning straight from `useEffect`.
- */
+// Warms a lazily-imported chunk once the browser goes idle, so opening it later never waits on a network round trip.
 export function prefetchOnIdle(load: () => void): () => void {
   if (typeof window === "undefined") {
     return () => {};

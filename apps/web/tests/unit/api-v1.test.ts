@@ -50,6 +50,22 @@ describe("API v1 backend proxy failures", () => {
       },
     });
   });
+
+  it("rejects dot-segment path traversal before proxying to the backend", async () => {
+    const response = await handleApiV1Request(
+      new Request("http://localhost/api/v1/foods/.."),
+      ["foods", ".."],
+      "GET",
+    );
+
+    expect(response.status).toBe(404);
+    expect(response.headers.get("vary")).toBe("Authorization");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    await expect(response.json()).resolves.toMatchObject({
+      ok: false,
+      error: { code: "not_found", message: "Unknown API route." },
+    });
+  });
 });
 
 describe("Macro Tracker API v1", () => {

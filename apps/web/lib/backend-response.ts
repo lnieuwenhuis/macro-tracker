@@ -1,11 +1,6 @@
 import { backendFetch } from "@macro-tracker/db";
 
-/**
- * Hop-by-hop headers describe the single connection they arrived on (RFC 9110
- * §7.6.1) and are meaningless — at best — on the next hop. Only `host` used to
- * be stripped, so a client could hand the backend a `connection`, `te` or
- * `upgrade` header of its choosing.
- */
+// Hop-by-hop headers describe only the connection they arrived on and must not be forwarded (RFC 9110 §7.6.1).
 const HOP_BY_HOP_HEADERS = [
   "connection",
   "keep-alive",
@@ -19,8 +14,7 @@ const HOP_BY_HOP_HEADERS = [
 ];
 
 export function stripHopByHopHeaders(headers: Headers) {
-  // A `Connection: x-secret` request nominates further headers for removal;
-  // honour that before dropping `connection` itself.
+  // A Connection header nominates further headers for removal; honour that before dropping connection itself.
   for (const nominated of headers.get("connection")?.split(",") ?? []) {
     const name = nominated.trim();
     if (name) {
@@ -83,9 +77,7 @@ export async function proxyBackendRoute(
     } as RequestInit & { duplex?: "half"; timeoutMs?: number });
     return createBackendProxyResponse(response);
   } catch (error) {
-    // Logged rather than swallowed: a 502 here is indistinguishable from a
-    // genuine "not found" once it reaches the client, so the cause has to be
-    // recoverable from the server logs.
+    // Logged rather than swallowed: a 502 is indistinguishable from a genuine "not found" once it reaches the client.
     console.error(`Backend proxy failure for ${path}`, error);
     return Response.json(unavailableBody, { status: 502 });
   }

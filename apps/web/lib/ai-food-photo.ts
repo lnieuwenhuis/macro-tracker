@@ -43,9 +43,7 @@ export type AnalyzeFoodPhotoResult =
       retryable?: boolean;
     };
 
-// Mirrors the backend's defaults: food photos go to the AI gateway (an
-// OpenAI-compatible endpoint, normally CLIProxyAPI in front of the Codex
-// backend); the effort suffix is translated into the reasoning parameter.
+// Mirrors the backend's defaults for the AI gateway; the effort suffix is translated into the reasoning parameter.
 export const DEFAULT_FOOD_PHOTO_MODELS = [
   "gpt-5.6-luna(low)",
   "gpt-5.6-luna(medium)",

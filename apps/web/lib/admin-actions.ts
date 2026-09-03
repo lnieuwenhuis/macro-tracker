@@ -84,11 +84,7 @@ async function redirectAfterAdminAction(input: {
   redirect(destination);
 }
 
-/**
- * Not an open redirect today — every destination starts with a literal
- * `/admin/` — but the ids come straight off `formData`, so they are encoded
- * rather than trusted to be UUID-shaped. A real id is unchanged by this.
- */
+// Ids come straight off formData, so encode rather than trust them to be UUID-shaped; a real id is unchanged by this.
 function encodePathSegment(value: string) {
   return encodeURIComponent(value);
 }
