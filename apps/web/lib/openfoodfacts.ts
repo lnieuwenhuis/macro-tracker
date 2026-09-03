@@ -26,12 +26,14 @@ const PRODUCT_SOURCES = new Set<OpenFoodFactsProduct["source"]>([
   "custom",
 ]);
 
-function readString(value: unknown, fallback: string) {
+function readString(value: unknown, fallback: string): string;
+function readString(value: unknown, fallback: null): string | null;
+function readString(value: unknown, fallback: string | null) {
   return typeof value === "string" && value ? value : fallback;
 }
 
 function readNullableString(value: unknown) {
-  return typeof value === "string" && value ? value : null;
+  return readString(value, null);
 }
 
 // Rejects non-finite/negative/non-number upstream values instead of letting them reach the macro maths.

@@ -1,8 +1,5 @@
-/**
- * iOS Safari zooms in on any focused form control rendering text below 16px
- * and never zooms back out. This scans source rather than rendered output,
- * since the defect is a class on a control and only shows on a real device.
- */
+// iOS Safari zooms on focused sub-16px text and never zooms out;
+// this scans source since the defect only shows on a real device.
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 

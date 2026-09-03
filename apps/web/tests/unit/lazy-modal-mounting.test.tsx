@@ -1,10 +1,5 @@
-/**
- * @vitest-environment jsdom
- *
- * These assert on the rendered DOM rather than source-text substrings, so a
- * lazy chunk's content must be absent before the flow starts, present once
- * it starts, and absent again once it is dismissed.
- */
+/** @vitest-environment jsdom */
+// Assert rendered DOM absence/presence across lazy chunk mount and dismiss.
 import type { DailySummary, MacroGoals, MealEntryRecord, MealGroup } from "@macro-tracker/db";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -102,8 +97,7 @@ function buildDailySummary(): DailySummary {
   };
 }
 
-// The "From template" button that opens the preset modal only renders in the
-// "no food items logged yet" empty state, so this variant has no meals.
+// The "From template" opener only renders in the empty state, so this variant has no meals.
 function buildEmptyDailySummary(): DailySummary {
   return {
     date: "2026-08-18",

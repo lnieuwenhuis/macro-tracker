@@ -10,19 +10,19 @@ type ServerEnv = {
 
 let cachedEnv: ServerEnv | undefined;
 
-function parseCsvList(value: string | undefined) {
-  return (value ?? "")
-    .split(",")
-    .map((item) => item.trim().toLowerCase())
-    .filter(Boolean);
-}
-
-function parseOriginList(value: string | undefined) {
+function splitCsvValues(value: string | undefined) {
   return (value ?? "")
     .split(",")
     .map((item) => item.trim())
-    .filter(Boolean)
-    .map((item) => new URL(item).origin);
+    .filter(Boolean);
+}
+
+function parseCsvList(value: string | undefined) {
+  return splitCsvValues(value).map((item) => item.toLowerCase());
+}
+
+function parseOriginList(value: string | undefined) {
+  return splitCsvValues(value).map((item) => new URL(item).origin);
 }
 
 function readRequiredEnv(name: string, fallback?: string) {

@@ -1,6 +1,4 @@
-/**
- * @vitest-environment jsdom
- */
+/** @vitest-environment jsdom */
 import type { DailySummary, MacroGoals, MealEntryRecord, MealGroup } from "@macro-tracker/db";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -134,8 +132,7 @@ describe("DashboardShell handleGroupChange", () => {
       expect(mocked.saveMealEntryAction).toHaveBeenCalledTimes(1);
     });
 
-    // Group change remounts the card into the new section, collapsing it; re-expand
-    // to confirm the rollback (original group, error shown) rather than a stale reassignment.
+    // Group change remounts and collapses the card; re-expand to confirm rollback rather than stale reassignment.
     const collapsedButton = await screen.findByRole("button", {
       name: /Edit details for Oatmeal/i,
     });

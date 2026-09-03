@@ -14,6 +14,13 @@ function emptyTotals() {
   return { proteinG: 0, carbsG: 0, fatG: 0, caloriesKcal: 0 };
 }
 
+function accumulateDraftTotals(bucket: MacroNumbers, draft: MealDraft) {
+  bucket.proteinG += parseDraftValue(draft.proteinG);
+  bucket.carbsG += parseDraftValue(draft.carbsG);
+  bucket.fatG += parseDraftValue(draft.fatG);
+  bucket.caloriesKcal += parseDraftValue(draft.caloriesKcal);
+}
+
 function roundTotals(totals: MacroNumbers): MacroNumbers {
   return {
     proteinG: roundToSingleDecimal(totals.proteinG),
@@ -35,10 +42,7 @@ export function computeLiveTotals(
       continue;
     }
 
-    totals.proteinG += parseDraftValue(draft.proteinG);
-    totals.carbsG += parseDraftValue(draft.carbsG);
-    totals.fatG += parseDraftValue(draft.fatG);
-    totals.caloriesKcal += parseDraftValue(draft.caloriesKcal);
+    accumulateDraftTotals(totals, draft);
   }
 
   return roundTotals(totals);
@@ -60,10 +64,7 @@ export function computeLiveTotalsByStatus(
       continue;
     }
 
-    bucket.proteinG += parseDraftValue(draft.proteinG);
-    bucket.carbsG += parseDraftValue(draft.carbsG);
-    bucket.fatG += parseDraftValue(draft.fatG);
-    bucket.caloriesKcal += parseDraftValue(draft.caloriesKcal);
+    accumulateDraftTotals(bucket, draft);
   }
 
   return {

@@ -59,6 +59,10 @@ function toNullableNumber(value: string): number | null {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
+function toInputString(value: number | null | undefined): string {
+  return value != null ? String(value) : "";
+}
+
 function GoalsPanel({
   goals,
   initialWeightKg,
@@ -68,18 +72,10 @@ function GoalsPanel({
 }) {
   const { run, isPending, error, clearError } = useActionRunner();
   const [saved, setSaved] = useState(false);
-  const [calories, setCalories] = useState(
-    goals.caloriesKcal != null ? String(goals.caloriesKcal) : "",
-  );
-  const [protein, setProtein] = useState(
-    goals.proteinG != null ? String(goals.proteinG) : "",
-  );
-  const [carbs, setCarbs] = useState(
-    goals.carbsG != null ? String(goals.carbsG) : "",
-  );
-  const [fat, setFat] = useState(
-    goals.fatG != null ? String(goals.fatG) : "",
-  );
+  const [calories, setCalories] = useState(toInputString(goals.caloriesKcal));
+  const [protein, setProtein] = useState(toInputString(goals.proteinG));
+  const [carbs, setCarbs] = useState(toInputString(goals.carbsG));
+  const [fat, setFat] = useState(toInputString(goals.fatG));
 
   function update(setter: (value: string) => void) {
     return (value: string) => {
@@ -152,10 +148,14 @@ function GoalsPanel({
       </section>
 
       <div className="grid gap-3 sm:grid-cols-2">
-        <NumberInputField label="Calories" unit="kcal" step="1" value={calories} disabled={isPending} variant="card" onChange={update(setCalories)} />
-        <NumberInputField label="Protein" unit="g" step="0.1" value={protein} disabled={isPending} variant="card" onChange={update(setProtein)} />
-        <NumberInputField label="Carbs" unit="g" step="0.1" value={carbs} disabled={isPending} variant="card" onChange={update(setCarbs)} />
-        <NumberInputField label="Fat" unit="g" step="0.1" value={fat} disabled={isPending} variant="card" onChange={update(setFat)} />
+        {[
+          { label: "Calories", unit: "kcal", step: "1", value: calories, set: setCalories },
+          { label: "Protein", unit: "g", step: "0.1", value: protein, set: setProtein },
+          { label: "Carbs", unit: "g", step: "0.1", value: carbs, set: setCarbs },
+          { label: "Fat", unit: "g", step: "0.1", value: fat, set: setFat },
+        ].map(({ label, unit, step, value, set }) => (
+          <NumberInputField key={label} label={label} unit={unit} step={step} value={value} disabled={isPending} variant="card" onChange={update(set)} />
+        ))}
       </div>
 
       {error ? <p className="text-sm text-[var(--color-danger)]">{error}</p> : null}

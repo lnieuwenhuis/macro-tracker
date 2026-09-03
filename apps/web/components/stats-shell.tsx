@@ -184,7 +184,6 @@ function MacroTrendChart({
           <span>{last30[last30.length - 1] ? formatShortDate(last30[last30.length - 1].date) : ""}</span>
         </div>
       </div>
-      {/* Legend */}
       <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-[var(--color-muted)]">
         <span className="flex items-center gap-1.5">
           <span className="inline-block h-2 w-2 rounded-sm" style={{ backgroundColor: color, opacity: 0.85 }} />
@@ -240,18 +239,23 @@ function MacroSplitBar({
   const pPct = Math.round((proteinCal / total) * 100);
   const cPct = Math.round((carbsCal / total) * 100);
   const fPct = 100 - pPct - cPct;
+  const segments = [
+    { pct: pPct, colorVar: "var(--color-bar-protein)", label: "Protein" },
+    { pct: cPct, colorVar: "var(--color-bar-carbs)", label: "Carbs" },
+    { pct: fPct, colorVar: "var(--color-bar-fat)", label: "Fat" },
+  ];
 
   return (
     <div className="space-y-3">
       <div className="flex h-4 w-full overflow-hidden rounded-full">
-        <div style={{ width: `${pPct}%`, backgroundColor: "var(--color-bar-protein)" }} />
-        <div style={{ width: `${cPct}%`, backgroundColor: "var(--color-bar-carbs)" }} />
-        <div style={{ width: `${fPct}%`, backgroundColor: "var(--color-bar-fat)" }} />
+        {segments.map(({ pct, colorVar }) => (
+          <div key={colorVar} style={{ width: `${pct}%`, backgroundColor: colorVar }} />
+        ))}
       </div>
       <div className="flex gap-4 text-xs font-semibold">
-        <span style={{ color: "var(--color-bar-protein)" }}>Protein {pPct}%</span>
-        <span style={{ color: "var(--color-bar-carbs)" }}>Carbs {cPct}%</span>
-        <span style={{ color: "var(--color-bar-fat)" }}>Fat {fPct}%</span>
+        {segments.map(({ pct, colorVar, label }) => (
+          <span key={label} style={{ color: colorVar }}>{label} {pct}%</span>
+        ))}
       </div>
     </div>
   );
@@ -312,7 +316,6 @@ export function StatsPanels({
   return (
     <div className="space-y-5">
 
-        {/* Key stat cards */}
         <section>
           <h2 className="mb-3 text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
             Overview
@@ -441,7 +444,6 @@ export function StatsPanels({
           </div>
         </section>
 
-        {/* Macro trend chart */}
         <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5">
           <div className="mb-4">
             <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
@@ -450,7 +452,6 @@ export function StatsPanels({
             <p className="mt-1 text-[11px] text-[var(--color-muted)]">Last 30 days with eaten or planned entries</p>
           </div>
 
-          {/* Pill tab selector */}
           <div
             role="tablist"
             aria-label="Macro"
@@ -491,7 +492,6 @@ export function StatsPanels({
           />
         </section>
 
-        {/* Macro split */}
         <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5">
           <div className="mb-4">
             <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
@@ -506,7 +506,6 @@ export function StatsPanels({
           />
         </section>
 
-        {/* All-time totals */}
         <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5">
           <h2 className="mb-4 text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
             All-Time Totals
@@ -539,7 +538,6 @@ export function StatsPanels({
           )}
         </section>
 
-        {/* Top foods */}
         {topLabels.length > 0 && (
           <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5">
             <h2 className="mb-4 text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">

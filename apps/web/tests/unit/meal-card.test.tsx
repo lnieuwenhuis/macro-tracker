@@ -1,8 +1,5 @@
-/**
- * @vitest-environment jsdom
- *
- * The overflow menu must dismiss on Escape and on an outside pointerdown.
- */
+/** @vitest-environment jsdom */
+// The overflow menu must dismiss on Escape and on an outside pointerdown.
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 

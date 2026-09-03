@@ -1,6 +1,4 @@
-/**
- * @vitest-environment jsdom
- */
+/** @vitest-environment jsdom */
 import { MacroBarGroup } from "@/components/macro-bar";
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";

@@ -29,8 +29,7 @@ async function ensureAdminUser(
   const roleSelect = page.locator('select[name="role"]');
   if ((await roleSelect.inputValue()) !== "admin") {
     await roleSelect.selectOption("admin");
-    // Role changes are irreversible, so the submit button arms on the first
-    // click and only submits on the second.
+    // Role changes are irreversible, so the submit button only submits on the second click.
     await page.getByRole("button", { name: "Update role" }).click();
     await page.getByRole("button", { name: "Tap again to change role" }).click();
     await page.waitForURL(/saved=role/);
@@ -49,9 +48,7 @@ test("owner bootstrap account sees the admin entry and can open /admin", async (
   await page.getByRole("link", { name: "Admin Panel" }).click();
 
   await expect(page).toHaveURL(/\/admin$/);
-  // Scoped to the heading: Next's route announcer (#__next-route-announcer__)
-  // mirrors the page heading into a live region after a client-side navigation,
-  // so a bare getByText matches twice and trips strict mode.
+  // Scoped to the heading; Next's route announcer mirrors it and trips strict mode on bare text.
   await expect(
     page.getByRole("heading", { name: "Operations Panel" }),
   ).toBeVisible();

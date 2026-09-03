@@ -1,9 +1,5 @@
-/**
- * @vitest-environment jsdom
- *
- * `todayStr` must come from the server-resolved prop, not a client-side
- * `getLocalDateString()` recompute, or SSR/hydration disagree across zones.
- */
+/** @vitest-environment jsdom */
+// todayStr comes from the server prop so SSR/hydration agree across zones.
 import { fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 

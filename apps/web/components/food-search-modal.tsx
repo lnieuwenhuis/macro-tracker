@@ -12,6 +12,7 @@ import { formatSelectedDate } from "@/lib/formatting";
 import { buildMealEntryCopyInput } from "@/lib/meal-entry-copy";
 import { createClientMutationIdStore } from "@/lib/client-mutation-id";
 import { getLocalDateString } from "@/lib/startup-date";
+import { useCopiedFlash } from "@/lib/use-copied-flash";
 import { CompactModal } from "./compact-modal";
 
 type FoodSearchModalProps = {
@@ -28,21 +29,9 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
   const [isSearching, setIsSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copyingId, setCopyingId] = useState<string | null>(null);
-  const [copiedIds, setCopiedIds] = useState<Set<string>>(new Set());
+  const { copiedIds, setCopiedIds, flash: flashCopied } = useCopiedFlash(2500);
   const inputRef = useRef<HTMLInputElement>(null);
   const mutationIds = useRef(createClientMutationIdStore());
-  // Pending "copied" flash timers, keyed by entry id; cleared on unmount to avoid a setState on an unmounted tree.
-  const copiedTimersRef = useRef<Map<string, number>>(new Map());
-
-  useEffect(() => {
-    const timers = copiedTimersRef.current;
-    return () => {
-      for (const timer of timers.values()) {
-        window.clearTimeout(timer);
-      }
-      timers.clear();
-    };
-  }, []);
 
   const todayStr = useMemo(() => getLocalDateString(), []);
   const trimmedQuery = normalizeFoodSearchQuery(query);
@@ -120,22 +109,7 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
         if (result.entry) {
           onEntrySaved?.(result.entry);
         }
-        setCopiedIds((prev) => new Set([...prev, entry.id]));
-        const existingTimer = copiedTimersRef.current.get(entry.id);
-        if (existingTimer !== undefined) {
-          window.clearTimeout(existingTimer);
-        }
-        copiedTimersRef.current.set(
-          entry.id,
-          window.setTimeout(() => {
-            copiedTimersRef.current.delete(entry.id);
-            setCopiedIds((prev) => {
-              const next = new Set(prev);
-              next.delete(entry.id);
-              return next;
-            });
-          }, 2500),
-        );
+        flashCopied(entry.id);
         return;
       }
 
@@ -190,7 +164,6 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
       title="Search History"
       onClose={onClose}
     >
-        {/* Search input */}
         <div className="relative mb-4">
           <div className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[var(--color-muted)]">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
@@ -213,21 +186,18 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
           )}
         </div>
 
-        {/* Error */}
         {visibleError && (
           <p className="mb-3 rounded-xl border border-[var(--color-danger)]/20 bg-[var(--color-danger)]/8 px-3 py-2 text-sm text-[var(--color-danger)]">
             {visibleError}
           </p>
         )}
 
-        {/* Prompt state */}
         {!trimmedQuery && (
           <p className="py-4 text-center text-sm text-[var(--color-muted)]">
             Type to search across all your logged days.
           </p>
         )}
 
-        {/* No results */}
         {shouldShowNoResults && (
           <p className="py-4 text-center text-sm text-[var(--color-muted)]">
             No food items found for &ldquo;{query}&rdquo;.
@@ -265,7 +235,6 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
           </div>
         )}
 
-        {/* Results */}
         {visibleResults.length > 0 && (
           <div className="space-y-2">
             {visibleResults.map((entry) => {
@@ -277,7 +246,6 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
                   key={entry.id}
                   className="flex items-center gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-card-subtle)] px-3 py-2.5"
                 >
-                  {/* Food info */}
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-sm font-semibold text-[var(--color-ink)]">
                       {entry.label}
@@ -293,7 +261,6 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
                     </div>
                   </div>
 
-                  {/* Action buttons */}
                   <div className="flex shrink-0 flex-col gap-1.5">
                     <button
                       type="button"

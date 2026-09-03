@@ -112,22 +112,6 @@ describe("calculateMacroTargets", () => {
   });
 
   // Exercises the "gain" branch of weeklyWeightChangeDirection via a surplus preset.
-  // Expected values are hand-derived from lib/macro-calculator.ts:
-  //   bmr (male) = 10*weightKg + 6.25*heightCm - 5*age + 5
-  //              = 10*70 + 6.25*175 - 5*25 + 5 = 1673.75 -> round -> 1674
-  //   tdee = round(bmr * activityMultiplier[light=1.375])
-  //        = round(1673.75 * 1.375) = round(2301.406..) = 2301
-  //   lean_bulk preset: calorieAdjustmentKcal=+250, proteinTargetGPerKg=1.6,
-  //     macroSplit { carbs: 0.65, fat: 0.35 }
-  //   rawTargetCalories = 2301 + 250 = 2551
-  //   BMI-25 reference weight = 25 * 1.75^2 = 76.5625kg; 70kg is under that,
-  //     so protein reference weight is the actual body weight (70kg, "actual").
-  //   proteinG = round1(70 * 1.6) = 112 -> proteinCalories = 448
-  //   targetCalories = max(2551, ceil(448)) = 2551
-  //   remainingCalories = 2551 - 448 = 2103
-  //   carbsG = round1((2103*0.65)/4) = round1(1366.95/4) = round1(341.7375) = 341.7
-  //   fatG = round1((2103*0.35)/9) = round1(736.05/9) = round1(81.7833..) = 81.8
-  //   weeklyWeightChangeEstimateKg = round1(abs(250)*7/7700) = round1(0.22727..) = 0.2
   it("calculates lean bulk (surplus) targets and reports a gain direction", () => {
     const result = calculateMacroTargets({
       sex: "male",
