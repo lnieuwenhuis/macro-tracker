@@ -33,15 +33,10 @@ const migrationFiles = [
   "0019_meal_entries_healthkit_sync.sql",
 ] as const;
 
-/** Index of `0013_deduplicate_default_meal_groups.sql`, which several tests
- * apply by hand after seeding the state it is expected to repair. */
+// Index of `0013_deduplicate_default_meal_groups.sql`, applied by hand in several tests.
 const DEDUPLICATE_DEFAULT_MEAL_GROUPS_INDEX = 13;
 
-/**
- * Materialise a migrations folder holding only the first `count` migrations,
- * copying the real journal entries verbatim so a later run against the full
- * folder resumes from the correct point instead of replaying them.
- */
+// Copies the real journal entries verbatim so a later full-folder run resumes correctly.
 async function createPartialMigrationsFolder(count: number) {
   const folder = await mkdtemp(join(tmpdir(), "macro-tracker-partial-migrations-"));
   await mkdir(join(folder, "meta"));
@@ -352,8 +347,7 @@ describe("database migrations", () => {
     partialMigrationsDir = await createPartialMigrationsFolder(11);
     runtime = await createDatabaseRuntime(connectionString);
 
-    // Migrate through 0010 with the real migrator so the follow-up run resumes
-    // from recorded state, exercising the same path production upgrades take.
+    // Uses the real migrator so the follow-up run resumes as production upgrades would.
     await migrateDatabase(runtime, partialMigrationsDir);
 
     await runtime.db.execute(sql.raw(`
@@ -417,8 +411,7 @@ describe("database migrations", () => {
         )
     `));
 
-    // 0011 adds the active-global-barcode unique index, so it must dedupe the
-    // rows above before the index can be created.
+    // 0011's unique index requires the rows above to be deduped first.
     await migrateDatabase(runtime);
 
     const productResult = await runtime.db.execute<{
@@ -593,11 +586,7 @@ describe("database migrations", () => {
   it("enforces the enum CHECK constraints for new writes without invalidating pre-existing rows (DB-09)", async () => {
     runtime = await createDatabaseRuntime("memory:");
 
-    // Apply everything up to (not including) 0016 so an out-of-union row can
-    // be seeded exactly the way it could already exist in a production
-    // database the CHECK constraint migration runs against. Sliced by index,
-    // not `slice(0, -1)`: appending a later migration to `migrationFiles`
-    // must not silently apply 0016 here and break the seed insert.
+    // Sliced by index, not `slice(0, -1)`, so appending a migration later can't silently apply 0016 here.
     const enumCheckMigrationIndex = migrationFiles.indexOf(
       "0016_enum_check_constraints.sql",
     );
@@ -617,8 +606,7 @@ describe("database migrations", () => {
       VALUES ('${legacyTemplateId}', '${userId}', 'not_a_real_type', 'Legacy template')
     `));
 
-    // Migration 0016 must apply cleanly even though the row above violates
-    // the constraint it adds -- that's the point of NOT VALID.
+    // NOT VALID lets 0016 apply cleanly despite the row above violating the new constraint.
     await applyMigration(runtime, "0016_enum_check_constraints.sql");
 
     const legacyRow = await runtime.db.execute<{ type: string }>(sql.raw(`
@@ -682,14 +670,14 @@ describe("database migrations", () => {
       `)),
     ).rejects.toThrow();
 
-    // 23:00 until midnight is representable (end_minute = 1440)...
+    // end_minute = 1440 (23:00 until midnight) is representable.
     await runtime.db.execute(sql.raw(`
       INSERT INTO "gym_slots" (
         "id", "user_id", "title", "recurrence", "weekday", "start_minute", "end_minute"
       )
       VALUES ('c6666666-6666-4666-8666-666666666666', '${requesterId}', 'Night lift', 'weekly', 1, 1380, 1440)
     `));
-    // ...but an overnight slot is not.
+    // An overnight slot (end before start) is not representable.
     await expect(
       runtime.db.execute(sql.raw(`
         INSERT INTO "gym_slots" (
@@ -716,8 +704,7 @@ describe("database migrations", () => {
   it("backfills invite identifiers and enforces friend-code uniqueness (0018)", async () => {
     runtime = await createDatabaseRuntime("memory:");
 
-    // Apply everything before 0018 so a pre-existing email invite can be
-    // seeded the way production rows exist, then let 0018 backfill it.
+    // Seeds a pre-existing email invite the way production rows exist, then lets 0018 backfill it.
     const friendCodeMigrationIndex = migrationFiles.indexOf(
       "0018_gym_friend_codes.sql",
     );
@@ -740,8 +727,7 @@ describe("database migrations", () => {
 
     await applyMigration(runtime, "0018_gym_friend_codes.sql");
 
-    // Pre-existing invites were all made by email, so the backfill must echo
-    // the addressee's email as the invite identifier.
+    // Pre-existing invites were all made by email, so the backfill echoes the addressee's email.
     const backfilled = await runtime.db.execute<{ invite_identifier: string }>(sql.raw(`
       SELECT "invite_identifier" FROM "gym_buddies"
       WHERE "id" = 'd3333333-3333-4333-8333-333333333333'
@@ -873,9 +859,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PostgreSQL migration regression
       await migrationPool.query(
         "DROP SCHEMA public CASCADE; DROP SCHEMA IF EXISTS drizzle CASCADE; DROP EXTENSION IF EXISTS pg_trgm; CREATE SCHEMA public",
       );
-      // Everything except 0014 (applied below, manually, under the
-      // restricted role) and everything after it, which was added later and
-      // is irrelevant to this trigram-specific regression.
+      // 0014 is applied below, manually, under the restricted role; later migrations are irrelevant here.
       const trigramMigrationIndex = migrationFiles.indexOf(
         "0014_food_product_search_trigram.sql",
       );
@@ -1083,8 +1067,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PostgreSQL migration regression
     }
 
     const previousPoolMax = process.env.POSTGRES_POOL_MAX;
-    // Force a single physical connection so the connection the migration ran
-    // on is the same one we inspect afterwards.
+    // Forces a single physical connection so the one we inspect is the one the migration ran on.
     process.env.POSTGRES_POOL_MAX = "1";
 
     const postgresRuntime = await createDatabaseRuntime(databaseUrl);
@@ -1097,9 +1080,8 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PostgreSQL migration regression
 
       await migrateDatabase(postgresRuntime);
 
-      // The pool has exactly one physical connection (POSTGRES_POOL_MAX=1),
-      // and `SET` (not `SET LOCAL`) persists for the life of the session, so
-      // this reconnect observes the settings the migration itself ran with.
+      // `SET` (not `SET LOCAL`) persists for the session, so this reconnect on the
+      // single pooled connection (POSTGRES_POOL_MAX=1) sees the migration's settings.
       const lockTimeoutResult = await postgresRuntime.migrationPool?.query<{
         lock_timeout: string;
       }>("SHOW lock_timeout");
@@ -1144,8 +1126,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PostgreSQL migration regression
       if (!holderClient) {
         throw new Error("Expected a migration pool connection");
       }
-      // Simulate a hung previous migration: it holds the advisory lock and
-      // never releases it.
+      // Simulates a hung previous migration holding the advisory lock forever.
       await holderClient.query("SELECT pg_advisory_lock(1836027411)");
 
       try {
@@ -1153,9 +1134,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PostgreSQL migration regression
         await expect(migrateDatabase(contendingRuntime)).rejects.toThrow(
           /Timed out after 1500ms waiting for the database migration advisory lock/,
         );
-        // Bounded: must not have hung anywhere near "forever". Generous
-        // upper bound to absorb CI scheduling jitter around the 1s retry
-        // interval.
+        // Generous bound to absorb CI jitter, not an assertion of exact timing.
         expect(Date.now() - start).toBeLessThan(10_000);
       } finally {
         await holderClient.query("SELECT pg_advisory_unlock(1836027411)");
@@ -1306,9 +1285,8 @@ describe("migration tooling invariants", () => {
   );
 
   it("does not offer db:generate now that migrations 0005+ are hand-authored (DB-01)", () => {
-    // `meta/` only has snapshots for 0000-0004 while the journal has many
-    // more entries; `drizzle-kit generate` would diff schema.ts against that
-    // stale 0004 baseline and emit a destructive migration. See MIGRATIONS.md.
+    // `meta/` snapshots stop at 0004; `drizzle-kit generate` would diff against that
+    // stale baseline and emit a destructive migration. See MIGRATIONS.md.
     const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
       scripts?: Record<string, string>;
     };
