@@ -2860,6 +2860,110 @@ async fn stats_page_reports_the_same_streaks_as_the_leaderboard() {
     test_db.cleanup().await;
 }
 
+// The projections in `db/sql.rs` define wire-visible JSON shapes that several
+// queries share, so drift here is a silent contract break in every one of them.
+#[test]
+fn shared_sql_fragments_render_unchanged() {
+    const FOOD_PRODUCT_FIELDS: &str = r#"'id', fp.id,
+          'ownerUserId', fp.owner_user_id,
+          'scope', fp.scope,
+          'source', fp.source,
+          'barcode', fp.barcode,
+          'name', fp.name,
+          'brand', fp.brand,
+          'defaultServingQuantity', fp.default_serving_quantity::float8,
+          'defaultServingUnit', fp.default_serving_unit,
+          'proteinPer100', fp.protein_per_100::float8,
+          'carbsPer100', fp.carbs_per_100::float8,
+          'fatPer100', fp.fat_per_100::float8,
+          'caloriesPer100', fp.calories_per_100,
+          'servingWeightG', fp.serving_weight_g::float8,
+          'servingVolumeMl', fp.serving_volume_ml::float8,
+          'submittedByUserId', fp.submitted_by_user_id,
+          'deletedByUserId', fp.deleted_by_user_id,
+          'sourceProvider', fp.source_provider,
+          'sourceConfidence', fp.source_confidence::float8,
+          'sourceMetadata', fp.source_metadata,
+          'correctedFromProductId', fp.corrected_from_product_id,
+          'createdAt', fp.created_at,
+          'updatedAt', fp.updated_at,
+          'deletedAt', fp.deleted_at"#;
+
+    const MEAL_ENTRY_FIELDS: &str = r#"'id', me.id,
+          'userId', me.user_id,
+          'date', me.entry_date,
+          'mealGroupId', me.meal_group_id,
+          'status', me.status,
+          'productId', CASE WHEN fp.id IS NULL THEN NULL ELSE me.product_id END,
+          'label', me.label,
+          'sortOrder', me.sort_order,
+          'quantity', me.quantity::float8,
+          'unit', me.unit,
+          'servingMultiplier', me.serving_multiplier::float8,
+          'proteinG', me.protein_g::float8,
+          'carbsG', me.carbs_g::float8,
+          'fatG', me.fat_g::float8,
+          'caloriesKcal', me.calories_kcal,
+          'clientMutationId', me.client_mutation_id,
+          'sourceLabel', fp.name"#;
+
+    const ADMIN_AUDIT_EVENT_FIELDS: &str = r#"'id', ae.id,
+          'actorUserId', ae.actor_user_id,
+          'actorEmail', u.email,
+          'actorDisplayName', u.display_name,
+          'actorRole', ae.actor_role,
+          'action', ae.action,
+          'targetType', ae.target_type,
+          'targetId', ae.target_id,
+          'details', ae.details_json,
+          'createdAt', ae.created_at"#;
+
+    assert_eq!(sql::food_product_fields("fp."), FOOD_PRODUCT_FIELDS);
+    assert_eq!(
+        sql::food_product_fields(""),
+        FOOD_PRODUCT_FIELDS.replace("fp.", "")
+    );
+
+    assert_eq!(sql::meal_entry_fields("me."), MEAL_ENTRY_FIELDS);
+    for qualifier in ["matches.", "recent."] {
+        assert_eq!(
+            sql::meal_entry_fields(qualifier),
+            MEAL_ENTRY_FIELDS.replace("me.", qualifier)
+        );
+    }
+
+    assert_eq!(sql::admin_audit_event_fields(), ADMIN_AUDIT_EVENT_FIELDS);
+
+    assert_eq!(
+        sql::INSERT_MEAL_ENTRY,
+        r#"
+        INSERT INTO meal_entries (
+          id, user_id, entry_date, meal_group_id, status, product_id, label,
+          sort_order, quantity, unit, serving_multiplier, protein_g, carbs_g,
+          fat_g, calories_kcal, client_mutation_id
+        )
+        VALUES (
+          $1, $2, $3::date, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
+        )
+        ON CONFLICT (user_id, client_mutation_id) DO NOTHING
+        RETURNING id
+        "#
+    );
+
+    assert_eq!(
+        sql::INSERT_FOOD_PRODUCT_COLUMNS,
+        r#"
+        INSERT INTO food_products (
+          id, owner_user_id, scope, source, barcode, name, brand,
+          default_serving_quantity, default_serving_unit, protein_per_100,
+          carbs_per_100, fat_per_100, calories_per_100, serving_weight_g,
+          serving_volume_ml, submitted_by_user_id, source_provider,
+          source_confidence, source_metadata, corrected_from_product_id,
+          updated_at
+        )"#
+    );
+}
+
 mod api_tokens;
 mod gym;
 mod weight;

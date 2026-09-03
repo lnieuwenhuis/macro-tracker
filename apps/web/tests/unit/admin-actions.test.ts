@@ -2,10 +2,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocked = vi.hoisted(() => ({
   createAdminBarcodeProduct: vi.fn(),
-  restoreAdminBarcodeProduct: vi.fn(),
-  setUserRole: vi.fn(),
-  softDeleteAdminBarcodeProduct: vi.fn(),
-  updateAdminBarcodeProduct: vi.fn(),
   revalidatePath: vi.fn(),
   redirect: vi.fn((url: string) => {
     throw new Error(`redirect:${url}`);
@@ -14,13 +10,7 @@ const mocked = vi.hoisted(() => ({
   requireOwnerUser: vi.fn(),
 }));
 
-vi.mock("@macro-tracker/db", () => ({
-  createAdminBarcodeProduct: mocked.createAdminBarcodeProduct,
-  restoreAdminBarcodeProduct: mocked.restoreAdminBarcodeProduct,
-  setUserRole: mocked.setUserRole,
-  softDeleteAdminBarcodeProduct: mocked.softDeleteAdminBarcodeProduct,
-  updateAdminBarcodeProduct: mocked.updateAdminBarcodeProduct,
-}));
+vi.mock("@macro-tracker/db", async () => (await import("./helpers/mock-db")).mockDbModule(mocked));
 
 vi.mock("@/lib/auth", () => ({
   requireAdminUser: mocked.requireAdminUser,
