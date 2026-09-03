@@ -1,13 +1,7 @@
 /**
  * @vitest-environment jsdom
  *
- * UI-03: the overflow menu declared `role="menu"`/`role="menuitem"` but had
- * no Escape handler and no outside-click dismissal -- a keyboard or
- * screen-reader user could only close it by clicking the trigger again or
- * picking an item. The fix reuses `useDismissableLayer` from
- * `overlay-portal.tsx`, the same hook every other dropdown in this codebase
- * (e.g. `add-food-button.tsx`) already uses for Escape + outside-pointerdown
- * dismissal.
+ * The overflow menu must dismiss on Escape and on an outside pointerdown.
  */
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";

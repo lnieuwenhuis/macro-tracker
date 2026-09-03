@@ -63,8 +63,7 @@ describe("GET /api/auth/logout", () => {
     });
   });
 
-  // `SameSite=Lax` sends the session cookie on a top-level navigation, so
-  // without a gate any site could sign a user out by linking here.
+  // SameSite=Lax still sends the cookie on a top-level nav, so a CSRF gate is required here too.
   it.each([
     ["a cross-site navigation", { headers: { "sec-fetch-site": "cross-site" } }],
     ["a request with no origin signal at all", { omit: ["sec-fetch-site"] }],
@@ -72,8 +71,7 @@ describe("GET /api/auth/logout", () => {
     const response = await GET(logoutRequest("trusted.example", overrides));
 
     expect(mocked.clearSessionCookie).not.toHaveBeenCalled();
-    // Still lands on /login rather than erroring, so the genuine expiry
-    // redirect cannot dead-end or loop.
+    // Must land on /login, not error, so the genuine expiry redirect cannot dead-end or loop.
     expect(response.headers.get("location")).toContain("/login");
   });
 

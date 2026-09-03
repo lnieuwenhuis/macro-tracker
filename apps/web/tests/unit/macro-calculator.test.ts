@@ -111,10 +111,7 @@ describe("calculateMacroTargets", () => {
     });
   });
 
-  // TEST-06: every other case above drives a "loss" (cut) preset. This case
-  // exercises "lean_bulk" (a surplus preset) so the "gain" branch of
-  // `weeklyWeightChangeDirection` and the surplus arithmetic get coverage.
-  //
+  // Exercises the "gain" branch of weeklyWeightChangeDirection via a surplus preset.
   // Expected values are hand-derived from lib/macro-calculator.ts:
   //   bmr (male) = 10*weightKg + 6.25*heightCm - 5*age + 5
   //              = 10*70 + 6.25*175 - 5*25 + 5 = 1673.75 -> round -> 1674

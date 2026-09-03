@@ -201,10 +201,7 @@ describe("server actions", () => {
   });
 
   it("forwards the recipe idempotency key so a double-tap dedupes", async () => {
-    // The backend dedupes on a unique index over a NULLABLE
-    // `client_mutation_id`, and multiple NULLs do not collide — so a recipe log
-    // that omits the key is exactly the double-write `client-mutation-id` was
-    // added to prevent.
+    // The dedupe index is over a nullable client_mutation_id, and NULLs never collide.
     mocked.getRecipeById.mockResolvedValue({
       id: "recipe-1",
       userId: "user-1",

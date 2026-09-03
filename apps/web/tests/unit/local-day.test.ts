@@ -3,11 +3,7 @@ import { buildRecipePortionMealEntryInput } from "@/lib/recipe-portion";
 import type { RecipeRecord } from "@macro-tracker/db";
 import { afterEach, describe, expect, it } from "vitest";
 
-/**
- * CI runs in UTC, so every timezone bug in this app used to pass by
- * construction. These tests pin `process.env.TZ` to zones on either side of
- * UTC and assert the day boundary each one produces.
- */
+// Pins process.env.TZ to zones on either side of UTC, since CI itself runs in UTC.
 const originalTz = process.env.TZ;
 
 function withTimeZone<T>(timeZone: string, run: () => T): T {
@@ -88,8 +84,6 @@ describe("buildRecipePortionMealEntryInput", () => {
   } as unknown as RecipeRecord;
 
   it("uses the caller's status verbatim rather than re-deriving it", () => {
-    // The whole point of the fix: a user in UTC+13 logging at 09:00 local sends
-    // tomorrow's date by the server's reckoning, and it must still be "eaten".
     const input = buildRecipePortionMealEntryInput({
       date: "2026-01-15",
       gramsConsumed: null,

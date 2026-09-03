@@ -1,18 +1,5 @@
 /**
  * @vitest-environment jsdom
- *
- * TEST-02: `api-token-actions.test.ts` mocks `ApiSettingsClient` out
- * entirely (`ApiSettingsClient: () => null`), so the one surface where a raw
- * API token secret is shown -- exactly once -- had no coverage at any level.
- *
- * A second auditor read `components/api-settings-client.tsx` and found it
- * correct: the raw token only ever lives in `useActionState`'s `state.token`,
- * which is replaced (and so cleared) by the *next* `createApiTokenAction`
- * result -- success or failure -- and is never written to localStorage, a
- * URL, or a log. This test renders the real component against a real test
- * database and proves that guarantee holds at runtime: create -> reveal
- * once -> the secret is gone as soon as another action result lands, and
- * revoking the token (a real, DB-backed action) never brings it back.
  */
 import { randomUUID } from "node:crypto";
 
@@ -38,15 +25,9 @@ vi.mock("next/cache", () => ({
 
 import { ApiSettingsClient } from "@/components/api-settings-client";
 
-// `upsertUserFromShooProfile`/`listApiTokens`/etc. from `@macro-tracker/db`
-// go over the backend RPC client (BACKEND_URL/BACKEND_INTERNAL_SECRET), not a
-// local drizzle connection -- so no `DatabaseRuntime` is needed to call them.
-// A raw `pg` pool (mirroring `tests/e2e/global-setup.ts`) is only needed here
-// to truncate between tests. `@macro-tracker/db/testing`'s `createTestDatabase`
-// is deliberately avoided: it resolves its migrations folder from
-// `import.meta.url` via a dynamic `import()`, which Vite/Vitest resolve
-// against the jsdom document location (not the filesystem) in this
-// environment, and this file needs `jsdom` to render with Testing Library.
+// `createTestDatabase` is avoided here: it resolves migrations via
+// `import.meta.url`, which Vitest resolves against the jsdom document
+// location, not the filesystem, in this environment.
 let pool: Pool;
 
 beforeAll(() => {
@@ -92,14 +73,9 @@ describe("ApiSettingsClient", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Create token" }));
 
-    // Scoped to the "New token" reveal section: the token list below also
-    // renders each token's (truncated) `tokenPrefix`, which matches the same
-    // "mtk_v1_<hex>" shape and would otherwise make this query ambiguous.
-    //
-    // The reveal `<section>` itself does not unmount between two successful
-    // creations (only its text content changes), so this must wait for the
-    // *content* to update rather than just for the section to appear --
-    // otherwise it can observe the still-present previous reveal.
+    // Scoped to the reveal section, since the token list below also renders
+    // truncated prefixes matching the same shape; waits for the content to
+    // change since the section itself persists across creations.
     const secret = await waitFor(() => {
       const revealHeading = screen.getByText("New token");
       const revealSection = revealHeading.closest("section");
@@ -125,18 +101,16 @@ describe("ApiSettingsClient", () => {
       screen.getByText("Copy this now. It will not be shown again."),
     ).not.toBeNull();
 
-    // Creating a second token replaces `state.token` -- the only place the
-    // raw secret ever lives -- with the new result. The first secret must be
-    // gone from the DOM, not just visually superseded.
+    // Creating a second token replaces `state.token` with the new result;
+    // the first secret must be gone from the DOM, not just superseded.
     const secretB = await createTokenThroughForm("Shortcut B", secretA);
     expect(secretB).toMatch(/^mtk_v1_/);
     expect(secretB).not.toBe(secretA);
     expect(screen.queryByText(secretA)).toBeNull();
-    // Only one "New token" reveal section is ever on screen at a time.
     expect(screen.getAllByText("New token")).toHaveLength(1);
 
-    // A *failing* action result also clears the previously revealed secret,
-    // since `state.token` is only ever set on a successful creation.
+    // `state.token` is only ever set on a successful creation, so a failing
+    // action result also clears the previously revealed secret.
     fireEvent.change(screen.getByLabelText("Token name"), {
       target: { value: "   " },
     });
@@ -145,8 +119,6 @@ describe("ApiSettingsClient", () => {
     expect(screen.queryByText(secretB)).toBeNull();
     expect(screen.queryByText("New token")).toBeNull();
 
-    // The raw secrets were never persisted anywhere the server can read back
-    // -- the DB only ever has the hashed/prefixed record.
     const stored = await listApiTokens(mocked.userId);
     expect(stored).toHaveLength(2);
     for (const record of stored) {
@@ -162,9 +134,8 @@ describe("ApiSettingsClient", () => {
     const [createdRecord] = await listApiTokens(mocked.userId);
     expect(createdRecord?.revokedAt).toBeNull();
 
-    // The revoke form only carries a hidden `tokenId` field -- confirm the
-    // raw secret never appears anywhere outside the one-time reveal box, in
-    // particular not inside the revoke form itself.
+    // The revoke form only carries a hidden `tokenId` field; confirm the raw
+    // secret never leaks into it.
     const revokeForm = screen.getByRole("button", { name: "Revoke" }).closest("form");
     if (!revokeForm) {
       throw new Error("Expected a revoke form.");
@@ -183,11 +154,8 @@ describe("ApiSettingsClient", () => {
       expect(revoked?.revokedAt).toBeTruthy();
     });
 
-    // Revoking runs through an entirely separate server action from the one
-    // that revealed the secret (`useActionState(createApiTokenAction, ...)`)
-    // and must not cause it to be shown again: the secret must still appear
-    // exactly once (the original, untouched reveal), never duplicated into
-    // the token list row (which only ever shows the truncated prefix).
+    // Revoking runs through a separate server action from the one that
+    // revealed the secret and must not cause it to be shown again.
     expect(screen.getAllByText(secret)).toHaveLength(1);
     const tokenArticle = screen.getByText("Shortcut").closest("article");
     if (!tokenArticle) {

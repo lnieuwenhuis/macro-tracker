@@ -57,8 +57,7 @@ describe("admin server actions", () => {
   }
 
   it("surfaces the backend duplicate-barcode conflict message", async () => {
-    // The Rust backend masks the raw constraint name and returns a typed
-    // conflict, so the mapping has to key off `error.code`.
+    // The backend masks the raw constraint name, so the mapping keys off error.code.
     mocked.createAdminBarcodeProduct.mockRejectedValue(
       backendError("conflict", "That barcode already exists."),
     );

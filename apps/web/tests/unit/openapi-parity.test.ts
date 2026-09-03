@@ -20,11 +20,7 @@ async function readGeneratedContract() {
   };
 }
 
-/**
- * The backend serves the generated artifact while the docs page renders from
- * `API_V1_ENDPOINTS`. Nothing forces the two to agree, so pin the properties
- * the docs actually claim about each endpoint.
- */
+// Nothing forces API_V1_ENDPOINTS to agree with the generated backend contract; pin it here.
 describe("generated API v1 contract", () => {
   it("covers exactly the endpoints and methods the docs table advertises", async () => {
     const { paths } = await readGeneratedContract();
