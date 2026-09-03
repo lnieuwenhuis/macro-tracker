@@ -1,8 +1,5 @@
 //! Gym schedule sharing: slots, per-date statuses, buddies and overlaps.
-//!
-//! Extracted verbatim from `db.rs` (godfiles audit, step 3). The RPC
-//! dispatch arms stay in `db.rs`. The authorization and lock-ordering
-//! invariants documented below move with the code they protect.
+//! Buddy visibility is read-only; every write predicate carries the caller's ownership.
 
 use super::{MAX_TEXT_FIELD_LENGTH, ensure_date_string, ensure_text_length};
 use crate::errors::{AppError, AppResult};
@@ -12,37 +9,17 @@ use sqlx::{PgPool, Postgres, Row};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-// ---------------------------------------------------------------------------
-// Gym schedule sharing
-//
-// This is the app's first cross-user surface, so the authorization invariants
-// are load-bearing:
-//   * Buddy visibility is READ-ONLY - no op mutates another user's rows, and
-//     every write predicate carries the caller's ownership.
-//   * Every cross-user read goes through the accepted_buddies CTE below so the
-//     "is an accepted buddy" predicate cannot be forgotten in one op.
-//   * Lock-ordering contract (deadlock prevention): resolve the target user id
-//     FIRST, take the per-user advisory locks for all involved parties in
-//     ascending user-id order as the first lock-taking statements of the
-//     transaction, and only then take any FOR UPDATE / row write on
-//     gym_buddies. Never acquire an advisory lock while already holding a
-//     gym_buddies row lock.
-// ---------------------------------------------------------------------------
-
 const GYM_SLOT_STATUS_VALUES: &[&str] = &["going", "maybe", "skipped", "done"];
 const GYM_MAX_SLOTS_PER_USER: i64 = 50;
 const GYM_MAX_PENDING_OUTGOING_INVITES: i64 = 20;
 const GYM_MAX_ACCEPTED_BUDDIES: i64 = 100;
-/// Bounds how far from today a per-date status may be written; the format
-/// check alone would accept `9999-12-31` and allow unbounded row growth.
+/// Bounds how far a status write may be from today; the date-format check alone allows `9999-12-31`.
 const GYM_STATUS_DATE_WINDOW_DAYS: i64 = 400;
 const GYM_MAX_TITLE_LENGTH: usize = 100;
 const GYM_MAX_OVERLAP_BUDDIES: usize = 20;
 const GYM_MAX_OVERLAP_WINDOWS_PER_BUDDY: usize = 3;
 
-/// The one shared "who are my accepted buddies" predicate. `LIMIT 120` sits
-/// strictly ABOVE the enforced cap of 100 with a deterministic order, so a cap
-/// overshoot can never silently drop a different buddy per response.
+/// Every cross-user read builds on this CTE; `LIMIT 120` sits above the cap of 100 so overshoot never drops a buddy.
 macro_rules! gym_accepted_buddies_cte {
     () => {
         r#"
@@ -63,9 +40,7 @@ macro_rules! gym_accepted_buddies_cte {
     };
 }
 
-/// Resolves which slots occur on `$2::date` for the caller ($1) and their
-/// accepted buddies, with the effective per-date status (`'going'` when no
-/// gym_slot_statuses row exists). Requires the accepted_buddies CTE first.
+/// Slots occurring on `$2::date` for the caller ($1) and accepted buddies; requires the accepted_buddies CTE first.
 macro_rules! gym_resolved_slots_cte {
     () => {
         r#"
@@ -95,9 +70,7 @@ macro_rules! gym_resolved_slots_cte {
     };
 }
 
-/// Raw pairwise overlap rows (>= 30 shared minutes) between the caller's and
-/// each buddy's resolved slots; merged into per-buddy windows in Rust by
-/// `gym_merge_overlaps`. Buddy projection deliberately excludes `description`.
+/// Raw pairwise overlap rows (>=30 min), merged into windows by `gym_merge_overlaps`; buddy rows omit `description`.
 macro_rules! gym_overlap_rows_sql {
     () => {
         concat!(
@@ -155,15 +128,11 @@ pub(super) fn ensure_gym_status(value: &str) -> AppResult<()> {
     }
 }
 
-/// No 0/O, 1/I/L: friend codes are read aloud and typed back, so every
-/// character must be unambiguous. 31^8 ≈ 8.5e11 codes — unguessable enough
-/// that the code path (unlike the email path) is not an account oracle.
+/// Excludes 0/O/1/I/L (read aloud and typed back); 31^8 ≈ 8.5e11 codes, unguessable unlike the email lookup path.
 pub(super) const GYM_FRIEND_CODE_ALPHABET: &[u8] = b"23456789ABCDEFGHJKMNPQRSTUVWXYZ";
 pub(super) const GYM_FRIEND_CODE_LENGTH: usize = 8;
 
-/// UUIDv4 as the entropy source — the same idiom `create_api_token_json`
-/// uses, so no new dependency. The modulo bias (~3% per char) is irrelevant
-/// for a shareable identifier whose only property is non-guessability.
+/// Uses UUIDv4 bytes for entropy, same idiom as `create_api_token_json`; modulo bias is irrelevant here.
 pub(super) fn generate_gym_friend_code() -> String {
     Uuid::new_v4()
         .as_bytes()
@@ -180,9 +149,6 @@ pub(super) enum GymInviteIdentifier {
     FriendCode(String),
 }
 
-/// An '@' anywhere means email (lowercased); otherwise the input is treated
-/// as a friend code — uppercased with separators stripped, so "ab23-cd45",
-/// "AB23 CD45" and "ab23cd45" all resolve to the same stored code.
 pub(super) fn classify_gym_invite_identifier(raw: &str) -> AppResult<GymInviteIdentifier> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -207,10 +173,7 @@ pub(super) fn classify_gym_invite_identifier(raw: &str) -> AppResult<GymInviteId
     Ok(GymInviteIdentifier::FriendCode(code))
 }
 
-/// Returns the user's static friend code, generating it on first use. The
-/// guarded UPDATE (`WHERE friend_code IS NULL`) makes concurrent generation
-/// settle on one winner, and the partial unique index turns the astronomically
-/// unlikely cross-user collision into a retry.
+/// The guarded UPDATE settles concurrent first use on one winner; the unique index turns a race into a retry.
 async fn ensure_gym_friend_code(pool: &PgPool, user_id: Uuid) -> AppResult<String> {
     let existing: Option<Option<String>> =
         sqlx::query_scalar("SELECT friend_code FROM users WHERE id = $1")
@@ -344,9 +307,7 @@ pub(super) fn gym_slot_values(input: &serde_json::Map<String, Value>) -> AppResu
     })
 }
 
-/// Per-user advisory locks serializing the count-guarded cap checks (a
-/// count-guard alone is not race-free under READ COMMITTED). Locks are always
-/// taken in ascending user-id order, before any gym_buddies row lock.
+/// Deadlock-free by construction: locks are taken in ascending user-id order, before any row lock.
 async fn gym_advisory_lock(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     mut user_ids: Vec<Uuid>,
@@ -362,8 +323,7 @@ async fn gym_advisory_lock(
     Ok(())
 }
 
-/// Backstop for the pair-unique index: without this a concurrent duplicate
-/// invite would surface as a 500 `internal_error` instead of a Conflict.
+/// Backstop for the pair-unique index; without it a duplicate invite race surfaces as a 500 instead of a Conflict.
 fn gym_conflict_on_unique_violation(error: sqlx::Error, message: &str) -> AppError {
     if let sqlx::Error::Database(database_error) = &error
         && database_error.code().as_deref() == Some("23505")
@@ -507,9 +467,7 @@ pub(super) async fn update_gym_slot_json(
     .await?;
     let data: Value = row.try_get("data")?;
 
-    // Statuses are keyed to concrete dates. When the slot moves to another
-    // day they would match no occurrence - and silently resurrect as current
-    // truth if the slot ever moved back - so they must not survive the move.
+    // Statuses are keyed to concrete dates; they must not survive a move or they'd resurrect if it moved back.
     if existing_date != values.slot_date || existing_weekday != values.weekday {
         sqlx::query("DELETE FROM gym_slot_statuses WHERE slot_id = $1")
             .bind(slot_id)
@@ -554,9 +512,7 @@ pub(super) async fn set_gym_slot_status_json(
         ));
     }
 
-    // Ownership and occurrence checks live INSIDE the insert-from-select: the
-    // slot ids of buddies' slots are handed to every client, so a bare upsert
-    // keyed only on slot_id would be a cross-user write primitive.
+    // Ownership and occurrence checks live inside the insert-from-select; buddy slot ids are visible to every client.
     let row = sqlx::query(
         r#"
         INSERT INTO gym_slot_statuses (id, slot_id, status_date, status)
@@ -597,10 +553,7 @@ pub(super) async fn invite_gym_buddy_json(
     identifier: &str,
 ) -> AppResult<Value> {
     let identifier = classify_gym_invite_identifier(identifier)?;
-    // The email path is a clear miss/hit answer and therefore an
-    // account-existence oracle — accepted risk (documented in the feature
-    // plan) at this app's scale. The friend-code path is NOT: codes are
-    // 31^8 random, so a miss reveals nothing enumerable.
+    // The email path is an accepted account-existence oracle at this scale; the friend-code path is not (31^8 random).
     let (stored_identifier, target_id): (String, Option<Uuid>) = match &identifier {
         GymInviteIdentifier::Email(email) => (
             email.clone(),
@@ -691,8 +644,7 @@ pub(super) async fn invite_gym_buddy_json(
                 "pending" if requester_user_id == user_id => Err(AppError::Conflict(
                     "You already invited this user.".to_string(),
                 )),
-                // The other user already invited us: two people trying to pair
-                // up should not get a confusing conflict, so this accepts.
+                // The other user already invited us; two people trying to pair up should not get a confusing conflict.
                 "pending" => {
                     gym_ensure_accepted_capacity(&mut tx, user_id).await?;
                     gym_ensure_accepted_capacity(&mut tx, target_id).await?;
@@ -708,8 +660,7 @@ pub(super) async fn invite_gym_buddy_json(
                 "accepted" => Err(AppError::Conflict(
                     "You're already gym buddies with this user.".to_string(),
                 )),
-                // Neutral on purpose: a declined row is a block, and the copy
-                // must not reveal that (or who) declined.
+                // Neutral on purpose: a declined row is a block, and the copy must not reveal that (or who) declined.
                 _ => Err(AppError::Conflict(
                     "You can't invite this user right now.".to_string(),
                 )),
@@ -725,8 +676,7 @@ pub(super) async fn respond_gym_buddy_invite_json(
     accept: bool,
 ) -> AppResult<Value> {
     if !accept {
-        // Decline keeps the row as a durable block; only the decliner can
-        // remove it later (see remove_gym_buddy_json).
+        // Decline keeps the row as a durable block; only the decliner can remove it later (see remove_gym_buddy_json).
         let declined = sqlx::query(
             "UPDATE gym_buddies SET status = 'declined', updated_at = now() WHERE id = $2 AND addressee_user_id = $1 AND status = 'pending' RETURNING id",
         )
@@ -744,9 +694,7 @@ pub(super) async fn respond_gym_buddy_invite_json(
     }
 
     let mut tx = pool.begin().await?;
-    // Plain read (no FOR UPDATE) just to learn both party ids - they are
-    // immutable once a row exists, and the advisory locks must come before
-    // any row lock per the lock-ordering contract.
+    // Plain read (no FOR UPDATE): party ids are immutable once a row exists; advisory locks must precede any row lock.
     let row = sqlx::query(
         "SELECT requester_user_id, addressee_user_id FROM gym_buddies WHERE id = $2 AND addressee_user_id = $1 AND status = 'pending'",
     )
@@ -763,8 +711,7 @@ pub(super) async fn respond_gym_buddy_invite_json(
     gym_advisory_lock(&mut tx, vec![user_id, requester_user_id]).await?;
     gym_ensure_accepted_capacity(&mut tx, user_id).await?;
     gym_ensure_accepted_capacity(&mut tx, requester_user_id).await?;
-    // The guarded UPDATE re-checks ownership and state under the locks, so a
-    // concurrent cancel/decline lands on 0 rows instead of a lost update.
+    // The guarded UPDATE re-checks ownership and state under the locks, so a race lands on 0 rows, not a lost update.
     let accepted = sqlx::query(
         "UPDATE gym_buddies SET status = 'accepted', updated_at = now() WHERE id = $2 AND addressee_user_id = $1 AND status = 'pending' RETURNING id",
     )
@@ -787,11 +734,7 @@ pub(super) async fn remove_gym_buddy_json(
     user_id: Uuid,
     buddy_id: Uuid,
 ) -> AppResult<Value> {
-    // Split by status - a symmetric predicate would let the BLOCKED requester
-    // delete the declined row (e.g. via a stale "Cancel") and defeat the
-    // block. The NotFound below is also a "don't reveal the block" surface:
-    // a blocked requester's stale cancel lands here, so the copy stays
-    // neutral about why the row is gone.
+    // Split by status: a symmetric predicate lets a blocked requester delete the declined row via a stale "Cancel".
     let removed = sqlx::query(
         r#"
         DELETE FROM gym_buddies
@@ -817,11 +760,7 @@ pub(super) async fn remove_gym_buddy_json(
     Ok(json!({ "removed": true }))
 }
 
-/// Merges the raw pairwise overlap rows into at most one entry per buddy:
-/// confirmed and tentative windows merge independently (never across styles),
-/// each buddy shows at most 3 windows, buddies are ordered by their earliest
-/// window and capped at 20, and a buddy is tentative only when they have no
-/// confirmed window at all.
+/// Merges raw overlap rows into at most `GYM_MAX_OVERLAP_WINDOWS_PER_BUDDY` per buddy, confirmed/tentative separately.
 pub(super) fn gym_merge_overlaps(rows: &[Value]) -> Value {
     fn merge_windows(mut windows: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
         windows.sort_unstable();
@@ -908,8 +847,7 @@ pub(super) fn gym_merge_overlaps(rows: &[Value]) -> Value {
             "tentative": confirmed.is_empty(),
         }));
     }
-    // Raw rows arrive ordered by overlap start, so `order` (first appearance)
-    // already ranks buddies by their earliest window.
+    // Raw rows arrive ordered by overlap start, so `order` already ranks buddies by their earliest window.
     entries.truncate(GYM_MAX_OVERLAP_BUDDIES);
     Value::Array(entries)
 }
@@ -1093,8 +1031,7 @@ pub(super) async fn get_gym_home_summary_json(
     user_id: Uuid,
     date: &str,
 ) -> AppResult<Value> {
-    // One cheap probe; `/` fires several RPCs against a small pool, and the
-    // common case (no buddies) must stay near-free.
+    // One cheap probe; `/` fires several RPCs against a small pool, so the no-buddies case must stay near-free.
     let probe = sqlx::query(
         r#"
         SELECT
