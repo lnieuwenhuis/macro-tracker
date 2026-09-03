@@ -1317,7 +1317,8 @@ fn api_failure_from_app_error(error: AppError) -> ApiFailure {
         AppError::Unauthorized(message) => {
             ApiFailure::new(StatusCode::UNAUTHORIZED, "invalid_token", message)
         }
-        // API-03: every unique violation maps to a conflict; the constraint name is logged, never returned.
+        // API-03: every unique violation maps to a conflict.
+        // The constraint name is logged, never returned (names internal schema).
         AppError::Sqlx(ref sqlx_error)
             if sqlx_error
                 .as_database_error()

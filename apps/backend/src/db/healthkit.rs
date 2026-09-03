@@ -6,6 +6,7 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 /// Pending eaten entries not yet acked, oldest first; an acked entry never re-enters (avoids double-counting samples).
+/// Day window and row limit bound a first-ever sync; backfills clamp to 18:00 UTC (right day west of UTC+6).
 pub(super) async fn healthkit_sync_entries_json(
     pool: &PgPool,
     user_id: Uuid,
