@@ -86,6 +86,39 @@ describe("backend client", () => {
     expect((init.headers as Headers).get("x-backend-internal-secret")).toBe("real-secret");
   });
 
+  it("strips a client-supplied internal-secret header when attachInternalSecret is false", async () => {
+    process.env.NODE_ENV = "test";
+    process.env.BACKEND_URL = "http://127.0.0.1:4000";
+    process.env.BACKEND_INTERNAL_SECRET = "real-secret";
+    const fetchMock = vi.fn().mockResolvedValue(new Response("{}"));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await backendFetch("/api/v1/foods", {
+      attachInternalSecret: false,
+      headers: { "x-backend-internal-secret": "spoofed-secret" },
+    });
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect((init.headers as Headers).get("x-backend-internal-secret")).toBeNull();
+  });
+
+  it("strips a client-supplied internal-secret header when no secret is configured outside production", async () => {
+    process.env.NODE_ENV = "test";
+    process.env.BACKEND_URL = "http://127.0.0.1:4000";
+    delete process.env.BACKEND_INTERNAL_SECRET;
+    const fetchMock = vi.fn().mockResolvedValue(new Response("{}"));
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    await backendFetch("/internal/rpc", {
+      method: "POST",
+      body: "{}",
+      headers: { "x-backend-internal-secret": "spoofed-secret" },
+    });
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect((init.headers as Headers).get("x-backend-internal-secret")).toBeNull();
+  });
+
   it("rejects a literal traversal segment before URL normalization can rewrite it", () => {
     process.env.NODE_ENV = "test";
     process.env.BACKEND_URL = "http://127.0.0.1:4000";
@@ -95,7 +128,7 @@ describe("backend client", () => {
     );
   });
 
-  it("rejects a percent-encoded traversal segment, since encodeURIComponent('..') === '..'", () => {
+  it("rejects a percent-encoded traversal segment, which WHATWG URL parsing would decode to `..`", () => {
     process.env.NODE_ENV = "test";
     process.env.BACKEND_URL = "http://127.0.0.1:4000";
 
