@@ -2,15 +2,6 @@ import { expect, test, type Page } from "@playwright/test";
 
 import { createTestSession, uniqueTestEmail, waitForAppReady } from "./test-users";
 
-/**
- * TEST-03: `app/recipes/new`, `app/recipes/[id]/edit` and
- * `recipe-builder-shell.tsx` used to be reachable only through an `href`
- * assertion and a source-text check -- nothing built a recipe, edited its
- * ingredients, or verified macro scaling through the UI. That coverage hole
- * is what let DATA-04 (a double-tap on "Log..." writing two identical meal
- * entries) ship.
- */
-
 async function buildRecipe(
   page: Page,
   input: {
@@ -55,8 +46,7 @@ test("builds a recipe, logs a portion, and the logged entry reflects the scaled 
 
   await createTestSession(page, uniqueTestEmail("user", testInfo));
 
-  // One ingredient, 2 portions: per-portion macros are exactly half the
-  // ingredient's totals -- 20/40/10/300 -> 10/20/5/150 per portion.
+  // One ingredient, 2 portions: per-portion macros are half the totals -- 20/40/10/300 -> 10/20/5/150.
   await buildRecipe(page, {
     date,
     label: recipeLabel,
@@ -131,12 +121,7 @@ test("DATA-04: logging a recipe portion twice in rapid succession only creates o
   const logButton = recipeCard.getByRole("button", { name: /^Log/ });
   await expect(logButton).toBeVisible();
 
-  // A real double-tap dispatches two click events before React's `isPending`
-  // state has a chance to re-render the button as disabled. `fireEvent`-style
-  // sequential `.click()` calls from within the page (rather than two
-  // separately-awaited Playwright `.click()` calls) reproduce that race:
-  // both are dispatched synchronously in the same task, before either
-  // `handleLogPortion` call's state update commits.
+  // Two clicks dispatched synchronously in the same task, before React's `isPending` disables the button.
   await logButton.evaluate((button: HTMLButtonElement) => {
     button.click();
     button.click();
@@ -149,8 +134,7 @@ test("DATA-04: logging a recipe portion twice in rapid succession only creates o
   const loggedCards = page.locator("article").filter({
     has: page.getByRole("heading", { name: `${recipeLabel} (1 portion)` }),
   });
-  // The clientMutationId fix (DATA-04) collapses the duplicate at the
-  // backend's unique index; a regression here writes two identical entries.
+  // clientMutationId collapses the duplicate at the backend's unique index.
   await expect(loggedCards).toHaveCount(1);
   await expect(loggedCards).toContainText("P 15g");
   await expect(loggedCards).toContainText("C 45g");
