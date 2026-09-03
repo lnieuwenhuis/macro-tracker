@@ -294,15 +294,7 @@ pub async fn get_user_by_id(pool: &PgPool, user_id: Uuid) -> AppResult<Option<Ap
     row.map(row_to_app_user).transpose()
 }
 
-pub async fn ensure_user_role(pool: &PgPool, user_id: Uuid, role: &str) -> AppResult<AppUser> {
-    ensure_user_role_with_executor(pool, user_id, role).await
-}
-
-async fn ensure_user_role_with_executor<'e, E>(
-    executor: E,
-    user_id: Uuid,
-    role: &str,
-) -> AppResult<AppUser>
+pub async fn ensure_user_role<'e, E>(executor: E, user_id: Uuid, role: &str) -> AppResult<AppUser>
 where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
@@ -2141,15 +2133,7 @@ async fn assert_meal_group_access(
     }
 }
 
-async fn food_product_json_by_id(
-    pool: &PgPool,
-    user_id: Uuid,
-    product_id: Uuid,
-) -> AppResult<Option<Value>> {
-    food_product_json_by_id_with_executor(pool, user_id, product_id).await
-}
-
-async fn food_product_json_by_id_with_executor<'e, E>(
+async fn food_product_json_by_id<'e, E>(
     executor: E,
     user_id: Uuid,
     product_id: Uuid,
@@ -3260,15 +3244,7 @@ fn map_active_barcode_conflict(error: sqlx::Error) -> AppError {
     AppError::Sqlx(error)
 }
 
-async fn active_global_barcode_exists(
-    pool: &PgPool,
-    barcode: &str,
-    exclude_product_id: Option<Uuid>,
-) -> AppResult<bool> {
-    active_global_barcode_exists_with_executor(pool, barcode, exclude_product_id).await
-}
-
-async fn active_global_barcode_exists_with_executor<'e, E>(
+async fn active_global_barcode_exists<'e, E>(
     executor: E,
     barcode: &str,
     exclude_product_id: Option<Uuid>,
@@ -3395,13 +3371,12 @@ async fn save_barcode_food_product_json(
     test_fault: Option<&serde_json::Map<String, Value>>,
 ) -> AppResult<Value> {
     let mut tx = pool.begin().await?;
-    let (_, product) =
-        save_barcode_food_product_with_executor(&mut tx, user_id, input, test_fault).await?;
+    let (_, product) = save_barcode_food_product(&mut tx, user_id, input, test_fault).await?;
     tx.commit().await?;
     Ok(product)
 }
 
-async fn save_barcode_food_product_with_executor(
+async fn save_barcode_food_product(
     executor: &mut sqlx::PgConnection,
     user_id: Uuid,
     input: &serde_json::Map<String, Value>,
@@ -3414,7 +3389,7 @@ async fn save_barcode_food_product_with_executor(
 
     if normalized.source == "barcode"
         && let Some(barcode) = normalized.barcode.as_deref()
-        && active_global_barcode_exists_with_executor(&mut *executor, barcode, None).await?
+        && active_global_barcode_exists(&mut *executor, barcode, None).await?
     {
         return Err(AppError::BadRequest(
             "That barcode already exists.".to_string(),
@@ -3439,11 +3414,11 @@ async fn save_barcode_food_product_with_executor(
         .await
         .map_err(map_active_barcode_conflict)?;
 
-    let product = food_product_json_by_id_with_executor(&mut *executor, user_id, product_id)
+    let product = food_product_json_by_id(&mut *executor, user_id, product_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Food product not found.".to_string()))?;
     maybe_trigger_test_fault(test_fault, 1)?;
-    insert_food_product_revision_with_executor(
+    insert_food_product_revision(
         &mut *executor,
         product_id,
         Some(user_id),
@@ -3844,9 +3819,9 @@ async fn set_user_role_json(
         }
     }
 
-    let user = ensure_user_role_with_executor(&mut *tx, target_user_id, next_role).await?;
+    let user = ensure_user_role(&mut *tx, target_user_id, next_role).await?;
     maybe_trigger_test_fault(audit_test_fault, 1)?;
-    insert_admin_audit_event_with_executor(
+    insert_admin_audit_event(
         &mut *tx,
         actor_user_id,
         &actor.role,
@@ -4140,14 +4115,7 @@ async fn admin_food_products_json(
     ))
 }
 
-async fn admin_food_product_by_id_json(
-    pool: &PgPool,
-    product_id: Uuid,
-) -> AppResult<Option<Value>> {
-    admin_food_product_by_id_json_with_executor(pool, product_id).await
-}
-
-async fn admin_food_product_by_id_json_with_executor<'e, E>(
+async fn admin_food_product_by_id_json<'e, E>(
     executor: E,
     product_id: Uuid,
 ) -> AppResult<Option<Value>>
@@ -4201,10 +4169,9 @@ async fn create_admin_barcode_product_json(
 ) -> AppResult<Value> {
     let actor = require_admin_actor(pool, actor_user_id).await?;
     let mut tx = pool.begin().await?;
-    let (product_id, product) =
-        save_barcode_food_product_with_executor(&mut tx, actor.id, input, None).await?;
+    let (product_id, product) = save_barcode_food_product(&mut tx, actor.id, input, None).await?;
     maybe_trigger_test_fault(audit_test_fault, 1)?;
-    insert_admin_audit_event_with_executor(
+    insert_admin_audit_event(
         &mut *tx,
         actor.id,
         &actor.role,
@@ -4238,10 +4205,10 @@ async fn update_admin_barcode_product_json(
         .ok_or_else(|| AppError::BadRequest("Barcode is required.".to_string()))?;
 
     let mut tx = pool.begin().await?;
-    let before = admin_food_product_by_id_json_with_executor(&mut *tx, product_id)
+    let before = admin_food_product_by_id_json(&mut *tx, product_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Barcode product not found.".to_string()))?;
-    if active_global_barcode_exists_with_executor(&mut *tx, barcode, Some(product_id)).await? {
+    if active_global_barcode_exists(&mut *tx, barcode, Some(product_id)).await? {
         return Err(AppError::BadRequest(
             "That barcode already exists.".to_string(),
         ));
@@ -4288,11 +4255,11 @@ async fn update_admin_barcode_product_json(
     if !updated {
         return Err(AppError::NotFound("Barcode product not found.".to_string()));
     }
-    let product = admin_food_product_by_id_json_with_executor(&mut *tx, product_id)
+    let product = admin_food_product_by_id_json(&mut *tx, product_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Barcode product not found.".to_string()))?;
     maybe_trigger_test_fault(revision_test_fault, 1)?;
-    insert_food_product_revision_with_executor(
+    insert_food_product_revision(
         &mut *tx,
         product_id,
         Some(actor.id),
@@ -4301,7 +4268,7 @@ async fn update_admin_barcode_product_json(
     )
     .await?;
     maybe_trigger_test_fault(audit_test_fault, 1)?;
-    insert_admin_audit_event_with_executor(
+    insert_admin_audit_event(
         &mut *tx,
         actor.id,
         &actor.role,
@@ -4330,7 +4297,7 @@ async fn set_admin_barcode_deleted_json(
 ) -> AppResult<Value> {
     let actor = require_admin_actor(pool, actor_user_id).await?;
     let mut tx = pool.begin().await?;
-    let existing = admin_food_product_by_id_json_with_executor(&mut *tx, product_id)
+    let existing = admin_food_product_by_id_json(&mut *tx, product_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Barcode product not found.".to_string()))?;
     let already_deleted = existing
@@ -4344,7 +4311,7 @@ async fn set_admin_barcode_deleted_json(
     }
     if !deleted
         && let Some(barcode) = existing.get("barcode").and_then(Value::as_str)
-        && active_global_barcode_exists_with_executor(&mut *tx, barcode, Some(product_id)).await?
+        && active_global_barcode_exists(&mut *tx, barcode, Some(product_id)).await?
     {
         return Err(AppError::BadRequest(
             "That barcode already exists.".to_string(),
@@ -4369,11 +4336,11 @@ async fn set_admin_barcode_deleted_json(
     if row.is_none() {
         return Err(AppError::NotFound("Barcode product not found.".to_string()));
     }
-    let product = admin_food_product_by_id_json_with_executor(&mut *tx, product_id)
+    let product = admin_food_product_by_id_json(&mut *tx, product_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Barcode product not found.".to_string()))?;
     maybe_trigger_test_fault(revision_test_fault, 1)?;
-    insert_food_product_revision_with_executor(
+    insert_food_product_revision(
         &mut *tx,
         product_id,
         Some(actor.id),
@@ -4382,7 +4349,7 @@ async fn set_admin_barcode_deleted_json(
     )
     .await?;
     maybe_trigger_test_fault(audit_test_fault, 1)?;
-    insert_admin_audit_event_with_executor(
+    insert_admin_audit_event(
         &mut *tx,
         actor.id,
         &actor.role,
@@ -4405,7 +4372,7 @@ async fn set_admin_barcode_deleted_json(
         .ok_or_else(|| AppError::NotFound("Barcode product not found.".to_string()))
 }
 
-async fn insert_food_product_revision_with_executor<'e, E>(
+async fn insert_food_product_revision<'e, E>(
     executor: E,
     product_id: Uuid,
     actor_user_id: Option<Uuid>,
@@ -4433,7 +4400,7 @@ where
     Ok(())
 }
 
-async fn insert_admin_audit_event_with_executor<'e, E>(
+async fn insert_admin_audit_event<'e, E>(
     executor: E,
     actor_user_id: Uuid,
     actor_role: &str,
