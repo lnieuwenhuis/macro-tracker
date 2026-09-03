@@ -147,7 +147,6 @@ function NotFoundForm({
     });
   }
 
-  // ── "not found" landing screen ──────────────────────────────────────────
   if (!showForm) {
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -189,7 +188,6 @@ function NotFoundForm({
     );
   }
 
-  // ── manual entry form ────────────────────────────────────────────────────
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center">
       <div
@@ -390,7 +388,6 @@ export function BarcodeResult({
 
   const serving = parseServingGrams(servingG);
 
-  // ── Not-found state: delegate to the form sub-component ─────────────────
   if (!displayProduct && notFoundBarcode) {
     return (
       <OverlayPortal>
