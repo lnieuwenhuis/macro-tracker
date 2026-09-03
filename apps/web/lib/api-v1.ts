@@ -27,6 +27,7 @@ export async function handleApiV1Request(
   const segments = path ?? [];
 
   // Called directly (e.g. from tests) too, bypassing Next's dot-segment normalization, so reject it explicitly.
+  // encodeURIComponent("..") is "..", so the encoding below is not itself a traversal defense.
   if (segments.some((segment) => segment === "." || segment === "..")) {
     return Response.json(
       {

@@ -15,7 +15,7 @@ export function buildRecipePortionMealEntryInput({
   recipe,
   status,
 }: {
-  /** Idempotency key for the create; without one, a double-tap writes two identical entries. */
+  /** Idempotency key; without one, a double-tap writes two entries (unique index is over a nullable column). */
   clientMutationId?: string;
   date: string;
   gramsConsumed: number | null;

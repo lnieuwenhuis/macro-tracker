@@ -10,7 +10,7 @@ export const metadata: Metadata = {
 };
 
 export default async function AdminAiBenchmarkPage() {
-  // Gates itself rather than trusting the layout: layouts don't re-render on navigation.
+  // Gates itself rather than trusting the layout: router state is client-supplied and layouts don't re-render on nav.
   await requireAdminUser();
 
   const currentModel = getConfiguredFoodPhotoModel();

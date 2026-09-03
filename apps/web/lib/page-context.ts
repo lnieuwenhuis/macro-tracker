@@ -13,6 +13,7 @@ export async function loadOnboardedDateParam<TSearchParams extends DateSearchPar
   const user = await requireOnboardedAppUser();
   const params = await searchParams;
   // today is the browser's calendar day (not the Node/UTC day) so a cold load without ?date= is already correct.
+  // Pass today as a prop; recomputing per-component mismatches (server UTC vs browser zone on hydration).
   const today = await getRequestToday();
   const selectedDate = ensureDateString(params.date, today);
 

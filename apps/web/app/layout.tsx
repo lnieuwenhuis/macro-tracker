@@ -77,6 +77,7 @@ const timeZoneInitScript = `
 `;
 
 // script-src is nonce-based (proxy.ts); the nonce prop is load-bearing, since next/script replays props onto it.
+// A missing nonce is blocked silently (mt_tz never set); reading headers() opts every route into dynamic rendering.
 export default async function RootLayout({
   children,
 }: Readonly<{

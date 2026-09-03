@@ -21,6 +21,7 @@ function createLogoutResponse(request: Request) {
 }
 
 // GET exists so a Server Component's redirect(...expired=1) can clear the cookie; gated same-origin, since forceable.
+// proxy.ts must not bounce /login?error=... back to /, or a still-verifiable arrival loops.
 export async function GET(request: Request) {
   if (!isSameOriginRequest(request)) {
     return NextResponse.redirect(new URL(logoutDestination(request), request.url));

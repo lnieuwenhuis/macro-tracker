@@ -41,6 +41,7 @@ export function getRequestProtocol(request: Request) {
 }
 
 // CSRF gate: SameSite=Lax governs sending a cookie, not setting one; prefer Sec-Fetch-Site over Origin, fail closed.
+// same-site is untrusted like cross-site: a sibling subdomain is outside this app's trust boundary.
 export function isSameOriginRequest(request: Request) {
   const secFetchSite = request.headers.get("sec-fetch-site");
 
