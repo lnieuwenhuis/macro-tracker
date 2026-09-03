@@ -89,10 +89,7 @@ fn backend_test_routes_are_accepted_for_loopback_app_urls() {
     }
 }
 
-/// SEC-08: `read_secret` deliberately keeps `SESSION_SECRET` untrimmed
-/// (the signing bytes must match the web side exactly), but it used to
-/// *measure* the untrimmed value too — so 40 spaces around `short` cleared
-/// the 32-character floor while carrying five characters of entropy.
+/// SEC-08: the minimum-length check runs on the trimmed secret, not the untrimmed one.
 #[test]
 fn production_config_measures_secret_length_on_the_trimmed_value() {
     let padded_short = format!("   {}short   ", " ".repeat(40));

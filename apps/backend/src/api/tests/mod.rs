@@ -51,8 +51,6 @@ async fn openapi_json_is_public_and_uses_cors_contract() {
     assert!(payload["paths"].get("/goals").is_some());
 }
 
-// --- Router shape -------------------------------------------------------
-
 async fn read_json_body(response: Response) -> Value {
     let body = response
         .into_body()
@@ -109,10 +107,7 @@ async fn known_routes_reject_unsupported_methods_before_authenticating() {
 
 #[tokio::test]
 async fn an_oversized_body_keeps_the_error_envelope_and_the_cors_headers() {
-    // API-06: the `Bytes` extractor rejects before the handler, so this
-    // used to be a bare 413 with a plain-text body and no
-    // `Access-Control-Allow-Origin` — a browser saw a CORS failure rather
-    // than the documented error shape.
+    // API-06: the `Bytes` extractor rejects before the handler, so a 413 must still carry CORS headers.
     let response = router()
         .with_state(test_state())
         .oneshot(
@@ -139,8 +134,7 @@ async fn an_oversized_body_keeps_the_error_envelope_and_the_cors_headers() {
 
 #[tokio::test]
 async fn the_public_spec_is_still_served_when_the_body_is_rejected() {
-    // A rejected body must not stop the unauthenticated document from
-    // being readable.
+    // A rejected body must not stop the unauthenticated document from being readable.
     let response = router()
         .with_state(test_state())
         .oneshot(
@@ -192,8 +186,6 @@ fn auth_error_maps_every_backend_reason() {
     assert_eq!(auth_error("missing").0, "missing_token");
     assert_eq!(auth_error("anything-else").0, "invalid_token");
 }
-
-// --- Validation ---------------------------------------------------------
 
 #[test]
 fn require_date_matches_the_internal_rpc_rule() {
@@ -264,10 +256,7 @@ fn object(value: Value) -> Map<String, Value> {
 
 #[test]
 fn meal_entry_patches_cannot_set_the_private_recalculation_flag() {
-    // DATA-02: the exploit body. `proteinG` is present, so the handler's own
-    // snapshot rule says "recalculate", but the caller tries to override it
-    // with `false` so its raw macro numbers are stored verbatim against the
-    // linked product.
+    // DATA-02: `proteinG` should force recalculation, but the caller tries to override the flag to `false`.
     let merged = merge_meal_entry_patch(
         object(json!({
             "id": "11111111-1111-4111-8111-111111111111",
@@ -307,8 +296,7 @@ fn meal_entry_patches_drop_every_reserved_key() {
 
 #[test]
 fn product_linked_entries_keep_their_snapshot_when_no_macro_field_is_patched() {
-    // Regression guard for the behaviour the flag exists for: renaming a
-    // product-linked entry must not recompute its macros.
+    // Renaming a product-linked entry must not recompute its macros.
     let merged = merge_meal_entry_patch(
         object(json!({
             "productId": "22222222-2222-4222-8222-222222222222",
@@ -356,8 +344,6 @@ fn require_object_rejects_non_objects() {
     assert!(require_object(json!({ "a": 1 })).is_ok());
 }
 
-// --- Error mapping ------------------------------------------------------
-
 #[test]
 fn app_errors_map_onto_the_public_status_and_code() {
     let cases = [
@@ -395,8 +381,7 @@ fn app_errors_map_onto_the_public_status_and_code() {
     }
 }
 
-/// Minimal `sqlx::error::DatabaseError` so the unique-violation mapping can
-/// be tested without provoking a real constraint.
+/// Minimal `sqlx::error::DatabaseError` so unique-violation mapping is testable without a real constraint.
 #[derive(Debug)]
 struct FakeDatabaseError {
     code: &'static str,
@@ -454,9 +439,7 @@ fn database_error(code: &'static str, constraint: Option<&'static str>) -> AppEr
 
 #[test]
 fn any_unique_violation_is_a_conflict_not_an_internal_error() {
-    // API-03: only `weight_entries_user_date_key` was recognised, so
-    // reusing a `clientMutationId` reported a 500 for what is a collision
-    // with an existing row.
+    // API-03: every unique-violation constraint must map to a conflict, not just the weight-date one.
     let failure = api_failure_from_app_error(database_error(
         "23505",
         Some("meal_entries_user_client_mutation_id_key"),
@@ -490,7 +473,6 @@ fn a_non_unique_database_fault_is_still_an_internal_error() {
 
 #[test]
 fn barcodes_are_validated_the_same_way_on_both_entry_points() {
-    // API-11.
     assert!(require_barcode("8712345678901").is_ok());
     assert!(require_barcode("1234").is_ok());
     assert!(require_barcode("123").is_err());
@@ -517,10 +499,7 @@ fn internal_failures_never_leak_their_message() {
     assert!(!failure.message.contains("postgres://"));
 }
 
-// --- Scope contract -----------------------------------------------------
-
-/// Turns an OpenAPI path template into a concrete request path, so the
-/// tests below exercise the same routing a client would hit.
+/// Turns an OpenAPI path template into a concrete request path a client would hit.
 fn sample_path(template: &str) -> Vec<String> {
     template
         .split('/')
@@ -538,8 +517,7 @@ fn sample_path(template: &str) -> Vec<String> {
 
 #[test]
 fn every_shipped_endpoint_declares_scopes_for_each_method() {
-    // Derived from the routing table rather than a hand-kept list, so a new
-    // endpoint cannot be added without this test covering it (API-01).
+    // API-01: derived from the routing table, so a new endpoint cannot skip this coverage.
     for endpoint in API_V1_ENDPOINTS {
         for method in endpoint.methods {
             assert!(
@@ -553,9 +531,7 @@ fn every_shipped_endpoint_declares_scopes_for_each_method() {
 
 #[test]
 fn an_endpoint_with_no_scope_tuple_for_a_method_is_denied() {
-    // The structural hole API-01 describes: a method allowed by `methods`
-    // but absent from `scopes`. The lookup must not fall back to "no scopes
-    // required".
+    // API-01: a method allowed but absent from `scopes` must not fall back to "no scopes required".
     let endpoint = Endpoint {
         path: "/example",
         methods: &["GET", "DELETE"],
@@ -568,8 +544,7 @@ fn an_endpoint_with_no_scope_tuple_for_a_method_is_denied() {
 
 #[test]
 fn every_table_entry_routes_back_to_itself() {
-    // Guards the match order: a shape with a literal segment must not be
-    // swallowed by an earlier wildcard shape.
+    // Guards the match order: a literal segment must not be swallowed by an earlier wildcard shape.
     for endpoint in API_V1_ENDPOINTS {
         let path = sample_path(endpoint.path);
         let resolved =
@@ -584,9 +559,7 @@ fn every_table_entry_routes_back_to_itself() {
 
 #[test]
 fn the_routing_table_and_the_published_contract_agree_on_scopes() {
-    // The spec is served verbatim from `API_V1_OPENAPI_JSON`, so a drift
-    // between what is enforced and what is documented is a silent contract
-    // break. Compared in both directions.
+    // The spec is served verbatim, so drift between enforced and documented scopes is a silent break.
     let spec: Value = serde_json::from_slice(API_V1_OPENAPI_JSON).expect("spec should be JSON");
     let paths = spec["paths"].as_object().expect("spec should have paths");
 
@@ -643,10 +616,7 @@ fn the_routing_table_and_the_published_contract_agree_on_scopes() {
 
 #[test]
 fn the_published_status_lists_match_what_the_handler_can_actually_return() {
-    // API-15: every operation used to list an identical
-    // 400/401/403/404/405/500 set, including for the public
-    // `GET /openapi.json`, while the 504 the deadline emits and the 413 an
-    // over-limit body emits were documented nowhere.
+    // API-15: the documented status set must match what each handler can actually return, including 504/413.
     let spec: Value = serde_json::from_slice(API_V1_OPENAPI_JSON).expect("spec should be JSON");
     let paths = spec["paths"].as_object().expect("spec should have paths");
 
@@ -658,11 +628,7 @@ fn the_published_status_lists_match_what_the_handler_can_actually_return() {
             let label = format!("{} {path}", method.to_uppercase());
 
             if path == "/openapi.json" {
-                // Answered from a compiled-in constant before
-                // authentication, before the body is read and before the
-                // deadline wrapper — but `main.rs` mounts the rate limiter
-                // in front of the whole `/api/v1` router, so 429 is still
-                // reachable.
+                // Answered before auth or the deadline wrapper, but the rate limiter still wraps it.
                 assert_eq!(
                     responses.keys().collect::<Vec<_>>(),
                     vec!["200", "429"],
@@ -671,10 +637,7 @@ fn the_published_status_lists_match_what_the_handler_can_actually_return() {
                 continue;
             }
 
-            // 405 is a property of the *path*, not of one operation — a
-            // documented method is by definition allowed — but every
-            // operation lists it because OpenAPI has nowhere else to put a
-            // path-level response.
+            // 405 is a path-level property, but every operation lists it since OpenAPI has nowhere else to put it.
             for required in ["401", "403", "405", "429", "500", "504"] {
                 assert!(
                     responses.contains_key(required),
@@ -690,10 +653,7 @@ fn the_published_status_lists_match_what_the_handler_can_actually_return() {
 
 #[test]
 fn every_success_response_describes_its_data_and_every_ref_resolves() {
-    // API-15: all 41 operations shipped `"data": {}` — an envelope with no
-    // statement about what is inside it. The document is hand-maintained,
-    // so a dangling `$ref` would be silent until a consumer tried to
-    // dereference it.
+    // API-15: every success response must describe `data`, and every `$ref` in the hand-maintained spec must resolve.
     let spec: Value = serde_json::from_slice(API_V1_OPENAPI_JSON).expect("spec should be JSON");
 
     fn collect_refs(node: &Value, into: &mut Vec<String>) {
@@ -741,8 +701,7 @@ fn every_success_response_describes_its_data_and_every_ref_resolves() {
             let schema = &success["content"]["application/json"]["schema"];
 
             if path == "/openapi.json" {
-                // This one operation answers with the document itself, not
-                // with the `{ ok, data }` envelope.
+                // This one operation answers with the document itself, not the `{ ok, data }` envelope.
                 assert!(
                     schema.get("properties").is_none(),
                     "{label}: the spec endpoint does not use the envelope"
@@ -782,8 +741,7 @@ fn the_published_timeout_status_is_the_one_the_handler_emits() {
 
 #[test]
 fn the_published_quantity_units_are_the_ones_the_data_layer_accepts() {
-    // API-15: `unit` and `defaultServingUnit` were documented as free
-    // strings while `is_quantity_unit` accepts exactly four values.
+    // API-15: `unit` must be documented as the same closed set `is_quantity_unit` accepts.
     let spec: Value = serde_json::from_slice(API_V1_OPENAPI_JSON).expect("spec should be JSON");
     let unit = &spec["paths"]["/days/{date}/entries"]["post"]["requestBody"]["content"]["application/json"]
         ["schema"]["properties"]["unit"];
@@ -795,16 +753,13 @@ fn the_published_quantity_units_are_the_ones_the_data_layer_accepts() {
         .filter_map(Value::as_str)
         .collect::<Vec<_>>();
 
-    // Mirrors `is_quantity_unit` in db.rs, which is private to that module;
-    // if it gains or loses a unit this assertion has to move with it.
+    // Mirrors the private `is_quantity_unit` in db.rs; move this assertion if that set changes.
     assert_eq!(documented, vec!["g", "ml", "serving", "count"]);
 }
 
 #[test]
 fn the_body_date_is_not_documented_where_the_path_wins() {
-    // API-15: `date` was documented in the body of
-    // `POST /days/{date}/entries` but `dispatch_api_request` overwrites it
-    // with the path segment before the RPC call.
+    // API-15: `dispatch_api_request` overwrites body `date` with the path segment, so it must not be documented.
     let spec: Value = serde_json::from_slice(API_V1_OPENAPI_JSON).expect("spec should be JSON");
     let properties = &spec["paths"]["/days/{date}/entries"]["post"]["requestBody"]["content"]["application/json"]
         ["schema"]["properties"];
@@ -831,8 +786,7 @@ fn portions_is_documented_as_optional_with_its_real_default() {
 
 #[tokio::test]
 async fn a_timed_out_request_still_returns_the_json_envelope_and_cors_headers() {
-    // A tower TimeoutLayer would emit a bare 504 here, breaking the
-    // documented contract for direct clients and tripping CORS in browsers.
+    // A tower TimeoutLayer would emit a bare 504, breaking the documented contract and CORS for browsers.
     let response = json_response(
         StatusCode::GATEWAY_TIMEOUT,
         json!({
@@ -855,9 +809,7 @@ async fn a_timed_out_request_still_returns_the_json_envelope_and_cors_headers() 
 
 #[tokio::test]
 async fn slow_requests_time_out_through_the_api_error_envelope() {
-    // Drives the real handler path with a deadline short enough to elapse,
-    // proving the timeout branch produces an envelope rather than an empty
-    // transport-level response.
+    // A deadline short enough to elapse proves the timeout branch produces an envelope, not an empty response.
     let slow = async {
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         Ok::<(StatusCode, Value), ApiFailure>((StatusCode::OK, json!({})))
