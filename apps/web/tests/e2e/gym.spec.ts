@@ -25,6 +25,8 @@ async function createOneOffSlot(
   await modal.getByLabel("Until").fill(input.until);
   await modal.getByRole("button", { name: "Add slot" }).click();
   await expect(modal).toBeHidden();
+  // The modal closes before the save action resolves; the slot chip proves the write landed before the next step.
+  await expect(page.getByText(`${input.from}–${input.until}`).first()).toBeVisible();
 }
 
 test("the top-left gym button opens the schedule and slots can be managed", async ({
