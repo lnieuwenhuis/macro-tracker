@@ -1,5 +1,4 @@
-//! Gym schedule sharing: slots, per-date statuses, buddies and overlaps.
-//! Buddy visibility is read-only; every write predicate carries the caller's ownership.
+//! Gym sharing: slots, statuses, buddies, overlaps. Buddy visibility is read-only; writes are ownership-scoped.
 
 use super::{MAX_TEXT_FIELD_LENGTH, ensure_date_string, ensure_text_length};
 use crate::errors::{AppError, AppResult};

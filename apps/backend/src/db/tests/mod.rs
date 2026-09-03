@@ -2598,6 +2598,84 @@ async fn stats_page_reports_the_same_streaks_as_the_leaderboard() {
     test_db.cleanup().await;
 }
 
+#[tokio::test]
+#[cfg_attr(not(has_test_database), ignore = "needs a test database")]
+async fn healthkit_sync_excludes_acked_entries_and_counts_the_full_pending_window() {
+    let test_db = test_db().await;
+    let user_id = insert_test_user(&test_db.pool).await;
+    let today = Utc::now().date_naive();
+
+    let mut entry_ids = Vec::new();
+    for offset in 0..3 {
+        let date = (today - Duration::days(offset))
+            .format("%Y-%m-%d")
+            .to_string();
+        entry_ids.push(
+            insert_test_meal_entry(
+                &test_db.pool,
+                user_id,
+                &date,
+                "eaten",
+                &format!("Meal {offset}"),
+                0,
+                (10.0, 20.0, 5.0, 165),
+            )
+            .await,
+        );
+    }
+
+    let page = rpc_json(
+        &test_db.pool,
+        "getHealthkitSyncEntries",
+        json!({ "userId": user_id, "days": 7, "limit": 2 }),
+    )
+    .await
+    .expect("healthkit sync entries should load");
+    assert_eq!(
+        page["entries"]
+            .as_array()
+            .expect("entries should be array")
+            .len(),
+        2,
+        "limit caps the page"
+    );
+    assert_eq!(
+        page["pendingTotal"], 3,
+        "pendingTotal counts the whole window, not just the page"
+    );
+
+    let acked = rpc_json(
+        &test_db.pool,
+        "ackHealthkitSyncEntries",
+        json!({ "userId": user_id, "entryIds": [entry_ids[0]] }),
+    )
+    .await
+    .expect("ack should succeed");
+    assert_eq!(acked["acked"], 1);
+
+    let after_ack = rpc_json(
+        &test_db.pool,
+        "getHealthkitSyncEntries",
+        json!({ "userId": user_id, "days": 7, "limit": 10 }),
+    )
+    .await
+    .expect("healthkit sync entries should reload");
+    let remaining_ids: Vec<String> = after_ack["entries"]
+        .as_array()
+        .expect("entries should be array")
+        .iter()
+        .map(|entry| entry["id"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        remaining_ids.len(),
+        2,
+        "the acked entry must not re-enter the queue"
+    );
+    assert!(!remaining_ids.contains(&entry_ids[0].to_string()));
+
+    test_db.cleanup().await;
+}
+
 // The projections in `db/sql.rs` define wire-visible JSON shapes that several
 // queries share, so drift here is a silent contract break in every one of them.
 #[test]
