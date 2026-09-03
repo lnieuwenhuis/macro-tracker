@@ -2042,7 +2042,7 @@ struct BenchmarkFixture {
     name: &'static str,
     serving_description: &'static str,
     asset_file_name: &'static str,
-    /// Direct file URL fetched by the model; a Commons article URL would serve `text/html` instead.
+    /// Direct file URL fetched by the model; article URLs serve `text/html`, hence the pasta fixture's encoded parens.
     image_url: &'static str,
     /// Commons article page shown in the admin UI for attribution. Never fetched.
     image_source_url: &'static str,
