@@ -128,8 +128,6 @@ pub(super) const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "Medium carrot",
         serving_description: "One medium raw carrot.",
         asset_file_name: "carrot.jpg",
-        // Unresolved: see `image_url` — this fixture has no stable
-        // source image.
         image_url: "https://loremflickr.com/512/512/carrot,food",
         image_source_url: "https://loremflickr.com/512/512/carrot,food",
         expected_source: "USDA FoodData Central, one medium raw carrot, rounded.",
@@ -144,8 +142,6 @@ pub(super) const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "White bread slice",
         serving_description: "One regular slice white bread.",
         asset_file_name: "white-bread.jpg",
-        // Unresolved: see `image_url` — this fixture has no stable
-        // source image.
         image_url: "https://loremflickr.com/512/512/toast,food",
         image_source_url: "https://loremflickr.com/512/512/toast,food",
         expected_source: "USDA FoodData Central, one slice white bread, rounded.",
@@ -160,8 +156,6 @@ pub(super) const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "Cheddar cheese",
         serving_description: "One ounce cheddar cheese.",
         asset_file_name: "cheddar.jpg",
-        // Unresolved: see `image_url` — this fixture has no stable
-        // source image.
         image_url: "https://loremflickr.com/512/512/cheddar,food",
         image_source_url: "https://loremflickr.com/512/512/cheddar,food",
         expected_source: "USDA FoodData Central, one ounce cheddar cheese, rounded.",
@@ -176,8 +170,6 @@ pub(super) const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "Raw almonds",
         serving_description: "One ounce raw almonds.",
         asset_file_name: "almonds.jpg",
-        // Unresolved: see `image_url` — this fixture has no stable
-        // source image.
         image_url: "https://loremflickr.com/512/512/almonds,food",
         image_source_url: "https://loremflickr.com/512/512/almonds,food",
         expected_source: "USDA FoodData Central, one ounce raw almonds, rounded.",
@@ -192,8 +184,6 @@ pub(super) const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "Rolled oats",
         serving_description: "Forty grams dry rolled oats.",
         asset_file_name: "oats.jpg",
-        // Unresolved: see `image_url` — this fixture has no stable
-        // source image.
         image_url: "https://loremflickr.com/512/512/oats,food",
         image_source_url: "https://loremflickr.com/512/512/oats,food",
         expected_source: "Common nutrition label serving, 40g dry rolled oats.",
@@ -208,8 +198,6 @@ pub(super) const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "Cooked shrimp",
         serving_description: "One hundred grams cooked shrimp.",
         asset_file_name: "shrimp.jpg",
-        // Unresolved: see `image_url` — this fixture has no stable
-        // source image.
         image_url: "https://loremflickr.com/512/512/prawn,food",
         image_source_url: "https://loremflickr.com/512/512/prawn,food",
         expected_source: "USDA FoodData Central, 100g cooked shrimp, rounded.",
@@ -224,8 +212,6 @@ pub(super) const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "Cooked salmon",
         serving_description: "One hundred grams cooked Atlantic salmon.",
         asset_file_name: "salmon.jpg",
-        // Unresolved: see `image_url` — this fixture has no stable
-        // source image.
         image_url: "https://loremflickr.com/512/512/salmon,food",
         image_source_url: "https://loremflickr.com/512/512/salmon,food",
         expected_source: "USDA FoodData Central, 100g cooked Atlantic salmon, rounded.",
@@ -240,8 +226,6 @@ pub(super) const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "Cooked lentils",
         serving_description: "One cup cooked lentils.",
         asset_file_name: "lentils.jpg",
-        // Unresolved: see `image_url` — this fixture has no stable
-        // source image.
         image_url: "https://loremflickr.com/512/512/lentils,food",
         image_source_url: "https://loremflickr.com/512/512/lentils,food",
         expected_source: "USDA FoodData Central, one cup cooked lentils, rounded.",
@@ -256,8 +240,6 @@ pub(super) const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "Whole milk",
         serving_description: "One cup whole milk.",
         asset_file_name: "whole-milk.jpg",
-        // Unresolved: see `image_url` — this fixture has no stable
-        // source image.
         image_url: "https://loremflickr.com/512/512/milk,food",
         image_source_url: "https://loremflickr.com/512/512/milk,food",
         expected_source: "USDA FoodData Central, one cup whole milk, rounded.",
@@ -272,8 +254,6 @@ pub(super) const BENCHMARK_FIXTURES: &[BenchmarkFixture] = &[
         name: "Greek yogurt",
         serving_description: "One 170g serving plain nonfat Greek yogurt.",
         asset_file_name: "greek-yogurt.jpg",
-        // Unresolved: see `image_url` — this fixture has no stable
-        // source image.
         image_url: "https://loremflickr.com/512/512/yogurt,food",
         image_source_url: "https://loremflickr.com/512/512/yogurt,food",
         expected_source: "USDA FoodData Central, 170g plain nonfat Greek yogurt, rounded.",
