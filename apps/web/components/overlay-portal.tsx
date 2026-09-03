@@ -99,6 +99,7 @@ function isFocusable(element: HTMLElement) {
   }
 
   // `offsetParent` is null inside `position: fixed`, so it can't test visibility here; `checkVisibility` can.
+  // Where `checkVisibility` is unavailable, err to included so the trap stays closed.
   return typeof element.checkVisibility === "function"
     ? element.checkVisibility()
     : true;

@@ -13,8 +13,6 @@ import {
 
 import { useDismissableLayer } from "./overlay-portal";
 
-// ─── Core helpers ─────────────────────────────────────────────────────────────
-
 function applyTheme(theme: ThemeId) {
   const root = document.documentElement;
   root.setAttribute("data-theme", theme);

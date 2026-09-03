@@ -31,6 +31,7 @@ import { TransitionLink } from "./transition-link";
 import { useTemplateMutations } from "./use-template-mutations";
 
 // `loading` is load-bearing for Suspense; keep it an inline literal, since dynamic() options are analyzed statically.
+// Fallbacks mirror their modal shell; null would blank the overlay for a frame.
 const AiFoodPhotoModal = dynamic(
   () => import("./ai-food-photo-modal").then((mod) => mod.AiFoodPhotoModal),
   { loading: () => <OverlayBackdropFallback /> },

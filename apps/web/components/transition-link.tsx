@@ -37,6 +37,7 @@ export function TransitionLink({
   href,
   motion = "screen",
   // Off by default: dynamic prefetch renders the full route server-side and hosting memory is tightly capped.
+  // High-traffic links opt in individually.
   prefetch = false,
   onClick,
   target,
@@ -64,7 +65,8 @@ export function TransitionLink({
   );
 }
 
-// Pulses while navigation is pending; must render inside a TransitionLink/Link, which is where useLinkStatus reads from.
+// Pulses while pending, renders nothing idle; the delay keeps fast navigations from flashing.
+// Must render inside a TransitionLink/Link, which is where useLinkStatus reads from.
 export function LinkPendingPulse({
   className,
   children,
