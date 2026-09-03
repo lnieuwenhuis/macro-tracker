@@ -12,9 +12,12 @@ use uuid::Uuid;
 mod api_tokens;
 mod gym;
 mod healthkit;
+mod sql;
 mod weight;
 
 pub use api_tokens::authenticate_api_token;
+
+type PgQuery<'q> = sqlx::query::Query<'q, Postgres, sqlx::postgres::PgArguments>;
 
 #[derive(Clone, Debug)]
 struct AdminActor {
@@ -48,6 +51,33 @@ struct FoodProductValues {
     corrected_from_product_id: Option<Uuid>,
 }
 
+impl FoodProductValues {
+    fn bind_columns<'q>(&'q self, query: PgQuery<'q>) -> PgQuery<'q> {
+        query
+            .bind(&self.source)
+            .bind(self.barcode.as_deref())
+            .bind(&self.name)
+            .bind(&self.brand)
+            .bind(self.default_serving_quantity)
+            .bind(&self.default_serving_unit)
+            .bind(self.macros.protein)
+            .bind(self.macros.carbs)
+            .bind(self.macros.fat)
+            .bind(self.macros.calories)
+            .bind(self.serving_weight_g)
+            .bind(self.serving_volume_ml)
+    }
+
+    fn bind_provenance<'q>(&'q self, query: PgQuery<'q>, submitted_by: Uuid) -> PgQuery<'q> {
+        query
+            .bind(Some(submitted_by))
+            .bind(self.source_provider.as_deref())
+            .bind(self.source_confidence)
+            .bind(&self.source_metadata)
+            .bind(self.corrected_from_product_id)
+    }
+}
+
 #[derive(Clone, Debug)]
 struct MealFoodValues {
     product_id: Option<Uuid>,
@@ -69,9 +99,9 @@ const DEFAULT_MEAL_GROUP_LABELS: [&str; 4] = ["Breakfast", "Lunch", "Dinner", "S
 /// gaps-and-islands query lived only in the leaderboard, so every user's Summary
 /// permanently read `0🔥 / Best: 0 days` even though five tests asserted correct
 /// streaks — against the other consumer. Expanding one literal into both
-/// queries keeps them from drifting again; a `macro_rules!` rather than a
-/// `const` so each query stays a single compile-time string literal and the
-/// "no `format!` into SQL" invariant holds.
+/// queries keeps them from drifting again.
+///
+/// SQL is only ever assembled from compile-time constants in `db/sql.rs`, never from runtime values.
 ///
 /// Contract: the caller supplies a preceding CTE named `streak_days` with one
 /// row per date the user logged an eaten entry, and binds `$2` to the reference
@@ -1979,39 +2009,14 @@ async fn recipes_json_filtered(
 }
 
 async fn search_food_products_json(pool: &PgPool, user_id: Uuid, query: &str) -> AppResult<Value> {
-    validate_search_query(query)?;
-    let patterns = search_like_patterns(query);
-    if patterns.is_empty() {
+    let Some(patterns) = accepted_search_patterns(query)? else {
         return Ok(Value::Array(Vec::new()));
-    }
-    let row = sqlx::query(
+    };
+    let sql = format!(
         r#"
         SELECT coalesce(jsonb_agg(
           jsonb_build_object(
-            'id', id,
-            'ownerUserId', owner_user_id,
-            'scope', scope,
-            'source', source,
-            'barcode', barcode,
-            'name', name,
-            'brand', brand,
-            'defaultServingQuantity', default_serving_quantity::float8,
-            'defaultServingUnit', default_serving_unit,
-            'proteinPer100', protein_per_100::float8,
-            'carbsPer100', carbs_per_100::float8,
-            'fatPer100', fat_per_100::float8,
-            'caloriesPer100', calories_per_100,
-            'servingWeightG', serving_weight_g::float8,
-            'servingVolumeMl', serving_volume_ml::float8,
-            'submittedByUserId', submitted_by_user_id,
-            'deletedByUserId', deleted_by_user_id,
-            'sourceProvider', source_provider,
-            'sourceConfidence', source_confidence::float8,
-            'sourceMetadata', source_metadata,
-            'correctedFromProductId', corrected_from_product_id,
-            'createdAt', created_at,
-            'updatedAt', updated_at,
-            'deletedAt', deleted_at
+          {fields}
           )
           ORDER BY
             CASE
@@ -2058,12 +2063,14 @@ async fn search_food_products_json(pool: &PgPool, user_id: Uuid, query: &str) ->
           LIMIT 50
         ) products
         "#,
-    )
-    .bind(user_id)
-    .bind(&patterns)
-    .bind(&patterns[0])
-    .fetch_one(pool)
-    .await?;
+        fields = sql::food_product_fields("")
+    );
+    let row = sqlx::query(&sql)
+        .bind(user_id)
+        .bind(&patterns)
+        .bind(&patterns[0])
+        .fetch_one(pool)
+        .await?;
     Ok(row.try_get("data")?)
 }
 
@@ -2094,6 +2101,14 @@ fn search_like_patterns(query: &str) -> Vec<String> {
         .take(MAX_SEARCH_TERMS)
         .map(|word| format!("%{}%", escape_like_pattern(word)))
         .collect()
+}
+
+/// `None` means the query yielded no usable terms, which both searches answer
+/// with an empty array instead of a round trip.
+fn accepted_search_patterns(query: &str) -> AppResult<Option<Vec<String>>> {
+    validate_search_query(query)?;
+    let patterns = search_like_patterns(query);
+    Ok((!patterns.is_empty()).then_some(patterns))
 }
 
 fn escape_like_pattern(value: &str) -> String {
@@ -2142,44 +2157,23 @@ async fn food_product_json_by_id_with_executor<'e, E>(
 where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
-    let row = sqlx::query(
+    let sql = format!(
         r#"
         SELECT jsonb_build_object(
-          'id', id,
-          'ownerUserId', owner_user_id,
-          'scope', scope,
-          'source', source,
-          'barcode', barcode,
-          'name', name,
-          'brand', brand,
-          'defaultServingQuantity', default_serving_quantity::float8,
-          'defaultServingUnit', default_serving_unit,
-          'proteinPer100', protein_per_100::float8,
-          'carbsPer100', carbs_per_100::float8,
-          'fatPer100', fat_per_100::float8,
-          'caloriesPer100', calories_per_100,
-          'servingWeightG', serving_weight_g::float8,
-          'servingVolumeMl', serving_volume_ml::float8,
-          'submittedByUserId', submitted_by_user_id,
-          'deletedByUserId', deleted_by_user_id,
-          'sourceProvider', source_provider,
-          'sourceConfidence', source_confidence::float8,
-          'sourceMetadata', source_metadata,
-          'correctedFromProductId', corrected_from_product_id,
-          'createdAt', created_at,
-          'updatedAt', updated_at,
-          'deletedAt', deleted_at
+          {fields}
         ) AS data
         FROM food_products
         WHERE id = $2
           AND deleted_at IS NULL
           AND (owner_user_id = $1 OR owner_user_id IS NULL)
         "#,
-    )
-    .bind(user_id)
-    .bind(product_id)
-    .fetch_optional(executor)
-    .await?;
+        fields = sql::food_product_fields("")
+    );
+    let row = sqlx::query(&sql)
+        .bind(user_id)
+        .bind(product_id)
+        .fetch_optional(executor)
+        .await?;
 
     row.map(|row| row.try_get("data"))
         .transpose()
@@ -2314,6 +2308,26 @@ struct NormalizedMealEntry {
     serving_multiplier: f64,
     macros: MacroValues,
     client_mutation_id: Option<String>,
+}
+
+impl NormalizedMealEntry {
+    fn bind_columns<'q>(&'q self, query: PgQuery<'q>) -> PgQuery<'q> {
+        query
+            .bind(&self.date)
+            .bind(self.meal_group_id)
+            .bind(&self.status)
+            .bind(self.product_id)
+            .bind(&self.label)
+            .bind(self.sort_order)
+            .bind(self.quantity)
+            .bind(&self.unit)
+            .bind(self.serving_multiplier)
+            .bind(self.macros.protein)
+            .bind(self.macros.carbs)
+            .bind(self.macros.fat)
+            .bind(self.macros.calories)
+            .bind(self.client_mutation_id.as_deref())
+    }
 }
 
 /// PERF-02: everything `normalize_meal_input` would otherwise fetch once *per
@@ -2462,38 +2476,10 @@ async fn create_meal_entry_json(
     let entry = normalize_meal_input(pool, user_id, input, next_sort_order, true).await?;
 
     let id = Uuid::new_v4();
-    let inserted = sqlx::query(
-        r#"
-        INSERT INTO meal_entries (
-          id, user_id, entry_date, meal_group_id, status, product_id, label,
-          sort_order, quantity, unit, serving_multiplier, protein_g, carbs_g,
-          fat_g, calories_kcal, client_mutation_id
-        )
-        VALUES (
-          $1, $2, $3::date, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
-        )
-        ON CONFLICT (user_id, client_mutation_id) DO NOTHING
-        RETURNING id
-        "#,
-    )
-    .bind(id)
-    .bind(user_id)
-    .bind(&entry.date)
-    .bind(entry.meal_group_id)
-    .bind(&entry.status)
-    .bind(entry.product_id)
-    .bind(&entry.label)
-    .bind(entry.sort_order)
-    .bind(entry.quantity)
-    .bind(&entry.unit)
-    .bind(entry.serving_multiplier)
-    .bind(entry.macros.protein)
-    .bind(entry.macros.carbs)
-    .bind(entry.macros.fat)
-    .bind(entry.macros.calories)
-    .bind(entry.client_mutation_id.as_deref())
-    .fetch_optional(pool)
-    .await?;
+    let inserted = entry
+        .bind_columns(sqlx::query(sql::INSERT_MEAL_ENTRY).bind(id).bind(user_id))
+        .fetch_optional(pool)
+        .await?;
 
     if let Some(row) = inserted {
         let created_id: Uuid = row.try_get("id")?;
@@ -2566,7 +2552,7 @@ async fn update_meal_entry_json(
     let entry =
         normalize_meal_input(pool, user_id, merged_obj, 0, recalculate_product_macros).await?;
 
-    sqlx::query(
+    let update = sqlx::query(
         r#"
         UPDATE meal_entries
         SET
@@ -2589,54 +2575,24 @@ async fn update_meal_entry_json(
         "#,
     )
     .bind(user_id)
-    .bind(entry_id)
-    .bind(&entry.date)
-    .bind(entry.meal_group_id)
-    .bind(&entry.status)
-    .bind(entry.product_id)
-    .bind(&entry.label)
-    .bind(entry.sort_order)
-    .bind(entry.quantity)
-    .bind(&entry.unit)
-    .bind(entry.serving_multiplier)
-    .bind(entry.macros.protein)
-    .bind(entry.macros.carbs)
-    .bind(entry.macros.fat)
-    .bind(entry.macros.calories)
-    .bind(entry.client_mutation_id.as_deref())
-    .execute(pool)
-    .await
-    // LOW-B1: reusing a `clientMutationId` that another entry already holds is
-    // a client-visible collision, not an internal fault. The create path
-    // resolves it with `ON CONFLICT`; the update path turned it into a 500.
-    .map_err(map_unique_violation(
-        "That clientMutationId is already used by another meal entry.",
-    ))?;
+    .bind(entry_id);
+    entry
+        .bind_columns(update)
+        .execute(pool)
+        .await
+        // LOW-B1: a duplicate clientMutationId is a client-visible collision, not a fault.
+        .map_err(map_unique_violation(
+            "That clientMutationId is already used by another meal entry.",
+        ))?;
 
     meal_entry_json(pool, user_id, entry_id).await
 }
 
 async fn meal_entry_json(pool: &PgPool, user_id: Uuid, entry_id: Uuid) -> AppResult<Value> {
-    let row = sqlx::query(
+    let sql = format!(
         r#"
         SELECT jsonb_build_object(
-          'id', me.id,
-          'userId', me.user_id,
-          'date', me.entry_date,
-          'mealGroupId', me.meal_group_id,
-          'status', me.status,
-          'productId', CASE WHEN fp.id IS NULL THEN NULL ELSE me.product_id END,
-          'label', me.label,
-          'sortOrder', me.sort_order,
-          'quantity', me.quantity::float8,
-          'unit', me.unit,
-          'servingMultiplier', me.serving_multiplier::float8,
-          'proteinG', me.protein_g::float8,
-          'carbsG', me.carbs_g::float8,
-          'fatG', me.fat_g::float8,
-          'caloriesKcal', me.calories_kcal,
-          'clientMutationId', me.client_mutation_id,
-          'sourceLabel', fp.name
+          {fields}
         ) AS data
         FROM meal_entries me
         LEFT JOIN food_products fp
@@ -2645,18 +2601,19 @@ async fn meal_entry_json(pool: &PgPool, user_id: Uuid, entry_id: Uuid) -> AppRes
           AND (fp.owner_user_id = me.user_id OR fp.owner_user_id IS NULL)
         WHERE me.user_id = $1 AND me.id = $2
         "#,
-    )
-    .bind(user_id)
-    .bind(entry_id)
-    .fetch_optional(pool)
-    .await?;
+        fields = sql::meal_entry_fields("me.")
+    );
+    let row = sqlx::query(&sql)
+        .bind(user_id)
+        .bind(entry_id)
+        .fetch_optional(pool)
+        .await?;
     Ok(row
         .ok_or_else(|| AppError::NotFound("Meal entry not found.".to_string()))?
         .try_get("data")?)
 }
 
-/// Read back a batch of freshly written entries in one round trip, preserving
-/// the caller's id order via `WITH ORDINALITY`.
+/// `WITH ORDINALITY` preserves the caller's id order across the batch read.
 async fn meal_entries_json_by_ids(
     pool: &PgPool,
     user_id: Uuid,
@@ -2666,27 +2623,11 @@ async fn meal_entries_json_by_ids(
         return Ok(Value::Array(Vec::new()));
     }
 
-    let row = sqlx::query(
+    let sql = format!(
         r#"
         SELECT coalesce(jsonb_agg(
           jsonb_build_object(
-            'id', me.id,
-            'userId', me.user_id,
-            'date', me.entry_date,
-            'mealGroupId', me.meal_group_id,
-            'status', me.status,
-            'productId', CASE WHEN fp.id IS NULL THEN NULL ELSE me.product_id END,
-            'label', me.label,
-            'sortOrder', me.sort_order,
-            'quantity', me.quantity::float8,
-            'unit', me.unit,
-            'servingMultiplier', me.serving_multiplier::float8,
-            'proteinG', me.protein_g::float8,
-            'carbsG', me.carbs_g::float8,
-            'fatG', me.fat_g::float8,
-            'caloriesKcal', me.calories_kcal,
-            'clientMutationId', me.client_mutation_id,
-            'sourceLabel', fp.name
+          {fields}
           )
           ORDER BY requested.ordinality
         ), '[]'::jsonb) AS data
@@ -2697,11 +2638,13 @@ async fn meal_entries_json_by_ids(
           AND fp.deleted_at IS NULL
           AND (fp.owner_user_id = me.user_id OR fp.owner_user_id IS NULL)
         "#,
-    )
-    .bind(user_id)
-    .bind(entry_ids)
-    .fetch_one(pool)
-    .await?;
+        fields = sql::meal_entry_fields("me.")
+    );
+    let row = sqlx::query(&sql)
+        .bind(user_id)
+        .bind(entry_ids)
+        .fetch_one(pool)
+        .await?;
 
     Ok(row.try_get("data")?)
 }
@@ -2816,7 +2759,7 @@ async fn insert_template_items(
         );
     }
 
-    sqlx::query(
+    let query = sqlx::query(
         r#"
         INSERT INTO meal_template_items (
           id, template_id, product_id, meal_group_label, sort_order, label,
@@ -2834,29 +2777,16 @@ async fn insert_template_items(
           quantity, unit, serving_multiplier, protein_g, carbs_g, fat_g, calories_kcal
         )
         "#,
-    )
-    .bind(template_id)
-    .bind(&rows.ids)
-    .bind(&rows.product_ids)
-    .bind(&rows.meal_group_labels)
-    .bind(&rows.sort_orders)
-    .bind(&rows.labels)
-    .bind(&rows.quantities)
-    .bind(&rows.units)
-    .bind(&rows.serving_multipliers)
-    .bind(&rows.proteins)
-    .bind(&rows.carbs)
-    .bind(&rows.fats)
-    .bind(&rows.calories)
-    .execute(&mut **tx)
-    .await?;
+    );
+    let query = rows
+        .bind_ids(query.bind(template_id))
+        .bind(&rows.meal_group_labels);
+    rows.bind_values(query).execute(&mut **tx).await?;
 
     Ok(())
 }
 
-/// Column-major staging buffer for a multi-row `unnest` insert. Template items
-/// and recipe ingredients share every column except `meal_group_label`, which
-/// recipe rows leave empty.
+/// Column-major staging buffer for a multi-row `unnest` insert.
 #[derive(Default)]
 struct TemplateItemColumns {
     ids: Vec<Uuid>,
@@ -2905,11 +2835,27 @@ impl TemplateItemColumns {
         self.fats.push(values.macros.fat);
         self.calories.push(values.macros.calories);
     }
+
+    /// Split so insert_template_items can bind meal_group_label between ids and values; recipe rows have none.
+    fn bind_ids<'q>(&'q self, query: PgQuery<'q>) -> PgQuery<'q> {
+        query.bind(&self.ids).bind(&self.product_ids)
+    }
+
+    fn bind_values<'q>(&'q self, query: PgQuery<'q>) -> PgQuery<'q> {
+        query
+            .bind(&self.sort_orders)
+            .bind(&self.labels)
+            .bind(&self.quantities)
+            .bind(&self.units)
+            .bind(&self.serving_multipliers)
+            .bind(&self.proteins)
+            .bind(&self.carbs)
+            .bind(&self.fats)
+            .bind(&self.calories)
+    }
 }
 
-/// Loads every product a template's items reference in one round trip, using
-/// the same visibility predicate as `food_product_json_by_id` so a prefetched
-/// product is indistinguishable from an individually fetched one (PERF-02).
+/// PERF-02: prefetches a template's products under `food_product_json_by_id`'s visibility rule.
 async fn food_products_json_by_ids(
     pool: &PgPool,
     user_id: Uuid,
@@ -2918,46 +2864,25 @@ async fn food_products_json_by_ids(
     if product_ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let rows = sqlx::query(
+    let sql = format!(
         r#"
         SELECT
           id,
           jsonb_build_object(
-            'id', id,
-            'ownerUserId', owner_user_id,
-            'scope', scope,
-            'source', source,
-            'barcode', barcode,
-            'name', name,
-            'brand', brand,
-            'defaultServingQuantity', default_serving_quantity::float8,
-            'defaultServingUnit', default_serving_unit,
-            'proteinPer100', protein_per_100::float8,
-            'carbsPer100', carbs_per_100::float8,
-            'fatPer100', fat_per_100::float8,
-            'caloriesPer100', calories_per_100,
-            'servingWeightG', serving_weight_g::float8,
-            'servingVolumeMl', serving_volume_ml::float8,
-            'submittedByUserId', submitted_by_user_id,
-            'deletedByUserId', deleted_by_user_id,
-            'sourceProvider', source_provider,
-            'sourceConfidence', source_confidence::float8,
-            'sourceMetadata', source_metadata,
-            'correctedFromProductId', corrected_from_product_id,
-            'createdAt', created_at,
-            'updatedAt', updated_at,
-            'deletedAt', deleted_at
+          {fields}
           ) AS data
         FROM food_products
         WHERE id = ANY($2::uuid[])
           AND deleted_at IS NULL
           AND (owner_user_id = $1 OR owner_user_id IS NULL)
         "#,
-    )
-    .bind(user_id)
-    .bind(product_ids)
-    .fetch_all(pool)
-    .await?;
+        fields = sql::food_product_fields("")
+    );
+    let rows = sqlx::query(&sql)
+        .bind(user_id)
+        .bind(product_ids)
+        .fetch_all(pool)
+        .await?;
 
     let mut products = HashMap::with_capacity(rows.len());
     for row in rows {
@@ -3187,38 +3112,10 @@ async fn apply_template_json(
     for (index, entry) in normalized.into_iter().enumerate() {
         maybe_trigger_test_fault(test_fault, index + 1)?;
         let id = Uuid::new_v4();
-        let inserted = sqlx::query(
-            r#"
-            INSERT INTO meal_entries (
-              id, user_id, entry_date, meal_group_id, status, product_id, label,
-              sort_order, quantity, unit, serving_multiplier, protein_g, carbs_g,
-              fat_g, calories_kcal, client_mutation_id
-            )
-            VALUES (
-              $1, $2, $3::date, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
-            )
-            ON CONFLICT (user_id, client_mutation_id) DO NOTHING
-            RETURNING id
-            "#,
-        )
-        .bind(id)
-        .bind(user_id)
-        .bind(&entry.date)
-        .bind(entry.meal_group_id)
-        .bind(&entry.status)
-        .bind(entry.product_id)
-        .bind(&entry.label)
-        .bind(entry.sort_order)
-        .bind(entry.quantity)
-        .bind(&entry.unit)
-        .bind(entry.serving_multiplier)
-        .bind(entry.macros.protein)
-        .bind(entry.macros.carbs)
-        .bind(entry.macros.fat)
-        .bind(entry.macros.calories)
-        .bind(entry.client_mutation_id.as_deref())
-        .fetch_optional(&mut *tx)
-        .await?;
+        let inserted = entry
+            .bind_columns(sqlx::query(sql::INSERT_MEAL_ENTRY).bind(id).bind(user_id))
+            .fetch_optional(&mut *tx)
+            .await?;
 
         if let Some(row) = inserted {
             created_ids.push(row.try_get::<Uuid, _>("id")?);
@@ -3323,45 +3220,24 @@ async fn create_food_product_json(
             "That barcode already exists.".to_string(),
         ));
     }
-    sqlx::query(
-        r#"
-        INSERT INTO food_products (
-          id, owner_user_id, scope, source, barcode, name, brand,
-          default_serving_quantity, default_serving_unit, protein_per_100,
-          carbs_per_100, fat_per_100, calories_per_100, serving_weight_g,
-          serving_volume_ml, submitted_by_user_id, source_provider,
-          source_confidence, source_metadata, corrected_from_product_id,
-          updated_at
-        )
+    let insert = format!(
+        r#"{columns}
         VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
           $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, now()
         )
         "#,
-    )
-    .bind(product_id)
-    .bind(if personal { Some(user_id) } else { None })
-    .bind(normalized.scope)
-    .bind(normalized.source)
-    .bind(normalized.barcode.as_deref())
-    .bind(normalized.name)
-    .bind(normalized.brand)
-    .bind(normalized.default_serving_quantity)
-    .bind(normalized.default_serving_unit)
-    .bind(normalized.macros.protein)
-    .bind(normalized.macros.carbs)
-    .bind(normalized.macros.fat)
-    .bind(normalized.macros.calories)
-    .bind(normalized.serving_weight_g)
-    .bind(normalized.serving_volume_ml)
-    .bind(Some(user_id))
-    .bind(normalized.source_provider.as_deref())
-    .bind(normalized.source_confidence)
-    .bind(normalized.source_metadata)
-    .bind(normalized.corrected_from_product_id)
-    .execute(pool)
-    .await
-    .map_err(map_active_barcode_conflict)?;
+        columns = sql::INSERT_FOOD_PRODUCT_COLUMNS
+    );
+    let query = sqlx::query(&insert)
+        .bind(product_id)
+        .bind(if personal { Some(user_id) } else { None })
+        .bind(&normalized.scope);
+    normalized
+        .bind_provenance(normalized.bind_columns(query), user_id)
+        .execute(pool)
+        .await
+        .map_err(map_active_barcode_conflict)?;
     let product = food_product_json_by_id(pool, user_id, product_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Food product not found.".to_string()))?;
@@ -3424,33 +3300,10 @@ async fn lookup_barcode_food_product_json(
     pool: &PgPool,
     barcode: &str,
 ) -> AppResult<Option<Value>> {
-    let row = sqlx::query(
+    let sql = format!(
         r#"
         SELECT jsonb_build_object(
-          'id', id,
-          'ownerUserId', owner_user_id,
-          'scope', scope,
-          'source', source,
-          'barcode', barcode,
-          'name', name,
-          'brand', brand,
-          'defaultServingQuantity', default_serving_quantity::float8,
-          'defaultServingUnit', default_serving_unit,
-          'proteinPer100', protein_per_100::float8,
-          'carbsPer100', carbs_per_100::float8,
-          'fatPer100', fat_per_100::float8,
-          'caloriesPer100', calories_per_100,
-          'servingWeightG', serving_weight_g::float8,
-          'servingVolumeMl', serving_volume_ml::float8,
-          'submittedByUserId', submitted_by_user_id,
-          'deletedByUserId', deleted_by_user_id,
-          'sourceProvider', source_provider,
-          'sourceConfidence', source_confidence::float8,
-          'sourceMetadata', source_metadata,
-          'correctedFromProductId', corrected_from_product_id,
-          'createdAt', created_at,
-          'updatedAt', updated_at,
-          'deletedAt', deleted_at
+          {fields}
         ) AS data
         FROM food_products
         WHERE owner_user_id IS NULL
@@ -3460,10 +3313,12 @@ async fn lookup_barcode_food_product_json(
         ORDER BY updated_at DESC
         LIMIT 1
         "#,
-    )
-    .bind(barcode.trim())
-    .fetch_optional(pool)
-    .await?;
+        fields = sql::food_product_fields("")
+    );
+    let row = sqlx::query(&sql)
+        .bind(barcode.trim())
+        .fetch_optional(pool)
+        .await?;
 
     row.map(|row| row.try_get("data"))
         .transpose()
@@ -3566,44 +3421,23 @@ async fn save_barcode_food_product_with_executor(
         ));
     }
 
-    sqlx::query(
-        r#"
-        INSERT INTO food_products (
-          id, owner_user_id, scope, source, barcode, name, brand,
-          default_serving_quantity, default_serving_unit, protein_per_100,
-          carbs_per_100, fat_per_100, calories_per_100, serving_weight_g,
-          serving_volume_ml, submitted_by_user_id, source_provider,
-          source_confidence, source_metadata, corrected_from_product_id,
-          updated_at
-        )
+    let insert = format!(
+        r#"{columns}
         VALUES (
           $1, NULL, $2, $3, $4, $5, $6, $7, $8, $9,
           $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, now()
         )
         "#,
-    )
-    .bind(product_id)
-    .bind(normalized.scope)
-    .bind(normalized.source)
-    .bind(normalized.barcode.as_deref())
-    .bind(normalized.name)
-    .bind(normalized.brand)
-    .bind(normalized.default_serving_quantity)
-    .bind(normalized.default_serving_unit)
-    .bind(normalized.macros.protein)
-    .bind(normalized.macros.carbs)
-    .bind(normalized.macros.fat)
-    .bind(normalized.macros.calories)
-    .bind(normalized.serving_weight_g)
-    .bind(normalized.serving_volume_ml)
-    .bind(Some(user_id))
-    .bind(normalized.source_provider.as_deref())
-    .bind(normalized.source_confidence)
-    .bind(normalized.source_metadata)
-    .bind(normalized.corrected_from_product_id)
-    .execute(&mut *executor)
-    .await
-    .map_err(map_active_barcode_conflict)?;
+        columns = sql::INSERT_FOOD_PRODUCT_COLUMNS
+    );
+    let query = sqlx::query(&insert)
+        .bind(product_id)
+        .bind(&normalized.scope);
+    normalized
+        .bind_provenance(normalized.bind_columns(query), user_id)
+        .execute(&mut *executor)
+        .await
+        .map_err(map_active_barcode_conflict)?;
 
     let product = food_product_json_by_id_with_executor(&mut *executor, user_id, product_id)
         .await?
@@ -3893,34 +3727,11 @@ async fn recent_barcode_submissions_json(
     user_id: Uuid,
     limit: i32,
 ) -> AppResult<Value> {
-    let row = sqlx::query(
+    let sql = format!(
         r#"
         SELECT coalesce(jsonb_agg(
           jsonb_build_object(
-            'id', id,
-            'ownerUserId', owner_user_id,
-            'scope', scope,
-            'source', source,
-            'barcode', barcode,
-            'name', name,
-            'brand', brand,
-            'defaultServingQuantity', default_serving_quantity::float8,
-            'defaultServingUnit', default_serving_unit,
-            'proteinPer100', protein_per_100::float8,
-            'carbsPer100', carbs_per_100::float8,
-            'fatPer100', fat_per_100::float8,
-            'caloriesPer100', calories_per_100,
-            'servingWeightG', serving_weight_g::float8,
-            'servingVolumeMl', serving_volume_ml::float8,
-            'submittedByUserId', submitted_by_user_id,
-            'deletedByUserId', deleted_by_user_id,
-            'sourceProvider', source_provider,
-            'sourceConfidence', source_confidence::float8,
-            'sourceMetadata', source_metadata,
-            'correctedFromProductId', corrected_from_product_id,
-            'createdAt', created_at,
-            'updatedAt', updated_at,
-            'deletedAt', deleted_at
+          {fields}
           )
           ORDER BY created_at DESC, id
         ), '[]'::jsonb) AS data
@@ -3932,11 +3743,13 @@ async fn recent_barcode_submissions_json(
           LIMIT $2
         ) recent
         "#,
-    )
-    .bind(user_id)
-    .bind(limit)
-    .fetch_one(pool)
-    .await?;
+        fields = sql::food_product_fields("")
+    );
+    let row = sqlx::query(&sql)
+        .bind(user_id)
+        .bind(limit)
+        .fetch_one(pool)
+        .await?;
     Ok(row.try_get("data")?)
 }
 
@@ -4108,7 +3921,7 @@ async fn admin_food_products_json(
 ) -> AppResult<Value> {
     // Second offset computation (DATA-06); shares the clamp with `pagination`.
     let offset = page_offset(page, page_size);
-    let rows = sqlx::query(
+    let sql = format!(
         r#"
         WITH barcode_products AS (
           SELECT
@@ -4174,30 +3987,7 @@ async fn admin_food_products_json(
           LEFT JOIN recently_restored rr ON rr.target_id = bp.id::text
         )
         SELECT jsonb_build_object(
-          'id', fp.id,
-          'ownerUserId', fp.owner_user_id,
-          'scope', fp.scope,
-          'source', fp.source,
-          'barcode', fp.barcode,
-          'name', fp.name,
-          'brand', fp.brand,
-          'defaultServingQuantity', fp.default_serving_quantity::float8,
-          'defaultServingUnit', fp.default_serving_unit,
-          'proteinPer100', fp.protein_per_100::float8,
-          'carbsPer100', fp.carbs_per_100::float8,
-          'fatPer100', fp.fat_per_100::float8,
-          'caloriesPer100', fp.calories_per_100,
-          'servingWeightG', fp.serving_weight_g::float8,
-          'servingVolumeMl', fp.serving_volume_ml::float8,
-          'submittedByUserId', fp.submitted_by_user_id,
-          'deletedByUserId', fp.deleted_by_user_id,
-          'sourceProvider', fp.source_provider,
-          'sourceConfidence', fp.source_confidence::float8,
-          'sourceMetadata', fp.source_metadata,
-          'correctedFromProductId', fp.corrected_from_product_id,
-          'createdAt', fp.created_at,
-          'updatedAt', fp.updated_at,
-          'deletedAt', fp.deleted_at,
+          {fields},
           'reviewReasons', CASE WHEN $3 THEN
             (CASE WHEN fp.source_confidence IS NOT NULL AND fp.source_confidence < 0.75 THEN jsonb_build_array('low_confidence') ELSE '[]'::jsonb END)
             || (CASE WHEN fp.serving_weight_g IS NULL AND fp.serving_volume_ml IS NULL THEN jsonb_build_array('missing_serving_size') ELSE '[]'::jsonb END)
@@ -4224,22 +4014,18 @@ async fn admin_food_products_json(
         ORDER BY fp.updated_at DESC, fp.created_at DESC
         LIMIT $1 OFFSET $2
         "#,
-    )
-    .bind(page_size)
-    .bind(offset)
-    .bind(review_queue)
-    .bind(filters.q_pattern.as_deref())
-    .bind(filters.status.as_str())
-    .bind(filters.submitter_pattern.as_deref())
-    .fetch_all(pool)
-    .await?;
-    // PERF-04: outside the review queue the outer predicate below is
-    // `NOT false`, i.e. always true — so the whole review-metadata chain
-    // (`regexp_replace` over every catalogue row, the duplicate-name GROUP BY,
-    // the revision and audit rollups and three LEFT JOINs) was computed and
-    // then discarded. Every ordinary admin page view paid for it, and
-    // `admin_dashboard_json` paid for it again to render five rows. The count
-    // is the same either way; only the review queue actually needs the rollups.
+        fields = sql::food_product_fields("fp.")
+    );
+    let rows = sqlx::query(&sql)
+        .bind(page_size)
+        .bind(offset)
+        .bind(review_queue)
+        .bind(filters.q_pattern.as_deref())
+        .bind(filters.status.as_str())
+        .bind(filters.submitter_pattern.as_deref())
+        .fetch_all(pool)
+        .await?;
+    // PERF-04: only the review queue needs the rollups; the count is the same either way.
     let total_row = if review_queue {
         sqlx::query(
         r#"
@@ -4368,41 +4154,20 @@ async fn admin_food_product_by_id_json_with_executor<'e, E>(
 where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
-    let row = sqlx::query(
+    let sql = format!(
         r#"
         SELECT jsonb_build_object(
-          'id', id,
-          'ownerUserId', owner_user_id,
-          'scope', scope,
-          'source', source,
-          'barcode', barcode,
-          'name', name,
-          'brand', brand,
-          'defaultServingQuantity', default_serving_quantity::float8,
-          'defaultServingUnit', default_serving_unit,
-          'proteinPer100', protein_per_100::float8,
-          'carbsPer100', carbs_per_100::float8,
-          'fatPer100', fat_per_100::float8,
-          'caloriesPer100', calories_per_100,
-          'servingWeightG', serving_weight_g::float8,
-          'servingVolumeMl', serving_volume_ml::float8,
-          'submittedByUserId', submitted_by_user_id,
-          'deletedByUserId', deleted_by_user_id,
-          'sourceProvider', source_provider,
-          'sourceConfidence', source_confidence::float8,
-          'sourceMetadata', source_metadata,
-          'correctedFromProductId', corrected_from_product_id,
-          'createdAt', created_at,
-          'updatedAt', updated_at,
-          'deletedAt', deleted_at
+          {fields}
         ) AS data
         FROM food_products
         WHERE id = $1 AND owner_user_id IS NULL AND source = 'barcode'
         "#,
-    )
-    .bind(product_id)
-    .fetch_optional(executor)
-    .await?;
+        fields = sql::food_product_fields("")
+    );
+    let row = sqlx::query(&sql)
+        .bind(product_id)
+        .fetch_optional(executor)
+        .await?;
     row.map(|row| row.try_get("data"))
         .transpose()
         .map_err(Into::into)
@@ -4707,19 +4472,10 @@ async fn list_admin_audit_events_json(
     let (page, page_size, offset) = pagination(input);
     let target_type = input.get("targetType").and_then(Value::as_str);
     let target_id = input.get("targetId").and_then(Value::as_str);
-    let rows = sqlx::query(
+    let sql = format!(
         r#"
         SELECT jsonb_build_object(
-          'id', ae.id,
-          'actorUserId', ae.actor_user_id,
-          'actorEmail', u.email,
-          'actorDisplayName', u.display_name,
-          'actorRole', ae.actor_role,
-          'action', ae.action,
-          'targetType', ae.target_type,
-          'targetId', ae.target_id,
-          'details', ae.details_json,
-          'createdAt', ae.created_at
+          {fields}
         ) AS data
         FROM admin_audit_events ae
         LEFT JOIN users u ON u.id = ae.actor_user_id
@@ -4728,13 +4484,15 @@ async fn list_admin_audit_events_json(
         ORDER BY ae.created_at DESC
         LIMIT $1 OFFSET $2
         "#,
-    )
-    .bind(page_size)
-    .bind(offset)
-    .bind(target_type)
-    .bind(target_id)
-    .fetch_all(pool)
-    .await?;
+        fields = sql::admin_audit_event_fields()
+    );
+    let rows = sqlx::query(&sql)
+        .bind(page_size)
+        .bind(offset)
+        .bind(target_type)
+        .bind(target_id)
+        .fetch_all(pool)
+        .await?;
     let total_row = sqlx::query(
         r#"
         SELECT count(*)::int AS total
@@ -4759,28 +4517,21 @@ async fn list_admin_audit_events_json(
 }
 
 async fn get_admin_audit_event_json(pool: &PgPool, event_id: Uuid) -> AppResult<Value> {
-    let row = sqlx::query(
+    let sql = format!(
         r#"
         SELECT jsonb_build_object(
-          'id', ae.id,
-          'actorUserId', ae.actor_user_id,
-          'actorEmail', u.email,
-          'actorDisplayName', u.display_name,
-          'actorRole', ae.actor_role,
-          'action', ae.action,
-          'targetType', ae.target_type,
-          'targetId', ae.target_id,
-          'details', ae.details_json,
-          'createdAt', ae.created_at
+          {fields}
         ) AS data
         FROM admin_audit_events ae
         LEFT JOIN users u ON u.id = ae.actor_user_id
         WHERE ae.id = $1
         "#,
-    )
-    .bind(event_id)
-    .fetch_optional(pool)
-    .await?;
+        fields = sql::admin_audit_event_fields()
+    );
+    let row = sqlx::query(&sql)
+        .bind(event_id)
+        .fetch_optional(pool)
+        .await?;
     Ok(row
         .map(|row| row.try_get("data"))
         .transpose()?
@@ -4795,7 +4546,7 @@ async fn update_food_product_json(
 ) -> AppResult<Value> {
     let mut normalized = normalize_food_product_input(input, "personal")?;
     normalized.scope = "personal".to_string();
-    let updated = sqlx::query(
+    let update = sqlx::query(
         r#"
         UPDATE food_products
         SET
@@ -4821,22 +4572,12 @@ async fn update_food_product_json(
         "#,
     )
     .bind(user_id)
-    .bind(product_id)
-    .bind(normalized.source)
-    .bind(normalized.barcode.as_deref())
-    .bind(normalized.name)
-    .bind(normalized.brand)
-    .bind(normalized.default_serving_quantity)
-    .bind(normalized.default_serving_unit)
-    .bind(normalized.macros.protein)
-    .bind(normalized.macros.carbs)
-    .bind(normalized.macros.fat)
-    .bind(normalized.macros.calories)
-    .bind(normalized.serving_weight_g)
-    .bind(normalized.serving_volume_ml)
-    .fetch_optional(pool)
-    .await?
-    .is_some();
+    .bind(product_id);
+    let updated = normalized
+        .bind_columns(update)
+        .fetch_optional(pool)
+        .await?
+        .is_some();
     if !updated {
         return Err(AppError::NotFound("Food product not found.".to_string()));
     }
@@ -4952,8 +4693,7 @@ async fn insert_recipe_ingredients(
 
     let mut rows = TemplateItemColumns::with_capacity(ingredients.len());
     for (index, ingredient) in ingredients.iter().enumerate() {
-        // Kept per item so injected faults still abort at the same ingredient;
-        // the surrounding transaction rolls back either way.
+        // Per item so an injected fault aborts at the same ingredient it would in production.
         maybe_trigger_test_fault(test_fault, index + 1)?;
         let ingredient = ingredient.as_object().ok_or_else(|| {
             AppError::BadRequest("Recipe ingredient must be an object.".to_string())
@@ -4966,7 +4706,7 @@ async fn insert_recipe_ingredients(
         rows.push(index as i32, None, values);
     }
 
-    sqlx::query(
+    let query = sqlx::query(
         r#"
         INSERT INTO recipe_ingredients (
           id, recipe_id, product_id, sort_order, label, quantity, unit,
@@ -4984,21 +4724,9 @@ async fn insert_recipe_ingredients(
           serving_multiplier, protein_g, carbs_g, fat_g, calories_kcal
         )
         "#,
-    )
-    .bind(recipe_id)
-    .bind(&rows.ids)
-    .bind(&rows.product_ids)
-    .bind(&rows.sort_orders)
-    .bind(&rows.labels)
-    .bind(&rows.quantities)
-    .bind(&rows.units)
-    .bind(&rows.serving_multipliers)
-    .bind(&rows.proteins)
-    .bind(&rows.carbs)
-    .bind(&rows.fats)
-    .bind(&rows.calories)
-    .execute(&mut **tx)
-    .await?;
+    );
+    let query = rows.bind_ids(query.bind(recipe_id));
+    rows.bind_values(query).execute(&mut **tx).await?;
 
     Ok(())
 }
@@ -5176,32 +4904,14 @@ async fn dashboard_quick_add_json(
 }
 
 async fn search_meal_entries_json(pool: &PgPool, user_id: Uuid, query: &str) -> AppResult<Value> {
-    validate_search_query(query)?;
-    let patterns = search_like_patterns(query);
-    if patterns.is_empty() {
+    let Some(patterns) = accepted_search_patterns(query)? else {
         return Ok(Value::Array(Vec::new()));
-    }
-    let row = sqlx::query(
+    };
+    let sql = format!(
         r#"
         SELECT coalesce(jsonb_agg(
           jsonb_build_object(
-            'id', matches.id,
-            'userId', matches.user_id,
-            'date', matches.entry_date,
-            'mealGroupId', matches.meal_group_id,
-            'status', matches.status,
-            'productId', CASE WHEN fp.id IS NULL THEN NULL ELSE matches.product_id END,
-            'label', matches.label,
-            'sortOrder', matches.sort_order,
-            'quantity', matches.quantity::float8,
-            'unit', matches.unit,
-            'servingMultiplier', matches.serving_multiplier::float8,
-            'proteinG', matches.protein_g::float8,
-            'carbsG', matches.carbs_g::float8,
-            'fatG', matches.fat_g::float8,
-            'caloriesKcal', matches.calories_kcal,
-            'clientMutationId', matches.client_mutation_id,
-            'sourceLabel', fp.name
+          {fields}
           )
           ORDER BY matches.entry_date DESC, matches.sort_order ASC
         ), '[]'::jsonb) AS data
@@ -5233,11 +4943,13 @@ async fn search_meal_entries_json(pool: &PgPool, user_id: Uuid, query: &str) -> 
           AND fp.deleted_at IS NULL
           AND (fp.owner_user_id = $1 OR fp.owner_user_id IS NULL)
         "#,
-    )
-    .bind(user_id)
-    .bind(patterns)
-    .fetch_one(pool)
-    .await?;
+        fields = sql::meal_entry_fields("matches.")
+    );
+    let row = sqlx::query(&sql)
+        .bind(user_id)
+        .bind(patterns)
+        .fetch_one(pool)
+        .await?;
     Ok(row.try_get("data")?)
 }
 
@@ -5247,7 +4959,7 @@ async fn list_recent_meal_entries_json(
     limit: i32,
     eaten_only: bool,
 ) -> AppResult<Value> {
-    let row = sqlx::query(
+    let sql = format!(
         r#"
         -- DATA-08: this was the one meal-JSON shape that did not mask
         -- soft-deleted products. It handed clients a `productId` that 404s on
@@ -5255,23 +4967,7 @@ async fn list_recent_meal_entries_json(
         -- blocks join exactly like this.
         SELECT coalesce(jsonb_agg(
           jsonb_build_object(
-            'id', recent.id,
-            'userId', recent.user_id,
-            'date', recent.entry_date,
-            'mealGroupId', recent.meal_group_id,
-            'status', recent.status,
-            'productId', CASE WHEN fp.id IS NULL THEN NULL ELSE recent.product_id END,
-            'label', recent.label,
-            'sortOrder', recent.sort_order,
-            'quantity', recent.quantity::float8,
-            'unit', recent.unit,
-            'servingMultiplier', recent.serving_multiplier::float8,
-            'proteinG', recent.protein_g::float8,
-            'carbsG', recent.carbs_g::float8,
-            'fatG', recent.fat_g::float8,
-            'caloriesKcal', recent.calories_kcal,
-            'clientMutationId', recent.client_mutation_id,
-            'sourceLabel', fp.name
+          {fields}
           )
           ORDER BY recent.entry_date DESC, recent.sort_order ASC, recent.created_at DESC, recent.id
         ), '[]'::jsonb) AS data
@@ -5287,12 +4983,14 @@ async fn list_recent_meal_entries_json(
           AND fp.deleted_at IS NULL
           AND (fp.owner_user_id = recent.user_id OR fp.owner_user_id IS NULL)
         "#,
-    )
-    .bind(user_id)
-    .bind(limit)
-    .bind(eaten_only)
-    .fetch_one(pool)
-    .await?;
+        fields = sql::meal_entry_fields("recent.")
+    );
+    let row = sqlx::query(&sql)
+        .bind(user_id)
+        .bind(limit)
+        .bind(eaten_only)
+        .fetch_one(pool)
+        .await?;
     Ok(row.try_get("data")?)
 }
 
