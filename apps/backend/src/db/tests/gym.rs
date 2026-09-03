@@ -169,3 +169,62 @@ fn gym_merge_overlaps_merges_per_style_and_classifies_tentative() {
 
     assert_eq!(gym_merge_overlaps(&[]), json!([]));
 }
+
+#[test]
+fn gym_merge_overlaps_caps_windows_and_buddies_keeping_the_earliest() {
+    // 22 buddies (cap is 20) with 4 far-apart, non-mergeable windows each (cap is 3 per buddy).
+    // Rows arrive ordered by start, so buddy N's earliest window is at minute N.
+    let buddy_id = |index: usize| format!("00000000-0000-4000-8000-{index:012}");
+    let mut rows = Vec::new();
+    for index in 0..22 {
+        for window in 0..4 {
+            let start = (index + window * 1000) as i64;
+            rows.push(json!({
+                "buddyId": buddy_id(index),
+                "buddyName": format!("Buddy {index}"),
+                "startMinute": start,
+                "endMinute": start + 5,
+                "tentative": false,
+            }));
+        }
+    }
+
+    let merged = gym_merge_overlaps(&rows);
+    let entries = merged.as_array().expect("merged overlaps are an array");
+    assert_eq!(
+        entries.len(),
+        20,
+        "buddy cap not enforced: expected 20 buddies, got {}",
+        entries.len()
+    );
+
+    for (index, entry) in entries.iter().enumerate() {
+        assert_eq!(
+            entry["buddy"]["id"],
+            json!(buddy_id(index)),
+            "buddies not retained in earliest-window order at position {index}"
+        );
+        let windows = entry["windows"].as_array().unwrap();
+        assert_eq!(
+            windows.len(),
+            3,
+            "per-buddy window cap not enforced for buddy {index}: got {}",
+            windows.len()
+        );
+        for (slot, window) in windows.iter().enumerate() {
+            assert_eq!(
+                window["startMinute"],
+                json!((index + slot * 1000) as i64),
+                "window {slot} of buddy {index} is not the {slot}-th earliest window"
+            );
+        }
+    }
+
+    let retained_ids: Vec<&Value> = entries.iter().map(|entry| &entry["buddy"]["id"]).collect();
+    for dropped in [20usize, 21] {
+        assert!(
+            !retained_ids.contains(&&json!(buddy_id(dropped))),
+            "late buddy {dropped} should have been dropped by the buddy cap"
+        );
+    }
+}
