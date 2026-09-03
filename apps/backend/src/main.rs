@@ -46,7 +46,7 @@ pub fn build_http_client() -> reqwest::Result<reqwest::Client> {
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const POSTGRES_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-// SEC-09: below `POSTGRES_POOL_MAX` so a pre-auth flood is refused here. Availability, not brute-force protection.
+// SEC-09: bounds the per-IP arrival rate at the edge, ahead of the `api_tokens` lookup. Availability, not brute force.
 const API_RATE_LIMIT_REPLENISH_MS: u64 = 50;
 const API_RATE_LIMIT_BURST: u32 = 100;
 // Only reachable via `BACKEND_ENABLE_TEST_ROUTES`, which SEC-05 restricts to a loopback `APP_URL`.

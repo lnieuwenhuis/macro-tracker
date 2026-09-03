@@ -145,7 +145,7 @@ fn production_config_rejects_committed_development_secrets() {
     }
 }
 
-/// CI runs the backend with a loopback `APP_URL` and no insecure-local flag, so these literals must stay accepted.
+/// The CI secret literals (`.github/workflows/ci.yml` lines ~30/32) must stay accepted in every deployment shape.
 #[test]
 fn production_config_accepts_ci_secret_literals() {
     for secret in [

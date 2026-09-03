@@ -96,7 +96,7 @@ impl Config {
             backend_internal_secret,
             database_url,
             port: parse_bounded(read_value(&mut read, "PORT"), "PORT", 4000, 1, u16::MAX)?,
-            // SEC-09: kept small so a pre-auth request burst cannot starve real traffic behind the 10s acquire timeout.
+            // SEC-09: not smaller; a pre-auth burst must not starve real traffic behind the 10s acquire timeout.
             postgres_pool_max: parse_bounded(
                 read_value(&mut read, "POSTGRES_POOL_MAX"),
                 "POSTGRES_POOL_MAX",
