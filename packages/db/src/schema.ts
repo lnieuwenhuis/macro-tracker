@@ -245,7 +245,7 @@ export const foodProductRevisions = pgTable(
   ],
 );
 
-/** Trigger `meal_groups_default_insert_compat` (migration 0013, no Drizzle DSL for it) silently discards an INSERT that duplicates an active default group instead of raising the unique violation below, so `INSERT ... RETURNING` + `fetch_one` gets RowNotFound on a duplicate; UPDATE is not covered by the trigger. */
+/** Migration 0013's `meal_groups_default_insert_compat` trigger drops a duplicate-default INSERT instead of raising this unique violation, so `INSERT ... RETURNING` yields RowNotFound; UPDATE is uncovered. */
 export const mealGroups = pgTable(
   "meal_groups",
   {
@@ -402,7 +402,7 @@ export const mealTemplates = pgTable(
   (table) => [
     index("meal_templates_user_type_idx").on(table.userId, table.type),
     index("meal_templates_deleted_at_idx").on(table.deletedAt),
-    // DB-09: matches MEAL_TEMPLATE_TYPE_VALUES in types.ts; NOT VALID in migration 0016, the backend does not yet validate this before writing (API-07).
+    // DB-09: mirrors MEAL_TEMPLATE_TYPE_VALUES in types.ts; NOT VALID since 0016, and unvalidated on write (API-07).
     check("meal_templates_type_check", sql`${table.type} IN ('meal', 'day')`),
   ],
 );
@@ -489,7 +489,7 @@ export const gymSlotStatuses = pgTable(
   ],
 );
 
-/** One row per unordered user pair, enforced below by a LEAST/GREATEST expression index (constraints can't use expressions); a 'declined' row survives as a block until the addressee deletes it. */
+/** One row per unordered user pair via the LEAST/GREATEST expression index below; a 'declined' row blocks until the addressee deletes it. */
 export const gymBuddies = pgTable(
   "gym_buddies",
   {
@@ -501,7 +501,7 @@ export const gymBuddies = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     status: text("status").notNull().default("pending"),
-    // What the requester typed (normalized); echoed back in sent-invites so a code invite never reveals the target's email. Nullable only for pre-0018 rows.
+    // Normalized requester input, echoed in sent-invites so a code invite never leaks the target's email; null only for pre-0018 rows.
     inviteIdentifier: text("invite_identifier"),
     ...createdUpdatedTimestamps(),
   },

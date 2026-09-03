@@ -4,7 +4,7 @@ const DEFAULT_BACKEND_TIMEOUT_MS = 10_000;
 export type BackendFetchInit = RequestInit & {
   /** Overrides {@link DEFAULT_BACKEND_TIMEOUT_MS}; pass `0` to opt out. */
   timeoutMs?: number;
-  /** Set `false` for routes the backend authenticates itself (public `/api/v1/*` uses Bearer API tokens), so a proxy bug can never become an internal-RPC call. */
+  /** Set `false` for routes the backend authenticates itself (Bearer tokens on `/api/v1/*`), so a proxy bug cannot become an internal-RPC call. */
   attachInternalSecret?: boolean;
 };
 
@@ -17,7 +17,7 @@ export function getBackendUrl() {
   return (backendUrl ?? "http://127.0.0.1:4000").replace(/\/$/, "");
 }
 
-// Rejects traversal segments before `fetch`'s WHATWG normalization can turn e.g. `/api/v1/../../internal/rpc` into `/internal/rpc` and leak the internal secret attached below.
+// Rejects traversal segments before WHATWG normalization can rewrite `/api/v1/../../internal/rpc` into `/internal/rpc` and leak the internal secret.
 export function resolveBackendUrl(path: string) {
   if (!path.startsWith("/")) {
     throw new Error("Backend path must be absolute.");

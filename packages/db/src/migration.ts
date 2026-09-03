@@ -17,7 +17,7 @@ function getMigrationsFolder() {
 
 const POSTGRES_MIGRATION_LOCK_ID = 1_836_027_411;
 
-// Bounds how long a blocked DDL statement can hold up the migration before it aborts; this runs as a Railway preDeployCommand while the previous version still serves traffic.
+// Caps how long blocked DDL stalls the migration, which runs as a Railway preDeployCommand while the old version still serves traffic.
 const DEFAULT_MIGRATION_LOCK_TIMEOUT_MS = 3_000;
 /** Overall cap per migration statement, independent of lock waits. */
 const DEFAULT_MIGRATION_STATEMENT_TIMEOUT_MS = 300_000;
@@ -63,7 +63,7 @@ async function applyMigrationConnectionTimeouts(client: MigrationLockClient) {
   await client.query(`SET statement_timeout = ${statementTimeoutMs}`);
 }
 
-// Uses a bounded pg_try_advisory_lock retry loop instead of the blocking pg_advisory_lock, so a hung previous migration fails the deploy loudly instead of blocking it forever (DB-07).
+// Bounded pg_try_advisory_lock retries rather than blocking pg_advisory_lock, so a hung prior migration fails the deploy loudly (DB-07).
 async function acquireMigrationLock(client: MigrationLockClient) {
   const acquireTimeoutMs = readPositiveIntegerEnv(
     "MIGRATION_LOCK_ACQUIRE_TIMEOUT_MS",
