@@ -145,6 +145,26 @@ fn production_config_rejects_committed_development_secrets() {
     }
 }
 
+/// CI runs the backend with a loopback `APP_URL` and no insecure-local flag, so these literals must stay accepted.
+#[test]
+fn production_config_accepts_ci_secret_literals() {
+    for secret in [
+        "macro-tracker-ci-session-secret-32-chars",
+        "macro-tracker-ci-backend-secret-32-chars",
+    ] {
+        for name in ["SESSION_SECRET", "BACKEND_INTERNAL_SECRET"] {
+            let mut values = production_values();
+            values.retain(|(key, _)| *key != name);
+            values.push((name, secret));
+
+            assert!(
+                config_from(&values).is_ok(),
+                "{name}={secret:?} must be accepted for CI"
+            );
+        }
+    }
+}
+
 #[test]
 fn postgres_pool_defaults_above_the_unauthenticated_request_burst() {
     let config = config_from(&production_values()).expect("config should build");
