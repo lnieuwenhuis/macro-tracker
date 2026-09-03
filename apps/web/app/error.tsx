@@ -11,8 +11,7 @@ export default function Error({
   reset: () => void;
 }) {
   useEffect(() => {
-    // Log to console so developers can see what went wrong. Production
-    // telemetry, if/when wired up, can hook in here too.
+    // Console for now; production telemetry, if wired up, can hook in here too.
     console.error(error);
   }, [error]);
 

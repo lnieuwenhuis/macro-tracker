@@ -23,10 +23,7 @@ export function resolvePresetModalActiveKind({
 }: {
   selectedKind: PresetTemplateKind;
 }): PresetTemplateKind {
-  // Deliberately does not consult foodItemCount/dayCount: once the user has
-  // selected a tab, it must stay active even if that list is (or becomes)
-  // empty. Auto-switching away on an empty list would yank the selection out
-  // from under the user; see preset-modal-state.test.ts for the regression
-  // this guards against.
+  // Deliberately ignores foodItemCount/dayCount: a selected tab stays active even if that list becomes empty.
+  // See preset-modal-state.test.ts for the regression this guards.
   return selectedKind;
 }

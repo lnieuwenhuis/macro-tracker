@@ -137,11 +137,7 @@ export type GymOverlap = {
 export type GymBuddyLists = {
   accepted: { id: string; user: GymBuddyUser }[];
   pendingIncoming: { id: string; user: GymBuddyUser }[];
-  /**
-   * Echoes exactly what the inviter typed (normalized email or friend code) —
-   * never the target's display name, and never the email when the invite was
-   * made by code (a code invite must not reveal the target's address).
-   */
+  /** Echoes what the inviter typed (email or friend code); never the target's name or email for a code invite. */
   pendingOutgoing: { id: string; identifier: string }[];
   /** Invites this user declined; visible only to the decliner (= the block list). */
   declined: { id: string; user: GymBuddyUser }[];
@@ -610,10 +606,7 @@ export type QuickAddCandidate = {
   sourceDate?: string;
   /** Preset ID, used for touch/ranking (preset items only) */
   presetId?: string;
-  /**
-   * UTC hour (0–23) at the centre of the 3-hour window where this food is most
-   * frequently logged. Only set when habitCount ≥ 3 (a clear, repeated habit).
-   */
+  /** UTC hour (0-23) at the centre of the peak 3-hour window; set only when habitCount >= 3. */
   peakHourUtc?: number;
   /** Number of log entries that fall within the peak time window. */
   habitCount?: number;

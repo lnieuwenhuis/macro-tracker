@@ -1,6 +1,43 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createBackendProxyResponse } from "@/lib/backend-response";
+import { createBackendProxyResponse, stripHopByHopHeaders } from "@/lib/backend-response";
+
+describe("stripHopByHopHeaders", () => {
+  it("removes hop-by-hop headers and host", () => {
+    const headers = new Headers({
+      connection: "keep-alive",
+      "keep-alive": "timeout=5",
+      te: "trailers",
+      upgrade: "websocket",
+      host: "example.com",
+      "content-type": "application/json",
+    });
+
+    const stripped = stripHopByHopHeaders(headers);
+
+    expect(stripped.has("connection")).toBe(false);
+    expect(stripped.has("keep-alive")).toBe(false);
+    expect(stripped.has("te")).toBe(false);
+    expect(stripped.has("upgrade")).toBe(false);
+    expect(stripped.has("host")).toBe(false);
+    expect(stripped.get("content-type")).toBe("application/json");
+  });
+
+  it("also drops headers nominated by a Connection header before dropping connection itself", () => {
+    const headers = new Headers({
+      connection: "x-secret, x-other",
+      "x-secret": "leak-me",
+      "x-other": "leak-me-too",
+      "x-safe": "keep-me",
+    });
+
+    const stripped = stripHopByHopHeaders(headers);
+
+    expect(stripped.has("x-secret")).toBe(false);
+    expect(stripped.has("x-other")).toBe(false);
+    expect(stripped.get("x-safe")).toBe("keep-me");
+  });
+});
 
 describe("createBackendProxyResponse", () => {
   it("forwards the backend body as a stream without buffering", async () => {

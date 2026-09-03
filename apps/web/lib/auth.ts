@@ -17,8 +17,7 @@ async function applyBootstrapOwnerRole(user: AppUser) {
     return user;
   }
 
-  // The backend re-checks the address against its own ADMIN_OWNER_EMAILS, so
-  // the promotion decision is never taken from this side.
+  // The backend re-checks the address against ADMIN_OWNER_EMAILS; the promotion decision is never taken from here.
   return (await reconcileConfiguredOwner(user.id)) ?? user;
 }
 
@@ -60,11 +59,7 @@ export async function requireSessionUser() {
   return user;
 }
 
-/**
- * Resolve the full onboarded account. Callers that also need the role or email
- * should use this rather than pairing `requireOnboardedSessionUser` with a
- * second `getUserById`, which costs an extra backend round trip per render.
- */
+/** Prefer this over pairing `requireOnboardedSessionUser` with a second `getUserById` (extra round trip). */
 export async function requireOnboardedAppUser() {
   const user = await getCurrentAppUser();
 
