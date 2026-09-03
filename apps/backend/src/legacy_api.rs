@@ -148,6 +148,9 @@ pub(crate) const MAX_BARCODE_LENGTH: usize = 20;
 /// reads whatever the upstream sends straight into memory.
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
+const PROVIDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const ALBERT_HEIJN_TOKEN_TIMEOUT: Duration = Duration::from_secs(4);
+
 /// Reads a JSON body with a hard byte budget, returning `None` if the upstream
 /// exceeds it (or sends something that is not JSON).
 async fn read_capped_json(response: reqwest::Response) -> Option<Value> {
@@ -178,6 +181,17 @@ async fn read_capped_json_result(
     }
 
     Ok(serde_json::from_slice(&buffer).ok())
+}
+
+async fn fetch_provider_json(request: reqwest::RequestBuilder, timeout: Duration) -> Option<Value> {
+    let response = tokio::time::timeout(timeout, request.send())
+        .await
+        .ok()?
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    read_capped_json(response).await
 }
 
 async fn acquire_food_photo_slot(
@@ -581,14 +595,7 @@ async fn lookup_open_food_facts(state: &AppState, barcode: &str) -> Option<Value
         state.config.open_food_facts_base_url.trim_end_matches('/'),
         url::form_urlencoded::byte_serialize(barcode.as_bytes()).collect::<String>()
     );
-    let response = tokio::time::timeout(Duration::from_secs(5), state.http.get(url).send())
-        .await
-        .ok()?
-        .ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    let data: Value = read_capped_json(response).await?;
+    let data: Value = fetch_provider_json(state.http.get(url), PROVIDER_REQUEST_TIMEOUT).await?;
     if data.get("status").and_then(Value::as_i64) != Some(1) {
         return None;
     }
@@ -697,17 +704,11 @@ async fn lookup_albert_heijn(state: &AppState, barcode: &str) -> Option<Value> {
         "{base_url}/mobile-services/product/search/v2?query={}&size=1",
         url::form_urlencoded::byte_serialize(barcode.as_bytes()).collect::<String>()
     );
-    let response = tokio::time::timeout(
-        Duration::from_secs(5),
-        headers(state.http.get(search_url)).send(),
+    let search_data: Value = fetch_provider_json(
+        headers(state.http.get(search_url)),
+        PROVIDER_REQUEST_TIMEOUT,
     )
-    .await
-    .ok()?
-    .ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    let search_data: Value = read_capped_json(response).await?;
+    .await?;
     let product = first_albert_heijn_product(&search_data)?;
 
     let name = string_field(product, &["title", "description"]).unwrap_or("Unknown product");
@@ -730,13 +731,11 @@ async fn lookup_albert_heijn(state: &AppState, barcode: &str) -> Option<Value> {
             "{base_url}/mobile-services/product/detail/v4/fir/{}",
             url::form_urlencoded::byte_serialize(product_id.as_bytes()).collect::<String>()
         );
-        if let Ok(Ok(response)) = tokio::time::timeout(
-            Duration::from_secs(5),
-            headers(state.http.get(detail_url)).send(),
+        if let Some(detail) = fetch_provider_json(
+            headers(state.http.get(detail_url)),
+            PROVIDER_REQUEST_TIMEOUT,
         )
         .await
-            && response.status().is_success()
-            && let Some(detail) = read_capped_json(response).await
             && let Some(macros) = parse_albert_heijn_nutrients(
                 detail
                     .get("nutritionInfo")
@@ -771,29 +770,21 @@ async fn get_albert_heijn_token(state: &AppState) -> Option<String> {
         "{}/mobile-auth/v1/auth/token/anonymous",
         state.config.albert_heijn_base_url.trim_end_matches('/')
     );
-    let response = tokio::time::timeout(
-        Duration::from_secs(4),
+    fetch_provider_json(
         state
             .http
             .post(url)
             .header("Content-Type", "application/json")
             .header("User-Agent", "Appie/8.8.2 Model/phone Android/7.0-API24")
             .header("x-application", "AHWEBSHOP")
-            .json(&json!({ "clientId": "appie" }))
-            .send(),
+            .json(&json!({ "clientId": "appie" })),
+        ALBERT_HEIJN_TOKEN_TIMEOUT,
     )
-    .await
-    .ok()?
-    .ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    read_capped_json(response)
-        .await?
-        .get("access_token")
-        .and_then(Value::as_str)
-        .filter(|token| !token.is_empty())
-        .map(str::to_string)
+    .await?
+    .get("access_token")
+    .and_then(Value::as_str)
+    .filter(|token| !token.is_empty())
+    .map(str::to_string)
 }
 
 async fn lookup_jumbo(state: &AppState, barcode: &str) -> Option<Value> {
@@ -803,21 +794,11 @@ async fn lookup_jumbo(state: &AppState, barcode: &str) -> Option<Value> {
         url::form_urlencoded::byte_serialize(barcode.as_bytes()).collect::<String>()
     );
     let user_agent = "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.120 Mobile Safari/537.36";
-    let response = tokio::time::timeout(
-        Duration::from_secs(5),
-        state
-            .http
-            .get(search_url)
-            .header("User-Agent", user_agent)
-            .send(),
+    let search_data: Value = fetch_provider_json(
+        state.http.get(search_url).header("User-Agent", user_agent),
+        PROVIDER_REQUEST_TIMEOUT,
     )
-    .await
-    .ok()?
-    .ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    let search_data: Value = read_capped_json(response).await?;
+    .await?;
     let product = search_data
         .get("products")
         .and_then(|products| products.get("data"))
@@ -842,17 +823,11 @@ async fn lookup_jumbo(state: &AppState, barcode: &str) -> Option<Value> {
             "{base_url}/v17/products/{}",
             url::form_urlencoded::byte_serialize(product_id.as_bytes()).collect::<String>()
         );
-        if let Ok(Ok(response)) = tokio::time::timeout(
-            Duration::from_secs(5),
-            state
-                .http
-                .get(detail_url)
-                .header("User-Agent", user_agent)
-                .send(),
+        if let Some(detail) = fetch_provider_json(
+            state.http.get(detail_url).header("User-Agent", user_agent),
+            PROVIDER_REQUEST_TIMEOUT,
         )
         .await
-            && response.status().is_success()
-            && let Some(detail) = read_capped_json(response).await
             && let Some(macros) = parse_jumbo_nutrients(
                 get_path(&detail, &["product", "data", "nutritionInfo"])
                     .or_else(|| get_path(&detail, &["product", "data", "nutrients"]))
@@ -916,26 +891,48 @@ fn get_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
         .try_fold(value, |current, key| current.get(*key))
 }
 
+struct NutrientKeys {
+    values: &'static [&'static str],
+    units: &'static [&'static str],
+}
+
+const ALBERT_HEIJN_NUTRIENT_KEYS: NutrientKeys = NutrientKeys {
+    values: &["value", "valuePer100g", "per100g"],
+    units: &["unit"],
+};
+
+const JUMBO_NUTRIENT_KEYS: NutrientKeys = NutrientKeys {
+    values: &["value", "per100g"],
+    units: &[],
+};
+
+fn assign_nutrient_from_item(
+    item: &Value,
+    name: &str,
+    keys: &NutrientKeys,
+    fallback_value: f64,
+    macros: &mut ParsedMacros,
+    found: &mut bool,
+) {
+    let unit = string_field(item, keys.units)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let value = keys
+        .values
+        .iter()
+        .find_map(|key| item.get(*key))
+        .and_then(number_from_value)
+        .unwrap_or(fallback_value);
+    assign_nutrient(&name.to_ascii_lowercase(), &unit, value, macros, found);
+}
+
 fn parse_albert_heijn_nutrients(raw: Option<&Value>) -> Option<ParsedMacros> {
     let mut macros = ParsedMacros::default();
     let mut found = false;
     fn walk(items: &[Value], macros: &mut ParsedMacros, found: &mut bool) {
         for item in items {
-            let name = string_field(item, &["name", "title", "key"])
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            let value = item
-                .get("value")
-                .or_else(|| item.get("valuePer100g"))
-                .or_else(|| item.get("per100g"))
-                .and_then(number_from_value)
-                .unwrap_or(0.0);
-            let unit = item
-                .get("unit")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            assign_nutrient(&name, &unit, value, macros, found);
+            let name = string_field(item, &["name", "title", "key"]).unwrap_or_default();
+            assign_nutrient_from_item(item, name, &ALBERT_HEIJN_NUTRIENT_KEYS, 0.0, macros, found);
             if let Some(children) = item
                 .get("nutrients")
                 .or_else(|| item.get("children"))
@@ -967,29 +964,25 @@ fn parse_jumbo_nutrients(raw: Option<&Value>) -> Option<ParsedMacros> {
     match raw? {
         Value::Array(items) => {
             for (index, item) in items.iter().enumerate() {
-                let name = string_field(item, &["name", "key"])
-                    .map(str::to_string)
-                    .unwrap_or_else(|| index.to_string())
-                    .to_ascii_lowercase();
-                let value = item
-                    .get("value")
-                    .or_else(|| item.get("per100g"))
-                    .and_then(number_from_value)
-                    .unwrap_or_else(|| number_from_value(item).unwrap_or(0.0));
-                assign_nutrient(&name, "", value, &mut macros, &mut found);
+                let position = index.to_string();
+                let name = string_field(item, &["name", "key"]).unwrap_or(&position);
+                assign_nutrient_from_item(
+                    item,
+                    name,
+                    &JUMBO_NUTRIENT_KEYS,
+                    number_from_value(item).unwrap_or(0.0),
+                    &mut macros,
+                    &mut found,
+                );
             }
         }
         Value::Object(object) => {
             for (key, value) in object {
-                let nutrient_value = value
-                    .get("value")
-                    .or_else(|| value.get("per100g"))
-                    .and_then(number_from_value)
-                    .unwrap_or_else(|| number_from_value(value).unwrap_or(0.0));
-                assign_nutrient(
-                    &key.to_ascii_lowercase(),
-                    "",
-                    nutrient_value,
+                assign_nutrient_from_item(
+                    value,
+                    key,
+                    &JUMBO_NUTRIENT_KEYS,
+                    number_from_value(value).unwrap_or(0.0),
                     &mut macros,
                     &mut found,
                 );
