@@ -368,6 +368,35 @@ async fn throttled_api_requests_use_the_documented_error_envelope() {
     assert_eq!(payload["error"]["code"], serde_json::json!("rate_limited"));
 }
 
+/// API-06: a throttled response must carry CORS headers, or a browser client sees a CORS failure instead of the 429.
+#[tokio::test]
+async fn throttled_api_requests_carry_cors_headers() {
+    let db = PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_millis(100))
+        .connect_lazy("postgres://postgres:***@127.0.0.1:1/macro_tracker")
+        .expect("test pool should be created lazily");
+    let router = build_router_with_rate_limit(test_state_with_db(test_config(), db), 60_000, 1);
+    let peer = SocketAddr::from(([203, 0, 113, 9], 51_000));
+
+    let _first = router
+        .clone()
+        .oneshot(bad_bearer_request(peer))
+        .await
+        .expect("request should complete");
+    let throttled = router
+        .oneshot(bad_bearer_request(peer))
+        .await
+        .expect("request should complete");
+
+    assert_eq!(throttled.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+        throttled
+            .headers()
+            .contains_key(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN),
+        "throttled response must carry CORS headers"
+    );
+}
+
 /// SEC-09: `/health` used to run `SELECT 1` per request, so a probe flood
 /// could take every permit. Closing the pool after a successful probe proves
 /// the next answer came from the cache and not from the database.

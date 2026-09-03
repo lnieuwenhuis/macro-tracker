@@ -26,13 +26,7 @@ pub fn internal_router() -> Router<AppState> {
         .route("/auth/shoo/verify", post(verify_shoo))
 }
 
-/// SEC-09: `/health` is unauthenticated and used to run `SELECT 1` per request,
-/// so a flood of probes could take every connection permit and starve real
-/// traffic — which then made `/health` itself 503 and tripped the platform's
-/// restart policy, turning a load spike into a restart loop.
-///
-/// The readiness signal is still real, just sampled: one probe per
-/// `HEALTH_CACHE_TTL` at most, shared by all concurrent callers.
+// SEC-09: caches the readiness probe so a flood of unauthenticated `/health` calls cannot take every DB permit.
 const HEALTH_CACHE_TTL: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
@@ -42,8 +36,7 @@ pub struct HealthCache {
 
 impl HealthCache {
     async fn database_is_ready(&self, db: &sqlx::PgPool) -> bool {
-        // Held across the probe so a burst collapses into a single query
-        // instead of one per request.
+        // Held across the probe, so a concurrent burst collapses into a single query instead of one per request.
         let mut last = self.last.lock().await;
         if let Some((checked_at, ready)) = *last
             && checked_at.elapsed() < HEALTH_CACHE_TTL
@@ -78,13 +71,7 @@ pub async fn health(
     }
 }
 
-/// Ops that need the backend's own configuration to decide what is allowed, so
-/// they cannot live in `db::rpc_json` (which only sees the pool).
-///
-/// `ensureUserRole` used to sit on the generic RPC surface taking a
-/// caller-supplied role — an arbitrary role-assignment primitive. Both
-/// replacements below decide the resulting role from server-side config
-/// instead of from the request.
+// Ops that need `AppState::config` to decide what is allowed, so they cannot live in `db::rpc_json` (pool-only).
 async fn config_scoped_rpc(state: &AppState, op: &str, args: &Value) -> AppResult<Option<Value>> {
     match op {
         "reconcileConfiguredOwner" => {
@@ -95,15 +82,9 @@ async fn config_scoped_rpc(state: &AppState, op: &str, args: &Value) -> AppResul
             let user = auth::reconcile_configured_owner(state, user).await?;
             Ok(Some(serde_json::to_value(user)?))
         }
-        // SEC-11: `setUserOnboardingForTesting` is dispatched from
-        // `db::rpc_json`, which only sees the pool and so cannot consult
-        // `enable_test_routes`. Gating it here refuses it before it reaches that
-        // dispatch. It already needs the internal secret, so this is
-        // defence-in-depth - but it is the only test-only op that had no
-        // server-side switch at all.
+        // SEC-11: `db::rpc_json` only sees the pool and cannot consult `enable_test_routes`, so gate here first.
         "setUserOnboardingForTesting" => {
             require_test_routes(state)?;
-            // Fall through to `db::rpc_json`, which owns the implementation.
             Ok(None)
         }
         "ensureUserRoleForTesting" => {
