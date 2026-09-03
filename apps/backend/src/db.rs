@@ -92,20 +92,7 @@ const DRIZZLE_MIGRATION_JOURNAL: &str =
     include_str!("../../../packages/db/drizzle/meta/_journal.json");
 const DEFAULT_MEAL_GROUP_LABELS: [&str; 4] = ["Breakfast", "Lunch", "Dinner", "Snack"];
 
-/// The streak computation, shared verbatim by `stats_page_data_json` and
-/// `leaderboard_json`.
-///
-/// BUG-01: the Summary page hardcoded `'currentStreak', 0` while the real
-/// gaps-and-islands query lived only in the leaderboard, so every user's Summary
-/// permanently read `0🔥 / Best: 0 days` even though five tests asserted correct
-/// streaks — against the other consumer. Expanding one literal into both
-/// queries keeps them from drifting again.
-///
-/// SQL is only ever assembled from compile-time constants in `db/sql.rs`, never from runtime values.
-///
-/// Contract: the caller supplies a preceding CTE named `streak_days` with one
-/// row per date the user logged an eaten entry, and binds `$2` to the reference
-/// date.
+/// Contract: a preceding CTE named `streak_days` with one row per eaten-entry date, and `$2` bound to the reference date.
 macro_rules! streak_summary_ctes {
     () => {
         r#"
@@ -325,27 +312,20 @@ where
     .bind(role)
     .fetch_optional(executor)
     .await?
-    // LOW-A3: an unknown user id used to surface as `RowNotFound` from
-    // `fetch_one`, i.e. a 500 for what is plainly a 404.
+    // An unknown user id is a 404, not `fetch_one`'s `RowNotFound` 500.
     .ok_or_else(|| AppError::NotFound("User not found.".to_string()))?;
 
     row_to_app_user(row)
 }
 
-/// The `email` claim in a Shoo ID token is not proof of address ownership —
-/// there is no `email_verified` claim to lean on. Refusing the login keeps a
-/// token minted for one subject from ever reaching another subject's row. The
-/// message deliberately does not echo the address back, so it cannot be used to
-/// probe which addresses are registered.
+/// Shoo tokens carry no `email_verified`, so an address held by another subject is refused without echoing it back.
 fn account_identity_conflict() -> AppError {
     AppError::Conflict(
         "This email address is already linked to a different sign-in identity. Sign in with the original identity instead.".to_string(),
     )
 }
 
-/// Turns a `23505` unique violation into a 409 with a caller-actionable
-/// message. Everything else keeps its original classification, so a genuine
-/// database fault is still logged and reported as a 500.
+/// A `23505` unique violation becomes a 409; every other error keeps its original classification.
 fn map_unique_violation(message: &'static str) -> impl Fn(sqlx::Error) -> AppError {
     move |error| {
         if let sqlx::Error::Database(db_error) = &error
@@ -357,10 +337,7 @@ fn map_unique_violation(message: &'static str) -> impl Fn(sqlx::Error) -> AppErr
     }
 }
 
-/// A `users_email_key` duplicate means another account already holds the
-/// address. That is the same conflict as the pre-check below, reached through a
-/// concurrent login rather than a stale read, so it gets the same 409 instead of
-/// a generic 500.
+/// A `users_email_key` duplicate is the pre-check's conflict reached concurrently, so it answers with the same 409.
 fn map_user_email_conflict(error: sqlx::Error) -> AppError {
     if let sqlx::Error::Database(db_error) = &error
         && db_error.code().as_deref() == Some("23505")
@@ -376,13 +353,7 @@ pub async fn upsert_user_from_shoo_profile(
     profile: &ShooProfile,
 ) -> AppResult<AppUser> {
     let user_id = Uuid::new_v4();
-    // SEC-03: match on `shoo_pairwise_sub` ONLY. The previous
-    // `shoo_pairwise_sub = $1 OR email = $2` also matched by address and then
-    // unconditionally overwrote `shoo_pairwise_sub`, so a token whose `email`
-    // claim named a victim rebound the victim's row — meals, weights, goals and
-    // `role` included — to the attacker's subject. Changing the address on an
-    // already-matched subject is still allowed; adopting somebody else's
-    // address never is.
+    // Match on `shoo_pairwise_sub` only: also matching by address would let a token rebind another subject's row.
     if let Some(existing) = sqlx::query("SELECT id FROM users WHERE shoo_pairwise_sub = $1 LIMIT 1")
         .bind(&profile.pairwise_sub)
         .fetch_optional(pool)
@@ -429,9 +400,7 @@ pub async fn upsert_user_from_shoo_profile(
         return row_to_app_user(row);
     }
 
-    // Unknown subject. If the address is already attached to some other
-    // subject, refuse rather than create a second account that would then fail
-    // the unique index anyway.
+    // An address already attached to another subject is refused rather than left to the unique index.
     if sqlx::query("SELECT 1 FROM users WHERE email = $1 LIMIT 1")
         .bind(&profile.email)
         .fetch_optional(pool)
@@ -516,9 +485,7 @@ pub async fn get_user_goals(pool: &PgPool, user_id: Uuid) -> AppResult<MacroGoal
     })
 }
 
-/// Goal macros land in `numeric(6, 1)` and the goal weight in `numeric(5, 2)`,
-/// so both need the column domain enforced before the UPDATE rather than after
-/// Postgres raises numeric-field-overflow.
+/// Enforces the `numeric(6, 1)` and `numeric(5, 2)` column domains before the UPDATE overflows.
 fn validate_macro_goals(goals: &MacroGoals) -> AppResult<()> {
     for (key, value) in [
         ("proteinG", goals.protein_g),
@@ -582,11 +549,7 @@ pub async fn save_user_goals(pool: &PgPool, user_id: Uuid, goals: MacroGoals) ->
 }
 
 pub async fn ensure_default_meal_groups(pool: &PgPool, user_id: Uuid) -> AppResult<()> {
-    // Read paths call this on every dashboard load to lazily backfill accounts
-    // that predate onboarding-time provisioning. Once all four deterministic
-    // groups exist and are active the provisioning statement is a guaranteed
-    // no-op -- the INSERT fully conflicts and the restore UPDATE requires
-    // `deleted_at IS NOT NULL` -- so probe first and skip the write entirely.
+    // Every dashboard load reaches this backfill, and the provisioning write is a guaranteed no-op once the groups are active.
     if default_meal_groups_are_active(pool, user_id).await? {
         return Ok(());
     }
@@ -748,10 +711,7 @@ async fn complete_onboarding_setup_json(
             .ok_or_else(|| AppError::BadRequest("goals is required.".to_string()))?,
     )
     .map_err(invalid_payload("goals"))?;
-    // Onboarding writes the goal columns directly rather than through
-    // `save_user_goals`, so the domain check has to be applied here too —
-    // otherwise an oversized macro reaches `numeric(6, 1)` and rolls the whole
-    // onboarding transaction back with a 500.
+    // Onboarding writes the goal columns directly, so the column-domain check has to be repeated here.
     validate_macro_goals(&goals)?;
     let goal_weight_kg = match input.get("goalWeightKg") {
         None | Some(Value::Null) => None,
@@ -759,9 +719,7 @@ async fn complete_onboarding_setup_json(
             AppError::BadRequest("goalWeightKg must be a non-negative number.".to_string())
         })?))?,
     };
-    // Normalized up front, with the same rules the standalone weight endpoint
-    // uses: a zero weight or a value that only overflows after rounding must
-    // fail as a bad request, not as a database error mid-transaction.
+    // Same rules as the standalone weight endpoint, applied up front so a bad value is a 400 and not a mid-transaction fault.
     let current_weight = match input.get("currentWeight") {
         None | Some(Value::Null) => None,
         Some(Value::Object(weight)) => Some(weight::normalize_weight_entry_input(weight)?),
@@ -851,10 +809,7 @@ async fn complete_onboarding_setup_json(
         )
         .bind(template_id)
         .bind(user_id)
-        // API-07: the onboarding starter template is the third write path into
-        // meal_templates.type and was the one that skipped validation. Migration
-        // 0016 adds a CHECK on this column, so an unvalidated value would now
-        // surface as a raw 23514 -> 500 instead of a 400.
+        // Migration 0016 puts a CHECK on `meal_templates.type`, so an unvalidated value would surface as a raw 23514.
         .bind(normalize_template_type(template)?)
         .bind(required_string(template, "label")?)
         .bind(template.get("notes").and_then(Value::as_str))
@@ -1140,8 +1095,7 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
                     "orderedIds must include each active meal group exactly once.".to_string(),
                 ));
             }
-            // One statement rather than one per group: a drag-to-reorder used
-            // to cost a round trip per row.
+            // One statement for the whole reorder rather than a round trip per row.
             let sort_orders: Vec<i32> = (0..ordered_ids.len() as i32).collect();
             sqlx::query(
                 r#"
@@ -1234,9 +1188,6 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
         "getTemplateById" => {
             let user_id = uuid_arg(&args, "userId")?;
             let template_id = uuid_arg(&args, "templateId")?;
-            // PERF-01: this used to load the account's whole template
-            // collection and linear-scan it. The indexed by-id helper already
-            // existed for exactly this.
             match template_by_id_json(pool, user_id, template_id).await {
                 Ok(template) => Ok(template),
                 Err(AppError::NotFound(_)) => Ok(Value::Null),
@@ -1294,8 +1245,6 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
         "getRecipeById" => {
             let user_id = uuid_arg(&args, "userId")?;
             let recipe_id = uuid_arg(&args, "recipeId")?;
-            // PERF-01: as above — the indexed helper replaces a full-collection
-            // load plus linear scan.
             match recipe_by_id_json(pool, user_id, recipe_id).await {
                 Ok(recipe) => Ok(recipe),
                 Err(AppError::NotFound(_)) => Ok(Value::Null),
@@ -1331,8 +1280,6 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
             let user_id = uuid_arg(&args, "userId")?;
             weight::weight_entries_json(pool, user_id).await
         }
-        // Fetches one row instead of the account's whole weight history, which
-        // the PATCH handler used to load and linear-scan.
         "getWeightEntryById" => {
             let user_id = uuid_arg(&args, "userId")?;
             let entry_id = uuid_arg(&args, "entryId")?;
@@ -1475,11 +1422,7 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
                 test_fault_arg(&args, "barcode_food_product_revision").cloned();
             save_barcode_food_product_json(pool, user_id, input, revision_test_fault.as_ref()).await
         }
-        // Admin reads take an actor and enforce the role here, in the data
-        // layer. Relying on the Next.js layout guard alone left a
-        // stale-privilege window: Partial Rendering does not re-run a layout on
-        // client navigation, so a just-demoted admin could still load every
-        // account's PII from an already-open tab.
+        // The role is enforced here because the Next.js layout guard leaves a stale-privilege window on client navigation.
         "getAdminDashboardData" => {
             require_admin_actor(pool, uuid_arg(&args, "actorUserId")?).await?;
             admin_dashboard_json(pool).await
@@ -1670,9 +1613,7 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
         }
         "inviteGymBuddy" => {
             let user_id = uuid_arg(&args, "userId")?;
-            // `identifier` (email or friend code) with an `email` fallback so
-            // a not-yet-redeployed web service keeps working during the skew
-            // window between the two services' deploys.
+            // The `email` fallback keeps a not-yet-redeployed web service working during the deploy skew window.
             let identifier =
                 string_arg(&args, "identifier").or_else(|_| string_arg(&args, "email"))?;
             gym::invite_gym_buddy_json(pool, user_id, &identifier).await
@@ -1830,12 +1771,7 @@ async fn daily_summary_json(pool: &PgPool, user_id: Uuid, date: &str) -> AppResu
     Ok(row.try_get("data")?)
 }
 
-/// PERF-03: collection reads had no ceiling at all. `getAdminUserDetail`
-/// loaded a user's entire recipe/template/weight history and then kept ten of
-/// each in Rust, and `ensure_date_string` permits years 0001-9999, so one
-/// account can hold millions of weight rows. Limits now live in SQL: the
-/// database sorts and stops, instead of shipping the whole history over the
-/// wire so Rust can throw it away.
+/// The limits live in SQL so an unbounded history is never shipped over the wire.
 const MAX_COLLECTION_ROWS: i64 = 5_000;
 const ADMIN_DETAIL_ROWS: i64 = 10;
 
@@ -1843,9 +1779,7 @@ async fn templates_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
     templates_json_filtered(pool, user_id, None, MAX_COLLECTION_ROWS).await
 }
 
-/// Shared shape for the template list and single-template reads. Passing a
-/// `template_id` narrows both the outer select and the item aggregation to one
-/// row, so by-id lookups stay indexed instead of building the whole collection.
+/// A `template_id` narrows both the outer select and the item aggregation, so by-id reads stay indexed.
 async fn templates_json_filtered(
     pool: &PgPool,
     user_id: Uuid,
@@ -1919,8 +1853,7 @@ async fn recipes_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
     recipes_json_filtered(pool, user_id, None, MAX_COLLECTION_ROWS).await
 }
 
-/// Shared shape for the recipe list and single-recipe reads. See
-/// [`templates_json_filtered`] for why the id filter lives in SQL.
+/// See [`templates_json_filtered`] for why the id filter lives in SQL.
 async fn recipes_json_filtered(
     pool: &PgPool,
     user_id: Uuid,
@@ -2066,9 +1999,7 @@ async fn search_food_products_json(pool: &PgPool, user_id: Uuid, query: &str) ->
     Ok(row.try_get("data")?)
 }
 
-/// Longest search string accepted. The SQL runs three ILIKEs per pattern per
-/// candidate row, so an uncapped query makes the scan cost quadratic in
-/// attacker-controlled input.
+/// The SQL runs three ILIKEs per pattern per row, so an uncapped query is quadratic in attacker-controlled input.
 pub(crate) const MAX_SEARCH_QUERY_LENGTH: usize = 128;
 /// Most whitespace-separated terms accepted from one query.
 pub(crate) const MAX_SEARCH_TERMS: usize = 8;
@@ -2095,8 +2026,7 @@ fn search_like_patterns(query: &str) -> Vec<String> {
         .collect()
 }
 
-/// `None` means the query yielded no usable terms, which both searches answer
-/// with an empty array instead of a round trip.
+/// `None` means no usable terms, which both searches answer with an empty array instead of a round trip.
 fn accepted_search_patterns(query: &str) -> AppResult<Option<Vec<String>>> {
     validate_search_query(query)?;
     let patterns = search_like_patterns(query);
@@ -2277,9 +2207,7 @@ fn nutrition_for_product(
     )
 }
 
-/// A meal entry after validation, ready to be written. Previously returned as a
-/// fourteen-element tuple whose `String`, `f64`, and `Option<Uuid>` fields were
-/// distinguished only by position.
+/// A meal entry after validation, ready to be written.
 struct NormalizedMealEntry {
     date: String,
     meal_group_id: Option<Uuid>,
@@ -2314,18 +2242,12 @@ impl NormalizedMealEntry {
     }
 }
 
-/// PERF-02: everything `normalize_meal_input` would otherwise fetch once *per
-/// entry*. `applyTemplateToDate` normalizes a whole template in a loop, so a
-/// 30-item template cost ~95 round trips — one meal-group check and one product
-/// fetch per item, both for ids it had already resolved and access-checked in
-/// bulk moments earlier. A caller that has done that work up front passes it in
-/// here; callers that have not use `Default` and behave exactly as before.
+/// Lookups a batching caller has already resolved; `Default` falls back to fetching them once per entry.
 #[derive(Default)]
 struct MealInputContext {
     /// Meal-group ids already proven to belong to `user_id`.
     trusted_meal_group_ids: HashSet<Uuid>,
-    /// Products already loaded through the same visibility predicate that
-    /// `food_product_json_by_id` applies.
+    /// Products already loaded through `food_product_json_by_id`'s visibility predicate.
     products: HashMap<Uuid, Value>,
 }
 
@@ -2633,10 +2555,7 @@ async fn meal_entries_json_by_ids(
     Ok(row.try_get("data")?)
 }
 
-/// API-07: the OpenAPI spec documents `template.type` as `["meal", "day"]`, but
-/// the handler only did `required_string` and the column is bare `text` with no
-/// CHECK — so `{"type": "anything"}` was stored and returned, breaking every
-/// consumer that switches on it.
+/// The column is bare `text`, so the documented `["meal", "day"]` domain is enforced here.
 fn normalize_template_type(input: &serde_json::Map<String, Value>) -> AppResult<String> {
     let template_type = required_string(input, "type")?;
     if !matches!(template_type.as_str(), "meal" | "day") {
@@ -2896,9 +2815,7 @@ async fn validate_item_product_access(
     assert_food_products_accessible(pool, user_id, &product_ids).await
 }
 
-/// Resolve access for a whole item list in one round trip. The per-item variant
-/// issued a query each, which made template and recipe writes scale their
-/// latency with item count.
+/// Resolves access for a whole item list in one round trip instead of one query per item.
 async fn assert_food_products_accessible(
     pool: &PgPool,
     user_id: Uuid,
@@ -2948,9 +2865,7 @@ fn first_json_item(value: Value) -> Option<Value> {
     }
 }
 
-/// Maps a template's `mealGroupLabel` onto the user's live meal groups. An
-/// exact match wins when it is unambiguous; otherwise a unique
-/// case-insensitive match is accepted. Ambiguous labels stay ungrouped.
+/// An unambiguous exact label match wins, else a unique case-insensitive one; ambiguous labels stay ungrouped.
 struct MealGroupLabelIndex {
     exact: HashMap<String, (Uuid, usize)>,
     case_insensitive: HashMap<String, (Uuid, usize)>,
@@ -3000,8 +2915,7 @@ impl MealGroupLabelIndex {
         }
     }
 
-    /// Every id `resolve` can hand back. All of them came from a query filtered
-    /// on `user_id`, so they need no further access check (PERF-02).
+    /// Every id came from a `user_id`-filtered query, so callers need no further access check.
     fn resolvable_ids(&self) -> HashSet<Uuid> {
         self.exact
             .values()
@@ -3042,13 +2956,7 @@ async fn apply_template_json(
     .await?;
     let next_sort_order: i32 = row.try_get("sort_order")?;
 
-    // PERF-02: resolve the per-item lookups once instead of once per item.
-    // `meal_groups` was loaded with `WHERE user_id = $1 AND deleted_at IS NULL`,
-    // so every id it can return is already proven to belong to this user — the
-    // per-item `assert_meal_group_access` was a provably redundant round trip.
-    // The products were already access-checked in bulk by
-    // `validate_item_product_access` just above, so one batched read replaces
-    // the per-item fetch.
+    // The group ids and the products above are already access-checked in bulk, so per-item lookups would be redundant.
     let mut product_ids = Vec::new();
     for item in items {
         let item = item
@@ -3228,12 +3136,7 @@ async fn create_food_product_json(
     Ok(product)
 }
 
-/// DATA-07: `active_global_barcode_exists` is a check-then-insert. Under READ
-/// COMMITTED two concurrent submissions both see no row, and
-/// `food_products_active_global_barcode_key` rejects the loser with `23505` —
-/// which reached the caller as a 500 rather than the 400 the pre-check already
-/// produces for the sequential case. Same message either way, so the two
-/// outcomes are indistinguishable to the client.
+/// The barcode pre-check is check-then-insert, so a lost race must answer with the same 400 as the sequential case.
 fn map_active_barcode_conflict(error: sqlx::Error) -> AppError {
     if let sqlx::Error::Database(db_error) = &error
         && db_error.code().as_deref() == Some("23505")
@@ -3533,9 +3436,7 @@ async fn list_admin_users_json(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        // DATA-05: this used to be a hand-rolled copy that escaped `%` and `_`
-        // but not the backslash, while the SQL still declares `ESCAPE '\'` — so
-        // searching for `100\%` produced a trailing wildcard and wrong results.
+        // The SQL declares `ESCAPE '\\'`, so the backslash itself has to be escaped too.
         .map(|value| format!("%{}%", escape_like_pattern(value)));
     let role = input
         .get("role")
@@ -3665,8 +3566,7 @@ async fn get_admin_user_detail_json(pool: &PgPool, user_id: Uuid) -> AppResult<V
     .bind(user_id)
     .fetch_one(pool)
     .await?;
-    // Independent reads, so total latency should be their max rather than
-    // their sum.
+    // Independent reads, joined so latency is their max rather than their sum.
     let (recent_recipes, recent_templates, recent_weights, goals, recent_meals, recent_barcodes) =
         tokio::try_join!(
             recipes_json_filtered(pool, user_id, None, ADMIN_DETAIL_ROWS),
@@ -3687,9 +3587,7 @@ async fn get_admin_user_detail_json(pool: &PgPool, user_id: Uuid) -> AppResult<V
             "barcodeSubmissions": counts.try_get::<i32, _>("barcode_submissions")?
         },
         "recentMeals": recent_meals,
-        // PERF-03: the limit is applied in SQL now; `rev()` still stands
-        // because `recentWeights` is contracted as newest-first while the
-        // series itself is stored ascending.
+        // `recentWeights` is contracted newest-first while the series is stored ascending.
         "recentWeights": recent_weights.as_array().cloned().unwrap_or_default().into_iter().rev().collect::<Vec<_>>(),
         "recentRecipes": recent_recipes,
         "recentTemplates": recent_templates,
@@ -5436,8 +5334,7 @@ fn uuid_arg(args: &Value, key: &str) -> AppResult<Uuid> {
         })
 }
 
-/// Rejects a malformed payload without echoing serde's message, which names
-/// struct fields and byte offsets.
+/// Never echoes serde's message, which names struct fields and byte offsets.
 fn invalid_payload(field: &'static str) -> impl Fn(serde_json::Error) -> AppError {
     move |error| {
         tracing::debug!(error = ?error, field, "rejected malformed rpc payload");
@@ -5452,11 +5349,7 @@ fn string_arg(args: &Value, key: &str) -> AppResult<String> {
         .ok_or_else(|| AppError::BadRequest(format!("{key} is required.")))
 }
 
-/// Rejects anything that is not a literal `YYYY-MM-DD` calendar date.
-///
-/// Postgres accepts `infinity`, `today` and `epoch` as `date` input, so an
-/// unvalidated string can be stored and then fail to re-parse on every
-/// subsequent read — permanently breaking the page that reads it.
+/// Postgres accepts `infinity`, `today` and `epoch` as `date` input, which would store a value that never re-parses.
 pub(crate) fn ensure_date_string(value: &str) -> AppResult<()> {
     let bytes = value.as_bytes();
     let well_formed = bytes.len() == 10
@@ -5496,11 +5389,7 @@ fn optional_object_arg<'a>(args: &'a Value, key: &str) -> &'a serde_json::Map<St
         .unwrap_or_else(|| EMPTY.get_or_init(serde_json::Map::new))
 }
 
-/// Forced-failure injection for rollback tests.
-///
-/// Gated on an explicit cargo feature rather than `debug_assertions`: a
-/// debug-profile deploy would otherwise expose fault injection to anyone
-/// holding the internal secret.
+/// Gated on a cargo feature rather than `debug_assertions`, so a debug-profile deploy cannot expose fault injection.
 fn test_fault_arg<'a>(args: &'a Value, kind: &str) -> Option<&'a serde_json::Map<String, Value>> {
     if !cfg!(any(test, feature = "test-faults")) {
         return None;
@@ -5531,10 +5420,7 @@ fn maybe_trigger_test_fault(
     Ok(())
 }
 
-/// DATA-06: `page` comes straight from the request. Unclamped,
-/// `(page - 1) * page_size` overflowed `i64` — a panic in debug, and in release
-/// a negative value that Postgres rejects with `OFFSET must not be negative`,
-/// i.e. a 500. A page this deep is meaningless for every paginated view here.
+/// `page` comes straight from the request; unclamped, `(page - 1) * page_size` overflows `i64`.
 const MAX_PAGE: i64 = 100_000;
 
 fn page_offset(page: i64, page_size: i64) -> i64 {
@@ -5574,20 +5460,13 @@ fn is_quantity_unit(value: &str) -> bool {
     matches!(value, "g" | "ml" | "serving" | "count")
 }
 
-/// API-10: nothing capped the length of any string reaching a `text` column, so
-/// a `write:daily` token could store a ~2 MB `label` on every meal entry and a
-/// ~2 MB `notes` on every template — bounded only by the HTTP body limit.
-/// Names, labels and codes are never prose, so they get the tighter cap;
-/// free-text fields get the looser one.
+/// Caps every string reaching a `text` column: names, labels and codes are never prose, free text gets the looser bound.
 const MAX_TEXT_FIELD_LENGTH: usize = 500;
 const MAX_FREE_TEXT_LENGTH: usize = 2_000;
-/// `items` / `ingredients` were only checked for non-emptiness, so one request
-/// could ask for thousands of rows.
+/// Bounds how many rows one `items` / `ingredients` request can ask for.
 const MAX_COLLECTION_ITEMS: usize = 200;
 
-/// Counted in `char`s rather than bytes: the columns are `text`, so the limit
-/// users care about is characters, and a byte limit would silently reject
-/// shorter non-ASCII input.
+/// Counted in `char`s rather than bytes, so non-ASCII input is not rejected early.
 fn ensure_text_length(value: &str, max: usize, field_name: &str) -> AppResult<()> {
     if value.chars().count() > max {
         return Err(AppError::BadRequest(format!(
@@ -5630,10 +5509,7 @@ fn trim_optional_string(input: &serde_json::Map<String, Value>, key: &str) -> Op
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        // Truncation rather than rejection: several callers use this for
-        // optional filter/search arguments where a hard error would be worse
-        // than a clamp, and the persisted callers (`brand`, `barcode`,
-        // `sourceProvider`) are all short by nature.
+        // Truncation rather than rejection: the callers are optional filter arguments or naturally short fields.
         .map(|value| value.chars().take(MAX_TEXT_FIELD_LENGTH).collect())
 }
 
@@ -5706,9 +5582,7 @@ fn normalize_macros(
         protein: round1(required_f64_bounded(input, protein_key, MAX_MACRO_GRAMS)?),
         carbs: round1(required_f64_bounded(input, carbs_key, MAX_MACRO_GRAMS)?),
         fat: round1(required_f64_bounded(input, fat_key, MAX_MACRO_GRAMS)?),
-        // DATA-03: calories used to be the one unbounded macro, which let a
-        // day's `sum(calories_kcal)` overflow the aggregate cast and 500 every
-        // summary/stats/leaderboard read for that account.
+        // An unbounded calories value lets a day's `sum(calories_kcal)` overflow the aggregate cast.
         calories: required_i32_bounded(input, calories_key, MAX_CALORIES_KCAL)?,
     })
 }
@@ -5722,16 +5596,7 @@ fn require_any_nutrition(macros: &MacroValues) -> AppResult<()> {
     ))
 }
 
-/// The single enforcement point for every value that reaches a `meal_entries` /
-/// `meal_template_items` / `recipe_ingredients` numeric column.
-///
-/// DATA-01: the manual path bounded its inputs on the way in
-/// (`normalize_positive_number`, `required_f64_bounded`), but the product-linked
-/// path built its values from the product row and the raw request and only
-/// checked finite/positive here — so `quantity: 1e12` reached the INSERT and
-/// came back as a Postgres `22003`, i.e. a 500 for what is a client error. The
-/// bounds live here rather than being copied into the product path so the two
-/// cannot drift apart again.
+/// The single bounds check for every numeric reaching a meal, template-item or recipe-ingredient column, so the manual and product-linked paths cannot drift apart.
 fn validate_meal_components(
     label: &str,
     sort_order: i32,
@@ -5833,12 +5698,7 @@ fn normalize_meal_food_values(
     Ok(values)
 }
 
-/// DATA-09: `sourceMetadata` was taken verbatim from the request and stored as
-/// `jsonb` with no shape or size validation — the barcode path builds it
-/// server-side, but `createPersonalFoodProduct` let a caller persist an
-/// arbitrarily large and deeply nested document per product, bounded only by the
-/// HTTP body limit. Only a flat object of scalars is accepted, which is all any
-/// producer in this codebase writes.
+/// `sourceMetadata` is caller-controlled `jsonb`, so only a flat object of scalars is accepted.
 const MAX_SOURCE_METADATA_KEYS: usize = 32;
 
 fn normalize_source_metadata(input: &serde_json::Map<String, Value>) -> AppResult<Value> {
@@ -5970,8 +5830,7 @@ fn optional_f64(input: &serde_json::Map<String, Value>, key: &str) -> Option<f64
         .get(key)
         .and_then(|value| match value {
             Value::Number(number) => number.as_f64(),
-            // `"inf"`/`"NaN"`/`"-inf"` all parse successfully into f64, so the
-            // finiteness check below is what keeps them out.
+            // `"inf"`/`"NaN"`/`"-inf"` all parse into f64, so the finiteness check below is what rejects them.
             Value::String(value) => value.parse().ok(),
             _ => None,
         })
@@ -5986,17 +5845,11 @@ fn optional_i32(input: &serde_json::Map<String, Value>, key: &str) -> Option<i32
     })
 }
 
-/// Widest value a `numeric(6, 1)` column accepts. Anything larger reaches the
-/// INSERT and comes back as a Postgres numeric-field-overflow — a 500 for what
-/// is really a client input error.
+/// Widest value a `numeric(6, 1)` column accepts; anything larger is a numeric-field-overflow at INSERT.
 pub(crate) const MAX_MACRO_GRAMS: f64 = 99_999.9;
 /// Widest value a `numeric(8, 2)` column accepts.
 pub(crate) const MAX_QUANTITY: f64 = 999_999.99;
-/// Calories land in an `integer` column, so a single row cannot overflow — but
-/// `sum(calories_kcal)` across a day could, and the shared barcode catalogue
-/// publishes `calories_per_100` to every account. Capping a single value at the
-/// same order of magnitude as [`MAX_MACRO_GRAMS`] keeps both honest; no real
-/// food comes close.
+/// A single row cannot overflow the `integer` column, but a day's `sum(calories_kcal)` can.
 pub(crate) const MAX_CALORIES_KCAL: i32 = 99_999;
 
 fn required_f64(input: &serde_json::Map<String, Value>, key: &str) -> AppResult<f64> {
