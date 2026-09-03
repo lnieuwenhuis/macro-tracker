@@ -85,9 +85,7 @@ async fn stalled_http_base_url() -> String {
     format!("http://{address}")
 }
 
-/// Binds a loopback listener that answers every connection with `response`
-/// and counts how many requests it served. Shared by `jwks_base_url` and
-/// `failing_jwks_base_url`, which only differ in the bytes they hand back.
+/// Binds a loopback listener that answers every connection with `response` and counts requests served.
 async fn spawn_looping_stub_server(response: String) -> (String, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -118,9 +116,7 @@ async fn jwks_base_url(jwks_body: String) -> (String, Arc<AtomicUsize>) {
     spawn_looping_stub_server(response).await
 }
 
-/// Throwaway P-256 keypair, generated for these tests only and never used
-/// anywhere else. Shoo signs ID tokens with ES256, so the fixtures have to
-/// as well - a symmetric key would no longer be accepted (see SEC-19).
+/// Throwaway P-256 keypair for these tests only; Shoo signs ID tokens with ES256 (see SEC-19).
 const TEST_EC_PRIVATE_KEY_PEM: &str = concat!(
     "-----BEGIN PRIVATE KEY-----\n",
     "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgl7f/GjQzI961QUMc\n",
@@ -135,8 +131,7 @@ fn ec_encoding_key() -> EncodingKey {
     EncodingKey::from_ec_pem(TEST_EC_PRIVATE_KEY_PEM.as_bytes()).expect("test EC key should parse")
 }
 
-/// Signs a token with the test EC key. `claims` is the full claim set so a
-/// test can omit `iss`/`aud` and prove the absent-claim path is rejected.
+/// Signs a token with the test EC key from a full claim set, so a test can omit a claim to prove it is required.
 fn signed_shoo_token_with_claims(kid: &str, claims: serde_json::Value) -> String {
     let mut header = Header::new(Algorithm::ES256);
     header.kid = Some(kid.to_string());
@@ -213,8 +208,7 @@ async fn internal_auth_rejects_missing_backend_secret() {
     assert!(matches!(error, AppError::Unauthorized(_)));
 }
 
-/// SEC-20: an unconfigured backend and a wrong secret must be
-/// indistinguishable to the caller.
+/// SEC-20: an unconfigured backend and a wrong secret must be indistinguishable to the caller.
 #[tokio::test]
 async fn internal_auth_does_not_reveal_that_the_secret_is_unconfigured() {
     let mut config = test_config("session-secret-with-at-least-32-chars");
@@ -256,8 +250,7 @@ fn constant_time_comparison_matches_byte_equality() {
     assert!(constant_time_eq_bytes(secret, secret));
     assert!(!constant_time_eq_bytes(b"", secret));
     assert!(!constant_time_eq_bytes(secret, b""));
-    // Same length, differing only in the last byte: the case an early-exit
-    // comparison would answer fastest.
+    // Same length, differing only in the last byte: the early-exit case.
     assert!(!constant_time_eq_bytes(
         b"internal-secret-with-at-least-32-charS",
         secret
@@ -267,8 +260,7 @@ fn constant_time_comparison_matches_byte_equality() {
     assert!(constant_time_eq_bytes(b"", b""));
 }
 
-/// SEC-18: promotion is automatic, revocation is not — and an admin-granted
-/// owner must never be demoted by an absence from `ADMIN_OWNER_EMAILS`.
+/// SEC-18: promotion is automatic, revocation is not — an admin-granted owner is never demoted.
 #[test]
 fn configured_owner_policy_promotes_but_never_demotes() {
     let configured = vec!["owner@example.com".to_string()];
@@ -286,8 +278,7 @@ fn configured_owner_policy_promotes_but_never_demotes() {
         configured_owner_action(&configured, "owner@example.com", "owner"),
         ConfiguredOwnerAction::Nothing
     );
-    // Granted through the admin flow, or left behind by an address removed
-    // from the config list. Indistinguishable here, so neither is demoted.
+    // Granted via admin flow or left behind by config removal: indistinguishable, so neither is demoted.
     assert_eq!(
         configured_owner_action(&configured, "someone@example.com", "owner"),
         ConfiguredOwnerAction::ReportUnconfiguredOwner
@@ -374,8 +365,7 @@ fn shoo_state_for(base_url: &str) -> crate::AppState {
     }
 }
 
-/// CLEAN-A2: a cold cache during a login burst used to fan out one JWKS
-/// request per concurrent login.
+/// CLEAN-A2: a cold cache during a login burst must not fan out one JWKS request per concurrent login.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_cold_logins_make_exactly_one_jwks_request() {
     const LOGINS: usize = 8;
@@ -383,8 +373,7 @@ async fn concurrent_cold_logins_make_exactly_one_jwks_request() {
     let (base_url, request_count) = jwks_base_url(ec_jwks(kid)).await;
     let state = shoo_state_for(&base_url);
     let token = signed_shoo_token(kid, &base_url, "http://localhost:3000");
-    // Releases every task into the cache lookup at the same moment, so the
-    // un-deduplicated version really does race.
+    // Releases every task into the cache lookup at once, so an un-deduplicated version really races.
     let start = Arc::new(tokio::sync::Barrier::new(LOGINS));
 
     let mut handles = Vec::with_capacity(LOGINS);
@@ -413,8 +402,7 @@ async fn concurrent_cold_logins_make_exactly_one_jwks_request() {
     );
 }
 
-/// CLEAN-A2: without a negative entry, an identity-provider outage makes
-/// every login pay the full fetch timeout again.
+/// CLEAN-A2: without a negative entry, an identity-provider outage makes every login pay the full fetch timeout again.
 #[tokio::test]
 async fn failed_jwks_fetches_are_negatively_cached() {
     let kid = "negative-cache-key";
@@ -436,8 +424,7 @@ async fn failed_jwks_fetches_are_negatively_cached() {
     );
 }
 
-/// Builds state whose JWKS endpoint serves `jwks_body`, and returns the
-/// issuer the token must claim.
+/// Builds state whose JWKS endpoint serves `jwks_body`, and returns the issuer the token must claim.
 async fn shoo_state_with_jwks(jwks_body: String) -> (crate::AppState, String) {
     let (base_url, _) = jwks_base_url(jwks_body).await;
     let mut config = test_config("session-secret-with-at-least-32-chars");
@@ -452,9 +439,7 @@ async fn shoo_state_with_jwks(jwks_body: String) -> (crate::AppState, String) {
     (state, base_url)
 }
 
-/// SEC-02 regression: `Validation` only ever seeded `required_spec_claims`
-/// with `exp`, and its `iss`/`aud` match arms fall through on an absent
-/// claim. A token that simply omitted `aud` used to authenticate.
+/// SEC-02: a token that simply omits `aud` must not authenticate.
 #[tokio::test]
 async fn shoo_token_without_audience_is_rejected() {
     let kid = "es256-key";
@@ -478,7 +463,7 @@ async fn shoo_token_without_audience_is_rejected() {
     assert!(matches!(error, AppError::Unauthorized(_)));
 }
 
-/// SEC-02 regression: same fall-through, for the issuer.
+/// SEC-02: same fall-through, for the issuer.
 #[tokio::test]
 async fn shoo_token_without_issuer_is_rejected() {
     let kid = "es256-key";
@@ -502,8 +487,7 @@ async fn shoo_token_without_issuer_is_rejected() {
     assert!(matches!(error, AppError::Unauthorized(_)));
 }
 
-/// Guard on the case that always worked, so the required-claims change
-/// cannot be mistaken for the whole of the audience check.
+/// Guard on the case that always worked, so the required-claims change isn't mistaken for the whole check.
 #[tokio::test]
 async fn shoo_token_with_wrong_audience_is_rejected() {
     let kid = "es256-key";
@@ -530,9 +514,7 @@ async fn shoo_token_with_correct_issuer_and_audience_is_accepted() {
     assert_eq!(claims.pairwise_sub, "pairwise-test-sub");
 }
 
-/// A JWK may legitimately omit the optional `alg` member (RFC 7517 §4.4).
-/// Gating on it would have turned a Shoo-side JWKS tweak into a total login
-/// outage, so the key type carries the check instead.
+/// A JWK may legitimately omit the optional `alg` member (RFC 7517 §4.4); the key type carries the check instead.
 #[tokio::test]
 async fn shoo_key_without_alg_member_still_verifies() {
     let kid = "es256-key";
@@ -557,9 +539,7 @@ async fn shoo_key_without_alg_member_still_verifies() {
     assert_eq!(claims.pairwise_sub, "pairwise-test-sub");
 }
 
-/// SEC-19: `DecodingKey::from_jwk` builds an HMAC key from a symmetric `oct`
-/// JWK. If Shoo ever published one, anyone able to read the public JWKS
-/// could mint logins for any email, so the key type is pinned.
+/// SEC-19: a symmetric `oct` JWK must never verify a login (anyone reading the public JWKS could mint one).
 #[tokio::test]
 async fn symmetric_jwks_key_is_rejected() {
     let secret = b"symmetric-shoo-secret-with-at-least-32-chars";

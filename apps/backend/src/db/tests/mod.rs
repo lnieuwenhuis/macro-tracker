@@ -357,13 +357,7 @@ async fn test_db() -> TestDb {
     test_db_with_connections(1).await
 }
 
-/// Builds a throwaway schema for one integration test.
-///
-/// Every failure here panics rather than being swallowed. Callers are gated
-/// by `#[cfg_attr(not(has_test_database), ignore = ...)]`, so reaching this
-/// function at all means a database URL was configured at build time — a
-/// missing or unreachable database is then a real failure, not a reason to
-/// report a test as passed (TEST-01).
+/// TEST-01: builds a throwaway schema for one integration test; every failure here panics, never reports a pass.
 async fn test_db_with_connections(max_connections: u32) -> TestDb {
     let database_url = env::var("TEST_DATABASE_URL")
         .or_else(|_| env::var("DATABASE_URL"))
@@ -400,9 +394,7 @@ async fn test_db_with_connections(max_connections: u32) -> TestDb {
     TestDb { pool, schema }
 }
 
-/// Pulls the `id` field out of every element of a `*_json` search
-/// result array, in order. Several search tests assert on nothing but
-/// this ordered id list.
+/// Pulls the `id` field out of every element of a `*_json` search result array, in order.
 fn search_result_ids(results: &Value) -> Vec<&str> {
     results
         .as_array()
@@ -551,15 +543,8 @@ async fn insert_test_meal_entry(
     entry_id
 }
 
-/// API-07: `completeOnboardingSetup` is the third write path into
-/// `meal_templates.type` and the one that skipped `normalize_template_type`.
-/// Migration 0016 adds a CHECK on that column, so an unvalidated value would
-/// come back as a raw 23514 -> 500 rather than a 400, and nothing else
-/// covered this path.
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
+/// API-07: `completeOnboardingSetup` skipped `normalize_template_type`, so a bad value hit the CHECK as a 500.
+#[cfg_attr(not(has_test_database), ignore = "needs a test database")]
 #[tokio::test]
 async fn onboarding_starter_template_rejects_an_out_of_union_type() {
     let test_db = test_db().await;
@@ -610,10 +595,7 @@ async fn onboarding_starter_template_rejects_an_out_of_union_type() {
     assert_eq!(templates, 0, "the rejected template must not be persisted");
 }
 
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
+#[cfg_attr(not(has_test_database), ignore = "needs a test database")]
 #[tokio::test]
 async fn ensure_default_meal_groups_creates_all_groups_idempotently() {
     let test_db = test_db().await;
@@ -709,10 +691,7 @@ async fn ensure_default_meal_groups_creates_all_groups_idempotently() {
     test_db.cleanup().await;
 }
 
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
+#[cfg_attr(not(has_test_database), ignore = "needs a test database")]
 #[tokio::test]
 async fn ensure_default_meal_groups_reactivates_a_soft_deleted_default() {
     let test_db = test_db().await;
@@ -753,10 +732,7 @@ async fn ensure_default_meal_groups_reactivates_a_soft_deleted_default() {
     test_db.cleanup().await;
 }
 
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
+#[cfg_attr(not(has_test_database), ignore = "needs a test database")]
 #[tokio::test]
 async fn apply_day_template_resolves_exact_and_unambiguous_meal_group_labels() {
     let test_db = test_db().await;
@@ -842,10 +818,7 @@ async fn apply_day_template_resolves_exact_and_unambiguous_meal_group_labels() {
     test_db.cleanup().await;
 }
 
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
+#[cfg_attr(not(has_test_database), ignore = "needs a test database")]
 #[tokio::test]
 async fn list_admin_barcode_products_applies_catalogue_filters_to_items_and_totals() {
     let test_db = test_db().await;
@@ -969,10 +942,7 @@ enum ProductSearchExpectation {
     LeadingOrder(&'static [usize]),
 }
 
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
+#[cfg_attr(not(has_test_database), ignore = "needs a test database")]
 #[tokio::test]
 async fn search_food_products_ranks_and_filters_the_catalogue() {
     // Seeds are (personal to the searcher, name, brand, index of the product this one corrects).
@@ -1053,10 +1023,7 @@ async fn search_food_products_ranks_and_filters_the_catalogue() {
     }
 }
 
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
+#[cfg_attr(not(has_test_database), ignore = "needs a test database")]
 #[tokio::test]
 async fn admin_user_detail_preserves_recent_activity_contracts() {
     let test_db = test_db().await;
@@ -1187,10 +1154,7 @@ enum MealEntryReader {
     Recent,
 }
 
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
+#[cfg_attr(not(has_test_database), ignore = "needs a test database")]
 #[tokio::test]
 async fn meal_entry_readers_return_only_the_expected_history() {
     // (protein g, carbs g, fat g, calories kcal) per seeded entry.
@@ -1260,10 +1224,7 @@ async fn meal_entry_readers_return_only_the_expected_history() {
     }
 }
 
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
+#[cfg_attr(not(has_test_database), ignore = "needs a test database")]
 #[tokio::test]
 async fn search_meal_entries_hides_soft_deleted_product_id_but_keeps_macro_snapshot() {
     let test_db = test_db().await;
@@ -1312,10 +1273,7 @@ async fn search_meal_entries_hides_soft_deleted_product_id_but_keeps_macro_snaps
     test_db.cleanup().await;
 }
 
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
+#[cfg_attr(not(has_test_database), ignore = "needs a test database")]
 #[tokio::test]
 async fn get_recent_quick_add_candidates_defaults_to_thirty_when_limit_is_omitted() {
     let test_db = test_db().await;
@@ -1414,10 +1372,7 @@ async fn get_recent_quick_add_candidates_defaults_to_thirty_when_limit_is_omitte
     test_db.cleanup().await;
 }
 
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
+#[cfg_attr(not(has_test_database), ignore = "needs a test database")]
 #[tokio::test]
 async fn leaderboard_handles_empty_grace_gaps_ties_and_large_history() {
     let test_db = test_db().await;
@@ -1529,10 +1484,7 @@ async fn leaderboard_handles_empty_grace_gaps_ties_and_large_history() {
     test_db.cleanup().await;
 }
 
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
+#[cfg_attr(not(has_test_database), ignore = "needs a test database")]
 #[tokio::test]
 async fn concurrent_owner_demotions_cannot_remove_last_owner() {
     let test_db = test_db_with_connections(4).await;
@@ -1644,10 +1596,7 @@ fn no_barcode_product_or_revision(fixture: &RollbackFixture) -> ScalarChecks {
     ]
 }
 
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
+#[cfg_attr(not(has_test_database), ignore = "needs a test database")]
 #[tokio::test]
 async fn an_injected_fault_rolls_back_the_whole_write() {
     for case in [
@@ -1785,10 +1734,7 @@ async fn an_injected_fault_rolls_back_the_whole_write() {
     }
 }
 
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
+#[cfg_attr(not(has_test_database), ignore = "needs a test database")]
 #[tokio::test]
 async fn save_barcode_food_product_rpc_creates_created_revision() {
     let test_db = test_db().await;
@@ -1844,8 +1790,7 @@ fn macro_goals_are_bounded_to_the_column_domain() {
         .is_ok()
     );
 
-    // numeric(6, 1) overflows past 99_999.9. Onboarding writes these
-    // columns directly, so the check has to reject before the UPDATE.
+    // numeric(6, 1) overflows past 99_999.9; onboarding writes these columns directly, so this must reject first.
     assert!(
         validate_macro_goals(&MacroGoals {
             protein_g: Some(1e30),
@@ -1887,8 +1832,7 @@ fn ensure_date_string_rejects_postgres_special_dates() {
         "2026-13-01",
         "2026-02-30",
         "2026-01-15T00:00:00Z",
-        // Postgres accepts all of these as `date` input, stores them, and
-        // then fails to re-parse on read — permanently breaking the page.
+        // Postgres accepts these as `date` input but fails to re-parse them on read, permanently breaking the page.
         "infinity",
         "-infinity",
         "today",
@@ -2084,10 +2028,7 @@ fn only_admin_and_owner_roles_are_admin_actors() {
 /// Migrations schema-qualify some references as `"public"."x"`, which would
 /// escape the scratch schema, so that qualifier is stripped before applying.
 /// That is the only rewrite performed.
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
+#[cfg_attr(not(has_test_database), ignore = "needs a test database")]
 #[tokio::test]
 async fn schema_sql_matches_the_drizzle_migrations() {
     async fn columns_of(
@@ -2261,10 +2202,7 @@ enum ShooOutcome {
 }
 
 #[tokio::test]
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
+#[cfg_attr(not(has_test_database), ignore = "needs a test database")]
 async fn shoo_login_pins_the_subject_and_address_rebinding_contract() {
     for (intent, seeds, profile, outcome) in [
         (
@@ -2430,13 +2368,9 @@ async fn bounds_fixture(pool: &PgPool) -> BoundsFixture {
     }
 }
 
-/// DATA-01: the product-linked and preserved-snapshot paths each once skipped a bound
-/// the manual path applied, and reached the INSERT as a numeric-overflow 500.
+/// DATA-01: the product-linked and preserved-snapshot paths must apply the same bound as the manual path.
 #[tokio::test]
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
+#[cfg_attr(not(has_test_database), ignore = "needs a test database")]
 async fn out_of_range_meal_and_product_writes_are_refused() {
     let cases: [BoundsCase; 6] = [
         (
@@ -2564,15 +2498,11 @@ async fn out_of_range_meal_and_product_writes_are_refused() {
 }
 
 #[tokio::test]
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
+#[cfg_attr(not(has_test_database), ignore = "needs a test database")]
 async fn calorie_aggregates_survive_rows_that_predate_the_bound() {
     let test_db = test_db().await;
     let user_id = insert_test_user(&test_db.pool).await;
-    // Written straight to the table: these are the rows the old unbounded
-    // path could already have stored. Every aggregate must still answer.
+    // Written straight to the table: these are rows the old unbounded path could already have stored.
     for sort_order in 0..2 {
         insert_test_meal_entry(
             &test_db.pool,
@@ -2612,15 +2542,11 @@ async fn calorie_aggregates_survive_rows_that_predate_the_bound() {
 }
 
 #[tokio::test]
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
+#[cfg_attr(not(has_test_database), ignore = "needs a test database")]
 async fn stats_page_reports_the_same_streaks_as_the_leaderboard() {
     let test_db = test_db().await;
     let user_id = insert_test_user(&test_db.pool).await;
-    // A closed 3-day streak, a gap, then a 4-day streak ending yesterday —
-    // so `currentStreak` uses the one-day grace the leaderboard allows.
+    // A closed 3-day streak, a gap, then a 4-day streak ending yesterday, testing the one-day grace period.
     for (index, date) in [
         "2026-01-01",
         "2026-01-02",
