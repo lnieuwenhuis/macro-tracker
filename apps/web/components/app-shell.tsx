@@ -27,31 +27,16 @@ type AppShellProps = {
   title: string;
   activeTab: "log" | "progress" | "recipes" | "summary";
   showDateNavigation?: boolean;
-  /**
-   * Where the day chevrons / date picker navigate. Defaults to the tab's
-   * home ("/" or "/summary") for existing callers; screens like /gym that
-   * reuse `activeTab="log"` must pass their own path or day navigation would
-   * bounce them back to the dashboard.
-   */
+  // Overrides the tab's default home for day navigation; /gym reuses activeTab="log" so it must pass its own path.
   basePath?: string;
-  /** Renders the top-left gym shortcut (dashboard and gym screens). */
   showGymShortcut?: boolean;
-  /**
-   * True on the /gym screen itself: the dumbbell renders in the accent
-   * "you are here" state and toggles BACK to the food log. Without this the
-   * button vanished inside the gym section, and the installed PWA (standalone,
-   * no browser chrome) had no header affordance to leave it.
-   */
+  // True on /gym itself: the standalone PWA has no browser chrome, so this is the only way back to the food log.
   gymShortcutActive?: boolean;
-  /** Pending gym-buddy invites; > 0 shows a dot on the gym shortcut. */
   gymPendingInviteCount?: number;
   onComposeAction?: (action: ComposeAction) => void;
   topBar?: (controls: { openSettings: () => void }) => ReactNode;
   children: ReactNode;
-  // Resolved server-side (user's timezone) via `getRequestToday()` so the
-  // client render agrees with the server render on hydration. Falls back to
-  // the local runtime's day when a caller has not been updated to pass it
-  // yet -- see AUDIT-REMEDIATION.md UI-02.
+  // Resolved server-side via getRequestToday() to agree with the client's hydration render.
   todayStr?: string;
 };
 
@@ -92,21 +77,10 @@ export function AppShell({
   const outerMotion = isDayMotion ? "none" : screenMotion;
   const contentMotion = isDayMotion ? screenMotion : "none";
 
-  // Runs once, on mount. This is the *startup* correction for a cold load
-  // whose server render predates the timezone cookie; re-running it on every
-  // `selectedDate` change made it race with the router. Picking a date pushes
-  // the new URL inside a transition, so for a moment `window.location.search`
-  // still holds the previous query while `selectedDate` already holds the new
-  // day — which this effect read as "no date requested" and bounced straight
-  // back to today, discarding the user's choice.
+  // One-shot: re-checking on every selectedDate change races an in-flight router push (startup-date.test.ts).
   const hasCheckedStartupDate = useRef(false);
 
-  // Hydration beacon for the Playwright suite. Effects only run once React
-  // has hydrated and attached its event listeners, so this attribute is the
-  // earliest reliable "the page is interactive" signal. Without it, tests on
-  // slow runners fill the date picker before hydration and the controlled
-  // input snaps back to the server-rendered day, silently discarding the
-  // interaction. `tests/e2e/test-users.ts#waitForAppReady` waits for this.
+  // tests/e2e/test-users.ts#waitForAppReady polls this as the earliest hydrated-and-interactive signal.
   useEffect(() => {
     document.documentElement.dataset.appHydrated = "true";
   }, []);
@@ -380,16 +354,10 @@ export function AppShell({
   );
 }
 
-/** The round header-button look shared by the settings and gym buttons. */
 const ROUND_SHELL_BUTTON_CLASS =
   "flex h-12 w-12 items-center justify-center rounded-full border border-[var(--color-border)] bg-[color-mix(in_srgb,var(--color-surface-strong)_92%,transparent)] text-[var(--color-ink)] shadow-[0_10px_20px_rgba(0,0,0,0.12)] backdrop-blur-xl transition hover:bg-[var(--color-card-muted)]";
 
-/**
- * Same geometry, accent-filled: the gym button's "you are here" state on the
- * /gym screen itself. A separate full string (not an override appended to
- * ROUND_SHELL_BUTTON_CLASS) because conflicting Tailwind utilities are not
- * resolved by class order.
- */
+// Not a ROUND_SHELL_BUTTON_CLASS override: conflicting Tailwind utilities don't resolve by class order.
 const ROUND_SHELL_BUTTON_ACTIVE_CLASS =
   "flex h-12 w-12 items-center justify-center rounded-full border border-[var(--color-accent)] bg-[var(--color-accent)] text-white shadow-[0_10px_20px_rgba(0,0,0,0.12)] backdrop-blur-xl transition hover:bg-[var(--color-accent-strong)]";
 
