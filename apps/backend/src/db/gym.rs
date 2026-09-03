@@ -365,10 +365,10 @@ async fn gym_advisory_lock(
 /// Backstop for the pair-unique index: without this a concurrent duplicate
 /// invite would surface as a 500 `internal_error` instead of a Conflict.
 fn gym_conflict_on_unique_violation(error: sqlx::Error, message: &str) -> AppError {
-    if let sqlx::Error::Database(database_error) = &error {
-        if database_error.code().as_deref() == Some("23505") {
-            return AppError::Conflict(message.to_string());
-        }
+    if let sqlx::Error::Database(database_error) = &error
+        && database_error.code().as_deref() == Some("23505")
+    {
+        return AppError::Conflict(message.to_string());
     }
     AppError::Sqlx(error)
 }

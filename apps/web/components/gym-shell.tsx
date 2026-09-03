@@ -1,7 +1,6 @@
 "use client";
 
-import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
+import { useState } from "react";
 
 import type {
   GymPageData,
@@ -20,6 +19,7 @@ import {
 import { formatMinutesAsTime, formatSelectedDate } from "@/lib/formatting";
 import { useGymNowMinute } from "@/lib/gym-clock";
 import { gymStatusLabel } from "@/lib/gym-time";
+import { useActionRunner } from "@/lib/use-action-runner";
 
 import { AppShell } from "./app-shell";
 import { CompactModal } from "./compact-modal";
@@ -79,10 +79,8 @@ export function GymShell({
   todayStr,
   data,
 }: GymShellProps) {
-  const router = useRouter();
+  const { run, isPending, error } = useActionRunner();
   const [activeTab, setActiveTab] = useState<"schedule" | "buddies">("schedule");
-  const [isPending, startTransition] = useTransition();
-  const [error, setError] = useState<string | null>(null);
   const [statusOverrides, setStatusOverrides] = useState<
     Record<string, GymSlotStatus>
   >({});
@@ -96,15 +94,10 @@ export function GymShell({
   const nowMinute = useGymNowMinute();
 
   function runAction(action: () => Promise<{ ok: boolean; error?: string }>) {
-    setError(null);
-    startTransition(async () => {
-      const result = await action();
-      if (!result.ok) {
-        setError(result.error ?? "Something went wrong.");
-        setStatusOverrides({});
-        return;
-      }
-      router.refresh();
+    run(action, {
+      fallbackError: "Something went wrong.",
+      refresh: true,
+      onError: () => setStatusOverrides({}),
     });
   }
 
@@ -367,17 +360,13 @@ export function GymShell({
             friendCode={data.friendCode}
             isPending={isPending}
             onInvite={(identifier, done) => {
-              setError(null);
-              startTransition(async () => {
-                const result = await inviteGymBuddyAction({ identifier });
-                if (!result.ok) {
-                  setError(result.error ?? "Something went wrong.");
-                  return;
-                }
-                done(result.result === "accepted"
-                  ? "You're now gym buddies!"
-                  : "Invite sent.");
-                router.refresh();
+              run(() => inviteGymBuddyAction({ identifier }), {
+                fallbackError: "Something went wrong.",
+                refresh: true,
+                onSuccess: (result) =>
+                  done(result.result === "accepted"
+                    ? "You're now gym buddies!"
+                    : "Invite sent."),
               });
             }}
             onRespond={(buddyId, accept) =>
