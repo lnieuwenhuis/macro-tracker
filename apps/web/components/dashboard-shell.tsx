@@ -30,7 +30,7 @@ import { QuickAddRail } from "./quick-add-rail";
 import { TransitionLink } from "./transition-link";
 import { useTemplateMutations } from "./use-template-mutations";
 
-// The `loading` option is load-bearing: without it next/dynamic emits no Suspense boundary of its own and the first open suspends to the route skeleton.
+// The `loading` option is load-bearing: without it (`ssr: false` does not help) next/dynamic emits no Suspense boundary and the first open suspends to the route skeleton.
 // Each fallback mirrors its modal's shell instead of rendering null, which would blank the overlay for the first frame and read as a close and reopen.
 // The options must stay inline literals; the bundler analyzes dynamic() options statically.
 const AiFoodPhotoModal = dynamic(
