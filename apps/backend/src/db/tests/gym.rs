@@ -40,54 +40,55 @@ fn gym_slot_values_validates_shape_and_minutes() {
     assert_eq!(values.slot_date.as_deref(), Some("2026-09-01"));
     assert_eq!(values.weekday, None);
 
-    // Overnight (start >= end) is rejected.
-    assert!(
-        gym_slot_values(&gym_input(&[
-            ("recurrence", json!("weekly")),
-            ("weekday", json!(2)),
-            ("startMinute", json!(1320)),
-            ("endMinute", json!(120)),
-        ]))
-        .is_err()
-    );
-    // Weekday outside ISO 1-7 is rejected.
-    assert!(
-        gym_slot_values(&gym_input(&[
-            ("recurrence", json!("weekly")),
-            ("weekday", json!(0)),
-            ("startMinute", json!(600)),
-            ("endMinute", json!(660)),
-        ]))
-        .is_err()
-    );
-    // A one-off slot without a date is rejected, as is a special date.
-    assert!(
-        gym_slot_values(&gym_input(&[
-            ("recurrence", json!("once")),
-            ("startMinute", json!(600)),
-            ("endMinute", json!(660)),
-        ]))
-        .is_err()
-    );
-    assert!(
-        gym_slot_values(&gym_input(&[
-            ("recurrence", json!("once")),
-            ("slotDate", json!("today")),
-            ("startMinute", json!(600)),
-            ("endMinute", json!(660)),
-        ]))
-        .is_err()
-    );
-    // Unknown recurrence is rejected.
-    assert!(
-        gym_slot_values(&gym_input(&[
-            ("recurrence", json!("biweekly")),
-            ("weekday", json!(3)),
-            ("startMinute", json!(600)),
-            ("endMinute", json!(660)),
-        ]))
-        .is_err()
-    );
+    // Rejections differ only by shape; loop over owned rows with an intent string.
+    for (intent, input) in [
+        (
+            "overnight (start >= end) is rejected",
+            gym_input(&[
+                ("recurrence", json!("weekly")),
+                ("weekday", json!(2)),
+                ("startMinute", json!(1320)),
+                ("endMinute", json!(120)),
+            ]),
+        ),
+        (
+            "weekday outside ISO 1-7 is rejected",
+            gym_input(&[
+                ("recurrence", json!("weekly")),
+                ("weekday", json!(0)),
+                ("startMinute", json!(600)),
+                ("endMinute", json!(660)),
+            ]),
+        ),
+        (
+            "a one-off slot without a date is rejected",
+            gym_input(&[
+                ("recurrence", json!("once")),
+                ("startMinute", json!(600)),
+                ("endMinute", json!(660)),
+            ]),
+        ),
+        (
+            "a one-off slot with a special date is rejected",
+            gym_input(&[
+                ("recurrence", json!("once")),
+                ("slotDate", json!("today")),
+                ("startMinute", json!(600)),
+                ("endMinute", json!(660)),
+            ]),
+        ),
+        (
+            "unknown recurrence is rejected",
+            gym_input(&[
+                ("recurrence", json!("biweekly")),
+                ("weekday", json!(3)),
+                ("startMinute", json!(600)),
+                ("endMinute", json!(660)),
+            ]),
+        ),
+    ] {
+        assert!(gym_slot_values(&input).is_err(), "{intent}");
+    }
 }
 
 #[test]
@@ -111,8 +112,7 @@ fn gym_invite_identifiers_classify_and_normalize() {
         GymInviteIdentifier::Email(email) => assert_eq!(email, "bob@example.com"),
         GymInviteIdentifier::FriendCode(_) => panic!("expected email"),
     }
-    // No '@' → friend code, uppercased with separators stripped so
-    // "ab23-cd45", "AB23 CD45" and "ab23cd45" all resolve identically.
+    // No '@' → friend code, uppercased with separators stripped so all three spellings resolve identically.
     for raw in ["ab23-cd45", "AB23 CD45", "ab23cd45"] {
         match classify_gym_invite_identifier(raw).unwrap() {
             GymInviteIdentifier::FriendCode(code) => assert_eq!(code, "AB23CD45"),
@@ -168,4 +168,62 @@ fn gym_merge_overlaps_merges_per_style_and_classifies_tentative() {
     assert_eq!(sam["tentative"], json!(true));
 
     assert_eq!(gym_merge_overlaps(&[]), json!([]));
+}
+
+#[test]
+fn gym_merge_overlaps_caps_windows_and_buddies_keeping_the_earliest() {
+    // 22 buddies (cap 20) with 4 non-mergeable windows each (cap 3); rows arrive ordered by start.
+    let buddy_id = |index: usize| format!("00000000-0000-4000-8000-{index:012}");
+    let mut rows = Vec::new();
+    for index in 0..22 {
+        for window in 0..4 {
+            let start = (index + window * 1000) as i64;
+            rows.push(json!({
+                "buddyId": buddy_id(index),
+                "buddyName": format!("Buddy {index}"),
+                "startMinute": start,
+                "endMinute": start + 5,
+                "tentative": false,
+            }));
+        }
+    }
+
+    let merged = gym_merge_overlaps(&rows);
+    let entries = merged.as_array().expect("merged overlaps are an array");
+    assert_eq!(
+        entries.len(),
+        20,
+        "buddy cap not enforced: expected 20 buddies, got {}",
+        entries.len()
+    );
+
+    for (index, entry) in entries.iter().enumerate() {
+        assert_eq!(
+            entry["buddy"]["id"],
+            json!(buddy_id(index)),
+            "buddies not retained in earliest-window order at position {index}"
+        );
+        let windows = entry["windows"].as_array().unwrap();
+        assert_eq!(
+            windows.len(),
+            3,
+            "per-buddy window cap not enforced for buddy {index}: got {}",
+            windows.len()
+        );
+        for (slot, window) in windows.iter().enumerate() {
+            assert_eq!(
+                window["startMinute"],
+                json!((index + slot * 1000) as i64),
+                "window {slot} of buddy {index} is not the {slot}-th earliest window"
+            );
+        }
+    }
+
+    let retained_ids: Vec<&Value> = entries.iter().map(|entry| &entry["buddy"]["id"]).collect();
+    for dropped in [20usize, 21] {
+        assert!(
+            !retained_ids.contains(&&json!(buddy_id(dropped))),
+            "late buddy {dropped} should have been dropped by the buddy cap"
+        );
+    }
 }

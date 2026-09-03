@@ -6,11 +6,7 @@ export type RecipePortionMealEntryInput = Omit<MealEntryInput, "sortOrder"> & {
   sortOrder?: number;
 };
 
-/**
- * `status` is resolved by the caller against *its* calendar day. Deriving it
- * here from a server-side `today` produced wrong-day classifications for users
- * whose zone differs from the server's.
- */
+// status is resolved by the caller against its own calendar day; a server-side "today" here mis-zones it.
 export function buildRecipePortionMealEntryInput({
   clientMutationId,
   date,
@@ -19,11 +15,7 @@ export function buildRecipePortionMealEntryInput({
   recipe,
   status,
 }: {
-  /**
-   * Idempotency key for the create. The backend's unique index is over a
-   * nullable column, so multiple `NULL`s do not collide — without a value a
-   * double-tap writes two identical entries.
-   */
+  /** Idempotency key; without one, a double-tap writes two entries (unique index is over a nullable column). */
   clientMutationId?: string;
   date: string;
   gramsConsumed: number | null;

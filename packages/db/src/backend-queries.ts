@@ -50,12 +50,6 @@ export type LeaderboardStats = {
   topLabels: StatsPageData["topLabels"];
 };
 
-export type DatabaseClient = any;
-export type DatabaseRuntime = {
-  db: DatabaseClient;
-  close: () => Promise<void>;
-};
-
 type BackendTestFault = {
   kind: string;
   failOnCall?: number;
@@ -79,40 +73,27 @@ export function getApiScopes(): ApiScope[] {
   return [...API_SCOPE_VALUES];
 }
 
-export async function upsertUserFromShooProfile(profile: ShooProfile, ..._ignored: unknown[]) {
+export async function upsertUserFromShooProfile(profile: ShooProfile) {
   return backendRpc<AppUser>("upsertUserFromShooProfile", { profile });
 }
 
-export async function getUserById(userId: string, ..._ignored: unknown[]) {
+export async function getUserById(userId: string) {
   return backendRpc<AppUser | null>("getUserById", { userId });
 }
 
-/**
- * Promotes a user to owner only if the *backend's* `ADMIN_OWNER_EMAILS` lists
- * their address. The role is decided server-side, so this is not a general
- * role-assignment primitive.
- */
-export async function reconcileConfiguredOwner(userId: string, ..._ignored: unknown[]) {
+/** Promotes to owner only if the backend's `ADMIN_OWNER_EMAILS` lists the address. */
+export async function reconcileConfiguredOwner(userId: string) {
   return backendRpc<AppUser>("reconcileConfiguredOwner", { userId });
 }
 
-/**
- * Assigns an arbitrary role. Rejected unless the backend was started with
- * `BACKEND_ENABLE_TEST_ROUTES=true`; only the Playwright test-session route
- * uses it.
- */
-export async function ensureUserRoleForTesting(
-  userId: string,
-  role: AdminRole,
-  ..._ignored: unknown[]
-) {
+/** Rejected unless the backend runs with `BACKEND_ENABLE_TEST_ROUTES=true`. */
+export async function ensureUserRoleForTesting(userId: string, role: AdminRole) {
   return backendRpc<AppUser>("ensureUserRoleForTesting", { userId, role });
 }
 
 export async function createApiToken(
   userId: string,
-  input: { name: string; scopes: readonly string[]; expiresAt?: Date | string | null },
-  ..._ignored: unknown[]
+  input: { name: string; scopes: readonly string[]; expiresAt?: Date | string | null }
 ): Promise<CreatedApiToken> {
   return backendRpc("createApiToken", {
     userId,
@@ -123,32 +104,27 @@ export async function createApiToken(
   });
 }
 
-export async function listApiTokens(userId: string, ..._ignored: unknown[]): Promise<ApiTokenRecord[]> {
+export async function listApiTokens(userId: string): Promise<ApiTokenRecord[]> {
   return backendRpc("listApiTokens", { userId });
 }
 
-export async function revokeApiToken(userId: string, tokenId: string, ..._ignored: unknown[]) {
+export async function revokeApiToken(userId: string, tokenId: string) {
   return backendRpc<boolean>("revokeApiToken", { userId, tokenId });
 }
 
-export async function authenticateApiToken(token: string | null, ..._ignored: unknown[]): Promise<ApiTokenAuthResult> {
+export async function authenticateApiToken(token: string | null): Promise<ApiTokenAuthResult> {
   return backendRpc("authenticateApiToken", { token });
 }
 
-export async function getMealGroups(userId: string, ..._ignored: unknown[]): Promise<MealGroup[]> {
+export async function getMealGroups(userId: string): Promise<MealGroup[]> {
   return backendRpc("getMealGroups", { userId });
 }
 
-export async function createMealGroup(userId: string, input: { label: string }, ..._ignored: unknown[]) {
+export async function createMealGroup(userId: string, input: { label: string }) {
   return backendRpc<MealGroup>("createMealGroup", { userId, input });
 }
 
-export async function updateMealGroup(
-  userId: string,
-  groupId: string,
-  input: { label: string },
-  ..._ignored: unknown[]
-) {
+export async function updateMealGroup(userId: string, groupId: string, input: { label: string }) {
   return backendRpc<MealGroup>("updateMealGroup", { userId, groupId, input });
 }
 
@@ -160,93 +136,69 @@ export async function deleteMealGroup(userId: string, groupId: string, ..._ignor
   });
 }
 
-export async function getDailySummary(
-  userId: string,
-  date: string,
-  ..._ignored: unknown[]
-): Promise<DailySummary> {
+export async function getDailySummary(userId: string, date: string): Promise<DailySummary> {
   return backendRpc("getDailySummary", { userId, date });
 }
 
 export async function createMealEntry(
   userId: string,
-  input: Omit<MealEntryInput, "sortOrder"> & { sortOrder?: number },
-  ..._ignored: unknown[]
+  input: Omit<MealEntryInput, "sortOrder"> & { sortOrder?: number }
 ) {
   return backendRpc<MealEntryRecord>("createMealEntry", { userId, input });
 }
 
-export async function updateMealEntry(
-  userId: string,
-  entryId: string,
-  input: MealEntryInput,
-  ..._ignored: unknown[]
-) {
+export async function updateMealEntry(userId: string, entryId: string, input: MealEntryInput) {
   return backendRpc<MealEntryRecord>("updateMealEntry", { userId, entryId, input });
 }
 
-export async function deleteMealEntry(userId: string, entryId: string, ..._ignored: unknown[]) {
+export async function deleteMealEntry(userId: string, entryId: string) {
   return backendRpc<boolean>("deleteMealEntry", { userId, entryId });
 }
 
 export async function markMealEntryStatus(
   userId: string,
   entryId: string,
-  status: MealEntryStatus,
-  ..._ignored: unknown[]
+  status: MealEntryStatus
 ) {
   return backendRpc<MealEntryRecord>("markMealEntryStatus", { userId, entryId, status });
 }
 
-export async function getUserGoals(userId: string, ..._ignored: unknown[]): Promise<MacroGoals> {
+export async function getUserGoals(userId: string): Promise<MacroGoals> {
   return backendRpc("getUserGoals", { userId });
 }
 
-export async function saveUserGoals(userId: string, goals: MacroGoals, ..._ignored: unknown[]) {
+export async function saveUserGoals(userId: string, goals: MacroGoals) {
   return backendRpc<void>("saveUserGoals", { userId, goals });
 }
 
 export async function completeOnboardingSetup(
   userId: string,
-  input: CompleteOnboardingInput & Record<string, unknown>,
-  ..._ignored: unknown[]
+  input: CompleteOnboardingInput & Record<string, unknown>
 ) {
   return backendRpc<AppUser>("completeOnboardingSetup", { userId, input });
 }
 
-export async function completeUserOnboarding(
-  userId: string,
-  input: CompleteOnboardingInput,
-  ..._ignored: unknown[]
-) {
+export async function completeUserOnboarding(userId: string, input: CompleteOnboardingInput) {
   return backendRpc<AppUser>("completeUserOnboarding", { userId, input });
 }
 
-export async function ensureDefaultMealGroups(userId: string, ..._ignored: unknown[]) {
+export async function ensureDefaultMealGroups(userId: string) {
   return backendRpc<void>("ensureDefaultMealGroups", { userId });
 }
 
-export async function setUserOnboardingForTesting(
-  userId: string,
-  onboarded: boolean,
-  ..._ignored: unknown[]
-) {
+export async function setUserOnboardingForTesting(userId: string, onboarded: boolean) {
   return backendRpc<AppUser>("setUserOnboardingForTesting", { userId, onboarded });
 }
 
-export async function searchMealEntries(userId: string, query: string, ..._ignored: unknown[]) {
+export async function searchMealEntries(userId: string, query: string) {
   return backendRpc<MealEntryRecord[]>("searchMealEntries", { userId, query });
 }
 
-export async function searchFoodProducts(userId: string, query: string, ..._ignored: unknown[]) {
+export async function searchFoodProducts(userId: string, query: string) {
   return backendRpc<FoodProduct[]>("searchFoodProducts", { userId, query });
 }
 
-export async function createPersonalFoodProduct(
-  userId: string,
-  input: FoodProductInput,
-  ..._ignored: unknown[]
-) {
+export async function createPersonalFoodProduct(userId: string, input: FoodProductInput) {
   return backendRpc<FoodProduct>("createPersonalFoodProduct", { userId, input });
 }
 
@@ -273,15 +225,14 @@ export function resolveProductNutritionForQuantity(
   };
 }
 
-export async function getPeriodAverages(userId: string, selectedDate: string, ..._ignored: unknown[]) {
+export async function getPeriodAverages(userId: string, selectedDate: string) {
   return backendRpc<PeriodAverage[]>("getPeriodAverages", { userId, selectedDate });
 }
 
 export async function getRecentDailyOverviews(
   userId: string,
   dateOrDays: string | number = 7,
-  daysOrDb?: number | unknown,
-  ..._ignored: unknown[]
+  daysOrDb?: number | unknown
 ): Promise<DailyOverview[]> {
   const selectedDate = typeof dateOrDays === "string" ? dateOrDays : undefined;
   const days =
@@ -293,28 +244,23 @@ export async function getRecentDailyOverviews(
   return backendRpc("getRecentDailyOverviews", { userId, selectedDate, days });
 }
 
-export async function getTemplates(userId: string, ..._ignored: unknown[]) {
+export async function getTemplates(userId: string) {
   return backendRpc<MealTemplate[]>("getTemplates", { userId });
 }
 
-export async function getTemplateById(userId: string, templateId: string, ..._ignored: unknown[]) {
+export async function getTemplateById(userId: string, templateId: string) {
   return backendRpc<MealTemplate | null>("getTemplateById", { userId, templateId });
 }
 
-export async function createTemplate(userId: string, input: MealTemplateInput, ..._ignored: unknown[]) {
+export async function createTemplate(userId: string, input: MealTemplateInput) {
   return backendRpc<MealTemplate>("createTemplate", { userId, input });
 }
 
-export async function updateTemplate(
-  userId: string,
-  templateId: string,
-  input: MealTemplateInput,
-  ..._ignored: unknown[]
-) {
+export async function updateTemplate(userId: string, templateId: string, input: MealTemplateInput) {
   return backendRpc<MealTemplate>("updateTemplate", { userId, templateId, input });
 }
 
-export async function deleteTemplate(userId: string, templateId: string, ..._ignored: unknown[]) {
+export async function deleteTemplate(userId: string, templateId: string) {
   return backendRpc<boolean>("deleteTemplate", { userId, templateId });
 }
 
@@ -332,50 +278,44 @@ export async function applyTemplateToDate(
 
 export async function createTemplateFromDate(
   userId: string,
-  input: { date: string; type: "meal" | "day"; label: string },
-  ..._ignored: unknown[]
+  input: { date: string; type: "meal" | "day"; label: string }
 ) {
   return backendRpc<MealTemplate>("createTemplateFromDate", { userId, input });
 }
 
-export async function getStatsPageData(userId: string, today: string, ..._ignored: unknown[]) {
+export async function getStatsPageData(userId: string, today: string) {
   return backendRpc<StatsPageData>("getStatsPageData", { userId, today });
 }
 
-export async function createWeightEntry(userId: string, input: WeightEntryInput, ..._ignored: unknown[]) {
+export async function createWeightEntry(userId: string, input: WeightEntryInput) {
   return backendRpc<WeightEntryRecord>("createWeightEntry", { userId, input });
 }
 
-export async function updateWeightEntry(
-  userId: string,
-  entryId: string,
-  input: WeightEntryInput,
-  ..._ignored: unknown[]
-) {
+export async function updateWeightEntry(userId: string, entryId: string, input: WeightEntryInput) {
   return backendRpc<WeightEntryRecord>("updateWeightEntry", { userId, entryId, input });
 }
 
-export async function deleteWeightEntry(userId: string, entryId: string, ..._ignored: unknown[]) {
+export async function deleteWeightEntry(userId: string, entryId: string) {
   return backendRpc<boolean>("deleteWeightEntry", { userId, entryId });
 }
 
-export async function saveWeightGoal(userId: string, goalWeightKg: number | null, ..._ignored: unknown[]) {
+export async function saveWeightGoal(userId: string, goalWeightKg: number | null) {
   return backendRpc<void>("saveWeightGoal", { userId, goalWeightKg });
 }
 
-export async function getWeightPageData(userId: string, selectedDate: string, ..._ignored: unknown[]) {
+export async function getWeightPageData(userId: string, selectedDate: string) {
   return backendRpc<WeightPageData>("getWeightPageData", { userId, selectedDate });
 }
 
-export async function getRecipes(userId: string, ..._ignored: unknown[]) {
+export async function getRecipes(userId: string) {
   return backendRpc<RecipeRecord[]>("getRecipes", { userId });
 }
 
-export async function getRecipeCount(userId: string, ..._ignored: unknown[]) {
+export async function getRecipeCount(userId: string) {
   return backendRpc<number>("getRecipeCount", { userId });
 }
 
-export async function getRecipeById(userId: string, recipeId: string, ..._ignored: unknown[]) {
+export async function getRecipeById(userId: string, recipeId: string) {
   return backendRpc<RecipeRecord | null>("getRecipeById", { userId, recipeId });
 }
 
@@ -396,15 +336,15 @@ export async function updateRecipe(userId: string, recipeId: string, input: Reci
   });
 }
 
-export async function deleteRecipe(userId: string, recipeId: string, ..._ignored: unknown[]) {
+export async function deleteRecipe(userId: string, recipeId: string) {
   return backendRpc<boolean>("deleteRecipe", { userId, recipeId });
 }
 
-export async function getLeaderboardStats(userId: string, referenceDate: string, ..._ignored: unknown[]) {
+export async function getLeaderboardStats(userId: string, referenceDate: string) {
   return backendRpc<LeaderboardStats>("getLeaderboardStats", { userId, referenceDate });
 }
 
-export async function lookupBarcodeFoodProduct(barcode: string, ..._ignored: unknown[]) {
+export async function lookupBarcodeFoodProduct(barcode: string) {
   return backendRpc<FoodProduct | null>("lookupBarcodeFoodProduct", { barcode });
 }
 
@@ -420,72 +360,50 @@ export async function saveBarcodeFoodProduct(
   });
 }
 
-export async function getRecentQuickAddCandidates(userId: string, limit = 30, ..._ignored: unknown[]) {
+export async function getRecentQuickAddCandidates(userId: string, limit = 30) {
   return backendRpc<QuickAddCandidate[]>("getRecentQuickAddCandidates", { userId, limit });
 }
 
-export async function getDashboardQuickAddCandidates(
-  userId: string,
-  limitPerSource = 30,
-  ..._ignored: unknown[]
-) {
+export async function getDashboardQuickAddCandidates(userId: string, limitPerSource = 30) {
   return backendRpc<QuickAddCandidate[]>("getDashboardQuickAddCandidates", {
     userId,
     limitPerSource,
   });
 }
 
-// Admin reads take the acting user so the backend can enforce the role in the
-// data layer. Passing it is not optional: the Next.js layout guard alone does
-// not survive client-side navigation.
-export async function getAdminDashboardData(actorUserId: string, ..._ignored: unknown[]) {
+// Admin reads take the acting user so the backend enforces the role server-side.
+export async function getAdminDashboardData(actorUserId: string) {
   return backendRpc<AdminDashboardData>("getAdminDashboardData", { actorUserId });
 }
 
-export async function getAdminUserHealthSummary(actorUserId: string, ..._ignored: unknown[]) {
+export async function getAdminUserHealthSummary(actorUserId: string) {
   return backendRpc<AdminUserHealthSummary>("getAdminUserHealthSummary", { actorUserId });
 }
 
-export async function listAdminUsers(actorUserId: string, input = {}, ..._ignored: unknown[]) {
+export async function listAdminUsers(actorUserId: string, input = {}) {
   return backendRpc<AdminUserListPage>("listAdminUsers", { actorUserId, input });
 }
 
-export async function getAdminUserDetail(
-  actorUserId: string,
-  userId: string,
-  ..._ignored: unknown[]
-) {
+export async function getAdminUserDetail(actorUserId: string, userId: string) {
   return backendRpc<AdminUserDetail | null>("getAdminUserDetail", { actorUserId, userId });
 }
 
-export async function setUserRole(actorUserId: string, targetUserId: string, nextRole: AdminRole, ..._ignored: unknown[]) {
+export async function setUserRole(actorUserId: string, targetUserId: string, nextRole: AdminRole) {
   return backendRpc<AppUser>("setUserRole", { actorUserId, targetUserId, nextRole });
 }
 
-export async function listAdminBarcodeProducts(
-  actorUserId: string,
-  input = {},
-  ..._ignored: unknown[]
-) {
+export async function listAdminBarcodeProducts(actorUserId: string, input = {}) {
   return backendRpc<AdminBarcodeListPage>("listAdminBarcodeProducts", { actorUserId, input });
 }
 
-export async function listAdminBarcodeReviewQueue(
-  actorUserId: string,
-  input = {},
-  ..._ignored: unknown[]
-) {
+export async function listAdminBarcodeReviewQueue(actorUserId: string, input = {}) {
   return backendRpc<AdminBarcodeReviewQueuePage>("listAdminBarcodeReviewQueue", {
     actorUserId,
     input,
   });
 }
 
-export async function getAdminBarcodeProductById(
-  actorUserId: string,
-  barcodeProductId: string,
-  ..._ignored: unknown[]
-) {
+export async function getAdminBarcodeProductById(actorUserId: string, barcodeProductId: string) {
   return backendRpc<FoodProduct | null>("getAdminBarcodeProductById", {
     actorUserId,
     barcodeProductId,
@@ -494,8 +412,7 @@ export async function getAdminBarcodeProductById(
 
 export async function createAdminBarcodeProduct(
   actorUserId: string,
-  input: BarcodeFoodProductInput,
-  ..._ignored: unknown[]
+  input: BarcodeFoodProductInput
 ) {
   return backendRpc<FoodProduct>("createAdminBarcodeProduct", { actorUserId, input });
 }
@@ -503,8 +420,7 @@ export async function createAdminBarcodeProduct(
 export async function updateAdminBarcodeProduct(
   actorUserId: string,
   barcodeProductId: string,
-  input: BarcodeFoodProductInput,
-  ..._ignored: unknown[]
+  input: BarcodeFoodProductInput
 ) {
   return backendRpc<FoodProduct>("updateAdminBarcodeProduct", {
     actorUserId,
@@ -513,65 +429,40 @@ export async function updateAdminBarcodeProduct(
   });
 }
 
-export async function softDeleteAdminBarcodeProduct(
-  actorUserId: string,
-  barcodeProductId: string,
-  ..._ignored: unknown[]
-) {
+export async function softDeleteAdminBarcodeProduct(actorUserId: string, barcodeProductId: string) {
   return backendRpc<FoodProduct>("softDeleteAdminBarcodeProduct", {
     actorUserId,
     barcodeProductId,
   });
 }
 
-export async function restoreAdminBarcodeProduct(
-  actorUserId: string,
-  barcodeProductId: string,
-  ..._ignored: unknown[]
-) {
+export async function restoreAdminBarcodeProduct(actorUserId: string, barcodeProductId: string) {
   return backendRpc<FoodProduct>("restoreAdminBarcodeProduct", {
     actorUserId,
     barcodeProductId,
   });
 }
 
-export async function listAdminAuditEvents(
-  actorUserId: string,
-  input = {},
-  ..._ignored: unknown[]
-) {
+export async function listAdminAuditEvents(actorUserId: string, input = {}) {
   return backendRpc<AdminAuditListPage>("listAdminAuditEvents", { actorUserId, input });
 }
 
-export async function getAdminAuditEventById(
-  actorUserId: string,
-  eventId: string,
-  ..._ignored: unknown[]
-) {
+export async function getAdminAuditEventById(actorUserId: string, eventId: string) {
   return backendRpc<AdminAuditEventDetail | null>("getAdminAuditEventById", {
     actorUserId,
     eventId,
   });
 }
 
-export async function createGymSlot(
-  userId: string,
-  input: GymSlotInput,
-  ..._ignored: unknown[]
-) {
+export async function createGymSlot(userId: string, input: GymSlotInput) {
   return backendRpc<GymSlot>("createGymSlot", { userId, input });
 }
 
-export async function updateGymSlot(
-  userId: string,
-  slotId: string,
-  input: GymSlotInput,
-  ..._ignored: unknown[]
-) {
+export async function updateGymSlot(userId: string, slotId: string, input: GymSlotInput) {
   return backendRpc<GymSlot>("updateGymSlot", { userId, slotId, input });
 }
 
-export async function deleteGymSlot(userId: string, slotId: string, ..._ignored: unknown[]) {
+export async function deleteGymSlot(userId: string, slotId: string) {
   return backendRpc<{ deleted: boolean }>("deleteGymSlot", { userId, slotId });
 }
 
@@ -579,8 +470,7 @@ export async function setGymSlotStatus(
   userId: string,
   slotId: string,
   date: string,
-  status: GymSlotStatus,
-  ..._ignored: unknown[]
+  status: GymSlotStatus
 ) {
   return backendRpc<{ slotId: string; date: string; status: GymSlotStatus }>(
     "setGymSlotStatus",
@@ -589,23 +479,14 @@ export async function setGymSlotStatus(
 }
 
 /** `identifier` is an email address or a friend code; the backend classifies. */
-export async function inviteGymBuddy(
-  userId: string,
-  identifier: string,
-  ..._ignored: unknown[]
-) {
+export async function inviteGymBuddy(userId: string, identifier: string) {
   return backendRpc<{ id: string; result: "invited" | "accepted" }>("inviteGymBuddy", {
     userId,
     identifier,
   });
 }
 
-export async function respondGymBuddyInvite(
-  userId: string,
-  buddyId: string,
-  accept: boolean,
-  ..._ignored: unknown[]
-) {
+export async function respondGymBuddyInvite(userId: string, buddyId: string, accept: boolean) {
   return backendRpc<{ status: "accepted" | "declined" }>("respondGymBuddyInvite", {
     userId,
     buddyId,
@@ -613,14 +494,14 @@ export async function respondGymBuddyInvite(
   });
 }
 
-export async function removeGymBuddy(userId: string, buddyId: string, ..._ignored: unknown[]) {
+export async function removeGymBuddy(userId: string, buddyId: string) {
   return backendRpc<{ removed: boolean }>("removeGymBuddy", { userId, buddyId });
 }
 
-export async function getGymPageData(userId: string, date: string, ..._ignored: unknown[]) {
+export async function getGymPageData(userId: string, date: string) {
   return backendRpc<GymPageData>("getGymPageData", { userId, date });
 }
 
-export async function getGymHomeSummary(userId: string, date: string, ..._ignored: unknown[]) {
+export async function getGymHomeSummary(userId: string, date: string) {
   return backendRpc<GymHomeSummary>("getGymHomeSummary", { userId, date });
 }

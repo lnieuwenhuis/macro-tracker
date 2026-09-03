@@ -21,8 +21,7 @@ vi.mock("@/lib/session", async (importOriginal) => {
 
 vi.mock("next/headers", () => ({ headers: mocked.headers }));
 
-// `next/font/google` is a build-time transform; the runtime module cannot run
-// outside the Next compiler.
+// next/font/google is build-time only; the runtime module cannot run outside the Next compiler.
 vi.mock("next/font/google", () => ({
   Fraunces: () => ({ variable: "--font-fraunces" }),
   Space_Grotesk: () => ({ variable: "--font-space-grotesk" }),
@@ -103,8 +102,7 @@ function findById(node: ReactNode, id: string): ReactElement | null {
 
 describe("content security policy", () => {
   it("lets the browser reach the identity provider", () => {
-    // `@shoojs/auth` exchanges the code for an id_token from the browser, so
-    // omitting this origin breaks sign-in with an opaque "Failed to fetch".
+    // @shoojs/auth exchanges code for id_token in the browser, so omitting this origin breaks sign-in opaquely.
     const policy = buildContentSecurityPolicy(NONCE, "https://shoo.dev", false);
 
     expect(directive(policy, "connect-src")).toBe(
@@ -131,8 +129,7 @@ describe("content security policy", () => {
   });
 
   it("omits form-action so POST-then-redirect forms still work", () => {
-    // Chromium enforces form-action across the redirect chain, which blocks
-    // sign-out and every admin server action that redirects.
+    // Chromium enforces form-action across redirects, which would block sign-out and redirecting admin actions.
     expect(
       directive(buildContentSecurityPolicy(NONCE), "form-action"),
     ).toBeUndefined();
@@ -167,8 +164,7 @@ describe("content security policy", () => {
   });
 
   it("never emits unsafe-inline in script-src, even in development", () => {
-    // A nonce makes browsers ignore 'unsafe-inline' anyway, so keeping it for
-    // dev convenience would only mislead the next reader.
+    // A nonce makes browsers ignore unsafe-inline anyway, so keeping it would only mislead.
     expect(
       directive(
         buildContentSecurityPolicy(NONCE, "https://shoo.dev", true),
@@ -178,8 +174,7 @@ describe("content security policy", () => {
   });
 
   it("keeps unsafe-inline for styles and adds no style nonce", () => {
-    // Adding a nonce here would make the browser ignore 'unsafe-inline' and
-    // break every inline style Next and next/font emit.
+    // A nonce here would make browsers ignore unsafe-inline and break Next's inline styles.
     const style = directive(buildContentSecurityPolicy(NONCE), "style-src");
 
     expect(style).toBe("style-src 'self' 'unsafe-inline'");
@@ -270,8 +265,7 @@ describe("root layout nonce threading", () => {
     const response = await proxy(proxyRequest("/login"));
     const nonce = nonceFromPolicy(response.headers.get(CSP_HEADER));
 
-    // The renderer reads the header the proxy forwarded, so the rendered
-    // script tags must carry exactly the value the browser was told to trust.
+    // The renderer reads the header the proxy forwarded, so the script tags must carry that exact value.
     mocked.headers.mockResolvedValue(
       new Headers({ [NONCE_HEADER]: forwardedNonce(response) ?? "" }),
     );
@@ -285,8 +279,7 @@ describe("root layout nonce threading", () => {
   });
 
   it("renders no nonce when the header is absent rather than an empty one", async () => {
-    // An empty `nonce=""` attribute matches nothing and would be a silent
-    // "scripts are blocked" state; `undefined` keeps the attribute off.
+    // An empty nonce matches nothing and silently blocks scripts; undefined keeps the attribute off.
     mocked.headers.mockResolvedValue(new Headers());
 
     const tree = await RootLayout({ children: null });

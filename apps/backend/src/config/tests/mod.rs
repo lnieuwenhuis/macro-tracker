@@ -89,10 +89,7 @@ fn backend_test_routes_are_accepted_for_loopback_app_urls() {
     }
 }
 
-/// SEC-08: `read_secret` deliberately keeps `SESSION_SECRET` untrimmed
-/// (the signing bytes must match the web side exactly), but it used to
-/// *measure* the untrimmed value too — so 40 spaces around `short` cleared
-/// the 32-character floor while carrying five characters of entropy.
+/// SEC-08: the minimum-length check runs on the trimmed secret, not the untrimmed one.
 #[test]
 fn production_config_measures_secret_length_on_the_trimmed_value() {
     let padded_short = format!("   {}short   ", " ".repeat(40));
@@ -145,6 +142,26 @@ fn production_config_rejects_committed_development_secrets() {
     }
 }
 
+/// The CI secret literals (`.github/workflows/ci.yml` lines ~30/32) must stay accepted in every deployment shape.
+#[test]
+fn production_config_accepts_ci_secret_literals() {
+    for secret in [
+        "macro-tracker-ci-session-secret-32-chars",
+        "macro-tracker-ci-backend-secret-32-chars",
+    ] {
+        for name in ["SESSION_SECRET", "BACKEND_INTERNAL_SECRET"] {
+            let mut values = production_values();
+            values.retain(|(key, _)| *key != name);
+            values.push((name, secret));
+
+            assert!(
+                config_from(&values).is_ok(),
+                "{name}={secret:?} must be accepted for CI"
+            );
+        }
+    }
+}
+
 #[test]
 fn postgres_pool_defaults_above_the_unauthenticated_request_burst() {
     let config = config_from(&production_values()).expect("config should build");
@@ -152,8 +169,7 @@ fn postgres_pool_defaults_above_the_unauthenticated_request_burst() {
     assert_eq!(config.postgres_pool_max, 10);
 }
 
-/// `production_values` with the loopback `APP_URL` a local or CI backend
-/// actually runs on.
+/// `production_values` with the loopback `APP_URL` a local or CI backend actually runs on.
 fn local_values() -> Vec<(&'static str, &'static str)> {
     let mut values = production_values();
     values.retain(|(key, _)| *key != "APP_URL");
@@ -219,27 +235,20 @@ fn ai_gateway_is_optional_and_absent_by_default() {
 }
 
 #[test]
-fn production_config_requires_app_url() {
-    let values = production_values()
-        .into_iter()
-        .filter(|(key, _)| *key != "APP_URL")
-        .collect::<Vec<_>>();
+fn production_config_requires_core_keys() {
+    for key in ["APP_URL", "SESSION_SECRET", "BACKEND_INTERNAL_SECRET"] {
+        let values = production_values()
+            .into_iter()
+            .filter(|(candidate, _)| *candidate != key)
+            .collect::<Vec<_>>();
 
-    let error = config_from(&values).expect_err("APP_URL should be required");
+        let error = config_from(&values).expect_err("{key} should be required");
 
-    assert!(error.to_string().contains("APP_URL is required"));
-}
-
-#[test]
-fn production_config_requires_session_secret() {
-    let values = production_values()
-        .into_iter()
-        .filter(|(key, _)| *key != "SESSION_SECRET")
-        .collect::<Vec<_>>();
-
-    let error = config_from(&values).expect_err("SESSION_SECRET should be required");
-
-    assert!(error.to_string().contains("SESSION_SECRET is required"));
+        assert!(
+            error.to_string().contains(&format!("{key} is required")),
+            "unexpected error for {key}: {error:#}"
+        );
+    }
 }
 
 #[test]
@@ -276,22 +285,6 @@ fn production_config_preserves_session_secret_whitespace() {
 }
 
 #[test]
-fn production_config_requires_backend_internal_secret() {
-    let values = production_values()
-        .into_iter()
-        .filter(|(key, _)| *key != "BACKEND_INTERNAL_SECRET")
-        .collect::<Vec<_>>();
-
-    let error = config_from(&values).expect_err("BACKEND_INTERNAL_SECRET should be required");
-
-    assert!(
-        error
-            .to_string()
-            .contains("BACKEND_INTERNAL_SECRET is required")
-    );
-}
-
-#[test]
 fn local_postgres_database_urls_disable_tls() {
     for database_url in [
         "postgres://postgres:***@localhost:5432/macro_tracker",
@@ -317,63 +310,29 @@ fn local_postgres_database_urls_disable_tls() {
 }
 
 #[test]
-fn remote_postgres_database_url_without_sslmode_uses_verifying_tls() {
-    let mut values = production_values();
-    values.retain(|(key, _)| *key != "DATABASE_URL");
-    values.push((
-        "DATABASE_URL",
-        "postgres://postgres:***@db.example.com:5432/macro_tracker",
-    ));
+fn remote_postgres_database_url_sslmode_selects_tls_mode() {
+    for (suffix, expected) in [
+        ("", "VerifyFull"),
+        ("?sslmode=verify-full", "VerifyFull"),
+        ("?sslmode=require", "Require"),
+    ] {
+        let mut values = production_values();
+        values.retain(|(key, _)| *key != "DATABASE_URL");
+        let database_url =
+            format!("postgres://postgres:***@db.example.com:5432/macro_tracker{suffix}");
+        values.push(("DATABASE_URL", &database_url));
 
-    let config = config_from(&values).expect("remote postgres URL should be accepted");
+        let config = config_from(&values).expect("remote postgres URL should be accepted");
 
-    assert_eq!(
-        format!(
-            "{:?}",
-            postgres_ssl_mode_for_url(&url::Url::parse(&config.database_url).unwrap()).unwrap()
-        ),
-        "VerifyFull"
-    );
-}
-
-#[test]
-fn remote_postgres_database_url_accepts_verify_full_sslmode() {
-    let mut values = production_values();
-    values.retain(|(key, _)| *key != "DATABASE_URL");
-    values.push((
-        "DATABASE_URL",
-        "postgres://postgres:***@db.example.com:5432/macro_tracker?sslmode=verify-full",
-    ));
-
-    let config = config_from(&values).expect("verify-full should be accepted");
-
-    assert_eq!(
-        format!(
-            "{:?}",
-            postgres_ssl_mode_for_url(&url::Url::parse(&config.database_url).unwrap()).unwrap()
-        ),
-        "VerifyFull"
-    );
-}
-
-#[test]
-fn remote_postgres_database_url_accepts_require_sslmode() {
-    let mut values = production_values();
-    values.retain(|(key, _)| *key != "DATABASE_URL");
-    values.push((
-        "DATABASE_URL",
-        "postgres://postgres:***@db.example.com:5432/macro_tracker?sslmode=require",
-    ));
-
-    let config = config_from(&values).expect("documented require mode should be accepted");
-
-    assert_eq!(
-        format!(
-            "{:?}",
-            postgres_ssl_mode_for_url(&url::Url::parse(&config.database_url).unwrap()).unwrap()
-        ),
-        "Require"
-    );
+        assert_eq!(
+            format!(
+                "{:?}",
+                postgres_ssl_mode_for_url(&url::Url::parse(&config.database_url).unwrap()).unwrap()
+            ),
+            expected,
+            "unexpected TLS mode for suffix {suffix:?}"
+        );
+    }
 }
 
 #[test]

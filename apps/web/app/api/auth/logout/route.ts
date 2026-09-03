@@ -20,20 +20,8 @@ function createLogoutResponse(request: Request) {
   return response;
 }
 
-/**
- * `GET` exists because the session-expiry path is a server-side
- * `redirect("/api/auth/logout?expired=1")` from a Server Component, which the
- * browser follows as a navigation — a Server Component cannot clear a cookie
- * during render, so the route has to.
- *
- * That also makes it forceable from any site by top-level navigation, which is
- * why the cookie is only cleared for a same-origin request. A cross-site GET
- * still lands on `/login` so the honest expiry flow never dead-ends; it just
- * leaves the session intact.
- *
- * `proxy.ts` deliberately does not bounce `/login?error=...` back to `/`, so
- * arriving here with a still-verifiable token cannot loop.
- */
+// GET exists so a Server Component's redirect(...expired=1) can clear the cookie; gated same-origin, since forceable.
+// proxy.ts must not bounce /login?error=... back to /, or a still-verifiable arrival loops.
 export async function GET(request: Request) {
   if (!isSameOriginRequest(request)) {
     return NextResponse.redirect(new URL(logoutDestination(request), request.url));
@@ -42,12 +30,7 @@ export async function GET(request: Request) {
   return createLogoutResponse(request);
 }
 
-/**
- * The in-app sign-out buttons in `profile-sheet.tsx` and `admin-shell.tsx`.
- * A same-origin form POST carries both `Sec-Fetch-Site: same-origin` and
- * `Origin`, so the gate is transparent to them; a cross-site form gets the same
- * side-effect-free redirect as a cross-site GET.
- */
+// Used by the in-app sign-out buttons; a cross-site form gets the same no-op redirect as a cross-site GET.
 export async function POST(request: Request) {
   if (!isSameOriginRequest(request)) {
     return NextResponse.redirect(new URL(logoutDestination(request), request.url));

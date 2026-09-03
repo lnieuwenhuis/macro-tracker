@@ -8,12 +8,7 @@ const mocked = vi.hoisted(() => ({
   loadOnboardedPageContext: vi.fn(),
 }));
 
-vi.mock("@macro-tracker/db", () => ({
-  getDailySummary: mocked.getDailySummary,
-  getDashboardQuickAddCandidates: mocked.getDashboardQuickAddCandidates,
-  getGymHomeSummary: mocked.getGymHomeSummary,
-  getUserGoals: mocked.getUserGoals,
-}));
+vi.mock("@macro-tracker/db", async () => (await import("./helpers/mock-db")).mockDbModule(mocked));
 
 vi.mock("@/components/dashboard-shell", () => ({
   DashboardShell: () => null,

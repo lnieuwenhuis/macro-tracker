@@ -1,10 +1,9 @@
 import {
   createWeightEntry,
   getWeightPageData,
-  upsertUserFromShooProfile,
   type DatabaseRuntime,
 } from "../../src";
-import { createTestDatabase } from "../../src/testing";
+import { setupSingleUserContext } from "../helpers";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 describe("weight queries", () => {
@@ -12,16 +11,7 @@ describe("weight queries", () => {
   let userId: string;
 
   beforeEach(async () => {
-    runtime = await createTestDatabase();
-    const user = await upsertUserFromShooProfile(
-      {
-        pairwiseSub: "ps_test_user",
-        email: "coach@example.com",
-        displayName: "Coach",
-      },
-      runtime.db,
-    );
-    userId = user.id;
+    ({ runtime, userId } = await setupSingleUserContext());
   });
 
   afterEach(async () => {
@@ -44,11 +34,10 @@ describe("weight queries", () => {
           bodyFatPct: null,
           notes: null,
         },
-        runtime.db,
       );
     }
 
-    const weightData = await getWeightPageData(userId, "2026-06-30", runtime.db);
+    const weightData = await getWeightPageData(userId, "2026-06-30");
 
     expect(weightData.entries.map((entry) => entry.date)).toEqual([
       "2026-05-29",

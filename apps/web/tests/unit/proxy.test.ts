@@ -149,8 +149,7 @@ describe("proxy session refresh", () => {
   });
 
   describe("public path allowlist", () => {
-    // The extension test used to be `pathname.endsWith(".png")`, which matched
-    // anywhere in the path and let any route skip the session gate.
+    // Extension match must anchor to the basename, not `pathname.endsWith`.
     it.each([
       "/api/barcode/1234.png",
       "/admin/barcodes/abc.png",
@@ -188,8 +187,7 @@ describe("proxy session refresh", () => {
   });
 
   it("lets /login render for a session that was just bounced with an error", async () => {
-    // Otherwise a token that verifies but whose account no longer resolves
-    // ping-pongs between `/login` and the page that rejected it.
+    // Otherwise a verified token for a no-longer-resolving account ping-pongs with the page that rejected it.
     const response = await proxy(
       proxyRequest("trusted.example", {
         path: "/login?error=session_expired",

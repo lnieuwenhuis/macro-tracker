@@ -29,8 +29,7 @@ function getOptionalText(formData: FormData, key: string) {
   return typeof value === "string" ? value.trim() : "";
 }
 
-function getNumber(formData: FormData, key: string) {
-  const raw = getRequiredText(formData, key);
+function assertNonNegativeNumber(raw: string, key: string) {
   const value = Number(raw);
 
   if (!Number.isFinite(value) || value < 0) {
@@ -40,6 +39,11 @@ function getNumber(formData: FormData, key: string) {
   return value;
 }
 
+function getNumber(formData: FormData, key: string) {
+  const raw = getRequiredText(formData, key);
+  return assertNonNegativeNumber(raw, key);
+}
+
 function getNullableNumber(formData: FormData, key: string) {
   const raw = getOptionalText(formData, key);
 
@@ -47,12 +51,7 @@ function getNullableNumber(formData: FormData, key: string) {
     return null;
   }
 
-  const value = Number(raw);
-  if (!Number.isFinite(value) || value < 0) {
-    throw new ActionError(`${key} must be a non-negative number.`);
-  }
-
-  return value;
+  return assertNonNegativeNumber(raw, key);
 }
 
 function getBarcodeProductInput(formData: FormData) {
@@ -84,11 +83,7 @@ async function redirectAfterAdminAction(input: {
   redirect(destination);
 }
 
-/**
- * Not an open redirect today — every destination starts with a literal
- * `/admin/` — but the ids come straight off `formData`, so they are encoded
- * rather than trusted to be UUID-shaped. A real id is unchanged by this.
- */
+// Ids come straight off formData, so encode rather than trust them to be UUID-shaped; a real id is unchanged by this.
 function encodePathSegment(value: string) {
   return encodeURIComponent(value);
 }

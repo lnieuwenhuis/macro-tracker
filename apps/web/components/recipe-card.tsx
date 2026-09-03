@@ -2,12 +2,13 @@
 
 import type { MealEntryStatus, RecipeRecord } from "@macro-tracker/db";
 import { useRouter } from "next/navigation";
-import { memo, useRef, useState, useTransition } from "react";
+import { memo, useRef, useState } from "react";
 
 import { deleteRecipeAction, logRecipePortionAction, saveRecipeAction } from "@/lib/actions";
 import { createClientMutationIdStore } from "@/lib/client-mutation-id";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
 import { getLocalDateString } from "@/lib/startup-date";
+import { useActionRunner } from "@/lib/use-action-runner";
 
 import { ConfirmDeleteButton } from "./confirm-delete-button";
 
@@ -22,15 +23,14 @@ export const RecipeCard = memo(function RecipeCard({
   selectedDate,
 }: RecipeCardProps) {
   const router = useRouter();
+  const { run, isPending, error, setError, clearError } = useActionRunner();
   const [isExpanded, setIsExpanded] = useState(false);
-  const [isPending, startTransition] = useTransition();
-  const [error, setError] = useState<string | null>(null);
   const [portionCount, setPortionCount] = useState("1");
   const [gramsConsumed, setGramsConsumed] = useState("");
   const mutationIds = useRef(createClientMutationIdStore());
 
   function handleLogPortion() {
-    setError(null);
+    clearError();
     const parsedPortionCount = Number(portionCount);
     const safePortionCount =
       Number.isFinite(parsedPortionCount) && parsedPortionCount > 0
@@ -47,72 +47,71 @@ export const RecipeCard = memo(function RecipeCard({
       return;
     }
 
-    // One key per (recipe, day, amount) intent, so a repeat tap while the first
-    // save is still in flight reuses the same id and the backend's unique index
-    // collapses the duplicate instead of writing a second row.
+    // One key per (recipe, day, amount) intent, so a repeat tap reuses the id and the backend's unique index collapses the duplicate.
     const mutationKey = `${recipe.id}:${selectedDate}:${safePortionCount}:${parsedGrams ?? ""}`;
 
-    startTransition(async () => {
-      const status: MealEntryStatus =
-        selectedDate > getLocalDateString() ? "planned" : "eaten";
-      const result = await logRecipePortionAction({
-        recipeId: recipe.id,
-        date: selectedDate,
-        status,
-        portionCount: safePortionCount,
-        gramsConsumed: parsedGrams,
-        clientMutationId: mutationIds.current.take(mutationKey),
-      });
-      if (!result.ok) {
-        setError(result.error ?? "Unable to log portion.");
-        return;
-      }
-      mutationIds.current.settle(mutationKey);
-      router.refresh();
-    });
+    run(
+      () => {
+        const status: MealEntryStatus =
+          selectedDate > getLocalDateString() ? "planned" : "eaten";
+        return logRecipePortionAction({
+          recipeId: recipe.id,
+          date: selectedDate,
+          status,
+          portionCount: safePortionCount,
+          gramsConsumed: parsedGrams,
+          clientMutationId: mutationIds.current.take(mutationKey),
+        });
+      },
+      {
+        fallbackError: "Unable to log portion.",
+        refresh: true,
+        onSuccess: () => mutationIds.current.settle(mutationKey),
+      },
+    );
   }
 
   function handleDuplicate() {
-    setError(null);
-    startTransition(async () => {
-      const result = await saveRecipeAction({
-        label: `${recipe.label} (copy)`,
-        portions: recipe.portions,
-        totalCookedWeightG: recipe.totalCookedWeightG,
-        ingredients: recipe.ingredients.map((ing) => ({
-          productId: ing.productId ?? null,
-          label: ing.label,
-          quantity: ing.quantity ?? 1,
-          unit: ing.unit ?? "serving",
-          servingMultiplier: ing.servingMultiplier ?? 1,
-          proteinG: ing.proteinG,
-          carbsG: ing.carbsG,
-          fatG: ing.fatG,
-          caloriesKcal: ing.caloriesKcal,
-        })),
-      });
-      if (!result.ok || !result.recipe) {
-        setError(result.error ?? "Unable to duplicate recipe.");
-        return;
-      }
-      // Send the user straight to the new copy's edit page so they can tweak
-      // the name / portions / ingredients immediately — much better UX than
-      // dropping them back into the list and making them hunt for it.
-      const href = `/recipes/${result.recipe.id}/edit?date=${selectedDate}`;
-      prepareNavigationMotion(href, "screen");
-      router.push(href);
-    });
+    const duplicateFailed = "Unable to duplicate recipe.";
+    run(
+      () =>
+        saveRecipeAction({
+          label: `${recipe.label} (copy)`,
+          portions: recipe.portions,
+          totalCookedWeightG: recipe.totalCookedWeightG,
+          ingredients: recipe.ingredients.map((ing) => ({
+            productId: ing.productId ?? null,
+            label: ing.label,
+            quantity: ing.quantity ?? 1,
+            unit: ing.unit ?? "serving",
+            servingMultiplier: ing.servingMultiplier ?? 1,
+            proteinG: ing.proteinG,
+            carbsG: ing.carbsG,
+            fatG: ing.fatG,
+            caloriesKcal: ing.caloriesKcal,
+          })),
+        }),
+      {
+        fallbackError: duplicateFailed,
+        onSuccess: (result) => {
+          if (!result.recipe) {
+            setError(duplicateFailed);
+            return;
+          }
+
+          // The copy opens in its editor so the name and ingredients can be tweaked immediately.
+          const href = `/recipes/${result.recipe.id}/edit?date=${selectedDate}`;
+          prepareNavigationMotion(href, "screen");
+          router.push(href);
+        },
+      },
+    );
   }
 
   function handleDelete() {
-    setError(null);
-    startTransition(async () => {
-      const result = await deleteRecipeAction({ id: recipe.id });
-      if (!result.ok) {
-        setError(result.error ?? "Unable to delete recipe.");
-        return;
-      }
-      router.refresh();
+    run(() => deleteRecipeAction({ id: recipe.id }), {
+      fallbackError: "Unable to delete recipe.",
+      refresh: true,
     });
   }
 
@@ -120,7 +119,6 @@ export const RecipeCard = memo(function RecipeCard({
 
   return (
     <article className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-card-subtle)] shadow-[0_4px_16px_rgba(74,45,28,0.05)]">
-      {/* Header row */}
       <div
         className="flex items-center gap-2 px-4 py-3 cursor-pointer"
         onClick={() => setIsExpanded(!isExpanded)}
@@ -157,7 +155,6 @@ export const RecipeCard = memo(function RecipeCard({
           {recipe.portions} portion{recipe.portions !== 1 ? "s" : ""}
         </span>
 
-        {/* Chevron */}
         <button
           type="button"
           onClick={(e) => {
@@ -186,10 +183,8 @@ export const RecipeCard = memo(function RecipeCard({
         </button>
       </div>
 
-      {/* Expanded body */}
       {isExpanded && (
         <div className="border-t border-[var(--color-border)] px-4 pb-4 pt-3">
-          {/* Total macros */}
           <div className="mb-3">
             <h4 className="mb-1 text-[11px] font-bold uppercase tracking-[0.14em] text-[var(--color-muted-strong)]">
               Total Recipe
@@ -210,7 +205,6 @@ export const RecipeCard = memo(function RecipeCard({
             </div>
           </div>
 
-          {/* Ingredients list */}
           <div className="mb-3">
             <h4 className="mb-1.5 text-[11px] font-bold uppercase tracking-[0.14em] text-[var(--color-muted-strong)]">
               Ingredients ({recipe.ingredients.length})
@@ -243,12 +237,10 @@ export const RecipeCard = memo(function RecipeCard({
             </div>
           </div>
 
-          {/* Error */}
           {error ? (
             <p className="mb-3 text-sm text-[var(--color-danger)]">{error}</p>
           ) : null}
 
-          {/* Log controls */}
           <div className="mb-3 grid grid-cols-2 gap-2">
             <label>
               <span className="mb-1 block text-[11px] font-bold uppercase tracking-[0.14em] text-[var(--color-muted-strong)]">
@@ -284,7 +276,6 @@ export const RecipeCard = memo(function RecipeCard({
             ) : null}
           </div>
 
-          {/* Action buttons */}
           <div className="flex gap-2">
             <button
               type="button"

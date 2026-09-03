@@ -112,8 +112,7 @@ fn insecure_internal_auth_forces_a_loopback_listener() {
     assert_eq!(listen_address(&config), IpAddr::V4(Ipv4Addr::LOCALHOST));
 }
 
-/// SEC-06: the normal, authenticated deployment must stay reachable from
-/// outside the container.
+/// SEC-06: the normal, authenticated deployment must stay reachable from outside the container.
 #[test]
 fn authenticated_backend_listens_on_all_interfaces() {
     assert_eq!(
@@ -121,9 +120,7 @@ fn authenticated_backend_listens_on_all_interfaces() {
         IpAddr::V4(Ipv4Addr::UNSPECIFIED)
     );
 
-    // The flag alone is not enough: `allows_insecure_internal_auth_for_app_url`
-    // is false for a public `APP_URL`, so internal auth is still enforced
-    // and restricting the listener would break the deployment for nothing.
+    // A public `APP_URL` still enforces internal auth, so the flag alone doesn't restrict the listener.
     let mut config = test_config();
     config.allow_insecure_internal_auth = true;
     config.app_url = "https://macro.example.com".to_string();
@@ -195,8 +192,7 @@ fn test_op_request(op: &str) -> Request<Body> {
         .expect("request should build")
 }
 
-/// SEC-11: `setUserOnboardingForTesting` was dispatched unconditionally from
-/// `db::rpc_json` while its sibling sat behind `enable_test_routes`.
+/// SEC-11: every test-only RPC op must sit behind `enable_test_routes`, not just some of them.
 #[tokio::test]
 async fn test_only_rpc_ops_are_refused_when_test_routes_are_disabled() {
     for op in ["setUserOnboardingForTesting", "ensureUserRoleForTesting"] {
@@ -212,10 +208,7 @@ async fn test_only_rpc_ops_are_refused_when_test_routes_are_disabled() {
     }
 }
 
-/// SEC-11: the gate must not break the op when it is legitimately enabled.
-/// A missing `onboarded` argument is rejected by `db::rpc_json` itself, so
-/// reaching a 400 proves dispatch got past the gate without needing a
-/// database.
+/// SEC-11: the gate must not break the op when legitimately enabled; a 400 here proves dispatch got past it.
 #[tokio::test]
 async fn test_only_onboarding_rpc_still_dispatches_when_test_routes_are_enabled() {
     let mut config = test_config();
@@ -233,19 +226,14 @@ fn bad_bearer_request(peer: SocketAddr) -> Request<Body> {
     Request::builder()
         .method("GET")
         .uri("/api/v1/me")
-        // Well-formed prefix, so `/api/v1` runs the `token_hash` lookup
-        // before it can tell the token is worthless. That database hit
-        // before any credential check is the whole point of SEC-09.
+        // SEC-09: well-formed prefix, so the `token_hash` lookup runs before the token is known worthless.
         .header("authorization", "Bearer mtk_v1_notarealtokenatall")
         .extension(axum::extract::ConnectInfo(peer))
         .body(Body::empty())
         .expect("request should build")
 }
 
-/// SEC-09: a burst of unauthenticated `/api/v1` requests must be refused at
-/// the edge instead of consuming every connection permit, and `/health` must
-/// keep answering while it happens - a 503 there trips the platform's
-/// restart policy and turns a load spike into a restart loop.
+/// SEC-09: an unauthenticated `/api/v1` burst must be throttled before it starves the pool, and `/health` must keep answering through it.
 #[tokio::test]
 async fn unauthenticated_api_burst_is_throttled_before_it_can_starve_the_pool() {
     let Ok(database_url) = env::var("TEST_DATABASE_URL").or_else(|_| env::var("DATABASE_URL"))
@@ -257,8 +245,7 @@ async fn unauthenticated_api_burst_is_throttled_before_it_can_starve_the_pool() 
     };
     let mut config = test_config();
     config.database_url = database_url.clone();
-    // Two permits, so "the limiter refused it" and "the pool absorbed it"
-    // are not the same outcome.
+    // Two permits, so "the limiter refused it" and "the pool absorbed it" are distinguishable.
     let db = PgPoolOptions::new()
         .max_connections(2)
         .acquire_timeout(std::time::Duration::from_secs(2))
@@ -268,8 +255,7 @@ async fn unauthenticated_api_burst_is_throttled_before_it_can_starve_the_pool() 
 
     const BURST: u32 = 5;
     const REQUESTS: usize = 40;
-    // A one-minute replenish period means nothing is refilled mid-test, so
-    // exactly `BURST` requests get through - no timing race.
+    // A one-minute replenish period means nothing refills mid-test, so exactly `BURST` requests get through.
     let router =
         build_router_with_rate_limit(test_state_with_db(config, db.clone()), 60_000, BURST);
     let peer = SocketAddr::from(([203, 0, 113, 7], 51_000));
@@ -293,13 +279,7 @@ async fn unauthenticated_api_burst_is_throttled_before_it_can_starve_the_pool() 
         BURST as usize,
         "only the burst allowance may reach the database: {statuses:?}"
     );
-    // The requests that do get through must reach the `api_tokens` lookup -
-    // otherwise the limiter would be bounding a 404 and proving nothing.
-    // `db::authenticate_api_token` short-circuits a token without the
-    // `mtk_v1_` prefix *before* the query, so anything but a routing error
-    // here means the query ran: 401 when the connection's default schema is
-    // populated, 500 when it is not (the integration suite builds its schema
-    // per test, so the default one is usually empty).
+    // Allowed requests must reach the `api_tokens` lookup, not just bound a 404: 401 or 500 both prove it ran.
     for status in statuses
         .iter()
         .filter(|status| **status != StatusCode::TOO_MANY_REQUESTS)
@@ -336,9 +316,7 @@ async fn unauthenticated_api_burst_is_throttled_before_it_can_starve_the_pool() 
 /// rather than the layer's plain-text default.
 #[tokio::test]
 async fn throttled_api_requests_use_the_documented_error_envelope() {
-    // The first request is only there to consume the single burst cell, and
-    // it reaches the database. A short acquire timeout keeps it from waiting
-    // out the whole `/api/v1` deadline against an unreachable pool.
+    // The first request only consumes the single burst cell; a short acquire timeout avoids the full deadline.
     let db = PgPoolOptions::new()
         .acquire_timeout(std::time::Duration::from_millis(100))
         .connect_lazy("postgres://postgres:***@127.0.0.1:1/macro_tracker")
@@ -368,9 +346,36 @@ async fn throttled_api_requests_use_the_documented_error_envelope() {
     assert_eq!(payload["error"]["code"], serde_json::json!("rate_limited"));
 }
 
-/// SEC-09: `/health` used to run `SELECT 1` per request, so a probe flood
-/// could take every permit. Closing the pool after a successful probe proves
-/// the next answer came from the cache and not from the database.
+/// API-06: a throttled response must carry CORS headers, or a browser client sees a CORS failure instead of the 429.
+#[tokio::test]
+async fn throttled_api_requests_carry_cors_headers() {
+    let db = PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_millis(100))
+        .connect_lazy("postgres://postgres:***@127.0.0.1:1/macro_tracker")
+        .expect("test pool should be created lazily");
+    let router = build_router_with_rate_limit(test_state_with_db(test_config(), db), 60_000, 1);
+    let peer = SocketAddr::from(([203, 0, 113, 9], 51_000));
+
+    let _first = router
+        .clone()
+        .oneshot(bad_bearer_request(peer))
+        .await
+        .expect("request should complete");
+    let throttled = router
+        .oneshot(bad_bearer_request(peer))
+        .await
+        .expect("request should complete");
+
+    assert_eq!(throttled.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(
+        throttled
+            .headers()
+            .contains_key(axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN),
+        "throttled response must carry CORS headers"
+    );
+}
+
+/// SEC-09: `/health` must answer from cache, not `SELECT 1` per request; closing the pool proves it.
 #[tokio::test]
 async fn health_serves_a_cached_probe_without_touching_the_database() {
     let Ok(database_url) = env::var("TEST_DATABASE_URL").or_else(|_| env::var("DATABASE_URL"))

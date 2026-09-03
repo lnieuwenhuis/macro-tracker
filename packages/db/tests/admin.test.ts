@@ -25,6 +25,31 @@ import { createTestDatabase } from "../src/testing";
 import { eq, sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+function barcodeProductInput(
+  barcode: string,
+  name: string,
+  overrides: Partial<{
+    brands: string | null;
+    proteinG: number;
+    carbsG: number;
+    fatG: number;
+    caloriesKcal: number;
+    servingSizeG: number | null;
+  }> = {},
+) {
+  return {
+    barcode,
+    name,
+    brands: "Macro Lab",
+    proteinG: 10,
+    carbsG: 20,
+    fatG: 5,
+    caloriesKcal: 165,
+    servingSizeG: 100,
+    ...overrides,
+  };
+}
+
 describe("admin queries", () => {
   let runtime: DatabaseRuntime;
   let ownerId: string;
@@ -40,7 +65,6 @@ describe("admin queries", () => {
         email: "owner@example.com",
         displayName: "Owner",
       },
-      runtime.db,
     );
     const admin = await upsertUserFromShooProfile(
       {
@@ -48,7 +72,6 @@ describe("admin queries", () => {
         email: "admin@example.com",
         displayName: "Admin",
       },
-      runtime.db,
     );
     const user = await upsertUserFromShooProfile(
       {
@@ -56,15 +79,14 @@ describe("admin queries", () => {
         email: "user@example.com",
         displayName: "User",
       },
-      runtime.db,
     );
 
     ownerId = owner.id;
     adminId = admin.id;
     userId = user.id;
 
-    await ensureUserRoleForTesting(ownerId, "owner", runtime.db);
-    await ensureUserRoleForTesting(adminId, "admin", runtime.db);
+    await ensureUserRoleForTesting(ownerId, "owner");
+    await ensureUserRoleForTesting(adminId, "admin");
   });
 
   afterEach(async () => {
@@ -72,11 +94,11 @@ describe("admin queries", () => {
   });
 
   it("changes roles, prevents demoting the last owner, and records an audit event", async () => {
-    const promoted = await setUserRole(ownerId, userId, "admin", runtime.db);
+    const promoted = await setUserRole(ownerId, userId, "admin");
     expect(promoted.role).toBe("admin");
 
     await expect(
-      setUserRole(ownerId, ownerId, "user", runtime.db),
+      setUserRole(ownerId, ownerId, "user"),
     ).rejects.toThrow("last owner");
 
     const audit = await listAdminAuditEvents(
@@ -86,7 +108,6 @@ describe("admin queries", () => {
         targetId: userId,
         pageSize: 10,
       },
-      runtime.db,
     );
 
     expect(audit.items[0]?.action).toBe("user.role_changed");
@@ -104,7 +125,6 @@ describe("admin queries", () => {
         role: "admin",
         pageSize: 25,
       },
-      runtime.db,
     );
 
     expect(adminUsers.items.map((item) => item.email)).toEqual([
@@ -127,28 +147,17 @@ describe("admin queries", () => {
         currentWeight: null,
         starterTemplate: null,
       },
-      runtime.db,
     );
     await runtime.db.execute(sql`update users set last_login_at = now() - interval '40 days' where id = ${adminId}`);
 
     for (let index = 0; index < 5; index += 1) {
       await createAdminBarcodeProduct(
         adminId,
-        {
-          barcode: `99000000004${index}`,
-          name: `Admin Submitted Food ${index}`,
-          brands: "Macro Lab",
-          proteinG: 10,
-          carbsG: 20,
-          fatG: 5,
-          caloriesKcal: 165,
-          servingSizeG: 100,
-        },
-        runtime.db,
+        barcodeProductInput(`99000000004${index}`, `Admin Submitted Food ${index}`),
       );
     }
 
-    const health = await getAdminUserHealthSummary(ownerId, runtime.db);
+    const health = await getAdminUserHealthSummary(ownerId);
     const counts = new Map(
       health.segments.map((segment) => [segment.id, segment.count]),
     );
@@ -161,17 +170,17 @@ describe("admin queries", () => {
     expect(counts.get("heavy_barcode_submitters")).toBe(1);
 
     await expect(
-      listAdminUsers(ownerId, { health: "onboarded_no_logs", pageSize: 25 }, runtime.db),
+      listAdminUsers(ownerId, { health: "onboarded_no_logs", pageSize: 25 }),
     ).resolves.toMatchObject({
       items: [{ email: "user@example.com" }],
     });
     await expect(
-      listAdminUsers(ownerId, { health: "heavy_barcode_submitters", pageSize: 25 }, runtime.db),
+      listAdminUsers(ownerId, { health: "heavy_barcode_submitters", pageSize: 25 }),
     ).resolves.toMatchObject({
       items: [{ email: "admin@example.com" }],
     });
     await expect(
-      listAdminUsers(ownerId, { activity: "inactive30", pageSize: 25 }, runtime.db),
+      listAdminUsers(ownerId, { activity: "inactive30", pageSize: 25 }),
     ).resolves.toMatchObject({
       items: [{ email: "admin@example.com" }],
     });
@@ -180,25 +189,21 @@ describe("admin queries", () => {
   it("creates, updates, soft-deletes, restores, and filters barcode records", async () => {
     const created = await createAdminBarcodeProduct(
       adminId,
-      {
-        barcode: "9900000000001",
-        name: "Admin Peanut Butter",
-        brands: "Macro Lab",
+      barcodeProductInput("9900000000001", "Admin Peanut Butter", {
         proteinG: 25,
         carbsG: 18,
         fatG: 50,
         caloriesKcal: 620,
         servingSizeG: 15,
-      },
-      runtime.db,
+      }),
     );
 
-    expect(await lookupBarcodeFoodProduct("9900000000001", runtime.db)).toMatchObject({
+    expect(await lookupBarcodeFoodProduct("9900000000001")).toMatchObject({
       name: "Admin Peanut Butter",
       submittedByUserId: adminId,
     });
     expect(
-      await searchFoodProducts(userId, "Admin Peanut Butter", runtime.db),
+      await searchFoodProducts(userId, "Admin Peanut Butter"),
     ).toMatchObject([
       {
         barcode: "9900000000001",
@@ -210,25 +215,21 @@ describe("admin queries", () => {
     const updated = await updateAdminBarcodeProduct(
       adminId,
       created.id,
-      {
-        barcode: "9900000000002",
-        name: "Admin Peanut Butter Deluxe",
-        brands: "Macro Lab",
+      barcodeProductInput("9900000000002", "Admin Peanut Butter Deluxe", {
         proteinG: 26,
         carbsG: 17,
         fatG: 49,
         caloriesKcal: 615,
         servingSizeG: 15,
-      },
-      runtime.db,
+      }),
     );
 
     expect(updated.name).toBe("Admin Peanut Butter Deluxe");
-    expect(await lookupBarcodeFoodProduct("9900000000001", runtime.db)).toBeNull();
-    expect(await lookupBarcodeFoodProduct("9900000000002", runtime.db)).toMatchObject({
+    expect(await lookupBarcodeFoodProduct("9900000000001")).toBeNull();
+    expect(await lookupBarcodeFoodProduct("9900000000002")).toMatchObject({
       name: "Admin Peanut Butter Deluxe",
     });
-    expect(await searchFoodProducts(userId, "Deluxe", runtime.db)).toMatchObject([
+    expect(await searchFoodProducts(userId, "Deluxe")).toMatchObject([
       {
         barcode: "9900000000002",
         name: "Admin Peanut Butter Deluxe",
@@ -239,7 +240,7 @@ describe("admin queries", () => {
       },
     ]);
     expect(
-      (await searchFoodProducts(userId, "Admin Peanut Butter", runtime.db)).map(
+      (await searchFoodProducts(userId, "Admin Peanut Butter")).map(
         (product) => product.barcode,
       ),
     ).toEqual(["9900000000002"]);
@@ -247,12 +248,11 @@ describe("admin queries", () => {
     const deleted = await softDeleteAdminBarcodeProduct(
       adminId,
       created.id,
-      runtime.db,
     );
     expect(deleted.deletedAt).toBeTruthy();
-    expect(await lookupBarcodeFoodProduct("9900000000001", runtime.db)).toBeNull();
-    expect(await lookupBarcodeFoodProduct("9900000000002", runtime.db)).toBeNull();
-    expect(await searchFoodProducts(userId, "Deluxe", runtime.db)).toEqual([]);
+    expect(await lookupBarcodeFoodProduct("9900000000001")).toBeNull();
+    expect(await lookupBarcodeFoodProduct("9900000000002")).toBeNull();
+    expect(await searchFoodProducts(userId, "Deluxe")).toEqual([]);
 
     const deletedOnly = await listAdminBarcodeProducts(
       adminId,
@@ -260,27 +260,25 @@ describe("admin queries", () => {
         status: "deleted",
         pageSize: 25,
       },
-      runtime.db,
     );
     expect(deletedOnly.items.map((item) => item.id)).toContain(created.id);
 
     const restored = await restoreAdminBarcodeProduct(
       adminId,
       created.id,
-      runtime.db,
     );
     expect(restored.deletedAt).toBeNull();
-    expect(await lookupBarcodeFoodProduct("9900000000002", runtime.db)).toMatchObject({
+    expect(await lookupBarcodeFoodProduct("9900000000002")).toMatchObject({
       name: "Admin Peanut Butter Deluxe",
     });
-    expect(await searchFoodProducts(userId, "Deluxe", runtime.db)).toMatchObject([
+    expect(await searchFoodProducts(userId, "Deluxe")).toMatchObject([
       {
         barcode: "9900000000002",
         name: "Admin Peanut Butter Deluxe",
       },
     ]);
 
-    const detail = await getAdminBarcodeProductById(adminId, created.id, runtime.db);
+    const detail = await getAdminBarcodeProductById(adminId, created.id);
     expect(detail?.deletedAt).toBeNull();
 
     const audit = await listAdminAuditEvents(
@@ -290,7 +288,6 @@ describe("admin queries", () => {
         targetId: created.id,
         pageSize: 10,
       },
-      runtime.db,
     );
     expect(audit.items.map((item) => item.action)).toEqual([
       "barcode.restored",
@@ -302,7 +299,7 @@ describe("admin queries", () => {
     const updateEvent = audit.items.find(
       (item) => item.action === "barcode.updated",
     );
-    const auditDetail = await getAdminAuditEventById(ownerId, updateEvent!.id, runtime.db);
+    const auditDetail = await getAdminAuditEventById(ownerId, updateEvent!.id);
     expect(auditDetail?.details).toMatchObject({
       before: {
         name: "Admin Peanut Butter",
@@ -316,17 +313,7 @@ describe("admin queries", () => {
   it("builds barcode review queue reasons", async () => {
     const lowConfidence = await createAdminBarcodeProduct(
       adminId,
-      {
-        barcode: "9900000000501",
-        name: "Review Queue Duplicate",
-        brands: "Macro Lab",
-        proteinG: 10,
-        carbsG: 20,
-        fatG: 5,
-        caloriesKcal: 165,
-        servingSizeG: 100,
-      },
-      runtime.db,
+      barcodeProductInput("9900000000501", "Review Queue Duplicate"),
     );
     await runtime.db
       .update(foodProducts)
@@ -339,107 +326,46 @@ describe("admin queries", () => {
 
     const duplicateName = await createAdminBarcodeProduct(
       adminId,
-      {
-        barcode: "9900000000502",
-        name: "Review Queue Duplicate",
-        brands: "Macro Lab",
-        proteinG: 10,
-        carbsG: 20,
-        fatG: 5,
-        caloriesKcal: 165,
-        servingSizeG: 100,
-      },
-      runtime.db,
+      barcodeProductInput("9900000000502", "Review Queue Duplicate"),
     );
     const deleted = await createAdminBarcodeProduct(
       adminId,
-      {
-        barcode: "9900000000503",
-        name: "Recently Deleted Food",
-        brands: "Macro Lab",
-        proteinG: 10,
-        carbsG: 20,
-        fatG: 5,
-        caloriesKcal: 165,
-        servingSizeG: 100,
-      },
-      runtime.db,
+      barcodeProductInput("9900000000503", "Recently Deleted Food"),
     );
-    await softDeleteAdminBarcodeProduct(adminId, deleted.id, runtime.db);
+    await softDeleteAdminBarcodeProduct(adminId, deleted.id);
     const restored = await createAdminBarcodeProduct(
       adminId,
-      {
-        barcode: "9900000000504",
-        name: "Recently Restored Food",
-        brands: "Macro Lab",
-        proteinG: 10,
-        carbsG: 20,
-        fatG: 5,
-        caloriesKcal: 165,
-        servingSizeG: 100,
-      },
-      runtime.db,
+      barcodeProductInput("9900000000504", "Recently Restored Food"),
     );
-    await softDeleteAdminBarcodeProduct(adminId, restored.id, runtime.db);
-    await restoreAdminBarcodeProduct(adminId, restored.id, runtime.db);
+    await softDeleteAdminBarcodeProduct(adminId, restored.id);
+    await restoreAdminBarcodeProduct(adminId, restored.id);
     await updateAdminBarcodeProduct(
       adminId,
       restored.id,
-      {
-        barcode: "9900000000504",
-        name: "Recently Restored Food Updated",
-        brands: "Macro Lab",
+      barcodeProductInput("9900000000504", "Recently Restored Food Updated", {
         proteinG: 11,
-        carbsG: 20,
-        fatG: 5,
         caloriesKcal: 169,
-        servingSizeG: 100,
-      },
-      runtime.db,
+      }),
     );
     const frequent = await createAdminBarcodeProduct(
       adminId,
-      {
-        barcode: "9900000000505",
-        name: "Frequently Revised Food",
-        brands: "Macro Lab",
-        proteinG: 10,
-        carbsG: 20,
-        fatG: 5,
-        caloriesKcal: 165,
-        servingSizeG: 100,
-      },
-      runtime.db,
+      barcodeProductInput("9900000000505", "Frequently Revised Food"),
     );
     await updateAdminBarcodeProduct(
       adminId,
       frequent.id,
-      {
-        barcode: "9900000000505",
-        name: "Frequently Revised Food V2",
-        brands: "Macro Lab",
+      barcodeProductInput("9900000000505", "Frequently Revised Food V2", {
         proteinG: 11,
-        carbsG: 20,
-        fatG: 5,
         caloriesKcal: 169,
-        servingSizeG: 100,
-      },
-      runtime.db,
+      }),
     );
     await updateAdminBarcodeProduct(
       adminId,
       frequent.id,
-      {
-        barcode: "9900000000505",
-        name: "Frequently Revised Food V3",
-        brands: "Macro Lab",
+      barcodeProductInput("9900000000505", "Frequently Revised Food V3", {
         proteinG: 12,
-        carbsG: 20,
-        fatG: 5,
         caloriesKcal: 173,
-        servingSizeG: 100,
-      },
-      runtime.db,
+      }),
     );
 
     const queue = await listAdminBarcodeReviewQueue(
@@ -447,7 +373,6 @@ describe("admin queries", () => {
       {
         pageSize: 25,
       },
-      runtime.db,
     );
     const byId = new Map(queue.items.map((item) => [item.id, item]));
 
@@ -468,45 +393,32 @@ describe("admin queries", () => {
   it("prevents restoring a deleted barcode when an active replacement uses the same barcode", async () => {
     const deletedOriginal = await createAdminBarcodeProduct(
       adminId,
-      {
-        barcode: "9900000000099",
-        name: "Original Barcode Food",
-        brands: "Macro Lab",
+      barcodeProductInput("9900000000099", "Original Barcode Food", {
         proteinG: 12,
-        carbsG: 20,
         fatG: 4,
         caloriesKcal: 164,
-        servingSizeG: 100,
-      },
-      runtime.db,
+      }),
     );
-    await softDeleteAdminBarcodeProduct(adminId, deletedOriginal.id, runtime.db);
+    await softDeleteAdminBarcodeProduct(adminId, deletedOriginal.id);
     await createAdminBarcodeProduct(
       adminId,
-      {
-        barcode: "9900000000099",
-        name: "Replacement Barcode Food",
-        brands: "Macro Lab",
+      barcodeProductInput("9900000000099", "Replacement Barcode Food", {
         proteinG: 14,
         carbsG: 18,
-        fatG: 5,
         caloriesKcal: 173,
-        servingSizeG: 100,
-      },
-      runtime.db,
+      }),
     );
 
     await expect(
-      restoreAdminBarcodeProduct(adminId, deletedOriginal.id, runtime.db),
+      restoreAdminBarcodeProduct(adminId, deletedOriginal.id),
     ).rejects.toThrow("That barcode already exists.");
 
     const stillDeleted = await getAdminBarcodeProductById(
       adminId,
       deletedOriginal.id,
-      runtime.db,
     );
     expect(stillDeleted?.deletedAt).toBeTruthy();
-    expect(await lookupBarcodeFoodProduct("9900000000099", runtime.db)).toMatchObject({
+    expect(await lookupBarcodeFoodProduct("9900000000099")).toMatchObject({
       name: "Replacement Barcode Food",
     });
   });
@@ -514,70 +426,45 @@ describe("admin queries", () => {
   it("prevents duplicate active barcode creates and updates", async () => {
     await createAdminBarcodeProduct(
       adminId,
-      {
-        barcode: "9900000000101",
-        name: "Original Duplicate Guard Food",
-        brands: "Macro Lab",
-        proteinG: 10,
-        carbsG: 20,
-        fatG: 5,
-        caloriesKcal: 165,
-        servingSizeG: 100,
-      },
-      runtime.db,
+      barcodeProductInput("9900000000101", "Original Duplicate Guard Food"),
     );
 
     await expect(
       createAdminBarcodeProduct(
         adminId,
-        {
-          barcode: "9900000000101",
-          name: "Duplicate Guard Food",
-          brands: "Macro Lab",
+        barcodeProductInput("9900000000101", "Duplicate Guard Food", {
           proteinG: 12,
           carbsG: 19,
           fatG: 6,
           caloriesKcal: 178,
-          servingSizeG: 100,
-        },
-        runtime.db,
+        }),
       ),
     ).rejects.toThrow("That barcode already exists.");
 
     const other = await createAdminBarcodeProduct(
       adminId,
-      {
-        barcode: "9900000000102",
-        name: "Other Duplicate Guard Food",
-        brands: "Macro Lab",
+      barcodeProductInput("9900000000102", "Other Duplicate Guard Food", {
         proteinG: 14,
         carbsG: 18,
         fatG: 4,
         caloriesKcal: 164,
-        servingSizeG: 100,
-      },
-      runtime.db,
+      }),
     );
 
     await expect(
       updateAdminBarcodeProduct(
         adminId,
         other.id,
-        {
-          barcode: "9900000000101",
-          name: "Other Duplicate Guard Food",
-          brands: "Macro Lab",
+        barcodeProductInput("9900000000101", "Other Duplicate Guard Food", {
           proteinG: 14,
           carbsG: 18,
           fatG: 4,
           caloriesKcal: 164,
-          servingSizeG: 100,
-        },
-        runtime.db,
+        }),
       ),
     ).rejects.toThrow("That barcode already exists.");
 
-    expect(await getAdminBarcodeProductById(adminId, other.id, runtime.db)).toMatchObject({
+    expect(await getAdminBarcodeProductById(adminId, other.id)).toMatchObject({
       barcode: "9900000000102",
     });
   });
@@ -585,17 +472,7 @@ describe("admin queries", () => {
   it("enforces active global barcode uniqueness at the database level", async () => {
     await createAdminBarcodeProduct(
       adminId,
-      {
-        barcode: "9900000000201",
-        name: "Indexed Barcode Food",
-        brands: "Macro Lab",
-        proteinG: 10,
-        carbsG: 20,
-        fatG: 5,
-        caloriesKcal: 165,
-        servingSizeG: 100,
-      },
-      runtime.db,
+      barcodeProductInput("9900000000201", "Indexed Barcode Food"),
     );
 
     await expect(
@@ -678,17 +555,7 @@ describe("admin queries", () => {
   it("finds active barcode duplicates when a newer deleted duplicate also exists", async () => {
     const active = await createAdminBarcodeProduct(
       adminId,
-      {
-        barcode: "9900000000301",
-        name: "Active Masking Guard Food",
-        brands: "Macro Lab",
-        proteinG: 10,
-        carbsG: 20,
-        fatG: 5,
-        caloriesKcal: 165,
-        servingSizeG: 100,
-      },
-      runtime.db,
+      barcodeProductInput("9900000000301", "Active Masking Guard Food"),
     );
 
     await runtime.db.execute(sql.raw(`
@@ -732,42 +599,32 @@ describe("admin queries", () => {
 
     const other = await createAdminBarcodeProduct(
       adminId,
-      {
-        barcode: "9900000000302",
-        name: "Other Masking Guard Food",
-        brands: "Macro Lab",
+      barcodeProductInput("9900000000302", "Other Masking Guard Food", {
         proteinG: 14,
         carbsG: 18,
         fatG: 4,
         caloriesKcal: 164,
-        servingSizeG: 100,
-      },
-      runtime.db,
+      }),
     );
 
     await expect(
       updateAdminBarcodeProduct(
         adminId,
         other.id,
-        {
-          barcode: "9900000000301",
-          name: "Other Masking Guard Food",
-          brands: "Macro Lab",
+        barcodeProductInput("9900000000301", "Other Masking Guard Food", {
           proteinG: 14,
           carbsG: 18,
           fatG: 4,
           caloriesKcal: 164,
-          servingSizeG: 100,
-        },
-        runtime.db,
+        }),
       ),
     ).rejects.toThrow("That barcode already exists.");
 
-    expect(await lookupBarcodeFoodProduct("9900000000301", runtime.db)).toMatchObject({
+    expect(await lookupBarcodeFoodProduct("9900000000301")).toMatchObject({
       id: active.id,
       name: "Active Masking Guard Food",
     });
-    expect(await getAdminBarcodeProductById(adminId, other.id, runtime.db)).toMatchObject({
+    expect(await getAdminBarcodeProductById(adminId, other.id)).toMatchObject({
       barcode: "9900000000302",
     });
   });
@@ -795,10 +652,9 @@ describe("admin queries", () => {
           },
         ],
       },
-      runtime.db,
     );
 
-    const detail = await getAdminUserDetail(adminId, userId, runtime.db);
+    const detail = await getAdminUserDetail(adminId, userId);
     const template = detail?.recentTemplates.find(
       (item) => item.label === "Two item day",
     );

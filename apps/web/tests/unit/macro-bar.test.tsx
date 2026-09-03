@@ -1,11 +1,8 @@
-/**
- * @vitest-environment jsdom
- */
+/** @vitest-environment jsdom */
 import { MacroBarGroup } from "@/components/macro-bar";
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-/** Normalized text of every macro readout currently rendered. */
 function readoutTexts() {
   return Array.from(document.querySelectorAll(".tabular-nums")).map((node) =>
     (node.textContent ?? "").replace(/\s+/g, " ").trim(),
@@ -33,8 +30,7 @@ describe("MacroBarGroup", () => {
       expect(screen.getByText(label)).toBeTruthy();
     }
 
-    // The value, the goal and the unit are separate text nodes inside one
-    // span, so assert on the rendered text rather than on node boundaries.
+    // Value, goal and unit are separate text nodes in one span; assert on rendered text, not node boundaries.
     expect(readoutTexts()).toContain("1800 / 2200 kcal");
     expect(readoutTexts()).toContain("120 / 150g");
   });

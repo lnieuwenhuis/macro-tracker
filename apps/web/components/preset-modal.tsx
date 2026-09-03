@@ -68,8 +68,39 @@ function presetToDraft(preset: MealTemplate): PresetDraft {
   };
 }
 
+export function presetDraftToInput(draft: PresetDraft): TemplateMacroInput {
+  return {
+    label: draft.label.trim(),
+    proteinG: Number(draft.proteinG) || 0,
+    carbsG: Number(draft.carbsG) || 0,
+    fatG: Number(draft.fatG) || 0,
+    caloriesKcal: Math.round(Number(draft.caloriesKcal) || 0),
+  };
+}
+
+export type { PresetDraft };
+
 const PRESET_NUMBER_INPUT_CLASS =
   "w-full rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-3 py-2 pr-9 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-60";
+
+function PresetMacroFields({
+  draft,
+  disabled,
+  onPatch,
+}: {
+  draft: PresetDraft;
+  disabled: boolean;
+  onPatch: (patch: Partial<PresetDraft>) => void;
+}) {
+  return (
+    <>
+      <NumberInputField label="Protein" value={draft.proteinG} unit="g" step="0.1" disabled={disabled} inputClassName={PRESET_NUMBER_INPUT_CLASS} onChange={(v) => onPatch({ proteinG: v })} />
+      <NumberInputField label="Carbs" value={draft.carbsG} unit="g" step="0.1" disabled={disabled} inputClassName={PRESET_NUMBER_INPUT_CLASS} onChange={(v) => onPatch({ carbsG: v })} />
+      <NumberInputField label="Fat" value={draft.fatG} unit="g" step="0.1" disabled={disabled} inputClassName={PRESET_NUMBER_INPUT_CLASS} onChange={(v) => onPatch({ fatG: v })} />
+      <NumberInputField label="Calories" value={draft.caloriesKcal} unit="kcal" step="1" disabled={disabled} inputClassName={PRESET_NUMBER_INPUT_CLASS} onChange={(v) => onPatch({ caloriesKcal: v })} />
+    </>
+  );
+}
 
 export function PresetModal({
   presets,
@@ -136,13 +167,7 @@ export function PresetModal({
 
   async function handleSave() {
     if (!draft.label.trim()) return;
-    const saved = await onSave({
-      label: draft.label.trim(),
-      proteinG: Number(draft.proteinG) || 0,
-      carbsG: Number(draft.carbsG) || 0,
-      fatG: Number(draft.fatG) || 0,
-      caloriesKcal: Math.round(Number(draft.caloriesKcal) || 0),
-    });
+    const saved = await onSave(presetDraftToInput(draft));
 
     if (!saved) {
       return;
@@ -164,13 +189,7 @@ export function PresetModal({
 
   async function handleUpdate() {
     if (!editDraft.label.trim() || !editingId) return;
-    const updated = await onUpdate(editingId, {
-      label: editDraft.label.trim(),
-      proteinG: Number(editDraft.proteinG) || 0,
-      carbsG: Number(editDraft.carbsG) || 0,
-      fatG: Number(editDraft.fatG) || 0,
-      caloriesKcal: Math.round(Number(editDraft.caloriesKcal) || 0),
-    });
+    const updated = await onUpdate(editingId, presetDraftToInput(editDraft));
 
     if (!updated) {
       return;
@@ -181,14 +200,12 @@ export function PresetModal({
 
   return (
     <OverlayPortal>
-      {/* Backdrop */}
       <div
         className="fixed inset-0 z-40 bg-black/40 backdrop-blur-[2px]"
         onClick={dismissModal}
         aria-hidden="true"
       />
 
-      {/* Modal panel */}
       <div
         role="dialog"
         aria-modal="true"
@@ -196,7 +213,6 @@ export function PresetModal({
         aria-busy={mutation ? "true" : "false"}
         className="fixed inset-x-4 top-[8%] z-50 mx-auto max-h-[82vh] max-w-sm overflow-y-auto rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5 shadow-2xl"
       >
-        {/* Header */}
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-base font-bold text-[var(--color-ink)]">Meal Templates</h2>
           <CloseButton
@@ -239,14 +255,12 @@ export function PresetModal({
           })}
         </div>
 
-        {/* Empty state */}
         {visiblePresets.length === 0 && (
           <p className="py-3 text-center text-sm text-[var(--color-muted)]">
             No {activeLabel} yet.
           </p>
         )}
 
-        {/* Preset list */}
         {visiblePresets.length > 0 && (
           <div className="space-y-2">
             {visiblePresets.map((preset) => {
@@ -255,7 +269,6 @@ export function PresetModal({
               const itemCount = preset.items.length;
 
               return editingId === preset.id ? (
-                /* Inline edit form */
                 <div
                   key={preset.id}
                   className="rounded-xl border border-[var(--color-accent)]/40 bg-[var(--color-card-subtle)] p-3"
@@ -273,10 +286,7 @@ export function PresetModal({
                     />
                   </label>
                   <div className="mt-2 grid grid-cols-2 gap-2">
-                    <NumberInputField label="Protein" value={editDraft.proteinG} unit="g" step="0.1" disabled={mutationsDisabled} inputClassName={PRESET_NUMBER_INPUT_CLASS} onChange={(v) => setEditDraft({ ...editDraft, proteinG: v })} />
-                    <NumberInputField label="Carbs" value={editDraft.carbsG} unit="g" step="0.1" disabled={mutationsDisabled} inputClassName={PRESET_NUMBER_INPUT_CLASS} onChange={(v) => setEditDraft({ ...editDraft, carbsG: v })} />
-                    <NumberInputField label="Fat" value={editDraft.fatG} unit="g" step="0.1" disabled={mutationsDisabled} inputClassName={PRESET_NUMBER_INPUT_CLASS} onChange={(v) => setEditDraft({ ...editDraft, fatG: v })} />
-                    <NumberInputField label="Calories" value={editDraft.caloriesKcal} unit="kcal" step="1" disabled={mutationsDisabled} inputClassName={PRESET_NUMBER_INPUT_CLASS} onChange={(v) => setEditDraft({ ...editDraft, caloriesKcal: v })} />
+                    <PresetMacroFields draft={editDraft} disabled={mutationsDisabled} onPatch={(patch) => setEditDraft({ ...editDraft, ...patch })} />
                   </div>
                   <div className="mt-3 flex gap-2">
                     <button
@@ -298,7 +308,6 @@ export function PresetModal({
                   </div>
                 </div>
               ) : (
-                /* Normal row */
                 <div
                   key={preset.id}
                   className="flex items-center gap-2 rounded-xl border border-[var(--color-border)] bg-[var(--color-card-subtle)] px-3 py-2.5"
@@ -360,7 +369,6 @@ export function PresetModal({
           </div>
         )}
 
-        {/* Create form toggle */}
         {activeKind === "food" ? (
           <button
             type="button"
@@ -382,7 +390,6 @@ export function PresetModal({
           </button>
         ) : null}
 
-        {/* Inline create form */}
         {activeKind === "food" && showCreateForm && (
           <div className="mt-3 rounded-xl border border-[var(--color-border)] bg-[var(--color-card-subtle)] p-3">
             <label className="block">
@@ -400,10 +407,7 @@ export function PresetModal({
             </label>
 
             <div className="mt-2 grid grid-cols-2 gap-2">
-              <NumberInputField label="Protein" value={draft.proteinG} unit="g" step="0.1" disabled={mutationsDisabled} inputClassName={PRESET_NUMBER_INPUT_CLASS} onChange={(v) => setDraft({ ...draft, proteinG: v })} />
-              <NumberInputField label="Carbs" value={draft.carbsG} unit="g" step="0.1" disabled={mutationsDisabled} inputClassName={PRESET_NUMBER_INPUT_CLASS} onChange={(v) => setDraft({ ...draft, carbsG: v })} />
-              <NumberInputField label="Fat" value={draft.fatG} unit="g" step="0.1" disabled={mutationsDisabled} inputClassName={PRESET_NUMBER_INPUT_CLASS} onChange={(v) => setDraft({ ...draft, fatG: v })} />
-              <NumberInputField label="Calories" value={draft.caloriesKcal} unit="kcal" step="1" disabled={mutationsDisabled} inputClassName={PRESET_NUMBER_INPUT_CLASS} onChange={(v) => setDraft({ ...draft, caloriesKcal: v })} />
+              <PresetMacroFields draft={draft} disabled={mutationsDisabled} onPatch={(patch) => setDraft({ ...draft, ...patch })} />
             </div>
 
             <button

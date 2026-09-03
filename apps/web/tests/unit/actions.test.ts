@@ -2,65 +2,26 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocked = vi.hoisted(() => ({
   createMealEntry: vi.fn(),
-  createMealGroup: vi.fn(),
-  createRecipe: vi.fn(),
   createTemplate: vi.fn(),
-  createTemplateFromDate: vi.fn(),
   createWeightEntry: vi.fn(),
   completeOnboardingSetup: vi.fn(),
   completeUserOnboarding: vi.fn(),
-  deleteMealGroup: vi.fn(),
   deleteMealEntry: vi.fn(),
   deleteRecipe: vi.fn(),
   deleteTemplate: vi.fn(),
   deleteWeightEntry: vi.fn(),
   getRecipeById: vi.fn(),
   getTemplateById: vi.fn(),
-  markMealEntryStatus: vi.fn(),
-  applyTemplateToDate: vi.fn(),
-  saveBarcodeFoodProduct: vi.fn(),
   saveUserGoals: vi.fn(),
   saveWeightGoal: vi.fn(),
   searchFoodProducts: vi.fn(),
   searchMealEntries: vi.fn(),
-  updateMealGroup: vi.fn(),
-  updateMealEntry: vi.fn(),
-  updateRecipe: vi.fn(),
   updateTemplate: vi.fn(),
-  updateWeightEntry: vi.fn(),
   requireSessionUser: vi.fn(),
   revalidatePath: vi.fn(),
 }));
 
-vi.mock("@macro-tracker/db", () => ({
-  createMealEntry: mocked.createMealEntry,
-  createMealGroup: mocked.createMealGroup,
-  createRecipe: mocked.createRecipe,
-  createTemplate: mocked.createTemplate,
-  createTemplateFromDate: mocked.createTemplateFromDate,
-  createWeightEntry: mocked.createWeightEntry,
-  completeOnboardingSetup: mocked.completeOnboardingSetup,
-  completeUserOnboarding: mocked.completeUserOnboarding,
-  deleteMealGroup: mocked.deleteMealGroup,
-  deleteMealEntry: mocked.deleteMealEntry,
-  deleteRecipe: mocked.deleteRecipe,
-  deleteTemplate: mocked.deleteTemplate,
-  deleteWeightEntry: mocked.deleteWeightEntry,
-  getRecipeById: mocked.getRecipeById,
-  getTemplateById: mocked.getTemplateById,
-  markMealEntryStatus: mocked.markMealEntryStatus,
-  applyTemplateToDate: mocked.applyTemplateToDate,
-  saveBarcodeFoodProduct: mocked.saveBarcodeFoodProduct,
-  saveUserGoals: mocked.saveUserGoals,
-  saveWeightGoal: mocked.saveWeightGoal,
-  searchFoodProducts: mocked.searchFoodProducts,
-  searchMealEntries: mocked.searchMealEntries,
-  updateMealGroup: mocked.updateMealGroup,
-  updateMealEntry: mocked.updateMealEntry,
-  updateRecipe: mocked.updateRecipe,
-  updateTemplate: mocked.updateTemplate,
-  updateWeightEntry: mocked.updateWeightEntry,
-}));
+vi.mock("@macro-tracker/db", async () => (await import("./helpers/mock-db")).mockDbModule(mocked));
 
 vi.mock("@/lib/auth", () => ({
   requireSessionUser: mocked.requireSessionUser,
@@ -240,10 +201,7 @@ describe("server actions", () => {
   });
 
   it("forwards the recipe idempotency key so a double-tap dedupes", async () => {
-    // The backend dedupes on a unique index over a NULLABLE
-    // `client_mutation_id`, and multiple NULLs do not collide — so a recipe log
-    // that omits the key is exactly the double-write `client-mutation-id` was
-    // added to prevent.
+    // The dedupe index is over a nullable client_mutation_id, and NULLs never collide.
     mocked.getRecipeById.mockResolvedValue({
       id: "recipe-1",
       userId: "user-1",

@@ -1,17 +1,5 @@
-/**
- * @vitest-environment jsdom
- *
- * UI-04: the "Copied"/"Added" confirmation flash in `dashboard-shell.tsx`
- * and `food-search-modal.tsx` scheduled a bare `setTimeout` with no
- * `clearTimeout` on unmount. Navigating away, or closing the modal, inside
- * the flash window called `setState` after the component was gone. The fix
- * tracks the pending timer in a ref and clears it in a cleanup effect, the
- * same pattern `confirm-delete-button.tsx` already uses.
- *
- * These tests spy on the real `window.setTimeout`/`clearTimeout` (not fake
- * timers, so `waitFor`'s own internal polling keeps working) and check that
- * the *exact* timer id scheduled for the flash gets cleared on unmount.
- */
+/** @vitest-environment jsdom */
+// The flash timer must be cleared on unmount; tests spy real timers and check the exact id is cleared.
 import type { DailySummary, MacroGoals, MealEntryRecord } from "@macro-tracker/db";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -115,8 +103,7 @@ describe("copied-flash timer cleanup", () => {
 
     mocked.saveMealEntryAction.mockResolvedValue({ ok: true, entry: savedMeal });
 
-    // A past day (todayStr differs from selectedDate) so the "Copy to today"
-    // action is offered.
+    // A past day so the "Copy to today" action is offered.
     const { unmount } = render(
       <DashboardShell
         userEmail="user@example.com"

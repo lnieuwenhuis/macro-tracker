@@ -25,14 +25,17 @@ function isClearlyTestDatabaseName(name: string) {
   return TEST_DATABASE_MARKER_PATTERN.test(name);
 }
 
+function isTruthyEnvToggle(value: string | undefined) {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
 function allowsDestructiveLocalDatabase(env: TestDatabaseEnv) {
-  const value = env[ALLOW_DESTRUCTIVE_LOCAL_DB_ENV]?.trim().toLowerCase();
-  return value === "1" || value === "true" || value === "yes" || value === "on";
+  return isTruthyEnvToggle(env[ALLOW_DESTRUCTIVE_LOCAL_DB_ENV]);
 }
 
 function allowsDestructiveRemoteDatabase(env: TestDatabaseEnv) {
-  const value = env[ALLOW_DESTRUCTIVE_REMOTE_DB_ENV]?.trim().toLowerCase();
-  return value === "1" || value === "true" || value === "yes" || value === "on";
+  return isTruthyEnvToggle(env[ALLOW_DESTRUCTIVE_REMOTE_DB_ENV]);
 }
 
 function parsePostgresUrl(connectionString: string, source: string) {
@@ -64,11 +67,7 @@ export function assertSafeDestructiveTestDatabaseUrl(
   const isTestName = isClearlyTestDatabaseName(databaseName);
   const isLocal = isLocalDatabaseHost(url.hostname);
 
-  // DB-08: a database-name match alone used to be enough regardless of host,
-  // so `TEST_DATABASE_URL=postgres://...@shared-staging.example.com/app_test`
-  // would let this through and a caller would `TRUNCATE ... CASCADE` every
-  // table on a shared remote host. A remote host now always needs an
-  // explicit opt-in, on top of (not instead of) the test-name check.
+  // DB-08: a remote host always needs an explicit opt-in on top of (not instead of) the test-name check.
   if (!isLocal) {
     if (isTestName && allowsDestructiveRemoteDatabase(env)) {
       return connectionString;

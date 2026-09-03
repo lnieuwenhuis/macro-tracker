@@ -29,10 +29,6 @@ function buildDraft(overrides: Partial<MealDraft>): MealDraft {
   };
 }
 
-// ---------------------------------------------------------------------------
-// computeLiveTotals
-// ---------------------------------------------------------------------------
-
 describe("computeLiveTotals", () => {
   it("returns zeros when there are no drafts", () => {
     expect(computeLiveTotals([])).toEqual({
@@ -165,10 +161,6 @@ describe("computeLiveTotals", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// computeRemaining
-// ---------------------------------------------------------------------------
-
 describe("computeRemaining", () => {
   const totals: MacroNumbers = {
     proteinG: 80,
@@ -237,10 +229,6 @@ describe("computeRemaining", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// hasAnyGoal
-// ---------------------------------------------------------------------------
-
 describe("hasAnyGoal", () => {
   it("returns false when no goals are set", () => {
     expect(
@@ -260,10 +248,6 @@ describe("hasAnyGoal", () => {
     ).toBe(true);
   });
 });
-
-// ---------------------------------------------------------------------------
-// deduplicateCandidates
-// ---------------------------------------------------------------------------
 
 describe("deduplicateCandidates", () => {
   it("removes exact duplicates keeping the first occurrence", () => {
@@ -349,10 +333,6 @@ describe("deduplicateCandidates", () => {
     expect(result).toHaveLength(2);
   });
 });
-
-// ---------------------------------------------------------------------------
-// rankCandidates
-// ---------------------------------------------------------------------------
 
 describe("rankCandidates", () => {
   const defaultRankOptions = {
@@ -696,10 +676,6 @@ describe("rankCandidates", () => {
     expect(ranked.map((item) => item.label)).toEqual(["Food A", "Food B"]);
   });
 });
-
-// ---------------------------------------------------------------------------
-// getRecentRepeats
-// ---------------------------------------------------------------------------
 
 describe("getRecentRepeats", () => {
   it("returns items sorted by most-recent date first", () => {

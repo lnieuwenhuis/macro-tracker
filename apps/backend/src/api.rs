@@ -18,8 +18,7 @@ const CORS_ALLOW_METHODS: &str = "GET, POST, PATCH, DELETE, OPTIONS";
 const CORS_ALLOW_HEADERS: &str = "Authorization, Content-Type";
 const CORS_MAX_AGE: &str = "86400";
 const API_V1_OPENAPI_JSON: &[u8] = include_bytes!("generated/api-v1-openapi.json");
-/// Deadline for a single `/api/v1` request. Matches the backend's other data
-/// routes; see `handle_api_v1` for why it is not a tower layer.
+/// Deadline for one `/api/v1` request; see `handle_api_v1` for why this is not a tower layer.
 pub const API_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 type ApiResult<T> = Result<T, ApiFailure>;
@@ -48,12 +47,7 @@ impl ApiFailure {
     }
 }
 
-/// One `/api/v1` endpoint shape.
-///
-/// `path` is the OpenAPI path template published at `/openapi.json`; a segment
-/// wrapped in braces is a wildcard when routing. Routing and the published
-/// contract share this one literal so the scope-contract tests can derive their
-/// coverage from [`API_V1_ENDPOINTS`] instead of restating it by hand (API-01).
+/// One `/api/v1` endpoint shape; `path` doubles as the OpenAPI path template (a `{brace}` segment is a wildcard).
 #[derive(Clone, Copy)]
 struct Endpoint {
     path: &'static str,
@@ -67,13 +61,7 @@ pub fn router() -> Router<AppState> {
         .route("/{*path}", any(api_v1_request))
 }
 
-// API-06: `Bytes` and `Path` are taken as `Result`s rather than as plain
-// extractors. An extractor that rejects does so *before* the handler runs, so
-// an over-limit body came back as a bare `413` with a plain-text body and none
-// of the CORS headers below — a browser client saw a CORS failure instead of
-// the documented error envelope, and a direct client got a body it could not
-// parse. Handling the rejection inside the handler keeps every `/api/v1`
-// response one shape.
+// API-06: `Bytes`/`Path` are taken as `Result`s so a rejection still gets the documented envelope and CORS headers.
 async fn api_v1_root(
     State(state): State<AppState>,
     method: Method,
@@ -115,11 +103,7 @@ async fn handle_api_v1(
 
     // A path we could not even decode cannot name an endpoint.
     let Ok(path) = path else {
-        return failure_response(ApiFailure::new(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "API endpoint not found.",
-        ));
+        return failure_response(not_found("API endpoint not found."));
     };
 
     if method == Method::GET && path.as_slice() == ["openapi.json"] {
@@ -131,19 +115,10 @@ async fn handle_api_v1(
         Err(rejection) => return failure_response(body_rejection_failure(&rejection)),
     };
 
-    // The deadline is enforced here rather than by a transport-level timeout
-    // layer: a layer would emit a bare 504 with no body and none of the CORS
-    // headers below, which breaks the documented error envelope for direct API
-    // clients and shows up as a CORS failure in browsers.
+    // Enforced here, not by a transport-level timeout layer, so the 504 still carries the envelope and CORS headers.
     let result = async {
         let method_name = method.as_str();
-        let endpoint = endpoint_for(&path).ok_or_else(|| {
-            ApiFailure::new(
-                StatusCode::NOT_FOUND,
-                "not_found",
-                "API endpoint not found.",
-            )
-        })?;
+        let endpoint = endpoint_for(&path).ok_or_else(|| not_found("API endpoint not found."))?;
         if !endpoint.methods.contains(&method_name) {
             let allow = endpoint
                 .methods
@@ -160,9 +135,7 @@ async fn handle_api_v1(
             .with_allow(allow));
         }
 
-        // API-01: an endpoint that allows a method but declares no scopes for it
-        // is a server-side contract bug. Refusing is the only safe reading —
-        // the previous empty-slice default let any valid token through.
+        // API-01: a method allowed but with no declared scopes is a contract bug; refuse rather than default-allow.
         let Some(scopes) = required_scopes(&endpoint, method_name) else {
             tracing::error!(
                 endpoint = endpoint.path,
@@ -185,13 +158,13 @@ async fn handle_api_v1(
     };
 
     match result {
-        Ok((status, data)) => json_response(status, json!({ "ok": true, "data": data }), None),
+        Ok((status, data)) => raw_json_response(status, json!({ "ok": true, "data": data }), None),
         Err(failure) => failure_response(failure),
     }
 }
 
 fn failure_response(failure: ApiFailure) -> Response {
-    json_response(
+    raw_json_response(
         failure.status,
         json!({
             "ok": false,
@@ -294,6 +267,15 @@ async fn authenticate_request(
     })
 }
 
+macro_rules! user_rpc {
+    ($state:expr, $auth:expr, $op:expr) => {
+        rpc($state, $op, json!({ "userId": $auth.user_id }))
+    };
+    ($state:expr, $auth:expr, $op:expr, $($field:tt)+) => {
+        rpc($state, $op, json!({ "userId": $auth.user_id, $($field)+ }))
+    };
+}
+
 async fn dispatch_api_request(
     state: &AppState,
     method: &str,
@@ -308,113 +290,51 @@ async fn dispatch_api_request(
 
     match (resource, id, action, method) {
         (Some("me"), None, None, "GET") => {
-            let user = rpc(state, "getUserById", json!({ "userId": auth.user_id })).await?;
-            let goals = rpc(state, "getUserGoals", json!({ "userId": auth.user_id })).await?;
-            Ok((
-                StatusCode::OK,
-                json!({ "user": map_account(user), "goals": goals }),
-            ))
+            let user = user_rpc!(state, auth, "getUserById").await?;
+            let goals = user_rpc!(state, auth, "getUserGoals").await?;
+            ok(json!({ "user": map_account(user), "goals": goals }))
         }
-        (Some("goals"), None, None, "GET") => Ok((
-            StatusCode::OK,
-            rpc(state, "getUserGoals", json!({ "userId": auth.user_id })).await?,
-        )),
+        (Some("goals"), None, None, "GET") => ok(user_rpc!(state, auth, "getUserGoals").await?),
         (Some("goals"), None, None, "PATCH") => {
-            let current = rpc(state, "getUserGoals", json!({ "userId": auth.user_id })).await?;
+            let current = user_rpc!(state, auth, "getUserGoals").await?;
             let goals = merge_goals(current, read_json(&body)?)?;
-            rpc(
-                state,
-                "saveUserGoals",
-                json!({ "userId": auth.user_id, "goals": goals }),
-            )
-            .await?;
-            Ok((
-                StatusCode::OK,
-                rpc(state, "getUserGoals", json!({ "userId": auth.user_id })).await?,
-            ))
+            user_rpc!(state, auth, "saveUserGoals", "goals": goals).await?;
+            ok(user_rpc!(state, auth, "getUserGoals").await?)
         }
         (Some("days"), Some(date), None, "GET") => {
             require_date(date)?;
-            Ok((
-                StatusCode::OK,
-                rpc(
-                    state,
-                    "getDailySummary",
-                    json!({ "userId": auth.user_id, "date": date }),
-                )
-                .await?,
-            ))
+            ok(user_rpc!(state, auth, "getDailySummary", "date": date).await?)
         }
         (Some("days"), Some(date), Some("entries"), "POST") => {
             require_date(date)?;
             let mut input = require_object(read_json(&body)?)?;
-            if has_non_null(&input, "productId")
-                && !auth.scopes.iter().any(|scope| scope == "read:foods")
-            {
-                return Err(insufficient_scope("read:foods"));
+            if has_non_null(&input, "productId") {
+                require_scope(&auth, "read:foods")?;
             }
             input.insert("date".to_string(), Value::String(date.to_string()));
-            let entry = rpc(
-                state,
-                "createMealEntry",
-                json!({ "userId": auth.user_id, "input": input }),
-            )
-            .await?;
-            Ok((StatusCode::CREATED, entry))
+            created(user_rpc!(state, auth, "createMealEntry", "input": input).await?)
         }
         (Some("meal-entries"), Some(entry_id), None, "PATCH") => {
             let entry_id = require_uuid(entry_id)?;
             let patch = require_object(read_json(&body)?)?;
-            if let Some(date) = patch.get("date").and_then(Value::as_str) {
-                require_date(date)?;
-            } else if patch.contains_key("date") {
-                return Err(bad_request("Date must use YYYY-MM-DD."));
+            require_optional_date(&patch)?;
+            if has_non_null(&patch, "productId") {
+                require_scope(&auth, "read:foods")?;
             }
-            if has_non_null(&patch, "productId")
-                && !auth.scopes.iter().any(|scope| scope == "read:foods")
-            {
-                return Err(insufficient_scope("read:foods"));
-            }
-            let existing = rpc(
-                state,
-                "getMealEntryById",
-                json!({ "userId": auth.user_id, "entryId": entry_id }),
-            )
-            .await?;
-            if existing.is_null() {
-                return Err(ApiFailure::new(
-                    StatusCode::NOT_FOUND,
-                    "not_found",
-                    "Meal entry not found.",
-                ));
-            }
+            let existing = require_found(
+                user_rpc!(state, auth, "getMealEntryById", "entryId": entry_id).await?,
+                "Meal entry not found.",
+            )?;
             let merged = merge_meal_entry_patch(require_object(existing)?, patch);
-            Ok((
-                StatusCode::OK,
-                rpc(
-                    state,
-                    "updateMealEntry",
-                    json!({ "userId": auth.user_id, "entryId": entry_id, "input": merged }),
-                )
-                .await?,
-            ))
-        }
-        (Some("meal-entries"), Some(entry_id), None, "DELETE") => {
-            let deleted = rpc(
-                state,
-                "deleteMealEntry",
-                json!({ "userId": auth.user_id, "entryId": require_uuid(entry_id)? }),
+            ok(
+                user_rpc!(state, auth, "updateMealEntry", "entryId": entry_id, "input": merged)
+                    .await?,
             )
-            .await?;
-            if !deleted.as_bool().unwrap_or(false) {
-                return Err(ApiFailure::new(
-                    StatusCode::NOT_FOUND,
-                    "not_found",
-                    "Meal entry not found.",
-                ));
-            }
-            Ok((StatusCode::OK, json!({ "deleted": true })))
         }
+        (Some("meal-entries"), Some(entry_id), None, "DELETE") => require_deleted(
+            user_rpc!(state, auth, "deleteMealEntry", "entryId": require_uuid(entry_id)?).await?,
+            "Meal entry not found.",
+        ),
         (Some("meal-entries"), Some(entry_id), Some("status"), "PATCH") => {
             let status = require_string_field(
                 &require_object(read_json(&body)?)?,
@@ -424,24 +344,18 @@ async fn dispatch_api_request(
             if !matches!(status.as_str(), "planned" | "eaten" | "skipped") {
                 return Err(bad_request("Meal status is invalid."));
             }
-            Ok((StatusCode::OK, rpc(state, "markMealEntryStatus", json!({ "userId": auth.user_id, "entryId": require_uuid(entry_id)?, "status": status })).await?))
+            ok(
+                user_rpc!(state, auth, "markMealEntryStatus", "entryId": require_uuid(entry_id)?, "status": status)
+                    .await?,
+            )
         }
-        (Some("meal-groups"), None, None, "GET") => Ok((
-            StatusCode::OK,
-            rpc(state, "getMealGroups", json!({ "userId": auth.user_id })).await?,
-        )),
+        (Some("meal-groups"), None, None, "GET") => {
+            ok(user_rpc!(state, auth, "getMealGroups").await?)
+        }
         (Some("meal-groups"), None, None, "POST") => {
             let input = require_object(read_json(&body)?)?;
             require_string_field(&input, "label", "Meal group name is required.")?;
-            Ok((
-                StatusCode::CREATED,
-                rpc(
-                    state,
-                    "createMealGroup",
-                    json!({ "userId": auth.user_id, "input": input }),
-                )
-                .await?,
-            ))
+            created(user_rpc!(state, auth, "createMealGroup", "input": input).await?)
         }
         (Some("meal-groups"), Some("reorder"), None, "POST") => {
             let body = require_object(read_json(&body)?)?;
@@ -450,78 +364,47 @@ async fn dispatch_api_request(
                 .or_else(|| body.get("groupIds"))
                 .cloned()
                 .ok_or_else(|| bad_request("orderedIds must be an array of group IDs."))?;
-            Ok((
-                StatusCode::OK,
-                rpc(
-                    state,
-                    "reorderMealGroups",
-                    json!({ "userId": auth.user_id, "orderedIds": ordered_ids }),
-                )
-                .await?,
-            ))
+            ok(user_rpc!(state, auth, "reorderMealGroups", "orderedIds": ordered_ids).await?)
         }
         (Some("meal-groups"), Some(group_id), None, "PATCH") => {
             let input = require_object(read_json(&body)?)?;
             require_string_field(&input, "label", "Meal group name is required.")?;
-            Ok((StatusCode::OK, rpc(state, "updateMealGroup", json!({ "userId": auth.user_id, "groupId": require_uuid(group_id)?, "input": input })).await?))
-        }
-        (Some("meal-groups"), Some(group_id), None, "DELETE") => {
-            let deleted = rpc(
-                state,
-                "deleteMealGroup",
-                json!({ "userId": auth.user_id, "groupId": require_uuid(group_id)? }),
+            ok(
+                user_rpc!(state, auth, "updateMealGroup", "groupId": require_uuid(group_id)?, "input": input)
+                    .await?,
             )
-            .await?;
-            if !deleted.as_bool().unwrap_or(false) {
-                return Err(ApiFailure::new(
-                    StatusCode::NOT_FOUND,
-                    "not_found",
-                    "Meal group not found.",
-                ));
-            }
-            Ok((StatusCode::OK, json!({ "deleted": true })))
         }
+        (Some("meal-groups"), Some(group_id), None, "DELETE") => require_deleted(
+            user_rpc!(state, auth, "deleteMealGroup", "groupId": require_uuid(group_id)?).await?,
+            "Meal group not found.",
+        ),
         (Some("foods"), Some("search"), None, "GET") => {
-            let products = rpc(state, "searchFoodProducts", json!({ "userId": auth.user_id, "query": query_param(uri, "q").unwrap_or_default() })).await?;
-            Ok((StatusCode::OK, map_food_array(products)))
+            let query = query_param(uri, "q").unwrap_or_default();
+            let products = user_rpc!(state, auth, "searchFoodProducts", "query": query).await?;
+            ok(map_food_array(products))
         }
         (Some("foods"), None, None, "POST") => {
             let input = sanitize_api_food_input(read_json(&body)?, None)?;
-            let product = rpc(
-                state,
-                "createPersonalFoodProduct",
-                json!({ "userId": auth.user_id, "input": input }),
-            )
-            .await?;
-            Ok((StatusCode::CREATED, map_food_product(product)))
+            let product =
+                user_rpc!(state, auth, "createPersonalFoodProduct", "input": input).await?;
+            created(map_food_product(product))
         }
         (Some("foods"), Some(product_id), None, "PATCH") => {
             let product_id = require_uuid(product_id)?;
-            let existing = rpc(
-                state,
-                "getFoodProductByIdForUser",
-                json!({ "userId": auth.user_id, "productId": product_id }),
-            )
-            .await?;
+            let existing =
+                user_rpc!(state, auth, "getFoodProductByIdForUser", "productId": product_id)
+                    .await?;
             if existing.is_null()
                 || existing.get("ownerUserId").and_then(Value::as_str)
                     != Some(auth.user_id.to_string().as_str())
                 || existing.get("scope").and_then(Value::as_str) != Some("personal")
             {
-                return Err(ApiFailure::new(
-                    StatusCode::NOT_FOUND,
-                    "not_found",
-                    "Food product not found.",
-                ));
+                return Err(not_found("Food product not found."));
             }
             let input = sanitize_api_food_input(read_json(&body)?, Some(existing))?;
-            let product = rpc(
-                state,
-                "updatePersonalFoodProduct",
-                json!({ "userId": auth.user_id, "productId": product_id, "input": input }),
-            )
-            .await?;
-            Ok((StatusCode::OK, map_food_product(product)))
+            let product = user_rpc!(state, auth, "updatePersonalFoodProduct", "productId": product_id, "input": input)
+                .await?;
+            ok(map_food_product(product))
         }
         (Some("barcodes"), Some(barcode), None, "GET") => {
             require_barcode(barcode)?;
@@ -531,44 +414,22 @@ async fn dispatch_api_request(
                 json!({ "barcode": barcode }),
             )
             .await?;
-            Ok((
-                StatusCode::OK,
-                if product.is_null() {
-                    Value::Null
-                } else {
-                    map_food_product(product)
-                },
-            ))
+            ok(if product.is_null() {
+                Value::Null
+            } else {
+                map_food_product(product)
+            })
         }
         (Some("templates"), Some("from-day"), None, "POST") => {
             let input = require_object(read_json(&body)?)?;
             let date = require_string_field(&input, "date", "Date must use YYYY-MM-DD.")?;
             require_date(&date)?;
-            Ok((
-                StatusCode::CREATED,
-                rpc(
-                    state,
-                    "createTemplateFromDate",
-                    json!({ "userId": auth.user_id, "input": input }),
-                )
-                .await?,
-            ))
+            created(user_rpc!(state, auth, "createTemplateFromDate", "input": input).await?)
         }
-        (Some("templates"), None, None, "GET") => Ok((
-            StatusCode::OK,
-            rpc(state, "getTemplates", json!({ "userId": auth.user_id })).await?,
-        )),
+        (Some("templates"), None, None, "GET") => ok(user_rpc!(state, auth, "getTemplates").await?),
         (Some("templates"), None, None, "POST") => {
             let input = require_object(read_json(&body)?)?;
-            Ok((
-                StatusCode::CREATED,
-                rpc(
-                    state,
-                    "createTemplate",
-                    json!({ "userId": auth.user_id, "input": input }),
-                )
-                .await?,
-            ))
+            created(user_rpc!(state, auth, "createTemplate", "input": input).await?)
         }
         (Some("templates"), Some(template_id), Some("apply"), "POST") => {
             let mut input = require_object(read_json(&body)?)?;
@@ -578,67 +439,32 @@ async fn dispatch_api_request(
                 "templateId".to_string(),
                 Value::String(require_uuid(template_id)?),
             );
-            Ok((
-                StatusCode::CREATED,
-                rpc(
-                    state,
-                    "applyTemplateToDate",
-                    json!({ "userId": auth.user_id, "input": input }),
-                )
-                .await?,
-            ))
+            created(user_rpc!(state, auth, "applyTemplateToDate", "input": input).await?)
         }
         (Some("templates"), Some(template_id), None, "GET") => {
-            let template = rpc(
-                state,
-                "getTemplateById",
-                json!({ "userId": auth.user_id, "templateId": require_uuid(template_id)? }),
-            )
-            .await?;
-            if template.is_null() {
-                return Err(ApiFailure::new(
-                    StatusCode::NOT_FOUND,
-                    "not_found",
-                    "Template not found.",
-                ));
-            }
-            Ok((StatusCode::OK, template))
+            let template = require_found(
+                user_rpc!(state, auth, "getTemplateById", "templateId": require_uuid(template_id)?)
+                    .await?,
+                "Template not found.",
+            )?;
+            ok(template)
         }
         (Some("templates"), Some(template_id), None, "PATCH") => {
             let input = require_object(read_json(&body)?)?;
-            Ok((StatusCode::OK, rpc(state, "updateTemplate", json!({ "userId": auth.user_id, "templateId": require_uuid(template_id)?, "input": input })).await?))
-        }
-        (Some("templates"), Some(template_id), None, "DELETE") => {
-            let deleted = rpc(
-                state,
-                "deleteTemplate",
-                json!({ "userId": auth.user_id, "templateId": require_uuid(template_id)? }),
+            ok(
+                user_rpc!(state, auth, "updateTemplate", "templateId": require_uuid(template_id)?, "input": input)
+                    .await?,
             )
-            .await?;
-            if !deleted.as_bool().unwrap_or(false) {
-                return Err(ApiFailure::new(
-                    StatusCode::NOT_FOUND,
-                    "not_found",
-                    "Template not found.",
-                ));
-            }
-            Ok((StatusCode::OK, json!({ "deleted": true })))
         }
-        (Some("recipes"), None, None, "GET") => Ok((
-            StatusCode::OK,
-            rpc(state, "getRecipes", json!({ "userId": auth.user_id })).await?,
-        )),
+        (Some("templates"), Some(template_id), None, "DELETE") => require_deleted(
+            user_rpc!(state, auth, "deleteTemplate", "templateId": require_uuid(template_id)?)
+                .await?,
+            "Template not found.",
+        ),
+        (Some("recipes"), None, None, "GET") => ok(user_rpc!(state, auth, "getRecipes").await?),
         (Some("recipes"), None, None, "POST") => {
             let input = require_object(read_json(&body)?)?;
-            Ok((
-                StatusCode::CREATED,
-                rpc(
-                    state,
-                    "createRecipe",
-                    json!({ "userId": auth.user_id, "input": input }),
-                )
-                .await?,
-            ))
+            created(user_rpc!(state, auth, "createRecipe", "input": input).await?)
         }
         (Some("recipes"), Some(recipe_id), Some("log"), "POST") => {
             let input = build_recipe_log_input(
@@ -648,135 +474,69 @@ async fn dispatch_api_request(
                 read_json(&body)?,
             )
             .await?;
-            Ok((
-                StatusCode::CREATED,
-                rpc(
-                    state,
-                    "createMealEntry",
-                    json!({ "userId": auth.user_id, "input": input }),
-                )
-                .await?,
-            ))
+            created(user_rpc!(state, auth, "createMealEntry", "input": input).await?)
         }
         (Some("recipes"), Some(recipe_id), None, "GET") => {
-            let recipe = rpc(
-                state,
-                "getRecipeById",
-                json!({ "userId": auth.user_id, "recipeId": require_uuid(recipe_id)? }),
-            )
-            .await?;
-            if recipe.is_null() {
-                return Err(ApiFailure::new(
-                    StatusCode::NOT_FOUND,
-                    "not_found",
-                    "Recipe not found.",
-                ));
-            }
-            Ok((StatusCode::OK, recipe))
+            let recipe = require_found(
+                user_rpc!(state, auth, "getRecipeById", "recipeId": require_uuid(recipe_id)?)
+                    .await?,
+                "Recipe not found.",
+            )?;
+            ok(recipe)
         }
         (Some("recipes"), Some(recipe_id), None, "PATCH") => {
             let input = require_object(read_json(&body)?)?;
-            Ok((StatusCode::OK, rpc(state, "updateRecipe", json!({ "userId": auth.user_id, "recipeId": require_uuid(recipe_id)?, "input": input })).await?))
-        }
-        (Some("recipes"), Some(recipe_id), None, "DELETE") => {
-            let deleted = rpc(
-                state,
-                "deleteRecipe",
-                json!({ "userId": auth.user_id, "recipeId": require_uuid(recipe_id)? }),
+            ok(
+                user_rpc!(state, auth, "updateRecipe", "recipeId": require_uuid(recipe_id)?, "input": input)
+                    .await?,
             )
-            .await?;
-            if !deleted.as_bool().unwrap_or(false) {
-                return Err(ApiFailure::new(
-                    StatusCode::NOT_FOUND,
-                    "not_found",
-                    "Recipe not found.",
-                ));
-            }
-            Ok((StatusCode::OK, json!({ "deleted": true })))
         }
-        (Some("weight"), None, None, "GET") => Ok((
-            StatusCode::OK,
-            rpc(
-                state,
-                "getWeightPageData",
-                json!({ "userId": auth.user_id, "selectedDate": reference_date(uri)? }),
-            )
-            .await?,
-        )),
-        (Some("weight"), Some("entries"), None, "GET") => Ok((
-            StatusCode::OK,
-            rpc(state, "getWeightEntries", json!({ "userId": auth.user_id })).await?,
-        )),
+        (Some("recipes"), Some(recipe_id), None, "DELETE") => require_deleted(
+            user_rpc!(state, auth, "deleteRecipe", "recipeId": require_uuid(recipe_id)?).await?,
+            "Recipe not found.",
+        ),
+        (Some("weight"), None, None, "GET") => ok(
+            user_rpc!(state, auth, "getWeightPageData", "selectedDate": reference_date(uri)?)
+                .await?,
+        ),
+        (Some("weight"), Some("entries"), None, "GET") => {
+            ok(user_rpc!(state, auth, "getWeightEntries").await?)
+        }
         (Some("weight"), Some("entries"), None, "POST") => {
             let input = require_object(read_json(&body)?)?;
             let date = require_string_field(&input, "date", "Date must use YYYY-MM-DD.")?;
             require_date(&date)?;
-            let created = rpc(
-                state,
-                "createWeightEntryNoOverwrite",
-                json!({ "userId": auth.user_id, "input": input }),
-            )
-            .await?;
-            if created.is_null() {
+            let entry =
+                user_rpc!(state, auth, "createWeightEntryNoOverwrite", "input": input).await?;
+            if entry.is_null() {
                 return Err(weight_conflict());
             }
-            Ok((StatusCode::CREATED, created))
+            created(entry)
         }
         (Some("weight"), Some("entries"), Some(entry_id), "PATCH") => {
             let entry_id = require_uuid(entry_id)?;
             let patch = require_object(read_json(&body)?)?;
-            if let Some(date) = patch.get("date").and_then(Value::as_str) {
-                require_date(date)?;
-            } else if patch.contains_key("date") {
-                return Err(bad_request("Date must use YYYY-MM-DD."));
-            }
-            let existing = rpc(
-                state,
-                "getWeightEntryById",
-                json!({ "userId": auth.user_id, "entryId": entry_id }),
-            )
-            .await?;
-            if existing.is_null() {
-                return Err(ApiFailure::new(
-                    StatusCode::NOT_FOUND,
-                    "not_found",
-                    "Weight entry not found.",
-                ));
-            }
+            require_optional_date(&patch)?;
+            let existing = require_found(
+                user_rpc!(state, auth, "getWeightEntryById", "entryId": entry_id).await?,
+                "Weight entry not found.",
+            )?;
             let merged = apply_client_patch(require_object(existing)?, patch);
             let date = require_string_field(&merged, "date", "Date must use YYYY-MM-DD.")?;
             require_date(&date)?;
-            // The unique-violation is already translated into `weight_conflict()`
-            // by `api_failure_from_app_error`, so there is nothing to re-check
-            // here.
-            let value = rpc(
-                state,
-                "updateWeightEntry",
-                json!({ "userId": auth.user_id, "entryId": entry_id, "input": merged }),
+            // A unique violation already becomes `weight_conflict()` in `api_failure_from_app_error`.
+            ok(
+                user_rpc!(state, auth, "updateWeightEntry", "entryId": entry_id, "input": merged)
+                    .await?,
             )
-            .await?;
-            Ok((StatusCode::OK, value))
         }
-        (Some("weight"), Some("entries"), Some(entry_id), "DELETE") => {
-            let deleted = rpc(
-                state,
-                "deleteWeightEntry",
-                json!({ "userId": auth.user_id, "entryId": require_uuid(entry_id)? }),
-            )
-            .await?;
-            if !deleted.as_bool().unwrap_or(false) {
-                return Err(ApiFailure::new(
-                    StatusCode::NOT_FOUND,
-                    "not_found",
-                    "Weight entry not found.",
-                ));
-            }
-            Ok((StatusCode::OK, json!({ "deleted": true })))
+        (Some("weight"), Some("entries"), Some(entry_id), "DELETE") => require_deleted(
+            user_rpc!(state, auth, "deleteWeightEntry", "entryId": require_uuid(entry_id)?).await?,
+            "Weight entry not found.",
+        ),
+        (Some("weight"), Some("goal"), None, "GET") => {
+            ok(json!({ "goalWeightKg": user_rpc!(state, auth, "getWeightGoal").await? }))
         }
-        (Some("weight"), Some("goal"), None, "GET") => Ok((
-            StatusCode::OK,
-            json!({ "goalWeightKg": rpc(state, "getWeightGoal", json!({ "userId": auth.user_id })).await? }),
-        )),
         (Some("weight"), Some("goal"), None, "PATCH") => {
             let body = require_object(read_json(&body)?)?;
             let goal_weight_kg = body.get("goalWeightKg").cloned().ok_or_else(|| {
@@ -791,73 +551,34 @@ async fn dispatch_api_request(
                     "goalWeightKg must be null or a finite positive number.",
                 ));
             }
-            rpc(
-                state,
-                "saveWeightGoal",
-                json!({ "userId": auth.user_id, "goalWeightKg": goal_weight_kg }),
-            )
-            .await?;
-            Ok((
-                StatusCode::OK,
-                json!({ "goalWeightKg": rpc(state, "getWeightGoal", json!({ "userId": auth.user_id })).await? }),
-            ))
+            user_rpc!(state, auth, "saveWeightGoal", "goalWeightKg": goal_weight_kg).await?;
+            ok(json!({ "goalWeightKg": user_rpc!(state, auth, "getWeightGoal").await? }))
         }
-        (Some("stats"), None, None, "GET") => Ok((
-            StatusCode::OK,
-            rpc(
-                state,
-                "getStatsPageData",
-                json!({ "userId": auth.user_id, "today": reference_date(uri)? }),
-            )
-            .await?,
-        )),
+        (Some("stats"), None, None, "GET") => {
+            ok(user_rpc!(state, auth, "getStatsPageData", "today": reference_date(uri)?).await?)
+        }
         (Some("summary"), None, None, "GET") => {
             let date = reference_date(uri)?;
-            let daily_summary = rpc(
-                state,
-                "getDailySummary",
-                json!({ "userId": auth.user_id, "date": date }),
-            )
-            .await?;
-            let period_averages = rpc(
-                state,
-                "getPeriodAverages",
-                json!({ "userId": auth.user_id, "selectedDate": date }),
-            )
-            .await?;
-            let goals = rpc(state, "getUserGoals", json!({ "userId": auth.user_id })).await?;
-            let stats = rpc(
-                state,
-                "getStatsPageData",
-                json!({ "userId": auth.user_id, "today": date }),
-            )
-            .await?;
-            Ok((
-                StatusCode::OK,
+            let daily_summary = user_rpc!(state, auth, "getDailySummary", "date": date).await?;
+            let period_averages =
+                user_rpc!(state, auth, "getPeriodAverages", "selectedDate": date).await?;
+            let goals = user_rpc!(state, auth, "getUserGoals").await?;
+            let stats = user_rpc!(state, auth, "getStatsPageData", "today": date).await?;
+            ok(
                 json!({ "date": date, "dailySummary": daily_summary, "periodAverages": period_averages, "goals": goals, "stats": stats }),
-            ))
-        }
-        (Some("leaderboard"), None, None, "GET") => Ok((
-            StatusCode::OK,
-            rpc(
-                state,
-                "getLeaderboardStats",
-                json!({ "userId": auth.user_id, "referenceDate": reference_date(uri)? }),
             )
-            .await?,
-        )),
+        }
+        (Some("leaderboard"), None, None, "GET") => ok(
+            user_rpc!(state, auth, "getLeaderboardStats", "referenceDate": reference_date(uri)?)
+                .await?,
+        ),
         (Some("sync"), Some("healthkit"), None, "GET") => {
             let days = bounded_query_int(uri, "days", 7, 1, 30)?;
             let limit = bounded_query_int(uri, "limit", 100, 1, 200)?;
-            Ok((
-                StatusCode::OK,
-                rpc(
-                    state,
-                    "getHealthkitSyncEntries",
-                    json!({ "userId": auth.user_id, "days": days, "limit": limit }),
-                )
-                .await?,
-            ))
+            ok(
+                user_rpc!(state, auth, "getHealthkitSyncEntries", "days": days, "limit": limit)
+                    .await?,
+            )
         }
         (Some("sync"), Some("healthkit"), Some("ack"), "POST") => {
             let body = require_object(read_json(&body)?)?;
@@ -865,21 +586,9 @@ async fn dispatch_api_request(
                 .get("entryIds")
                 .cloned()
                 .ok_or_else(|| bad_request("entryIds must be an array of meal entry IDs."))?;
-            Ok((
-                StatusCode::OK,
-                rpc(
-                    state,
-                    "ackHealthkitSyncEntries",
-                    json!({ "userId": auth.user_id, "entryIds": entry_ids }),
-                )
-                .await?,
-            ))
+            ok(user_rpc!(state, auth, "ackHealthkitSyncEntries", "entryIds": entry_ids).await?)
         }
-        _ => Err(ApiFailure::new(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "API endpoint not found.",
-        )),
+        _ => Err(not_found("API endpoint not found.")),
     }
 }
 
@@ -889,9 +598,7 @@ async fn rpc(state: &AppState, op: &str, args: Value) -> ApiResult<Value> {
         .map_err(api_failure_from_app_error)
 }
 
-/// Every endpoint the public API serves, matched **in order**: a shape with a
-/// literal segment must precede the wildcard shape that would otherwise swallow
-/// it (`/foods/search` before `/foods/{id}`).
+/// Every endpoint the public API serves, matched **in order**: a literal shape must precede any wildcard it shadows.
 const API_V1_ENDPOINTS: &[Endpoint] = &[
     Endpoint {
         path: "/me",
@@ -1058,8 +765,7 @@ const API_V1_ENDPOINTS: &[Endpoint] = &[
         methods: &["POST"],
         scopes: &[("POST", &["write:daily"])],
     },
-    // Answered before authentication in `handle_api_v1`. The empty scope list
-    // is the contract published for it, not a routing default.
+    // Answered before authentication in `handle_api_v1`; the empty scope list is the published contract, not a default.
     Endpoint {
         path: "/openapi.json",
         methods: &["GET"],
@@ -1074,8 +780,7 @@ fn endpoint_for(path: &[String]) -> Option<Endpoint> {
         .copied()
 }
 
-/// A template segment in braces matches any single path segment; every other
-/// segment must match exactly, and the two lengths must agree.
+/// A `{brace}` template segment matches any single path segment; every other segment must match exactly.
 fn path_template_matches(template: &str, path: &[String]) -> bool {
     let mut matched = 0usize;
     for segment in template.split('/').filter(|segment| !segment.is_empty()) {
@@ -1090,13 +795,7 @@ fn path_template_matches(template: &str, path: &[String]) -> bool {
     matched == path.len()
 }
 
-/// Required scopes for `method` on `endpoint`, or `None` when the endpoint
-/// declares none for it.
-///
-/// API-01: this lookup used to end in `.unwrap_or(&[])`, so a method listed in
-/// `Endpoint::methods` but missing from `Endpoint::scopes` silently required no
-/// scope at all and any valid token could call it. The caller now refuses such
-/// a request, making the default deny.
+/// Required scopes for `method` on `endpoint`, or `None` when the endpoint declares none for it (API-01: default-deny).
 fn required_scopes(endpoint: &Endpoint, method: &str) -> Option<&'static [&'static str]> {
     endpoint
         .scopes
@@ -1160,16 +859,11 @@ fn require_string_field(
 }
 
 fn require_date(value: &str) -> ApiResult<()> {
-    // Same rule the internal RPC path enforces, so both entry points agree on
-    // what a date is.
+    // Same rule the internal RPC path enforces, so both entry points agree on what a date is.
     crate::db::ensure_date_string(value).map_err(|_| bad_request("Date must use YYYY-MM-DD."))
 }
 
-/// API-11: `/api/v1/barcodes/{barcode}` accepted anything while its
-/// session-authenticated twin in `legacy_api.rs` has always required 4–20
-/// characters. Not exploitable — the lookup is a parameterised equality — but
-/// two entry points to one capability should not disagree about what a barcode
-/// is, so both now read the same bounds.
+/// API-11: bounds match the session-authenticated twin in `legacy_api.rs`, so both entry points agree on a barcode.
 fn require_barcode(value: &str) -> ApiResult<()> {
     use crate::legacy_api::{MAX_BARCODE_LENGTH, MIN_BARCODE_LENGTH};
 
@@ -1191,21 +885,33 @@ fn has_non_null(record: &Map<String, Value>, key: &str) -> bool {
     record.get(key).is_some_and(|value| !value.is_null())
 }
 
-/// Prefix reserved for control flags that this module adds to an RPC `input`
-/// map. `db.rs` reads them back out of that same map, so they are part of the
-/// internal calling convention and must never be settable by a client.
+fn require_found(value: Value, message: impl Into<String>) -> ApiResult<Value> {
+    if value.is_null() {
+        return Err(not_found(message));
+    }
+    Ok(value)
+}
+
+fn require_deleted(deleted: Value, message: impl Into<String>) -> ApiResult<(StatusCode, Value)> {
+    if !deleted.as_bool().unwrap_or(false) {
+        return Err(not_found(message));
+    }
+    ok(json!({ "deleted": true }))
+}
+
+fn require_optional_date(patch: &Map<String, Value>) -> ApiResult<()> {
+    if let Some(date) = patch.get("date").and_then(Value::as_str) {
+        require_date(date)?;
+    } else if patch.contains_key("date") {
+        return Err(bad_request("Date must use YYYY-MM-DD."));
+    }
+    Ok(())
+}
+
+/// Reserved prefix for RPC `input` control flags that `db.rs` reads back; must never be settable by a client.
 const PRIVATE_INPUT_KEY_PREFIX: &str = "__";
 
-/// Copies a client patch onto a stored record, dropping every reserved key.
-///
-/// DATA-02: `PATCH` handlers merge the raw request body onto the row they just
-/// read and hand the result to the RPC layer as `input`. Copying every key
-/// meant a caller could inject `__recalculateProductMacros`, the private flag
-/// that decides whether a product-linked entry's macros are recomputed from the
-/// product row or taken verbatim from the request — i.e. the client could
-/// choose to have its own macro numbers stored against someone else's product
-/// snapshot. Reserved keys are stripped here; only the callers below may add
-/// one back.
+/// Copies a client patch onto a record, dropping reserved keys (DATA-02); only the callers below may add one back.
 fn apply_client_patch(
     mut record: Map<String, Value>,
     patch: Map<String, Value>,
@@ -1219,12 +925,7 @@ fn apply_client_patch(
     record
 }
 
-/// Merges a meal-entry patch and re-derives the product-snapshot flag.
-///
-/// The flag is set only when the entry is product-linked and the patch touches
-/// none of the fields the product snapshot is derived from — patching any of
-/// them means the caller wants the entry recalculated. It is computed from the
-/// stored row and the patch's *key set*, never from a client-supplied value.
+/// Merges a meal-entry patch and re-derives the product-snapshot flag from the stored row and the patch's key set only.
 fn merge_meal_entry_patch(
     existing: Map<String, Value>,
     patch: Map<String, Value>,
@@ -1259,18 +960,15 @@ fn merge_goals(current: Value, patch: Value) -> ApiResult<Value> {
             .or_else(|| current.get(key))
             .cloned()
             .unwrap_or(Value::Null);
+        let message = format!("{key} must be null or a finite non-negative number.");
         if !(value.is_null() || value.as_f64().is_some()) {
-            return Err(bad_request(format!(
-                "{key} must be null or a finite non-negative number."
-            )));
+            return Err(bad_request(message));
         }
         if value
             .as_f64()
             .is_some_and(|number| number < 0.0 || !number.is_finite())
         {
-            return Err(bad_request(format!(
-                "{key} must be null or a finite non-negative number."
-            )));
+            return Err(bad_request(message));
         }
         if key == "caloriesKcal" && value.as_f64().is_some_and(|number| number.fract() != 0.0) {
             return Err(bad_request("caloriesKcal must be an integer."));
@@ -1360,6 +1058,14 @@ fn map_food_product(product: Value) -> Value {
     Value::Object(object)
 }
 
+fn finite_or_nan(body: &Map<String, Value>, key: &str) -> Option<f64> {
+    match body.get(key) {
+        Some(Value::Number(number)) => Some(number.as_f64().unwrap_or(f64::NAN)),
+        Some(_) => Some(f64::NAN),
+        None => None,
+    }
+}
+
 async fn build_recipe_log_input(
     state: &AppState,
     user_id: Uuid,
@@ -1375,28 +1081,14 @@ async fn build_recipe_log_input(
         json!({ "userId": user_id, "recipeId": recipe_id }),
     )
     .await?;
-    if recipe.is_null() {
-        return Err(ApiFailure::new(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "Recipe not found.",
-        ));
-    }
-    let portion_count = match body.get("portionCount") {
-        Some(Value::Number(number)) => number.as_f64().unwrap_or(f64::NAN),
-        Some(_) => f64::NAN,
-        None => 1.0,
-    };
+    let recipe = require_found(recipe, "Recipe not found.")?;
+    let portion_count = finite_or_nan(&body, "portionCount").unwrap_or(1.0);
     if !portion_count.is_finite() || portion_count <= 0.0 {
         return Err(bad_request(
             "portionCount must be a finite positive number.",
         ));
     }
-    let grams_consumed = match body.get("gramsConsumed") {
-        Some(Value::Number(number)) => Some(number.as_f64().unwrap_or(f64::NAN)),
-        Some(_) => Some(f64::NAN),
-        None => None,
-    };
+    let grams_consumed = finite_or_nan(&body, "gramsConsumed");
     if grams_consumed.is_some_and(|value| !value.is_finite() || value <= 0.0) {
         return Err(bad_request(
             "gramsConsumed must be a finite positive number.",
@@ -1458,6 +1150,7 @@ async fn build_recipe_log_input(
             }
         )
     };
+    let scaled = |key: &str| per_portion.get(key).and_then(Value::as_f64).unwrap_or(0.0) * factor;
     Ok(Map::from_iter([
         ("date".to_string(), Value::String(date)),
         ("status".to_string(), Value::String(status)),
@@ -1477,46 +1170,12 @@ async fn build_recipe_log_input(
                 .to_string(),
             ),
         ),
-        (
-            "proteinG".to_string(),
-            json!(round1(
-                per_portion
-                    .get("proteinG")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0)
-                    * factor
-            )),
-        ),
-        (
-            "carbsG".to_string(),
-            json!(round1(
-                per_portion
-                    .get("carbsG")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0)
-                    * factor
-            )),
-        ),
-        (
-            "fatG".to_string(),
-            json!(round1(
-                per_portion
-                    .get("fatG")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0)
-                    * factor
-            )),
-        ),
+        ("proteinG".to_string(), json!(round1(scaled("proteinG")))),
+        ("carbsG".to_string(), json!(round1(scaled("carbsG")))),
+        ("fatG".to_string(), json!(round1(scaled("fatG")))),
         (
             "caloriesKcal".to_string(),
-            json!(
-                (per_portion
-                    .get("caloriesKcal")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0)
-                    * factor)
-                    .round() as i32
-            ),
+            json!(scaled("caloriesKcal").round() as i32),
         ),
     ]))
 }
@@ -1550,8 +1209,28 @@ fn bounded_query_int(uri: &Uri, name: &str, default: i64, min: i64, max: i64) ->
     }
 }
 
+fn ok(data: Value) -> ApiResult<(StatusCode, Value)> {
+    Ok((StatusCode::OK, data))
+}
+
+fn created(data: Value) -> ApiResult<(StatusCode, Value)> {
+    Ok((StatusCode::CREATED, data))
+}
+
 fn bad_request(message: impl Into<String>) -> ApiFailure {
     ApiFailure::new(StatusCode::BAD_REQUEST, "bad_request", message)
+}
+
+fn not_found(message: impl Into<String>) -> ApiFailure {
+    ApiFailure::new(StatusCode::NOT_FOUND, "not_found", message)
+}
+
+fn require_scope(auth: &ApiAuth, scope: &'static str) -> ApiResult<()> {
+    if auth.scopes.iter().any(|owned| owned == scope) {
+        Ok(())
+    } else {
+        Err(insufficient_scope(scope))
+    }
 }
 
 fn insufficient_scope(scope: &'static str) -> ApiFailure {
@@ -1582,21 +1261,14 @@ fn internal_error() -> ApiFailure {
 }
 
 fn api_failure_from_app_error(error: AppError) -> ApiFailure {
-    // Everything the backend already classifies is taken straight from
-    // `AppError`, so the status/code strings live in exactly one place. Only
-    // the two genuine API-surface divergences are spelled out.
+    // `AppError` is taken straight through; only the two API-surface divergences below are spelled out.
     match error {
-        // The public API authenticates with Bearer tokens, so an auth failure
-        // is reported as `invalid_token` rather than the internal
-        // `unauthorized`.
+        // Bearer-token auth, so a failure is reported as `invalid_token` rather than the internal `unauthorized`.
         AppError::Unauthorized(message) => {
             ApiFailure::new(StatusCode::UNAUTHORIZED, "invalid_token", message)
         }
-        // API-03: only the weight-date constraint used to be recognised, so
-        // every other unique violation — reusing a `clientMutationId`, say —
-        // surfaced as a 500 `internal_error`, telling the caller the server
-        // broke when in fact their request collided with an existing row. The
-        // constraint name is logged, never returned: it names internal schema.
+        // API-03: every unique violation maps to a conflict.
+        // The constraint name is logged, never returned (names internal schema).
         AppError::Sqlx(ref sqlx_error)
             if sqlx_error
                 .as_database_error()
@@ -1626,10 +1298,6 @@ fn api_failure_from_app_error(error: AppError) -> ApiFailure {
             ApiFailure::new(status, code, error.to_string())
         }
     }
-}
-
-fn json_response(status: StatusCode, body: Value, allow: Option<&str>) -> Response {
-    raw_json_response(status, body, allow)
 }
 
 fn raw_json_response(status: StatusCode, body: Value, allow: Option<&str>) -> Response {

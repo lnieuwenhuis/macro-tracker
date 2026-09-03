@@ -14,6 +14,9 @@ type BarcodeScannerProps = {
   onClose: () => void;
 };
 
+const LOOKUP_UNAVAILABLE_MESSAGE =
+  "Could not reach the product database. Check your connection and try again.";
+
 export function BarcodeScanner({
   onScan,
   onNotFound,
@@ -37,6 +40,11 @@ export function BarcodeScanner({
     stoppedRef.current = false;
     isProcessingRef.current = false;
 
+    function failLookup() {
+      setStatus("error");
+      setErrorMessage(LOOKUP_UNAVAILABLE_MESSAGE);
+    }
+
     async function startScanner() {
       try {
         const [{ BrowserMultiFormatReader }, { DecodeHintType }] =
@@ -47,8 +55,7 @@ export function BarcodeScanner({
 
         if (stoppedRef.current || !videoRef.current) return;
 
-        // TRY_HARDER makes ZXing rotate and invert the image on each frame,
-        // so barcodes are detected in any orientation — not just horizontal.
+        // TRY_HARDER makes ZXing rotate/invert each frame, so barcodes are detected in any orientation.
         const hints = new Map();
         hints.set(DecodeHintType.TRY_HARDER, true);
 
@@ -77,21 +84,14 @@ export function BarcodeScanner({
               if (lookupResult.found) {
                 onScanRef.current(lookupResult.product);
               } else if (lookupResult.reason === "unavailable") {
-                // Not a catalogue miss: say the lookup failed rather than
-                // sending the user off to re-enter a product that may exist.
-                setStatus("error");
-                setErrorMessage(
-                  "Could not reach the product database. Check your connection and try again.",
-                );
+                // Not a catalogue miss: the lookup failed, so don't send the user to re-enter a product that may exist.
+                failLookup();
               } else {
                 onNotFoundRef.current(lookupResult.barcode);
               }
             } catch {
               if (!stoppedRef.current) {
-                setStatus("error");
-                setErrorMessage(
-                  "Could not reach the product database. Check your connection and try again.",
-                );
+                failLookup();
               }
             }
           },
@@ -130,7 +130,6 @@ export function BarcodeScanner({
         onClose={onClose}
         className="fixed inset-0 z-50 bg-black outline-none"
       >
-        {/* Full-screen camera feed */}
         <video
           ref={videoRef}
           className="absolute inset-0 h-full w-full object-cover"
@@ -149,19 +148,16 @@ export function BarcodeScanner({
               boxShadow: "0 0 0 9999px rgba(0,0,0,0.60)",
             }}
           >
-            {/* Corner brackets */}
             <span className="absolute left-0 top-0 h-6 w-6 border-l-2 border-t-2 border-white/90" />
             <span className="absolute right-0 top-0 h-6 w-6 border-r-2 border-t-2 border-white/90" />
             <span className="absolute bottom-0 left-0 h-6 w-6 border-b-2 border-l-2 border-white/90" />
             <span className="absolute bottom-0 right-0 h-6 w-6 border-b-2 border-r-2 border-white/90" />
 
-            {/* Animated scan line — only shown while actively scanning */}
             {status === "scanning" && (
               <div className="scan-line absolute inset-x-2 h-px bg-[var(--color-accent)] opacity-80 shadow-[0_0_6px_1px_var(--color-accent)]" />
             )}
           </div>
 
-          {/* Status text sits just below the scanning frame */}
           <div
             role="status"
             aria-live="polite"
@@ -199,7 +195,6 @@ export function BarcodeScanner({
           </div>
         </div>
 
-        {/* Close button */}
         <button
           type="button"
           onClick={onClose}

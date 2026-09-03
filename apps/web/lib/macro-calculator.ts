@@ -110,22 +110,21 @@ export type MacroCalculationResult = {
   };
 };
 
-function getActivityLevel(activityLevel: ActivityLevelId) {
-  const option = ACTIVITY_LEVEL_OPTIONS.find((item) => item.id === activityLevel);
+function findOptionOrThrow<T extends { id: string }>(options: readonly T[], id: string, label: string): T {
+  const option = options.find((item) => item.id === id);
   if (!option) {
-    throw new Error(`Unknown activity level: ${activityLevel}`);
+    throw new Error(`${label}: ${id}`);
   }
 
   return option;
 }
 
-function getGoalPreset(goalPreset: GoalPresetId) {
-  const option = GOAL_PRESET_OPTIONS.find((item) => item.id === goalPreset);
-  if (!option) {
-    throw new Error(`Unknown goal preset: ${goalPreset}`);
-  }
+function getActivityLevel(activityLevel: ActivityLevelId) {
+  return findOptionOrThrow(ACTIVITY_LEVEL_OPTIONS, activityLevel, "Unknown activity level");
+}
 
-  return option;
+function getGoalPreset(goalPreset: GoalPresetId) {
+  return findOptionOrThrow(GOAL_PRESET_OPTIONS, goalPreset, "Unknown goal preset");
 }
 
 function getProteinReferenceWeight(weightKg: number, heightCm: number) {

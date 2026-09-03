@@ -61,9 +61,7 @@ const themeInitScript = `
   } catch (e) {}
 `;
 
-// Runs while the initial HTML is parsed, so the zone is already on the cookie
-// jar for every subsequent request — including the RSC fetches a client-side
-// navigation makes. Server code can then resolve the user's own calendar day.
+// Runs during initial HTML parse, so the zone is on the cookie jar for every subsequent request, including RSC fetches.
 const timeZoneInitScript = `
   try {
     var tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -78,22 +76,8 @@ const timeZoneInitScript = `
   } catch (e) {}
 `;
 
-/**
- * `script-src` is nonce-based (see `buildContentSecurityPolicy` in
- * `proxy.ts`), so both bootstraps have to carry the request's nonce or the
- * browser blocks them — silently, which for the timezone bootstrap means
- * `mt_tz` is never set and every non-UTC user gets the server's "today".
- *
- * The `nonce` prop is load-bearing rather than cosmetic: `next/script` only
- * renders the nonce it took from context onto the *wrapper* script, while the
- * bootstrap body is replayed later by Next's runtime from `self.__next_s`,
- * which reproduces only the props it was given. Passing `nonce` explicitly is
- * what puts it on the element that actually executes.
- *
- * Reading `headers()` here opts every route into dynamic rendering. That is
- * unavoidable: a nonce is per request, and a prerendered page's HTML is
- * written before any request exists.
- */
+// script-src is nonce-based (proxy.ts); the nonce prop is load-bearing, since next/script replays props onto it.
+// A missing nonce is blocked silently (mt_tz never set); reading headers() opts every route into dynamic rendering.
 export default async function RootLayout({
   children,
 }: Readonly<{

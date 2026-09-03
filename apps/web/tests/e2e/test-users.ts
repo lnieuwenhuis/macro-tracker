@@ -33,14 +33,7 @@ export function uniqueTestEmail(base: TestUserBase, testInfo: TestInfo) {
   return `${base}+w${testInfo.workerIndex}-r${testInfo.retry}-l${testInfo.line}-${slug}@example.com`;
 }
 
-/**
- * Waits until React has hydrated the app shell and attached its event
- * listeners (`AppShell` sets this attribute in a mount effect). Interacting
- * before that point races hydration: on slow CI runners a `fill()` on the
- * controlled date picker was silently reverted to the server-rendered value
- * and button clicks were dropped. Call this after any full page load of an
- * app-shell screen and before the first interaction.
- */
+// Call after app-shell loads and before interacting, or hydration races and reverts the interaction.
 export async function waitForAppReady(page: Page) {
   await page.waitForSelector("html[data-app-hydrated]", { state: "attached" });
 }
@@ -61,8 +54,7 @@ export async function createTestSession(
   await page.setExtraHTTPHeaders(testRouteHeaders());
   await page.goto(`/api/test/session?${params.toString()}`);
 
-  // Not-onboarded sessions land on /onboarding, which renders no AppShell
-  // and therefore never sets the hydration beacon.
+  // /onboarding renders no AppShell, so it never sets the hydration beacon.
   if (options?.onboarded !== false) {
     await waitForAppReady(page);
   }

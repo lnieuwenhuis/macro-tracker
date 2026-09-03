@@ -55,8 +55,7 @@ describe("getServerEnv", () => {
   });
 
   it("requires SESSION_SECRET outside production too", () => {
-    // The old dev fallback was a repo-visible literal, so a mis-set NODE_ENV
-    // made every HS256 session forgeable.
+    // A mis-set NODE_ENV must not fall back to a forgeable dev secret.
     setEnv("NODE_ENV", "development");
     delete process.env.SESSION_SECRET;
     resetServerEnvForTests();
@@ -77,9 +76,7 @@ describe("getServerEnv", () => {
   });
 
   describe("SESSION_SECRET strength", () => {
-    // `jose` enforces no minimum HMAC key length, so without this the web app
-    // happily signs HS256 sessions with a one-character secret while the Rust
-    // backend refuses to start on the same value.
+    // jose enforces no minimum HMAC key length; this app must enforce one itself.
     it("rejects a secret shorter than the backend's minimum", () => {
       setEnv("NODE_ENV", "production");
       process.env.APP_URL = "https://app.example";
@@ -139,8 +136,7 @@ describe("getServerEnv", () => {
     });
 
     it("still allows the committed dev literal on a loopback APP_URL", () => {
-      // Mirrors the backend's insecure-local posture so `pnpm dev` and the
-      // Playwright default keep working; a deployment cannot be on loopback.
+      // Mirrors the backend's insecure-local posture so pnpm dev and Playwright keep working.
       setEnv("NODE_ENV", "development");
       process.env.APP_URL = "http://localhost:3000";
       process.env.SESSION_SECRET = "macro-tracker-dev-session-secret";
@@ -161,8 +157,7 @@ describe("getServerEnv", () => {
     });
 
     it("keeps the raw value so the signing bytes still match the backend", () => {
-      // The backend hashes the untrimmed env value; trimming here would make
-      // the two services sign different tokens.
+      // The backend hashes the untrimmed env value; trimming here would desync signing.
       setEnv("NODE_ENV", "production");
       process.env.APP_URL = "https://app.example";
       process.env.SESSION_SECRET = `  ${VALID_SECRET}  `;

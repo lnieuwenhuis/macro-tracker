@@ -35,32 +35,25 @@ describe("database client SSL config", () => {
     }
   });
 
-  it("uses TLS with chain verification when remote sslmode is omitted", () => {
-    expect(getSslConfig("postgres://user:pass@db.example.com:5432/macro")).toEqual({
-      rejectUnauthorized: true,
-    });
-  });
-
-  it("verifies the certificate for sslmode=require", () => {
-    expect(
-      getSslConfig("postgres://user:***@db.example.com:5432/macro?sslmode=require"),
-    ).toEqual({ rejectUnauthorized: true });
-  });
-
-  it("accepts Railway private-network certificates for sslmode=require", () => {
-    expect(
-      getSslConfig(
-        "postgresql://user:***@postgres.railway.internal:5432/macro?sslmode=require",
-      ),
-    ).toEqual({ rejectUnauthorized: false });
-  });
-
-  it("verifies the certificate for sslmode=verify-full", () => {
-    expect(
-      getSslConfig(
-        "postgres://user:pass@db.example.com:5432/macro?sslmode=verify-full",
-      ),
-    ).toEqual({ rejectUnauthorized: true });
+  it.each([
+    [
+      "postgres://user:pass@db.example.com:5432/macro",
+      { rejectUnauthorized: true },
+    ],
+    [
+      "postgres://user:***@db.example.com:5432/macro?sslmode=require",
+      { rejectUnauthorized: true },
+    ],
+    [
+      "postgresql://user:***@postgres.railway.internal:5432/macro?sslmode=require",
+      { rejectUnauthorized: false },
+    ],
+    [
+      "postgres://user:pass@db.example.com:5432/macro?sslmode=verify-full",
+      { rejectUnauthorized: true },
+    ],
+  ])("resolves TLS config for %s", (url, expected) => {
+    expect(getSslConfig(url)).toEqual(expected);
   });
 
   it("disables verification for sslmode=require only when ALLOW_UNVERIFIED_DB_TLS=true, and warns loudly", () => {
@@ -84,37 +77,36 @@ describe("database client SSL config", () => {
     ).toEqual({ rejectUnauthorized: true });
   });
 
-  it("rejects insecure remote sslmode values", () => {
-    expect(
-      () =>
+  it.each(["no-verify", "disable", "allow", "prefer"])(
+    "rejects insecure remote sslmode=%s",
+    (sslmode) => {
+      expect(() =>
         getSslConfig(
-          "postgres://user:pass@db.example.com:5432/macro?sslmode=no-verify",
+          `postgres://user:pass@db.example.com:5432/macro?sslmode=${sslmode}`,
         ),
-    ).toThrow("sslmode=no-verify");
-    expect(
-      () =>
-        getSslConfig(
-          "postgres://user:pass@db.example.com:5432/macro?sslmode=disable",
-        ),
-    ).toThrow("sslmode=disable");
-  });
+      ).toThrow(`sslmode=${sslmode}`);
+    },
+  );
 
   it("preserves localhost non-TLS behavior", () => {
     expect(getSslConfig("postgres://user:pass@localhost:5432/macro")).toBe(false);
     expect(getSslConfig("postgres://user:pass@127.0.0.1:5432/macro")).toBe(false);
   });
 
-  it("verifies the certificate for sslmode=require by default when building the pool config", () => {
-    expect(
-      getPostgresConnectionConfig(
-        "postgres://user:pass@db.example.com:5432/macro?sslmode=require",
-      ),
-    ).toEqual({
-      connectionString: "postgres://user:pass@db.example.com:5432/macro",
-      ssl: { rejectUnauthorized: true },
-      ...poolDefaults,
-    });
-  });
+  it.each(["require", "verify-full"])(
+    "builds the pool config with chain verification for sslmode=%s",
+    (sslmode) => {
+      expect(
+        getPostgresConnectionConfig(
+          `postgres://user:pass@db.example.com:5432/macro?sslmode=${sslmode}`,
+        ),
+      ).toEqual({
+        connectionString: "postgres://user:pass@db.example.com:5432/macro",
+        ssl: { rejectUnauthorized: true },
+        ...poolDefaults,
+      });
+    },
+  );
 
   it("rejects unsupported remote sslmode=verify-ca", () => {
     expect(() =>
@@ -122,18 +114,6 @@ describe("database client SSL config", () => {
         "postgres://user:pass@db.example.com:5432/macro?sslmode=verify-ca",
       ),
     ).toThrow("unsupported sslmode=verify-ca");
-  });
-
-  it("keeps chain verification for sslmode=verify-full", () => {
-    expect(
-      getPostgresConnectionConfig(
-        "postgres://user:pass@db.example.com:5432/macro?sslmode=verify-full",
-      ),
-    ).toEqual({
-      connectionString: "postgres://user:pass@db.example.com:5432/macro",
-      ssl: { rejectUnauthorized: true },
-      ...poolDefaults,
-    });
   });
 
   it("allows the production pool size to be lowered from the environment", () => {

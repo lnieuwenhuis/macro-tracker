@@ -25,22 +25,18 @@ pub const SESSION_COOKIE_NAME: &str = "mt_session";
 pub const SESSION_MAX_AGE_SECONDS: i64 = 60 * 60 * 24 * 7;
 const SHOO_JWKS_FETCH_TIMEOUT: StdDuration = StdDuration::from_secs(2);
 const SHOO_JWKS_CACHE_TTL: StdDuration = StdDuration::from_secs(5 * 60);
-/// CLEAN-A2: a failed fetch is cached too, briefly. Without it an identity
-/// provider outage makes every single login pay the full
-/// `SHOO_JWKS_FETCH_TIMEOUT` again. Kept short so recovery is fast.
+// CLEAN-A2: negative results are cached too, briefly, or a provider outage pays the fetch timeout per login.
 const SHOO_JWKS_NEGATIVE_CACHE_TTL: StdDuration = StdDuration::from_secs(10);
 
 #[derive(Clone)]
 struct CachedJwks {
-    /// `None` is a negative entry — the last fetch failed.
+    // `None` is a negative entry — the last fetch failed.
     jwks: Option<JwkSet>,
     expires_at: StdInstant,
 }
 
 static SHOO_JWKS_CACHE: OnceLock<Mutex<HashMap<String, CachedJwks>>> = OnceLock::new();
-/// CLEAN-A2: one lock per base URL, so a cold cache during a login burst makes
-/// exactly one upstream request instead of one per concurrent login. The map is
-/// keyed by a configured value, so it holds one entry in practice.
+// CLEAN-A2: one lock per base URL, so a cold cache during a login burst makes exactly one upstream request.
 static SHOO_JWKS_FETCH_LOCKS: OnceLock<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>> =
     OnceLock::new();
 
@@ -84,18 +80,10 @@ struct ShooClaims {
 #[derive(Debug)]
 pub struct InternalAuth;
 
-/// SEC-20: the single message every internal-auth failure returns, whatever the
-/// underlying cause.
+// SEC-20: the single message every internal-auth failure returns, whatever the underlying cause.
 const INVALID_BACKEND_SECRET: &str = "Invalid backend secret.";
 
-/// SEC-17: the hand-rolled OR-accumulate loop this replaces was written
-/// correctly, but nothing in the language guarantees the optimizer preserves it
-/// — and the release profile compiles the whole crate as one LTO'd codegen unit,
-/// which is exactly where a compiler is most able to reintroduce an early exit.
-/// `subtle` carries `optimization_barrier` intrinsics for that reason.
-///
-/// Length inequality still short-circuits (in `subtle` too): the secret's length
-/// is not what needs hiding, the bytes are.
+// SEC-17: `subtle` blocks the optimizer from reintroducing an early exit; only length may short-circuit.
 fn constant_time_eq_bytes(provided: &[u8], expected: &[u8]) -> bool {
     provided.ct_eq(expected).into()
 }
@@ -108,10 +96,7 @@ impl FromRequestParts<AppState> for InternalAuth {
             if state.config.allows_insecure_internal_auth_for_app_url() {
                 return Ok(Self);
             }
-            // SEC-20: an unauthenticated caller learns nothing about *why* the
-            // request failed. "not configured" told them the deployment is
-            // broken rather than that their secret was wrong, which is free
-            // reconnaissance. The distinction goes to the operator's log.
+            // SEC-20: the caller learns nothing about why it failed; the distinction goes to the operator's log.
             tracing::error!(
                 "refusing internal request: BACKEND_INTERNAL_SECRET is unset and insecure local mode does not apply to this APP_URL"
             );
@@ -238,16 +223,12 @@ pub async fn authorize_shoo_login(
     Ok((session, user))
 }
 
-/// What `ADMIN_OWNER_EMAILS` implies for one account. Split out from
-/// `reconcile_configured_owner` so the policy is unit-testable without a
-/// database.
+// What `ADMIN_OWNER_EMAILS` implies for one account; split out so the policy is unit-testable without a database.
 #[derive(Debug, PartialEq, Eq)]
 enum ConfiguredOwnerAction {
     /// The address is configured and the account is not an owner yet.
     Promote,
-    /// The account holds `owner` but its address is not configured. See
-    /// `reconcile_configured_owner` for why this cannot be an automatic
-    /// demotion.
+    /// The account holds `owner` but its address is not configured; see `reconcile_configured_owner`.
     ReportUnconfiguredOwner,
     Nothing,
 }
@@ -266,28 +247,10 @@ fn configured_owner_action(
     }
 }
 
-/// Warned at most once per account per process. `reconcile_configured_owner`
-/// runs on every authenticated request, so an unconditional `warn!` would be
-/// per-request log spam for a condition that is usually legitimate.
+// Warned at most once per account per process; this runs on every authenticated request.
 static REPORTED_UNCONFIGURED_OWNERS: OnceLock<Mutex<HashSet<Uuid>>> = OnceLock::new();
 
-/// SEC-18: this promotes but deliberately does **not** demote.
-///
-/// Removing an address from `ADMIN_OWNER_EMAILS` and redeploying leaves that
-/// account `owner`. Automatic demotion is not safe to add here, because the
-/// `users` table records only the resulting `role` — there is no column saying
-/// whether ownership came from this config list or from the admin UI. Demoting
-/// every owner missing from the list would therefore strip admin-granted owners
-/// on the next login and, if the list were ever empty or misconfigured, could
-/// leave the system with no owner at all.
-///
-/// **Revocation must go through the admin flow** (`setUserRole`), which takes
-/// `FOR UPDATE`, refuses to demote the last owner, and writes an audit event.
-/// Removing the address from `ADMIN_OWNER_EMAILS` only stops re-promotion; it is
-/// not a revocation on its own.
-///
-/// Making this automatic needs a schema change — an owner-grant provenance
-/// column, or reading `admin_audit_events` — in `apps/backend/src/db.rs`.
+// SEC-18: promotes but never demotes — `users.role` has no provenance column; revoke through `setUserRole` instead.
 pub async fn reconcile_configured_owner(state: &AppState, user: AppUser) -> AppResult<AppUser> {
     match configured_owner_action(&state.config.admin_owner_emails, &user.email, &user.role) {
         ConfiguredOwnerAction::Promote => db::ensure_user_role(&state.db, user.id, "owner").await,
@@ -326,14 +289,7 @@ async fn verify_shoo_token(
     let jwk = jwks
         .find(&kid)
         .ok_or_else(|| AppError::Unauthorized("Shoo signing key was not found.".to_string()))?;
-    // SEC-19: pin the key type. `DecodingKey::from_jwk` will happily build an
-    // HMAC key from a symmetric `oct` JWK, so if Shoo ever published one, anyone
-    // who can read the public JWKS could sign their own logins for any email.
-    // Shoo signs with ES256 over P-256; nothing else is accepted.
-    // Match on the key *type*, not on `alg`: RFC 7517 makes `alg` optional, so
-    // gating on it would break every login the day Shoo stopped emitting it.
-    // `kty`/`crv` are mandatory, and rejecting anything that is not P-256 is
-    // what actually excludes a symmetric key.
+    // SEC-19: match on kty/crv, not alg (RFC 7517 makes alg optional) - a symmetric key could otherwise sign logins.
     let is_p256 = match &jwk.algorithm {
         AlgorithmParameters::EllipticCurve(ec) => ec.curve == EllipticCurve::P256,
         _ => false,
@@ -345,16 +301,11 @@ async fn verify_shoo_token(
     }
     let key = DecodingKey::from_jwk(jwk)
         .map_err(|_| AppError::Unauthorized("Shoo signing key is invalid.".to_string()))?;
-    // SEC-02: never derive the algorithm from the token's own header - that lets
-    // the caller pick it. Pin it to what Shoo actually signs with instead.
+    // SEC-02: pin the algorithm to what Shoo signs with; never derive it from the token's own header.
     let mut validation = Validation::new(Algorithm::ES256);
     validation.set_issuer(&[state.config.shoo_base_url.as_str()]);
     validation.set_audience(&[format!("origin:{app_origin}")]);
-    // SEC-02: `Validation::new` seeds `required_spec_claims` with only `exp`, and
-    // neither `set_issuer` nor `set_audience` adds to it. In `validate()` both the
-    // `iss` and `aud` match arms end in `_ => {}`, so an *absent* claim falls
-    // through and passes - issuer and audience were only ever checked for tokens
-    // that happened to carry them. Require them explicitly.
+    // SEC-02: `set_issuer`/`set_audience` don't require the claim — an absent `iss`/`aud` would otherwise pass.
     validation.set_required_spec_claims(&["exp", "iss", "aud"]);
     let decoded = decode::<ShooClaims>(id_token, &key, &validation)
         .map_err(|_| AppError::Unauthorized("Unable to verify Shoo login.".to_string()))?;
@@ -372,11 +323,7 @@ fn jwks_unreachable() -> AppError {
     AppError::Upstream("Could not reach the identity provider.".to_string())
 }
 
-/// Reads the cache without fetching. `Some(Err(..))` is a live negative entry.
-///
-/// Recovers from poisoning rather than propagating it: a panic inside any
-/// critical section would otherwise turn a one-off failure into "every login
-/// panics forever".
+/// Reads the cache without fetching; `Some(Err(..))` is a live negative entry. Recovers from lock poisoning.
 fn cached_shoo_jwks(shoo_base_url: &str) -> Option<AppResult<JwkSet>> {
     let now = StdInstant::now();
     let cached = shoo_jwks_cache()
@@ -416,19 +363,16 @@ async fn fetch_shoo_jwks(state: &AppState) -> AppResult<JwkSet> {
         return cached;
     }
 
-    // CLEAN-A2: single-flight. Without this, a cold cache during a login burst
-    // fans out one JWKS request per concurrent login.
+    // CLEAN-A2: single-flight, or a cold cache during a login burst fans out one JWKS request per concurrent login.
     let fetch_lock = shoo_jwks_fetch_lock(&shoo_base_url);
     let _guard = fetch_lock.lock().await;
-    // The task that held the lock has just filled the cache - positively or,
-    // with the short negative TTL, negatively. Either way, do not refetch.
+    // The lock holder just filled the cache (positively or, with the short negative TTL, negatively); do not refetch.
     if let Some(cached) = cached_shoo_jwks(&shoo_base_url) {
         return cached;
     }
 
     let jwks_url = format!("{shoo_base_url}/.well-known/jwks.json");
-    // `reqwest::Error`'s Display embeds the request URL, so the details go to
-    // the log and the caller gets a fixed message.
+    // `reqwest::Error`'s Display embeds the URL, so details go to the log and the caller gets a fixed message.
     let upstream_failure = |error: reqwest::Error| {
         tracing::warn!(error = ?error, "Shoo JWKS fetch failed");
         jwks_unreachable()

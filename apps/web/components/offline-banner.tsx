@@ -16,8 +16,7 @@ function getSnapshot() {
 }
 
 function getServerSnapshot() {
-  // Assume online on the server — the banner only ever appears after
-  // hydration if the client actually reports offline.
+  // Assume online on the server; the banner appears post-hydration only if the client reports offline.
   return true;
 }
 

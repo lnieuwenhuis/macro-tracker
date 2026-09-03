@@ -245,8 +245,7 @@ async fn food_photo_stops_after_non_retryable_provider_response() {
     .await;
 
     assert_eq!(stub.requests.load(Ordering::SeqCst), 1);
-    // The provider's 401 is our misconfiguration, not the caller's: it must
-    // surface as a server-owned 502 with none of the upstream text.
+    // The provider's 401 is our misconfiguration, not the caller's: it must surface as a 502 with no upstream text.
     assert_eq!(result["statusCode"], json!(502));
     assert_eq!(result["retryable"], json!(false));
     assert_eq!(
@@ -433,8 +432,7 @@ fn food_photo_request_body_omits_fields_reasoning_models_reject() {
 
     assert_eq!(body["model"], json!("gpt-5.6-luna(low)"));
     assert_eq!(body["max_tokens"], json!(4000));
-    // Reasoning models reject temperature pins, and provider-specific
-    // routing fields would be meaningless or rejected upstream.
+    // Reasoning models reject temperature pins; provider-specific routing fields would be meaningless too.
     for absent in [
         "temperature",
         "provider",
@@ -455,9 +453,7 @@ fn food_photo_request_body_omits_fields_reasoning_models_reject() {
 
 #[tokio::test]
 async fn a_content_less_upstream_200_is_sanitised_before_it_reaches_the_caller() {
-    // API-02: a 200 whose payload carries no usable `choices[0].message
-    // .content` is a common outcome. The payload names the provider, the
-    // model and the token spend; none of it may be echoed.
+    // API-02: a 200 with no usable message content must not echo the provider, model, or token spend.
     let (endpoint, _stub) = spawn_chat_stub(vec![ChatStubResponse {
         status: StatusCode::OK,
         delay: Duration::ZERO,
@@ -506,8 +502,7 @@ async fn a_content_less_upstream_200_is_sanitised_before_it_reaches_the_caller()
 
 #[tokio::test]
 async fn unparseable_model_output_is_not_echoed_back() {
-    // API-02, second branch: the model answered, but not with the JSON we
-    // asked for. The raw text is logged, not returned.
+    // API-02: when the model answers with unparseable text, it must be logged, not returned.
     let (endpoint, _stub) = spawn_chat_stub(vec![ChatStubResponse {
         status: StatusCode::OK,
         delay: Duration::ZERO,
@@ -540,8 +535,7 @@ async fn unparseable_model_output_is_not_echoed_back() {
 
 #[tokio::test]
 async fn a_transport_failure_never_reports_the_upstream_url() {
-    // API-12: `reqwest::Error`'s Display embeds the request URL. Point the
-    // client at a closed port so `send()` fails outright.
+    // API-12: `reqwest::Error`'s Display embeds the request URL; a closed port makes `send()` fail outright.
     let result = analyze_food_photo_url_with_limits(
         &gateway_test_state("http://127.0.0.1:1/chat/completions", Some("test/model-1")),
         "data:image/png;base64,AA==",
@@ -571,12 +565,7 @@ async fn a_transport_failure_never_reports_the_upstream_url() {
 
 #[tokio::test]
 async fn a_model_that_cannot_see_images_is_reported_as_our_fault() {
-    // API-13, re-decided against the gateway code. The free-model allowlist
-    // is gone, so `unsupported_model` no longer describes a model the
-    // *caller* named — here it comes out of a server-configured model in
-    // `AI_GATEWAY_MODELS`, which is a deployment problem. It must not be
-    // returned as the caller's 400, and the provider's wording (which names
-    // the model) must not be forwarded either.
+    // API-13: an unsupported server-configured model is our deployment problem, not the caller's 400.
     let (endpoint, _stub) = spawn_chat_stub(vec![ChatStubResponse {
         status: StatusCode::BAD_REQUEST,
         delay: Duration::ZERO,
@@ -612,8 +601,7 @@ async fn a_model_that_cannot_see_images_is_reported_as_our_fault() {
 
 #[test]
 fn the_prompt_caps_how_much_clarification_reaches_the_model() {
-    // API-05: `clarification` had no cap while the image field was capped
-    // at 8 MB, so ~9 MB of prose could be billed as prompt tokens.
+    // API-05: `clarification` must be capped like the image field, or prose could be billed as prompt tokens.
     let huge = "x".repeat(MAX_CLARIFICATION_CHARS * 4);
 
     let prompt = build_prompt(&huge, false);
@@ -641,9 +629,7 @@ fn truncating_a_clarification_never_splits_a_character() {
 
 #[test]
 fn every_benchmark_fixture_points_at_a_direct_image_file() {
-    // CONCERN-C3: every fixture used to hand the provider a
-    // `commons.wikimedia.org/wiki/File:...` article URL, which serves
-    // `text/html`. Every benchmark was scoring models against a web page.
+    // CONCERN-C3: an article page URL serves `text/html`, not the image, silently scoring models on a web page.
     for fixture in BENCHMARK_FIXTURES {
         assert!(
             !fixture.image_url.contains("/wiki/"),
@@ -676,10 +662,7 @@ fn every_benchmark_fixture_points_at_a_direct_image_file() {
 
 #[test]
 fn the_unreproducible_benchmark_fixtures_are_the_known_ten() {
-    // `loremflickr.com` redirects to a different random photo per request,
-    // so these fixtures score models against an image nobody chose and
-    // cannot be compared across runs. Pinned so the set cannot grow
-    // unnoticed and so replacing them is visible as a test change.
+    // `loremflickr.com` redirects to a random photo per request; pinned so this set can't grow unnoticed.
     let unreproducible = BENCHMARK_FIXTURES
         .iter()
         .filter(|fixture| fixture.image_url.contains("loremflickr.com"))
@@ -703,8 +686,7 @@ fn the_unreproducible_benchmark_fixtures_are_the_known_ten() {
     );
 }
 
-/// `BENCHMARK_LOCK` is process-global, so the tests that drive it have to
-/// take turns.
+/// `BENCHMARK_LOCK` is process-global, so the tests that drive it have to take turns.
 static BENCHMARK_LOCK_TESTS: Mutex<()> = Mutex::new(());
 
 fn clear_benchmark_lock() {
@@ -736,9 +718,7 @@ fn benchmark_lock_guard_releases_on_drop() {
 
 #[test]
 fn an_overrunning_benchmark_run_cannot_release_its_successor() {
-    // API-08: run A overruns the TTL, so run B legitimately takes the lock.
-    // A finishing afterwards must not clear B's stamp — doing so let a
-    // third run start alongside B and doubled the upstream spend.
+    // API-08: run A overruns the TTL and B legitimately takes the lock; A finishing later must not clear B's stamp.
     let _serialized = BENCHMARK_LOCK_TESTS
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -833,9 +813,7 @@ async fn food_photo_body_limit_allows_images_above_axum_default_to_reach_process
 
 #[tokio::test]
 async fn barcode_route_falls_back_to_albert_heijn_after_open_food_facts_miss() {
-    // Drives the post-authentication half of the route: the account gate
-    // added for API-14 needs a real database, which this stub-backed test
-    // deliberately does not have.
+    // Drives the post-authentication half of the route; the API-14 account gate needs a real database.
     let base_url = spawn_barcode_provider_stub().await;
     let state = test_state(Some(&base_url));
     let response = lookup_barcode_for_user(&state, "8712345678901".to_string()).await;
@@ -856,9 +834,7 @@ async fn barcode_route_falls_back_to_albert_heijn_after_open_food_facts_miss() {
 
 #[tokio::test]
 async fn barcode_lookup_reports_saturation_as_busy_not_as_a_miss() {
-    // Drain every permit so the next acquisition times out. Reporting that
-    // as `found: false` would send the user off to re-enter a product that
-    // may well exist.
+    // Drain every permit; reporting saturation as `found: false` would send the user to re-enter a real product.
     let slots = barcode_lookup_slots();
     let held = slots
         .acquire_many(MAX_CONCURRENT_BARCODE_LOOKUPS as u32)
@@ -900,9 +876,7 @@ async fn barcode_route_rejects_requests_without_a_session() {
 
 #[tokio::test]
 async fn barcode_route_rejects_a_session_whose_account_cannot_be_loaded() {
-    // API-14: a correctly signed cookie used to be sufficient, so a 7-day
-    // session belonging to a deleted account still fanned out to five
-    // upstream providers. The account must now resolve.
+    // API-14: a correctly signed session for a deleted account must not reach the upstream providers.
     let state = test_state(None);
     let cookie = session_cookie(&state);
     let app = router().with_state(state);
@@ -923,10 +897,7 @@ async fn barcode_route_rejects_a_session_whose_account_cannot_be_loaded() {
 
 #[tokio::test]
 async fn the_benchmark_route_answers_the_same_way_whatever_an_anonymous_body_contains() {
-    // API-09: `Json<Value>` ran before the admin check, so malformed JSON
-    // returned 400 and well-formed JSON returned 401 — a reliable way for
-    // an unauthenticated caller to confirm a route that deliberately 404s
-    // to authenticated non-admins.
+    // API-09: malformed vs. well-formed JSON must not produce distinguishable statuses before the admin check.
     for body in ["{ not json", r#"{"model":"test/model:free"}"#] {
         let app = router().with_state(test_state(None));
         let response = app
@@ -951,8 +922,7 @@ async fn the_benchmark_route_answers_the_same_way_whatever_an_anonymous_body_con
 
 #[test]
 fn one_account_cannot_hold_every_food_photo_slot() {
-    // API-04: without per-user accounting a single account could take all
-    // four global permits and hold them for the full upstream round trip.
+    // API-04: without per-user accounting, one account could hold all global permits for the full round trip.
     let noisy = Uuid::new_v4();
     let other = Uuid::new_v4();
 
@@ -1012,4 +982,177 @@ async fn barcode_route_rejects_a_forged_session_cookie() {
         .expect("request should complete");
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[test]
+fn provider_request_limits_stay_at_the_shipped_numbers() {
+    assert_eq!(PROVIDER_REQUEST_TIMEOUT, Duration::from_secs(5));
+    assert_eq!(ALBERT_HEIJN_TOKEN_TIMEOUT, Duration::from_secs(4));
+    assert_eq!(MAX_PROVIDER_RESPONSE_BYTES, 2 * 1024 * 1024);
+}
+
+async fn spawn_provider_stub(app: Router) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("stub listener should bind");
+    let addr = listener.local_addr().expect("stub address should exist");
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("stub server should run");
+    });
+    format!("http://{addr}")
+}
+
+async fn spawn_padded_open_food_facts_stub(padding: usize) -> String {
+    let body = json!({
+        "status": 1,
+        "product": {
+            "product_name": "Padded Product",
+            "nutriments": { "proteins_100g": 1.0 },
+            "padding": "x".repeat(padding)
+        }
+    })
+    .to_string();
+    let app = Router::new().route(
+        "/api/v2/product/{*path}",
+        get(move || {
+            let body = body.clone();
+            async move {
+                (
+                    [(axum::http::header::CONTENT_TYPE, "application/json")],
+                    body,
+                )
+            }
+        }),
+    );
+    spawn_provider_stub(app).await
+}
+
+#[tokio::test]
+async fn open_food_facts_lookup_enforces_the_size_cap() {
+    for (padding, expected) in [
+        (
+            MAX_PROVIDER_RESPONSE_BYTES - 1024,
+            Some(json!("Padded Product")),
+        ),
+        (MAX_PROVIDER_RESPONSE_BYTES, None),
+    ] {
+        let base_url = spawn_padded_open_food_facts_stub(padding).await;
+        let state = test_state(Some(&base_url));
+
+        let product = lookup_open_food_facts(&state, "8712345678901").await;
+
+        match expected {
+            Some(name) => assert_eq!(
+                product.map(|product| product["name"].clone()),
+                Some(name),
+                "a body just under the cap must be accepted (padding {padding})"
+            ),
+            None => assert!(
+                product.is_none(),
+                "a body over the cap must be dropped (padding {padding})"
+            ),
+        }
+    }
+}
+
+/// Chunked and without `Content-Length`, so only the per-chunk check can stop this body.
+async fn spawn_chunked_open_food_facts_stub() -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("stub listener should bind");
+    let addr = listener.local_addr().expect("stub address should exist");
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request).await;
+                let headers = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n";
+                if stream.write_all(headers.as_bytes()).await.is_err() {
+                    return;
+                }
+
+                let padding = "x".repeat(64 * 1024);
+                let mut chunks = vec![
+                    r#"{"status":1,"product":{"product_name":"Streamed Product","#.to_string(),
+                    r#""nutriments":{"proteins_100g":1.0},"padding":""#.to_string(),
+                ];
+                chunks.extend(std::iter::repeat_n(
+                    padding.clone(),
+                    MAX_PROVIDER_RESPONSE_BYTES / padding.len() + 2,
+                ));
+                chunks.push(r#""}}"#.to_string());
+
+                for chunk in chunks {
+                    let framed = format!("{:x}\r\n{chunk}\r\n", chunk.len());
+                    if stream.write_all(framed.as_bytes()).await.is_err() {
+                        return;
+                    }
+                }
+                let _ = stream.write_all(b"0\r\n\r\n").await;
+            });
+        }
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn open_food_facts_lookup_drops_a_streamed_body_over_the_size_cap() {
+    let base_url = spawn_chunked_open_food_facts_stub().await;
+    let state = test_state(Some(&base_url));
+
+    assert!(
+        lookup_open_food_facts(&state, "8712345678901")
+            .await
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn provider_fetch_gives_up_when_the_upstream_stalls_past_its_deadline() {
+    let base_url = spawn_provider_stub(Router::new().route(
+        "/stall",
+        get(|| async {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            Json(json!({ "ok": true }))
+        }),
+    ))
+    .await;
+    let client = reqwest::Client::new();
+
+    let started = Instant::now();
+    let body = fetch_provider_json(
+        client.get(format!("{base_url}/stall")),
+        Duration::from_millis(50),
+    )
+    .await;
+
+    assert!(body.is_none());
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[tokio::test]
+async fn provider_fetch_rejects_a_failing_status_before_reading_the_body() {
+    let base_url = spawn_provider_stub(Router::new().route(
+        "/failing",
+        get(|| async {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "status": 1 })),
+            )
+        }),
+    ))
+    .await;
+    let client = reqwest::Client::new();
+
+    let body = fetch_provider_json(
+        client.get(format!("{base_url}/failing")),
+        PROVIDER_REQUEST_TIMEOUT,
+    )
+    .await;
+
+    assert!(body.is_none());
 }

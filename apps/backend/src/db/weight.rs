@@ -1,8 +1,4 @@
 //! Weight-entry persistence and progress statistics.
-//!
-//! Extracted verbatim from `db.rs` (godfiles audit, step 3). The RPC
-//! dispatch arms stay in `db.rs`; onboarding and admin queries call
-//! `normalize_weight_entry_input` and `weight_entries_json_limited` here.
 
 use super::{MAX_COLLECTION_ROWS, optional_f64, required_date, trim_optional_string};
 use crate::errors::{AppError, AppResult};
@@ -24,9 +20,7 @@ pub(super) async fn weight_entries_json(pool: &PgPool, user_id: Uuid) -> AppResu
     weight_entries_json_limited(pool, user_id, MAX_COLLECTION_ROWS).await
 }
 
-/// PERF-03: the row set is selected most-recent-first so a limit keeps the
-/// newest entries, then re-sorted ascending because every consumer charts the
-/// series forwards in time.
+/// PERF-03: selected most-recent-first so the limit keeps the newest entries, then re-sorted ascending for charting.
 pub(super) async fn weight_entries_json_limited(
     pool: &PgPool,
     user_id: Uuid,
@@ -131,14 +125,14 @@ pub(super) async fn weight_page_data_json(
         .map_err(|_| AppError::BadRequest("selectedDate must be YYYY-MM-DD.".to_string()))?;
     let latest = stat_entries.last().copied();
     let current_weight = latest.map(|entry| entry.weight_kg);
-    let week_change = latest.and_then(|latest| {
-        closest_weight_on_or_before(&stat_entries, today_date - Duration::days(7))
-            .map(|entry| round2(latest.weight_kg - entry.weight_kg))
-    });
-    let month_change = latest.and_then(|latest| {
-        closest_weight_on_or_before(&stat_entries, today_date - Duration::days(30))
-            .map(|entry| round2(latest.weight_kg - entry.weight_kg))
-    });
+    let change_over = |days: i64| {
+        latest.and_then(|latest| {
+            closest_weight_on_or_before(&stat_entries, today_date - Duration::days(days))
+                .map(|entry| round2(latest.weight_kg - entry.weight_kg))
+        })
+    };
+    let week_change = change_over(7);
+    let month_change = change_over(30);
     let trend_direction = match stat_entries.len() {
         0 | 1 => None,
         2 => {
@@ -172,33 +166,20 @@ pub(super) async fn create_weight_entry_json(
 ) -> AppResult<Value> {
     let id = Uuid::new_v4();
     let values = normalize_weight_entry_input(input)?;
-    let row = if overwrite {
-        sqlx::query(
-            r#"
-            INSERT INTO weight_entries (id, user_id, entry_date, weight_kg, body_fat_pct, notes, updated_at)
-            VALUES ($1, $2, $3::date, $4, $5, $6, now())
-            ON CONFLICT (user_id, entry_date)
-            DO UPDATE SET weight_kg = EXCLUDED.weight_kg, body_fat_pct = EXCLUDED.body_fat_pct, notes = EXCLUDED.notes, updated_at = now()
-            RETURNING id
-            "#,
-        )
-        .bind(id)
-        .bind(user_id)
-        .bind(&values.date)
-        .bind(values.weight_kg)
-        .bind(values.body_fat_pct)
-        .bind(values.notes.as_deref())
-        .fetch_optional(pool)
-        .await?
+    let conflict = if overwrite {
+        "\n            DO UPDATE SET weight_kg = EXCLUDED.weight_kg, body_fat_pct = EXCLUDED.body_fat_pct, notes = EXCLUDED.notes, updated_at = now()"
     } else {
-        sqlx::query(
-            r#"
+        " DO NOTHING"
+    };
+    let sql = format!(
+        r#"
             INSERT INTO weight_entries (id, user_id, entry_date, weight_kg, body_fat_pct, notes, updated_at)
             VALUES ($1, $2, $3::date, $4, $5, $6, now())
-            ON CONFLICT (user_id, entry_date) DO NOTHING
+            ON CONFLICT (user_id, entry_date){conflict}
             RETURNING id
-            "#,
-        )
+            "#
+    );
+    let row = sqlx::query(&sql)
         .bind(id)
         .bind(user_id)
         .bind(&values.date)
@@ -206,8 +187,7 @@ pub(super) async fn create_weight_entry_json(
         .bind(values.body_fat_pct)
         .bind(values.notes.as_deref())
         .fetch_optional(pool)
-        .await?
-    };
+        .await?;
     let Some(row) = row else {
         return Ok(Value::Null);
     };
@@ -290,9 +270,7 @@ pub(super) async fn delete_weight_entry_json(
 pub(super) fn normalize_weight_entry_input(
     input: &serde_json::Map<String, Value>,
 ) -> AppResult<WeightEntryValues> {
-    // Rounded before the bound check: `weight_kg` lands in a `numeric(5, 2)`
-    // column, so a value that only overflows *after* rounding (999.995) has to
-    // be rejected too.
+    // Rounds before the bound check: `numeric(5, 2)` also rejects values that only overflow after rounding.
     let weight_kg = optional_f64(input, "weightKg")
         .map(round2)
         .filter(|value| value.is_finite() && *value > 0.0)

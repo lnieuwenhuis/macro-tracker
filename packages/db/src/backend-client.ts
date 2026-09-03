@@ -1,14 +1,9 @@
-/** Default deadline for an internal RPC round-trip. */
 const DEFAULT_BACKEND_TIMEOUT_MS = 10_000;
 
 export type BackendFetchInit = RequestInit & {
   /** Overrides {@link DEFAULT_BACKEND_TIMEOUT_MS}; pass `0` to opt out. */
   timeoutMs?: number;
-  /**
-   * Set `false` for routes the backend authenticates on its own (the public
-   * `/api/v1/*` surface uses Bearer API tokens). Not sending the internal
-   * secret there means a proxy bug can never turn into an internal-RPC call.
-   */
+  /** Set `false` for routes the backend authenticates itself (Bearer tokens on `/api/v1/*`), so a proxy bug cannot become an internal-RPC call. */
   attachInternalSecret?: boolean;
 };
 
@@ -21,16 +16,7 @@ export function getBackendUrl() {
   return (backendUrl ?? "http://127.0.0.1:4000").replace(/\/$/, "");
 }
 
-/**
- * Resolves `path` against the backend origin, refusing anything that could
- * escape the route the caller named.
- *
- * `fetch` applies WHATWG normalization, so a `..` segment reaching this point
- * would silently rewrite e.g. `/api/v1/../../internal/rpc` into `/internal/rpc`
- * — and the internal secret is attached below, which would make that an
- * arbitrary-RPC primitive. Per-segment `encodeURIComponent` is not a defense
- * here: `encodeURIComponent("..") === ".."`.
- */
+// Rejects traversal segments before WHATWG normalization can rewrite `/api/v1/../../internal/rpc` into `/internal/rpc` and leak the internal secret.
 export function resolveBackendUrl(path: string) {
   if (!path.startsWith("/")) {
     throw new Error("Backend path must be absolute.");
@@ -81,8 +67,7 @@ export async function backendFetch(path: string, init: BackendFetchInit = {}) {
   if (!headers.has("Content-Type") && typeof rest.body === "string") {
     headers.set("Content-Type", "application/json");
   }
-  // Always overwrite, never append: a client-supplied header must not survive
-  // into the backend request.
+  // A client-supplied secret header must never survive into the backend request.
   headers.delete("x-backend-internal-secret");
   if (attachInternalSecret) {
     const backendInternalSecret = process.env.BACKEND_INTERNAL_SECRET?.trim();
@@ -93,8 +78,7 @@ export async function backendFetch(path: string, init: BackendFetchInit = {}) {
     }
   }
 
-  // Without this the Next.js worker inherits undici's 300s default and hangs
-  // for as long as the backend does.
+  // Without this the Next.js worker inherits undici's 300s default and hangs for as long as the backend does.
   const signals = [signal, timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : null].filter(
     (value): value is AbortSignal => value != null,
   );

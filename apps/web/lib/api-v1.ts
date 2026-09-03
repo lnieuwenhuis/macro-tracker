@@ -9,12 +9,7 @@ const CORS_HEADERS = {
   "access-control-max-age": "86400",
 };
 
-/**
- * These responses are per-token and wildcard-CORS'd. RFC 9111 §3.5 already
- * keeps a compliant shared cache from storing an `Authorization`-bearing
- * request, but a single misconfigured CDN rule would turn that into cross-user
- * cache poisoning, so the intent is stated rather than assumed.
- */
+// Per-token, wildcard-CORS'd responses; state no-shared-cache explicitly (RFC 9111 §3.5) against a misconfigured CDN.
 const NO_SHARED_CACHE_HEADERS = {
   vary: "Authorization",
   "cache-control": "no-store",
@@ -31,10 +26,8 @@ export async function handleApiV1Request(
 
   const segments = path ?? [];
 
-  // Next normalizes dot-segments before route matching, so the router never
-  // hands us one — but `handleApiV1Request` is exported and called directly
-  // (including from tests), and `encodeURIComponent("..") === ".."`, so the
-  // encoding below is not itself a traversal defense.
+  // Called directly (e.g. from tests) too, bypassing Next's dot-segment normalization, so reject it explicitly.
+  // encodeURIComponent("..") is "..", so the encoding below is not itself a traversal defense.
   if (segments.some((segment) => segment === "." || segment === "..")) {
     return Response.json(
       {
@@ -45,9 +38,7 @@ export async function handleApiV1Request(
     );
   }
 
-  // `openapi.json` is proxied like any other route. The backend serves the
-  // generated contract straight from a compiled-in artifact, so there is no
-  // reason to rebuild an equivalent document here on every request.
+  // openapi.json is proxied like any other route; the backend serves it from a compiled-in artifact.
   const requestUrl = new URL(request.url);
   const encodedPath = segments.map(encodeURIComponent).join("/");
   const backendPath = `/api/v1/${encodedPath}${requestUrl.search}`;
@@ -56,8 +47,7 @@ export async function handleApiV1Request(
   const init: RequestInit & { duplex?: "half"; attachInternalSecret?: boolean } = {
     method,
     headers,
-    // The backend authenticates `/api/v1/*` with the caller's Bearer token, so
-    // the internal secret has no business on this path.
+    // /api/v1/* is authenticated with the caller's Bearer token, not the internal secret.
     attachInternalSecret: false,
   };
 

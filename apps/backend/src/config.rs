@@ -9,31 +9,19 @@ pub const LOCAL_SESSION_SECRET: &str = "macro-tracker-dev-session-secret";
 pub const ENABLE_TEST_ROUTES_ENV: &str = "BACKEND_ENABLE_TEST_ROUTES";
 const MIN_SECRET_LENGTH: usize = 32;
 
-/// SEC-08: values that are published in this repository or its documentation.
-/// Length says nothing about whether a secret is secret, and every one of these
-/// clears `MIN_SECRET_LENGTH` on its own — the README placeholder is 35
-/// characters. `apps/web/lib/env.ts` keeps the same list; the two services share
-/// one HMAC key, so a value one refuses must not start the other.
-///
-/// The CI literals (`macro-tracker-ci-*-secret-32-chars`) are deliberately
-/// absent: CI runs the backend with a loopback `APP_URL` and no insecure-local
-/// flag, so blocking them would break the hard gate without protecting any
-/// deployment.
+// SEC-08: secrets published in this repo/docs; `apps/web/lib/env.ts` keeps the same list (one shared HMAC key).
+// CI runs loopback, so no insecure-local flag.
 const KNOWN_INSECURE_SECRETS: &[&str] = &[
-    // `LOCAL_SESSION_SECRET`, also the `playwright.config.ts` session default.
-    LOCAL_SESSION_SECRET,
-    // The internal-secret default in `apps/web/playwright.config.ts`.
-    "macro-tracker-local-backend-secret",
-    // The README setup placeholder.
-    "change-this-to-a-long-random-string",
+    LOCAL_SESSION_SECRET, // also the `playwright.config.ts` session default
+    "macro-tracker-local-backend-secret", // the internal-secret default in `apps/web/playwright.config.ts`
+    "change-this-to-a-long-random-string", // the README setup placeholder
 ];
 
 #[derive(Clone, Debug)]
 pub struct Config {
     pub allow_insecure_internal_auth: bool,
     pub app_url: String,
-    /// Gates the test-only role-assignment RPC. Deliberately its own flag
-    /// rather than a build profile, so a debug deploy cannot enable it.
+    /// Gates test-only RPCs; its own flag rather than a build profile, so a debug deploy cannot enable it.
     pub enable_test_routes: bool,
     pub backend_internal_secret: Option<String>,
     pub database_url: String,
@@ -108,10 +96,7 @@ impl Config {
             backend_internal_secret,
             database_url,
             port: parse_bounded(read_value(&mut read, "PORT"), "PORT", 4000, 1, u16::MAX)?,
-            // SEC-09: three permits is small enough that one burst of
-            // unauthenticated requests that touch the database *before* any
-            // credential check starves every real request behind the 10s acquire
-            // timeout. Ten still fits a personal Postgres instance.
+            // SEC-09: not smaller; a pre-auth burst must not starve real traffic behind the 10s acquire timeout.
             postgres_pool_max: parse_bounded(
                 read_value(&mut read, "POSTGRES_POOL_MAX"),
                 "POSTGRES_POOL_MAX",
@@ -237,16 +222,24 @@ fn is_local_database_host(host: Option<url::Host<&str>>) -> bool {
     }
 }
 
+fn require_local_app_url(flag: bool, app_url: &str, env_var: &str) -> anyhow::Result<()> {
+    if flag && !is_local_app_url(app_url) {
+        bail!(
+            "{env_var}=true is only allowed when APP_URL points to localhost or a loopback address."
+        );
+    }
+    Ok(())
+}
+
 fn validate_insecure_local_backend_mode(
     allow_insecure_local: bool,
     app_url: &str,
 ) -> anyhow::Result<()> {
-    if allow_insecure_local && !is_local_app_url(app_url) {
-        bail!(
-            "{ALLOW_INSECURE_LOCAL_BACKEND_ENV}=true is only allowed when APP_URL points to localhost or a loopback address."
-        );
-    }
-    Ok(())
+    require_local_app_url(
+        allow_insecure_local,
+        app_url,
+        ALLOW_INSECURE_LOCAL_BACKEND_ENV,
+    )
 }
 
 fn is_local_app_url(app_url: &str) -> bool {
@@ -299,9 +292,7 @@ fn validate_secret(name: &str, value: &str, allow_insecure_local: bool) -> anyho
     if allow_insecure_local {
         return Ok(());
     }
-    // SEC-08: checked on the trimmed value so 32 spaces cannot pass as a strong
-    // secret. Only the *check* trims — the untrimmed value is what gets signed
-    // with, and both services must agree on the exact key bytes.
+    // SEC-08: only the check trims, so 32 spaces cannot pass; the untrimmed value is what gets signed with.
     let trimmed = value.trim();
     if KNOWN_INSECURE_SECRETS.contains(&trimmed) {
         bail!(
@@ -314,23 +305,9 @@ fn validate_secret(name: &str, value: &str, allow_insecure_local: bool) -> anyho
     Ok(())
 }
 
-/// SEC-05: `BACKEND_ENABLE_TEST_ROUTES` turns on `ensureUserRoleForTesting`, a
-/// bare `UPDATE users SET role` with none of the real admin path's guards — no
-/// actor, no `FOR UPDATE`, no last-owner refusal, no audit event. Anyone who can
-/// reach `/internal/rpc` with the shared secret can make themselves `owner`, or
-/// demote the last one and lock admin out entirely.
-/// `apps/web/playwright.config.ts` ships the flag inside a copy-pasteable env
-/// block, so the realistic failure is that block landing in a deployed service.
-///
-/// Refused unless `APP_URL` is loopback, exactly like the sibling
-/// `BACKEND_ALLOW_INSECURE_LOCAL`.
+// SEC-05: `ensureUserRoleForTesting` has none of the admin path's guards; loopback-only, like the insecure-local flag.
 fn validate_test_routes_mode(enable_test_routes: bool, app_url: &str) -> anyhow::Result<()> {
-    if enable_test_routes && !is_local_app_url(app_url) {
-        bail!(
-            "{ENABLE_TEST_ROUTES_ENV}=true is only allowed when APP_URL points to localhost or a loopback address."
-        );
-    }
-    Ok(())
+    require_local_app_url(enable_test_routes, app_url, ENABLE_TEST_ROUTES_ENV)
 }
 
 fn parse_env_bool(value: Option<&str>) -> bool {
@@ -349,11 +326,7 @@ fn parse_csv_lower(value: Option<String>) -> Vec<String> {
         .collect()
 }
 
-/// Parses a numeric setting, failing loudly instead of silently falling back.
-///
-/// A typo in `POSTGRES_POOL_MAX` used to collapse to the default, and `=0` to a
-/// zero-permit pool where every query 500s after waiting out the acquire
-/// timeout.
+/// Parses a numeric setting, failing loudly instead of silently falling back to `default`.
 fn parse_bounded<T>(
     value: Option<String>,
     name: &str,
@@ -381,9 +354,7 @@ where
     Ok(parsed)
 }
 
-/// Provider base URLs are load-bearing: `SHOO_BASE_URL` is both the JWKS fetch
-/// origin and the JWT issuer allowlist, so an `http://` value would silently
-/// downgrade login-token verification.
+/// `SHOO_BASE_URL` is both the JWKS origin and the JWT issuer allowlist; `http://` would downgrade login verification.
 fn parse_https_base_url(
     value: Option<String>,
     name: &str,
@@ -413,11 +384,7 @@ fn parse_https_base_url(
     Ok(raw)
 }
 
-/// The AI gateway is the OpenAI-compatible chat-completions endpoint used
-/// for food-photo analysis (normally a CLIProxyAPI service). Railway's
-/// private network (`*.railway.internal`) has no TLS, so plain http is only
-/// allowed there and on loopback; anything else must be https or the API
-/// key would cross the public internet in cleartext.
+/// Railway's private network (`*.railway.internal`) has no TLS, so plain http is only allowed there and on loopback.
 fn parse_ai_gateway_url(
     value: Option<String>,
     allow_insecure_local: bool,
@@ -471,10 +438,7 @@ fn parse_origin_list(value: Option<String>) -> anyhow::Result<Vec<String>> {
         .collect()
 }
 
-/// A fully-populated, valid `Config` for tests that need an `AppState` but
-/// don't care about specific values. Shared by `main.rs` and `api.rs` (both
-/// previously carried their own copy of this literal — CLEAN-10); callers
-/// that need a particular field value overwrite it after construction.
+/// A fully-populated, valid `Config` for tests; callers overwrite whichever fields they care about.
 #[cfg(test)]
 pub(crate) fn test_config() -> Config {
     Config {

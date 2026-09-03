@@ -1,15 +1,4 @@
-/**
- * Idempotency keys for meal-entry creates.
- *
- * The backend already has the unique index and the `ON CONFLICT DO NOTHING`
- * for `client_mutation_id`, but nothing was sending one — so a mobile
- * double-tap, or a retry after a slow-but-successful save, wrote two identical
- * entries.
- *
- * An id is minted once per *intent* (identified by `key`) and reused until the
- * intent settles, which is what makes the repeat attempt dedupe rather than
- * duplicate.
- */
+// Idempotency keys minted once per intent and reused until it settles, so a double-tap dedupes instead of duplicating.
 export type ClientMutationIdStore = {
   take: (key: string) => string;
   settle: (key: string) => void;
@@ -20,8 +9,7 @@ function randomId() {
     return crypto.randomUUID();
   }
 
-  // Older WebViews without `crypto.randomUUID`. Collisions here only cost a
-  // dropped duplicate, and the value is scoped to one user's row.
+  // Fallback for older WebViews without crypto.randomUUID; a collision only costs a dropped duplicate.
   return `mt-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 }
 
