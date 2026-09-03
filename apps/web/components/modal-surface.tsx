@@ -14,14 +14,7 @@ type ModalSurfaceProps = {
   children: ReactNode;
 };
 
-/**
- * The panel of a hand-rolled overlay: dialog semantics, Escape, focus trap and
- * scroll lock in one place.
- *
- * `CompactModal` owns the standard centred dialog; this exists for the
- * full-screen and bottom-sheet flows whose chrome differs too much to share
- * that shell, so they at least share the accessibility behaviour.
- */
+// Dialog semantics, Escape, focus trap and scroll lock for full-screen/bottom-sheet flows CompactModal doesn't cover.
 export function ModalSurface({
   ariaLabel,
   onClose,

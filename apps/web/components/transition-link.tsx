@@ -36,9 +36,7 @@ export function shouldPrepareNavigationMotion(
 export function TransitionLink({
   href,
   motion = "screen",
-  // Off by default: every dynamic prefetch renders the full route on the
-  // server, and hosting memory is tightly capped. High-traffic links (the
-  // bottom-nav tabs) opt in individually.
+  // Off by default: dynamic prefetch renders the full route server-side and hosting memory is tightly capped.
   prefetch = false,
   onClick,
   target,
@@ -66,12 +64,7 @@ export function TransitionLink({
   );
 }
 
-/**
- * Wraps a link's content and pulses it while the navigation is pending.
- * Renders nothing extra when idle, and the CSS animation delay keeps fast
- * (or prefetched) navigations from flashing. Must be rendered inside a
- * `TransitionLink`/`Link`, which is where `useLinkStatus` reads from.
- */
+// Pulses while navigation is pending; must render inside a TransitionLink/Link, which is where useLinkStatus reads from.
 export function LinkPendingPulse({
   className,
   children,

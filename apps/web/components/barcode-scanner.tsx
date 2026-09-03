@@ -47,8 +47,7 @@ export function BarcodeScanner({
 
         if (stoppedRef.current || !videoRef.current) return;
 
-        // TRY_HARDER makes ZXing rotate and invert the image on each frame,
-        // so barcodes are detected in any orientation — not just horizontal.
+        // TRY_HARDER makes ZXing rotate/invert each frame, so barcodes are detected in any orientation.
         const hints = new Map();
         hints.set(DecodeHintType.TRY_HARDER, true);
 
@@ -77,8 +76,7 @@ export function BarcodeScanner({
               if (lookupResult.found) {
                 onScanRef.current(lookupResult.product);
               } else if (lookupResult.reason === "unavailable") {
-                // Not a catalogue miss: say the lookup failed rather than
-                // sending the user off to re-enter a product that may exist.
+                // Not a catalogue miss: the lookup failed, so don't send the user to re-enter a product that may exist.
                 setStatus("error");
                 setErrorMessage(
                   "Could not reach the product database. Check your connection and try again.",

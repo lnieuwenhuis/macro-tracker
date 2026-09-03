@@ -54,9 +54,7 @@ function useTheme(): ThemeId {
   );
 }
 
-// ─── ThemePicker ──────────────────────────────────────────────────────────────
 // Pill-chip grid for the hamburger menu.
-
 export function ThemePicker() {
   const activeTheme = useTheme();
   const [open, setOpen] = useState(false);
@@ -151,9 +149,7 @@ export function ThemePicker() {
   );
 }
 
-// ─── ThemeToggle ──────────────────────────────────────────────────────────────
 // Compact cycle-button for the login page.
-
 export function ThemeToggle() {
   const activeTheme = useTheme();
 

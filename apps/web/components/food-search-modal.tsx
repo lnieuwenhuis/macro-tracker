@@ -31,8 +31,7 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
   const [copiedIds, setCopiedIds] = useState<Set<string>>(new Set());
   const inputRef = useRef<HTMLInputElement>(null);
   const mutationIds = useRef(createClientMutationIdStore());
-  // Pending "copied" flash timers, keyed by entry id, cleared on unmount so
-  // closing the modal mid-flash doesn't call setState on an unmounted tree.
+  // Pending "copied" flash timers, keyed by entry id; cleared on unmount to avoid a setState on an unmounted tree.
   const copiedTimersRef = useRef<Map<string, number>>(new Map());
 
   useEffect(() => {
@@ -83,8 +82,7 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
     const timer = setTimeout(async () => {
       try {
         const result = await searchFoodsAction({ query: trimmedQuery });
-        // Guard against the component having unmounted or the query having
-        // changed while the network request was in flight.
+        // Guard against unmount or a newer query while this request was in flight.
         if (cancelled) return;
         setResultQuery(trimmedQuery);
         if (result.ok) {
