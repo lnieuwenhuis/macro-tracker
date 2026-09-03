@@ -99,9 +99,9 @@ const DEFAULT_MEAL_GROUP_LABELS: [&str; 4] = ["Breakfast", "Lunch", "Dinner", "S
 /// gaps-and-islands query lived only in the leaderboard, so every user's Summary
 /// permanently read `0🔥 / Best: 0 days` even though five tests asserted correct
 /// streaks — against the other consumer. Expanding one literal into both
-/// queries keeps them from drifting again; a `macro_rules!` rather than a
-/// `const` so each query stays a single compile-time string literal and the
-/// "no `format!` into SQL" invariant holds.
+/// queries keeps them from drifting again.
+///
+/// SQL is only ever assembled from compile-time constants in `db/sql.rs`, never from runtime values.
 ///
 /// Contract: the caller supplies a preceding CTE named `streak_days` with one
 /// row per date the user logged an eaten entry, and binds `$2` to the reference
@@ -2836,6 +2836,7 @@ impl TemplateItemColumns {
         self.calories.push(values.macros.calories);
     }
 
+    /// Split so insert_template_items can bind meal_group_label between ids and values; recipe rows have none.
     fn bind_ids<'q>(&'q self, query: PgQuery<'q>) -> PgQuery<'q> {
         query.bind(&self.ids).bind(&self.product_ids)
     }

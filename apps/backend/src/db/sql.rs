@@ -1,7 +1,6 @@
 //! SQL fragments spelled out once and rendered into the queries in `db.rs`.
 
-/// `@` in a column expression is replaced by the caller's qualifier, so one
-/// projection serves both unqualified and aliased selects.
+/// Replaced by the caller's qualifier, so one projection serves aliased and unaliased selects.
 const QUALIFIER_MARKER: char = '@';
 
 const FIELD_SEPARATOR: &str = ",\n          ";
@@ -49,8 +48,7 @@ const FOOD_PRODUCT_COLUMNS: &[(&str, &str)] = &[
     ("deletedAt", "@deleted_at"),
 ];
 
-/// `productId` and `sourceLabel` read through the `fp` join every caller adds,
-/// so a soft-deleted product is invisible rather than a dangling id (DATA-08).
+/// `fp.` is hard-coded, so callers must alias the food_products join as `fp` (DATA-08).
 const MEAL_ENTRY_COLUMNS: &[(&str, &str)] = &[
     ("id", "@id"),
     ("userId", "@user_id"),
@@ -112,8 +110,7 @@ pub(super) const INSERT_MEAL_ENTRY: &str = r#"
         RETURNING id
         "#;
 
-/// The `VALUES` list stays at each call site: one writes `owner_user_id` as a
-/// bind, the other as a literal `NULL`, which shifts every later placeholder.
+/// The `VALUES` list stays at each call site: `owner_user_id` is a bind in one and literal `NULL` in the other.
 pub(super) const INSERT_FOOD_PRODUCT_COLUMNS: &str = r#"
         INSERT INTO food_products (
           id, owner_user_id, scope, source, barcode, name, brand,
