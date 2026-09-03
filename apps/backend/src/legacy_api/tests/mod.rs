@@ -1084,6 +1084,60 @@ async fn open_food_facts_lookup_drops_a_body_over_the_size_cap() {
     );
 }
 
+/// Chunked and without `Content-Length`, so only the per-chunk check can stop this body.
+async fn spawn_chunked_open_food_facts_stub() -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("stub listener should bind");
+    let addr = listener.local_addr().expect("stub address should exist");
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request).await;
+                let headers = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n";
+                if stream.write_all(headers.as_bytes()).await.is_err() {
+                    return;
+                }
+
+                let padding = "x".repeat(64 * 1024);
+                let mut chunks = vec![
+                    r#"{"status":1,"product":{"product_name":"Streamed Product","#.to_string(),
+                    r#""nutriments":{"proteins_100g":1.0},"padding":""#.to_string(),
+                ];
+                chunks.extend(std::iter::repeat_n(
+                    padding.clone(),
+                    MAX_PROVIDER_RESPONSE_BYTES / padding.len() + 2,
+                ));
+                chunks.push(r#""}}"#.to_string());
+
+                for chunk in chunks {
+                    let framed = format!("{:x}\r\n{chunk}\r\n", chunk.len());
+                    if stream.write_all(framed.as_bytes()).await.is_err() {
+                        return;
+                    }
+                }
+                let _ = stream.write_all(b"0\r\n\r\n").await;
+            });
+        }
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn open_food_facts_lookup_drops_a_streamed_body_over_the_size_cap() {
+    let base_url = spawn_chunked_open_food_facts_stub().await;
+    let state = test_state(Some(&base_url));
+
+    assert!(
+        lookup_open_food_facts(&state, "8712345678901")
+            .await
+            .is_none()
+    );
+}
+
 #[tokio::test]
 async fn provider_fetch_gives_up_when_the_upstream_stalls_past_its_deadline() {
     let base_url = spawn_provider_stub(Router::new().route(
