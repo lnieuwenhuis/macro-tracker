@@ -9,8 +9,7 @@ type QuickAddRailProps = {
   emptyState?: React.ReactNode;
 };
 
-// Memoized to match MealCard: a parent re-render (a quantity edit, say)
-// otherwise re-renders every card in the rail.
+// Memoized to match MealCard: a parent re-render (a quantity edit, say) otherwise re-renders every card in the rail.
 const QuickAddCard = memo(function QuickAddCard({
   candidate,
   onAdd,

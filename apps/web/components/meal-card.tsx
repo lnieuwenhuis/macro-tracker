@@ -63,8 +63,7 @@ function MealCardComponent({ draft, busy, error, isCopied = false, mealGroups = 
   const menuContainerRef = useRef<HTMLDivElement>(null);
 
   const heading = draft.label.trim() || "New item";
-  // A macro chip is only worth showing when the value is meaningfully positive.
-  // parseFloat handles both "" (NaN → false) and "0" (0 → false) correctly.
+  // A macro chip only shows when meaningfully positive; parseFloat treats "" and "0" as not positive.
   const isPositive = (v: string) => parseFloat(v) > 0;
   const hasValues =
     isPositive(draft.proteinG) ||
@@ -123,11 +122,7 @@ function MealCardComponent({ draft, busy, error, isCopied = false, mealGroups = 
     setMenuOpen(false);
   }, []);
 
-  // Matches the outside-pointerdown + Escape dismissal every other dropdown
-  // in this codebase gets via this hook (see add-food-button.tsx). The menu
-  // and menuitem roles stay -- this only fixes the missing dismiss paths a
-  // keyboard or screen-reader user needs; it does not add roving-tabindex
-  // arrow-key navigation, which is a separate, larger change.
+  // Same outside-pointerdown + Escape dismissal as other dropdowns (see add-food-button.tsx); no roving-tabindex nav.
   useDismissableLayer({
     active: menuOpen,
     layerRef: menuContainerRef,
@@ -557,11 +552,7 @@ function MealCardComponent({ draft, busy, error, isCopied = false, mealGroups = 
   );
 }
 
-/**
- * A day's log renders one card per entry and every keystroke updates the shared
- * draft array, so without memoisation editing one card re-renders all of them.
- * Callers must pass stable callback identities for this to pay off.
- */
+// Memoized: a day's log re-renders every card on each keystroke otherwise; callers must pass stable callbacks.
 export const MealCard = memo(MealCardComponent);
 
 export type { MealDraft };

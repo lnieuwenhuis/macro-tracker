@@ -24,8 +24,7 @@ function roleStyles(role: AdminRole) {
   return "bg-[var(--color-card-muted)] text-[var(--color-muted-strong)]";
 }
 
-// Constructing an Intl formatter is expensive relative to formatting with one,
-// and this runs per row in admin tables. Build it once.
+// Built once: constructing an Intl formatter is costly relative to formatting with one, and this runs per table row.
 const adminTimestampFormat = new Intl.DateTimeFormat("en-US", {
   dateStyle: "medium",
   timeStyle: "short",

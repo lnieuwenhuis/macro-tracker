@@ -98,10 +98,8 @@ function isFocusable(element: HTMLElement) {
     return false;
   }
 
-  // `offsetParent` is not a usable visibility test — it is null for anything
-  // inside a `position: fixed` subtree, which is exactly what these dialogs
-  // are. `checkVisibility` is; where it is unavailable, err towards including
-  // the element so the trap stays closed.
+  // `offsetParent` is null inside `position: fixed`, so it can't test visibility here; `checkVisibility` can.
+  // Where `checkVisibility` is unavailable, err to included so the trap stays closed.
   return typeof element.checkVisibility === "function"
     ? element.checkVisibility()
     : true;
@@ -113,14 +111,7 @@ function getFocusableElements(container: HTMLElement) {
   ).filter(isFocusable);
 }
 
-/**
- * Keeps Tab focus inside an open dialog and restores it to the trigger on
- * close.
- *
- * Without this a keyboard user tabs straight out of the dialog into the page
- * behind it — which is still fully interactive and still announced by screen
- * readers.
- */
+// Keeps Tab focus inside an open dialog; without it a keyboard user tabs into the still-interactive page behind it.
 export function useFocusTrap<T extends HTMLElement>(
   active: boolean,
   containerRef: RefObject<T | null>,
@@ -136,8 +127,7 @@ export function useFocusTrap<T extends HTMLElement>(
 
     if (container) {
       const [first] = getFocusableElements(container);
-      // Fall back to the container itself so the reading position moves into
-      // the dialog even when it holds no focusable control yet.
+      // Fall back to the container so the reading position moves into the dialog even with no focusable control yet.
       (first ?? container).focus({ preventScroll: true });
     }
 

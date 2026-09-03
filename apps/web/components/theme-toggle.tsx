@@ -13,8 +13,6 @@ import {
 
 import { useDismissableLayer } from "./overlay-portal";
 
-// ─── Core helpers ─────────────────────────────────────────────────────────────
-
 function applyTheme(theme: ThemeId) {
   const root = document.documentElement;
   root.setAttribute("data-theme", theme);
@@ -54,9 +52,7 @@ function useTheme(): ThemeId {
   );
 }
 
-// ─── ThemePicker ──────────────────────────────────────────────────────────────
 // Pill-chip grid for the hamburger menu.
-
 export function ThemePicker() {
   const activeTheme = useTheme();
   const [open, setOpen] = useState(false);
@@ -151,9 +147,7 @@ export function ThemePicker() {
   );
 }
 
-// ─── ThemeToggle ──────────────────────────────────────────────────────────────
 // Compact cycle-button for the login page.
-
 export function ThemeToggle() {
   const activeTheme = useTheme();
 

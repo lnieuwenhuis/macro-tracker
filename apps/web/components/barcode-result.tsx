@@ -65,10 +65,6 @@ function parseServingGrams(value: string): number {
   return grams == null ? 100 : roundToTwoDecimals(grams);
 }
 
-// ---------------------------------------------------------------------------
-// Sub-component: manual entry form shown when a barcode isn't found
-// ---------------------------------------------------------------------------
-
 function NotFoundForm({
   barcode,
   onProductSaved,
@@ -151,7 +147,6 @@ function NotFoundForm({
     });
   }
 
-  // ── "not found" landing screen ──────────────────────────────────────────
   if (!showForm) {
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -193,7 +188,6 @@ function NotFoundForm({
     );
   }
 
-  // ── manual entry form ────────────────────────────────────────────────────
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center">
       <div
@@ -359,10 +353,6 @@ function NotFoundForm({
   );
 }
 
-// ---------------------------------------------------------------------------
-// Main component
-// ---------------------------------------------------------------------------
-
 type EditedValues = {
   name: string;
   proteinG: string;
@@ -392,15 +382,12 @@ export function BarcodeResult({
   const defaultServing = displayProduct?.servingSizeG ?? 100;
   const [servingG, setServingG] = useState(String(defaultServing));
   const [savedPreset, setSavedPreset] = useState(false);
-  // When isEditing is true, the macro display switches to editable inputs and
-  // scaling is paused. Add-to-log and Save-as-template send these raw edited
-  // values instead of the scaled ones.
+  // While editing, add-to-log and save-as-template send these raw values instead of the scaled ones.
   const [isEditing, setIsEditing] = useState(false);
   const [edited, setEdited] = useState<EditedValues>(emptyEdited);
 
   const serving = parseServingGrams(servingG);
 
-  // ── Not-found state: delegate to the form sub-component ─────────────────
   if (!displayProduct && notFoundBarcode) {
     return (
       <OverlayPortal>
@@ -474,8 +461,7 @@ export function BarcodeResult({
   }
 
   function updateEdited(field: keyof EditedValues, value: string) {
-    // Normalize comma decimals to dots so European keyboards work with
-    // numeric inputs; harmless for the name field.
+    // Normalize comma decimals to dots so European keyboards work; harmless for the name field.
     setEdited((prev) => ({ ...prev, [field]: value.replace(/,/g, ".") }));
   }
 

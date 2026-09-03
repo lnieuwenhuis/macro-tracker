@@ -26,8 +26,7 @@ type IngredientCardProps = {
   onDuplicate: (clientId: string) => void;
 };
 
-// Memoized to match MealCard: editing one ingredient otherwise re-renders the
-// whole list.
+// Memoized to match MealCard: editing one ingredient otherwise re-renders the whole list.
 export const IngredientCard = memo(function IngredientCard({
   draft,
   disabled,
