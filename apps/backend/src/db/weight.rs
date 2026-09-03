@@ -125,14 +125,14 @@ pub(super) async fn weight_page_data_json(
         .map_err(|_| AppError::BadRequest("selectedDate must be YYYY-MM-DD.".to_string()))?;
     let latest = stat_entries.last().copied();
     let current_weight = latest.map(|entry| entry.weight_kg);
-    let week_change = latest.and_then(|latest| {
-        closest_weight_on_or_before(&stat_entries, today_date - Duration::days(7))
-            .map(|entry| round2(latest.weight_kg - entry.weight_kg))
-    });
-    let month_change = latest.and_then(|latest| {
-        closest_weight_on_or_before(&stat_entries, today_date - Duration::days(30))
-            .map(|entry| round2(latest.weight_kg - entry.weight_kg))
-    });
+    let change_over = |days: i64| {
+        latest.and_then(|latest| {
+            closest_weight_on_or_before(&stat_entries, today_date - Duration::days(days))
+                .map(|entry| round2(latest.weight_kg - entry.weight_kg))
+        })
+    };
+    let week_change = change_over(7);
+    let month_change = change_over(30);
     let trend_direction = match stat_entries.len() {
         0 | 1 => None,
         2 => {
@@ -166,33 +166,20 @@ pub(super) async fn create_weight_entry_json(
 ) -> AppResult<Value> {
     let id = Uuid::new_v4();
     let values = normalize_weight_entry_input(input)?;
-    let row = if overwrite {
-        sqlx::query(
-            r#"
-            INSERT INTO weight_entries (id, user_id, entry_date, weight_kg, body_fat_pct, notes, updated_at)
-            VALUES ($1, $2, $3::date, $4, $5, $6, now())
-            ON CONFLICT (user_id, entry_date)
-            DO UPDATE SET weight_kg = EXCLUDED.weight_kg, body_fat_pct = EXCLUDED.body_fat_pct, notes = EXCLUDED.notes, updated_at = now()
-            RETURNING id
-            "#,
-        )
-        .bind(id)
-        .bind(user_id)
-        .bind(&values.date)
-        .bind(values.weight_kg)
-        .bind(values.body_fat_pct)
-        .bind(values.notes.as_deref())
-        .fetch_optional(pool)
-        .await?
+    let conflict = if overwrite {
+        "\n            DO UPDATE SET weight_kg = EXCLUDED.weight_kg, body_fat_pct = EXCLUDED.body_fat_pct, notes = EXCLUDED.notes, updated_at = now()"
     } else {
-        sqlx::query(
-            r#"
+        " DO NOTHING"
+    };
+    let sql = format!(
+        r#"
             INSERT INTO weight_entries (id, user_id, entry_date, weight_kg, body_fat_pct, notes, updated_at)
             VALUES ($1, $2, $3::date, $4, $5, $6, now())
-            ON CONFLICT (user_id, entry_date) DO NOTHING
+            ON CONFLICT (user_id, entry_date){conflict}
             RETURNING id
-            "#,
-        )
+            "#
+    );
+    let row = sqlx::query(&sql)
         .bind(id)
         .bind(user_id)
         .bind(&values.date)
@@ -200,8 +187,7 @@ pub(super) async fn create_weight_entry_json(
         .bind(values.body_fat_pct)
         .bind(values.notes.as_deref())
         .fetch_optional(pool)
-        .await?
-    };
+        .await?;
     let Some(row) = row else {
         return Ok(Value::Null);
     };

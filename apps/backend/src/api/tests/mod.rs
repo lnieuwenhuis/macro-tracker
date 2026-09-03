@@ -787,7 +787,7 @@ fn portions_is_documented_as_optional_with_its_real_default() {
 #[tokio::test]
 async fn a_timed_out_request_still_returns_the_json_envelope_and_cors_headers() {
     // A tower TimeoutLayer would emit a bare 504, breaking the documented contract and CORS for browsers.
-    let response = json_response(
+    let response = raw_json_response(
         StatusCode::GATEWAY_TIMEOUT,
         json!({
             "ok": false,

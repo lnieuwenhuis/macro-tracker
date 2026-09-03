@@ -5,21 +5,19 @@ use serde_json::{Value, json};
 
 #[test]
 fn api_token_scope_validation_rejects_empty_unknown_and_non_string_scopes() {
-    assert_eq!(
-        bad_request_message(normalize_api_token_scopes(Some(&json!([])))),
-        "API token must include at least one scope."
-    );
-    assert_eq!(
-        bad_request_message(normalize_api_token_scopes(Some(&json!([
-            "read:daily",
-            "admin:*"
-        ])))),
-        "API token scope is invalid."
-    );
-    assert_eq!(
-        bad_request_message(normalize_api_token_scopes(Some(&json!(["read:daily", 42])))),
-        "API token scope is invalid."
-    );
+    for (input, message) in [
+        (json!([]), "API token must include at least one scope."),
+        (
+            json!(["read:daily", "admin:*"]),
+            "API token scope is invalid.",
+        ),
+        (json!(["read:daily", 42]), "API token scope is invalid."),
+    ] {
+        assert_eq!(
+            bad_request_message(normalize_api_token_scopes(Some(&input))),
+            message
+        );
+    }
 }
 
 #[test]

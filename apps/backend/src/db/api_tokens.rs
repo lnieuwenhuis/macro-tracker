@@ -26,30 +26,19 @@ const API_SCOPE_VALUES: &[&str] = &[
     "read:stats",
 ];
 
+const API_TOKEN_COLUMNS: &str =
+    "id, user_id, token_prefix, name, scopes, created_at, last_used_at, expires_at, revoked_at";
+
 pub async fn authenticate_api_token(pool: &PgPool, token: &str) -> AppResult<Value> {
     if !token.starts_with("mtk_v1_") {
         return Ok(json!({ "ok": false, "reason": "malformed" }));
     }
     let token_hash = hash_token(token);
-    let row = sqlx::query(
-        r#"
-        SELECT
-          id,
-          user_id,
-          token_prefix,
-          name,
-          scopes,
-          created_at,
-          last_used_at,
-          expires_at,
-          revoked_at
-        FROM api_tokens
-        WHERE token_hash = $1
-        "#,
-    )
-    .bind(token_hash)
-    .fetch_optional(pool)
-    .await?;
+    let sql = format!("SELECT {API_TOKEN_COLUMNS} FROM api_tokens WHERE token_hash = $1");
+    let row = sqlx::query(&sql)
+        .bind(token_hash)
+        .fetch_optional(pool)
+        .await?;
     let Some(row) = row else {
         return Ok(json!({ "ok": false, "reason": "invalid" }));
     };
@@ -63,27 +52,10 @@ pub async fn authenticate_api_token(pool: &PgPool, token: &str) -> AppResult<Val
     }
     let id: Uuid = row.try_get("id")?;
     // `RETURNING` avoids a follow-up SELECT; the throttle usually skips the UPDATE, so `row` above stays current.
-    let refreshed = sqlx::query(
-        r#"
-        UPDATE api_tokens
-        SET last_used_at = now()
-        WHERE id = $1
-          AND (last_used_at IS NULL OR last_used_at < now() - interval '5 minutes')
-        RETURNING
-          id,
-          user_id,
-          token_prefix,
-          name,
-          scopes,
-          created_at,
-          last_used_at,
-          expires_at,
-          revoked_at
-        "#,
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
+    let sql = format!(
+        "UPDATE api_tokens SET last_used_at = now() WHERE id = $1 AND (last_used_at IS NULL OR last_used_at < now() - interval '5 minutes') RETURNING {API_TOKEN_COLUMNS}"
+    );
+    let refreshed = sqlx::query(&sql).bind(id).fetch_optional(pool).await?;
     let record = api_token_row_json(refreshed.as_ref().unwrap_or(&row))?;
     Ok(json!({ "ok": true, "token": record }))
 }
@@ -116,35 +88,21 @@ pub(super) async fn create_api_token_json(
     let token_hash = hash_token(&token);
     let token_prefix = format!("mtk_v1_{}", &token_hash[..12]);
     let expires_at = normalize_api_token_expiry(input.get("expiresAt"))?;
-    let row = sqlx::query(
-        r#"
-        INSERT INTO api_tokens (
-          id, user_id, token_hash, token_prefix, name, scopes, expires_at
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz)
-        RETURNING
-          id,
-          user_id,
-          token_prefix,
-          name,
-          scopes,
-          created_at,
-          last_used_at,
-          expires_at,
-          revoked_at
-        "#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(user_id)
-    .bind(token_hash)
-    .bind(token_prefix)
-    .bind(name)
-    .bind(Value::Array(
-        scopes.into_iter().map(Value::String).collect(),
-    ))
-    .bind(expires_at)
-    .fetch_one(pool)
-    .await?;
+    let sql = format!(
+        "INSERT INTO api_tokens (id, user_id, token_hash, token_prefix, name, scopes, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz) RETURNING {API_TOKEN_COLUMNS}"
+    );
+    let row = sqlx::query(&sql)
+        .bind(Uuid::new_v4())
+        .bind(user_id)
+        .bind(token_hash)
+        .bind(token_prefix)
+        .bind(name)
+        .bind(Value::Array(
+            scopes.into_iter().map(Value::String).collect(),
+        ))
+        .bind(expires_at)
+        .fetch_one(pool)
+        .await?;
     Ok(json!({
         "token": token,
         "record": api_token_row_json(&row)?
@@ -199,28 +157,14 @@ pub(super) fn normalize_api_token_expiry(
 }
 
 pub(super) async fn list_api_tokens_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
-    let rows = sqlx::query(
-        r#"
-        SELECT
-          id,
-          user_id,
-          token_prefix,
-          name,
-          scopes,
-          created_at,
-          last_used_at,
-          expires_at,
-          revoked_at
-        FROM api_tokens
-        WHERE user_id = $1
-        ORDER BY created_at DESC
-        LIMIT $2
-        "#,
-    )
-    .bind(user_id)
-    .bind(MAX_COLLECTION_ROWS)
-    .fetch_all(pool)
-    .await?;
+    let sql = format!(
+        "SELECT {API_TOKEN_COLUMNS} FROM api_tokens WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2"
+    );
+    let rows = sqlx::query(&sql)
+        .bind(user_id)
+        .bind(MAX_COLLECTION_ROWS)
+        .fetch_all(pool)
+        .await?;
     let records = rows
         .iter()
         .map(api_token_row_json)

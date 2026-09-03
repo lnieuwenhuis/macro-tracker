@@ -295,15 +295,7 @@ fn configured_owner_policy_promotes_but_never_demotes() {
 
 #[tokio::test]
 async fn shoo_jwks_fetch_times_out_instead_of_hanging() {
-    let mut config = test_config("session-secret-with-at-least-32-chars");
-    config.shoo_base_url = stalled_http_base_url().await;
-    let state = crate::AppState {
-        config,
-        db: PgPoolOptions::new()
-            .connect_lazy("postgres://postgres:***@127.0.0.1:5432/macro_tracker")
-            .expect("test pool should be created lazily"),
-        http: reqwest::Client::new(),
-    };
+    let state = shoo_state_for(&stalled_http_base_url().await);
     let started = Instant::now();
 
     let error = verify_shoo_token(
@@ -322,15 +314,7 @@ async fn shoo_jwks_fetch_times_out_instead_of_hanging() {
 async fn shoo_jwks_are_cached_per_base_url() {
     let kid = "cached-key";
     let (base_url, request_count) = jwks_base_url(ec_jwks(kid)).await;
-    let mut config = test_config("session-secret-with-at-least-32-chars");
-    config.shoo_base_url = base_url.clone();
-    let state = crate::AppState {
-        config,
-        db: PgPoolOptions::new()
-            .connect_lazy("postgres://postgres:***@127.0.0.1:5432/macro_tracker")
-            .expect("test pool should be created lazily"),
-        http: reqwest::Client::new(),
-    };
+    let state = shoo_state_for(&base_url);
     let token = signed_shoo_token(kid, &base_url, "http://localhost:3000");
 
     let first = verify_shoo_token(&state, &token, "http://localhost:3000")
@@ -439,52 +423,44 @@ async fn shoo_state_with_jwks(jwks_body: String) -> (crate::AppState, String) {
     (state, base_url)
 }
 
-/// SEC-02: a token that simply omits `aud` must not authenticate.
+/// SEC-02: a token that omits `aud` or `iss` must not authenticate (same fall-through for both).
 #[tokio::test]
-async fn shoo_token_without_audience_is_rejected() {
-    let kid = "es256-key";
-    let (state, base_url) = shoo_state_with_jwks(ec_jwks(kid)).await;
-    let now = Utc::now();
-    let token = signed_shoo_token_with_claims(
-        kid,
-        serde_json::json!({
-            "iss": base_url,
-            "exp": (now + Duration::minutes(5)).timestamp(),
-            "iat": now.timestamp(),
-            "pairwise_sub": "pairwise-test-sub",
-            "email": "coach@example.test"
-        }),
-    );
+async fn shoo_token_without_audience_or_issuer_is_rejected() {
+    for (omitted_claim, message) in [
+        ("aud", "a token with no aud claim must not authenticate"),
+        ("iss", "a token with no iss claim must not authenticate"),
+    ] {
+        let kid = "es256-key";
+        let (state, base_url) = shoo_state_with_jwks(ec_jwks(kid)).await;
+        let now = Utc::now();
+        let claims = if omitted_claim == "aud" {
+            serde_json::json!({
+                "iss": base_url,
+                "exp": (now + Duration::minutes(5)).timestamp(),
+                "iat": now.timestamp(),
+                "pairwise_sub": "pairwise-test-sub",
+                "email": "coach@example.test"
+            })
+        } else {
+            serde_json::json!({
+                "aud": "origin:http://localhost:3000",
+                "exp": (now + Duration::minutes(5)).timestamp(),
+                "iat": now.timestamp(),
+                "pairwise_sub": "pairwise-test-sub",
+                "email": "coach@example.test"
+            })
+        };
+        let token = signed_shoo_token_with_claims(kid, claims);
 
-    let error = verify_shoo_token(&state, &token, "http://localhost:3000")
-        .await
-        .expect_err("a token with no aud claim must not authenticate");
+        let error = verify_shoo_token(&state, &token, "http://localhost:3000")
+            .await
+            .expect_err(message);
 
-    assert!(matches!(error, AppError::Unauthorized(_)));
-}
-
-/// SEC-02: same fall-through, for the issuer.
-#[tokio::test]
-async fn shoo_token_without_issuer_is_rejected() {
-    let kid = "es256-key";
-    let (state, _) = shoo_state_with_jwks(ec_jwks(kid)).await;
-    let now = Utc::now();
-    let token = signed_shoo_token_with_claims(
-        kid,
-        serde_json::json!({
-            "aud": "origin:http://localhost:3000",
-            "exp": (now + Duration::minutes(5)).timestamp(),
-            "iat": now.timestamp(),
-            "pairwise_sub": "pairwise-test-sub",
-            "email": "coach@example.test"
-        }),
-    );
-
-    let error = verify_shoo_token(&state, &token, "http://localhost:3000")
-        .await
-        .expect_err("a token with no iss claim must not authenticate");
-
-    assert!(matches!(error, AppError::Unauthorized(_)));
+        assert!(
+            matches!(error, AppError::Unauthorized(_)),
+            "omitted {omitted_claim}"
+        );
+    }
 }
 
 /// Guard on the case that always worked, so the required-claims change isn't mistaken for the whole check.

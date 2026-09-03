@@ -40,54 +40,55 @@ fn gym_slot_values_validates_shape_and_minutes() {
     assert_eq!(values.slot_date.as_deref(), Some("2026-09-01"));
     assert_eq!(values.weekday, None);
 
-    // Overnight (start >= end) is rejected.
-    assert!(
-        gym_slot_values(&gym_input(&[
-            ("recurrence", json!("weekly")),
-            ("weekday", json!(2)),
-            ("startMinute", json!(1320)),
-            ("endMinute", json!(120)),
-        ]))
-        .is_err()
-    );
-    // Weekday outside ISO 1-7 is rejected.
-    assert!(
-        gym_slot_values(&gym_input(&[
-            ("recurrence", json!("weekly")),
-            ("weekday", json!(0)),
-            ("startMinute", json!(600)),
-            ("endMinute", json!(660)),
-        ]))
-        .is_err()
-    );
-    // A one-off slot without a date is rejected, as is a special date.
-    assert!(
-        gym_slot_values(&gym_input(&[
-            ("recurrence", json!("once")),
-            ("startMinute", json!(600)),
-            ("endMinute", json!(660)),
-        ]))
-        .is_err()
-    );
-    assert!(
-        gym_slot_values(&gym_input(&[
-            ("recurrence", json!("once")),
-            ("slotDate", json!("today")),
-            ("startMinute", json!(600)),
-            ("endMinute", json!(660)),
-        ]))
-        .is_err()
-    );
-    // Unknown recurrence is rejected.
-    assert!(
-        gym_slot_values(&gym_input(&[
-            ("recurrence", json!("biweekly")),
-            ("weekday", json!(3)),
-            ("startMinute", json!(600)),
-            ("endMinute", json!(660)),
-        ]))
-        .is_err()
-    );
+    // Rejections differ only by shape; loop over owned rows with an intent string.
+    for (intent, input) in [
+        (
+            "overnight (start >= end) is rejected",
+            gym_input(&[
+                ("recurrence", json!("weekly")),
+                ("weekday", json!(2)),
+                ("startMinute", json!(1320)),
+                ("endMinute", json!(120)),
+            ]),
+        ),
+        (
+            "weekday outside ISO 1-7 is rejected",
+            gym_input(&[
+                ("recurrence", json!("weekly")),
+                ("weekday", json!(0)),
+                ("startMinute", json!(600)),
+                ("endMinute", json!(660)),
+            ]),
+        ),
+        (
+            "a one-off slot without a date is rejected",
+            gym_input(&[
+                ("recurrence", json!("once")),
+                ("startMinute", json!(600)),
+                ("endMinute", json!(660)),
+            ]),
+        ),
+        (
+            "a one-off slot with a special date is rejected",
+            gym_input(&[
+                ("recurrence", json!("once")),
+                ("slotDate", json!("today")),
+                ("startMinute", json!(600)),
+                ("endMinute", json!(660)),
+            ]),
+        ),
+        (
+            "unknown recurrence is rejected",
+            gym_input(&[
+                ("recurrence", json!("biweekly")),
+                ("weekday", json!(3)),
+                ("startMinute", json!(600)),
+                ("endMinute", json!(660)),
+            ]),
+        ),
+    ] {
+        assert!(gym_slot_values(&input).is_err(), "{intent}");
+    }
 }
 
 #[test]
@@ -111,8 +112,7 @@ fn gym_invite_identifiers_classify_and_normalize() {
         GymInviteIdentifier::Email(email) => assert_eq!(email, "bob@example.com"),
         GymInviteIdentifier::FriendCode(_) => panic!("expected email"),
     }
-    // No '@' → friend code, uppercased with separators stripped so
-    // "ab23-cd45", "AB23 CD45" and "ab23cd45" all resolve identically.
+    // No '@' → friend code, uppercased with separators stripped so all three spellings resolve identically.
     for raw in ["ab23-cd45", "AB23 CD45", "ab23cd45"] {
         match classify_gym_invite_identifier(raw).unwrap() {
             GymInviteIdentifier::FriendCode(code) => assert_eq!(code, "AB23CD45"),
@@ -172,8 +172,7 @@ fn gym_merge_overlaps_merges_per_style_and_classifies_tentative() {
 
 #[test]
 fn gym_merge_overlaps_caps_windows_and_buddies_keeping_the_earliest() {
-    // 22 buddies (cap is 20) with 4 far-apart, non-mergeable windows each (cap is 3 per buddy).
-    // Rows arrive ordered by start, so buddy N's earliest window is at minute N.
+    // 22 buddies (cap 20) with 4 non-mergeable windows each (cap 3); rows arrive ordered by start.
     let buddy_id = |index: usize| format!("00000000-0000-4000-8000-{index:012}");
     let mut rows = Vec::new();
     for index in 0..22 {

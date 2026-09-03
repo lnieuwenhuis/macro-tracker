@@ -1,9 +1,5 @@
-// CLEAN-03: this is NOT dead, and it is not merely a reference. `test_db()` runs
-// `sqlx::raw_sql(SCHEMA_SQL)` to build the schema for EVERY backend integration
-// test, so if it drifts from `packages/db/drizzle/*.sql` the whole suite silently
-// stops testing the schema production actually runs. Startup still relies on the
-// Drizzle migrations, never on this. `schema_sql_matches_the_drizzle_migrations`
-// below pins the two together - update both, or that test fails.
+// CLEAN-03: `test_db()` builds EVERY integration schema from this; `schema_sql_matches_the_drizzle_migrations` pins it to the Drizzle migrations.
+// Update both together or that test fails.
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS users (
   id uuid PRIMARY KEY NOT NULL,
@@ -289,39 +285,47 @@ fn bad_request_message(result: AppResult<impl Sized>) -> String {
     }
 }
 
-fn meal_payload(overrides: &[(&str, Value)]) -> serde_json::Map<String, Value> {
-    let mut payload = serde_json::Map::from_iter([
-        ("label".to_string(), json!("Oats")),
-        ("quantity".to_string(), json!(1.0)),
-        ("unit".to_string(), json!("serving")),
-        ("servingMultiplier".to_string(), json!(1.0)),
-        ("proteinG".to_string(), json!(10.0)),
-        ("carbsG".to_string(), json!(20.0)),
-        ("fatG".to_string(), json!(5.0)),
-        ("caloriesKcal".to_string(), json!(165)),
-    ]);
+fn apply_payload_overrides(
+    mut payload: serde_json::Map<String, Value>,
+    overrides: &[(&str, Value)],
+) -> serde_json::Map<String, Value> {
     for (key, value) in overrides {
         payload.insert((*key).to_string(), value.clone());
     }
     payload
 }
 
+fn meal_payload(overrides: &[(&str, Value)]) -> serde_json::Map<String, Value> {
+    apply_payload_overrides(
+        serde_json::Map::from_iter([
+            ("label".to_string(), json!("Oats")),
+            ("quantity".to_string(), json!(1.0)),
+            ("unit".to_string(), json!("serving")),
+            ("servingMultiplier".to_string(), json!(1.0)),
+            ("proteinG".to_string(), json!(10.0)),
+            ("carbsG".to_string(), json!(20.0)),
+            ("fatG".to_string(), json!(5.0)),
+            ("caloriesKcal".to_string(), json!(165)),
+        ]),
+        overrides,
+    )
+}
+
 fn food_payload(overrides: &[(&str, Value)]) -> serde_json::Map<String, Value> {
-    let mut payload = serde_json::Map::from_iter([
-        ("scope".to_string(), json!("personal")),
-        ("source".to_string(), json!("manual")),
-        ("name".to_string(), json!("Oats")),
-        ("defaultServingQuantity".to_string(), json!(1.0)),
-        ("defaultServingUnit".to_string(), json!("serving")),
-        ("proteinPer100".to_string(), json!(10.0)),
-        ("carbsPer100".to_string(), json!(20.0)),
-        ("fatPer100".to_string(), json!(5.0)),
-        ("caloriesPer100".to_string(), json!(165)),
-    ]);
-    for (key, value) in overrides {
-        payload.insert((*key).to_string(), value.clone());
-    }
-    payload
+    apply_payload_overrides(
+        serde_json::Map::from_iter([
+            ("scope".to_string(), json!("personal")),
+            ("source".to_string(), json!("manual")),
+            ("name".to_string(), json!("Oats")),
+            ("defaultServingQuantity".to_string(), json!(1.0)),
+            ("defaultServingUnit".to_string(), json!("serving")),
+            ("proteinPer100".to_string(), json!(10.0)),
+            ("carbsPer100".to_string(), json!(20.0)),
+            ("fatPer100".to_string(), json!(5.0)),
+            ("caloriesPer100".to_string(), json!(165)),
+        ]),
+        overrides,
+    )
 }
 
 fn barcode_payload(barcode: &str) -> serde_json::Map<String, Value> {
@@ -404,25 +408,7 @@ fn search_result_ids(results: &Value) -> Vec<&str> {
         .collect::<Vec<_>>()
 }
 
-async fn insert_test_user(pool: &PgPool) -> Uuid {
-    let user_id = Uuid::new_v4();
-    sqlx::query(
-        r#"
-            INSERT INTO users (id, shoo_pairwise_sub, email, display_name)
-            VALUES ($1, $2, $3, 'Test User')
-            "#,
-    )
-    .bind(user_id)
-    .bind(format!("test-sub-{user_id}"))
-    .bind(format!("{user_id}@example.test"))
-    .execute(pool)
-    .await
-    .expect("test user should insert");
-    user_id
-}
-
-async fn insert_test_user_with_email(pool: &PgPool, email: &str) -> Uuid {
-    let user_id = Uuid::new_v4();
+async fn insert_test_user_with_id(pool: &PgPool, user_id: Uuid, email: &str) -> Uuid {
     sqlx::query(
         r#"
             INSERT INTO users (id, shoo_pairwise_sub, email, display_name)
@@ -436,6 +422,16 @@ async fn insert_test_user_with_email(pool: &PgPool, email: &str) -> Uuid {
     .await
     .expect("test user should insert");
     user_id
+}
+
+async fn insert_test_user(pool: &PgPool) -> Uuid {
+    let user_id = Uuid::new_v4();
+    insert_test_user_with_id(pool, user_id, &format!("{user_id}@example.test")).await
+}
+
+async fn insert_test_user_with_email(pool: &PgPool, email: &str) -> Uuid {
+    let user_id = Uuid::new_v4();
+    insert_test_user_with_id(pool, user_id, email).await
 }
 
 async fn insert_test_admin_barcode_product(
@@ -1791,33 +1787,28 @@ fn macro_goals_are_bounded_to_the_column_domain() {
     );
 
     // numeric(6, 1) overflows past 99_999.9; onboarding writes these columns directly, so this must reject first.
-    assert!(
-        validate_macro_goals(&MacroGoals {
+    for goals in [
+        MacroGoals {
             protein_g: Some(1e30),
             carbs_g: None,
             fat_g: None,
             calories_kcal: None,
-        })
-        .is_err()
-    );
-    assert!(
-        validate_macro_goals(&MacroGoals {
+        },
+        MacroGoals {
             protein_g: Some(-1.0),
             carbs_g: None,
             fat_g: None,
             calories_kcal: None,
-        })
-        .is_err()
-    );
-    assert!(
-        validate_macro_goals(&MacroGoals {
+        },
+        MacroGoals {
             protein_g: None,
             carbs_g: None,
             fat_g: None,
             calories_kcal: Some(-5),
-        })
-        .is_err()
-    );
+        },
+    ] {
+        assert!(validate_macro_goals(&goals).is_err());
+    }
 }
 
 #[test]
@@ -1975,27 +1966,27 @@ fn normalize_meal_food_values_pins_the_meal_item_contract() {
 
 #[test]
 fn food_and_barcode_validation_rejects_invalid_payloads() {
-    assert_eq!(
-        bad_request_message(normalize_food_product_input(
-            &food_payload(&[("name", json!(" "))]),
-            "personal",
-        )),
-        "Product name is required."
-    );
-    assert_eq!(
-        bad_request_message(normalize_food_product_input(
-            &food_payload(&[("defaultServingQuantity", json!(0))]),
-            "personal",
-        )),
-        "Default serving quantity must be a positive number."
-    );
-    assert_eq!(
-        bad_request_message(normalize_food_product_input(
-            &food_payload(&[("sourceConfidence", json!(1.1))]),
-            "personal",
-        )),
-        "Source confidence must be between 0 and 1."
-    );
+    for (key, value, message) in [
+        ("name", json!(" "), "Product name is required."),
+        (
+            "defaultServingQuantity",
+            json!(0),
+            "Default serving quantity must be a positive number.",
+        ),
+        (
+            "sourceConfidence",
+            json!(1.1),
+            "Source confidence must be between 0 and 1.",
+        ),
+    ] {
+        assert_eq!(
+            bad_request_message(normalize_food_product_input(
+                &food_payload(&[(key, value)]),
+                "personal",
+            )),
+            message
+        );
+    }
     assert_eq!(
         bad_request_message(normalize_barcode_food_product_input(
             &serde_json::Map::from_iter([
@@ -2020,14 +2011,9 @@ fn only_admin_and_owner_roles_are_admin_actors() {
     assert!(!is_admin_actor_role(""));
 }
 
-/// Applies every Drizzle migration into one scratch schema and `SCHEMA_SQL`
-/// into another, then compares the resulting catalogs. This is what stops
-/// the integration-test schema from drifting away from the migrations that
-/// production actually runs - the CLEAN-03 hazard.
-///
-/// Migrations schema-qualify some references as `"public"."x"`, which would
-/// escape the scratch schema, so that qualifier is stripped before applying.
-/// That is the only rewrite performed.
+/// Applies every Drizzle migration and `SCHEMA_SQL` into scratch schemas and compares catalogs.
+/// This stops the integration-test schema drifting from what production runs (CLEAN-03).
+/// Strips `"public".` qualifiers so they stay in the scratch schema; the only rewrite.
 #[cfg_attr(not(has_test_database), ignore = "needs a test database")]
 #[tokio::test]
 async fn schema_sql_matches_the_drizzle_migrations() {
@@ -2072,12 +2058,7 @@ async fn schema_sql_matches_the_drizzle_migrations() {
             .expect("scratch schema should be created");
     }
 
-    // 0014 creates pg_trgm opportunistically. Two things bite here: left to
-    // itself the extension lands in whatever schema is first on search_path
-    // (a scratch one), and if a previous run already installed it elsewhere
-    // then `IF NOT EXISTS` silently no-ops rather than relocating it - so
-    // `gin_trgm_ops` fails to resolve either way. Install it if missing, then
-    // resolve wherever it actually lives and put that on the search_path.
+    // 0014 needs pg_trgm resolvable: install if missing, then put its real schema on the search_path.
     sqlx::query("CREATE EXTENSION IF NOT EXISTS pg_trgm SCHEMA public")
         .execute(&mut *conn)
         .await
@@ -2676,8 +2657,7 @@ async fn healthkit_sync_excludes_acked_entries_and_counts_the_full_pending_windo
     test_db.cleanup().await;
 }
 
-// The projections in `db/sql.rs` define wire-visible JSON shapes that several
-// queries share, so drift here is a silent contract break in every one of them.
+// The `db/sql.rs` projections are wire-visible JSON shared by several queries; drift breaks them all.
 #[test]
 fn shared_sql_fragments_render_unchanged() {
     const FOOD_PRODUCT_FIELDS: &str = r#"'id', fp.id,

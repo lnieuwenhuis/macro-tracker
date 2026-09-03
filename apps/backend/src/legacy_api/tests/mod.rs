@@ -1030,28 +1030,31 @@ async fn spawn_padded_open_food_facts_stub(padding: usize) -> String {
 }
 
 #[tokio::test]
-async fn open_food_facts_lookup_accepts_a_body_just_under_the_size_cap() {
-    let base_url = spawn_padded_open_food_facts_stub(MAX_PROVIDER_RESPONSE_BYTES - 1024).await;
-    let state = test_state(Some(&base_url));
+async fn open_food_facts_lookup_enforces_the_size_cap() {
+    for (padding, expected) in [
+        (
+            MAX_PROVIDER_RESPONSE_BYTES - 1024,
+            Some(json!("Padded Product")),
+        ),
+        (MAX_PROVIDER_RESPONSE_BYTES, None),
+    ] {
+        let base_url = spawn_padded_open_food_facts_stub(padding).await;
+        let state = test_state(Some(&base_url));
 
-    let product = lookup_open_food_facts(&state, "8712345678901").await;
+        let product = lookup_open_food_facts(&state, "8712345678901").await;
 
-    assert_eq!(
-        product.map(|product| product["name"].clone()),
-        Some(json!("Padded Product"))
-    );
-}
-
-#[tokio::test]
-async fn open_food_facts_lookup_drops_a_body_over_the_size_cap() {
-    let base_url = spawn_padded_open_food_facts_stub(MAX_PROVIDER_RESPONSE_BYTES).await;
-    let state = test_state(Some(&base_url));
-
-    assert!(
-        lookup_open_food_facts(&state, "8712345678901")
-            .await
-            .is_none()
-    );
+        match expected {
+            Some(name) => assert_eq!(
+                product.map(|product| product["name"].clone()),
+                Some(name),
+                "a body just under the cap must be accepted (padding {padding})"
+            ),
+            None => assert!(
+                product.is_none(),
+                "a body over the cap must be dropped (padding {padding})"
+            ),
+        }
+    }
 }
 
 /// Chunked and without `Content-Length`, so only the per-chunk check can stop this body.

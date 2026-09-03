@@ -25,10 +25,7 @@ pub(super) async fn healthkit_sync_entries_json(
             fat_g,
             calories_kcal,
             created_at,
-            -- Clamp the sample timestamp into the entry's own calendar day so
-            -- backfilled and pre-logged entries land on the date the food was
-            -- eaten, while LEAST(updated_at, ...) keeps it from ever sitting
-            -- in the future — HealthKit rejects future-dated samples.
+            -- Clamp the sample timestamp into the entry's day; HealthKit rejects future-dated samples.
             GREATEST(
               LEAST(
                 updated_at,
