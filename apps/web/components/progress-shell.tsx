@@ -368,8 +368,7 @@ function WeightPanel({
   const [bodyFatPct, setBodyFatPct] = useState("");
   const [notes, setNotes] = useState("");
   const [editingEntry, setEditingEntry] = useState<WeightEntryRecord | null>(null);
-  // Held in the *display* unit; converted back to kg on save.
-  const [goalWeightKg, setGoalWeightKg] = useState(
+  const [goalWeightDisplay, setGoalWeightDisplay] = useState(
     weightData.goalWeightKg != null
       ? String(toDisplayWeight(weightData.goalWeightKg, unit))
       : "",
@@ -443,7 +442,7 @@ function WeightPanel({
   }
 
   function handleSaveGoal() {
-    const parsedGoal = goalWeightKg.trim() ? Number(goalWeightKg) : null;
+    const parsedGoal = goalWeightDisplay.trim() ? Number(goalWeightDisplay) : null;
     if (parsedGoal != null && (!Number.isFinite(parsedGoal) || parsedGoal <= 0)) {
       setError("Enter a valid goal weight.");
       return;
@@ -655,9 +654,9 @@ function WeightPanel({
               type="number"
               inputMode="decimal"
               step="0.1"
-              value={goalWeightKg}
+              value={goalWeightDisplay}
               onChange={(event) => {
-                setGoalWeightKg(event.target.value);
+                setGoalWeightDisplay(event.target.value);
                 setGoalSaved(false);
               }}
               className="w-full rounded-xl border border-[var(--color-border)] bg-[var(--color-app-bg)] px-3 py-2.5 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"

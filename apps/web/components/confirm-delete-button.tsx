@@ -14,24 +14,11 @@ type ConfirmDeleteButtonProps = {
   children: ReactNode;
   disabled?: boolean;
   timeoutMs?: number;
-  /**
-   * Tailwind classes applied when idle. Defaults to a muted icon button that
-   * goes red on hover — matches the existing delete-button look across the
-   * app, so callers don't need to restyle anything.
-   */
   className?: string;
   title?: string;
 };
 
-/**
- * A double-tap confirm button. First tap "arms" the button (red tint + swaps
- * the a11y label). A second tap within {@link timeoutMs} (default 3 s) invokes
- * `onConfirm`. This avoids modal friction and works much better on mobile than
- * `window.confirm`.
- *
- * Callers pass their existing SVG icon as `children` so idle visuals don't
- * change — only the confirm state changes the look.
- */
+// Double-tap confirm (arm, then act on the second tap): less friction than window.confirm on mobile.
 export function ConfirmDeleteButton({
   onConfirm,
   ariaLabel,
@@ -95,11 +82,7 @@ export function ConfirmDeleteButton({
       >
         {children}
       </button>
-      {/*
-        The armed state is otherwise conveyed only by colour and a changed
-        label on a control the user is already focused on, so a screen reader
-        never announces that a second tap is now destructive.
-      */}
+      {/* The armed state is otherwise conveyed only by colour and label text, invisible to screen readers. */}
       <span role="status" aria-live="polite" className="sr-only">
         {armed ? `${ariaLabel}: tap again within ${Math.round(timeoutMs / 1000)} seconds to confirm.` : ""}
       </span>
@@ -117,13 +100,7 @@ type ConfirmSubmitButtonProps = {
   timeoutMs?: number;
 };
 
-/**
- * The same double-tap confirmation for a form's submit button.
- *
- * Role changes and API-token revocations are irreversible but used to fire on
- * a single click. The first click is swallowed and arms the button; the second
- * submits the form normally, so the server action is untouched.
- */
+// Same double-tap confirmation, but for a submit button: the second click submits the form normally.
 export function ConfirmSubmitButton({
   children,
   confirmLabel,
