@@ -1,6 +1,7 @@
 /**
  * @vitest-environment jsdom
  */
+// Reveal-once, DB-backed revoke are asserted here; "never in localStorage, a URL or a log" rests on code review only.
 import { randomUUID } from "node:crypto";
 
 import { getApiScopes, listApiTokens, upsertUserFromShooProfile } from "@macro-tracker/db";
