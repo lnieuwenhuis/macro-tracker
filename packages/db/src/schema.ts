@@ -452,7 +452,6 @@ export const gymSlots = pgTable(
       "gym_slots_recurrence_check",
       sql`${table.recurrence} IN ('once', 'weekly')`,
     ),
-    // Immutable after creation: 'once' requires slotDate and no weekday; 'weekly' requires an ISO weekday (1-7) and no slotDate.
     check(
       "gym_slots_recurrence_shape_check",
       sql`(${table.recurrence} = 'once' AND ${table.slotDate} IS NOT NULL AND ${table.weekday} IS NULL) OR (${table.recurrence} = 'weekly' AND ${table.weekday} BETWEEN 1 AND 7 AND ${table.slotDate} IS NULL)`,

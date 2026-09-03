@@ -2,6 +2,8 @@ export function isPgliteConnectionString(connectionString: string): boolean;
 
 export function isLocalDatabaseHost(hostname: string): boolean;
 
+export function readPositiveIntegerEnv(name: string, fallback: number): number;
+
 export function getSslConfig(
   connectionString: string,
   env?: Record<string, string | undefined>,

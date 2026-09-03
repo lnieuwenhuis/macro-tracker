@@ -545,14 +545,12 @@ export type AdminDashboardData = {
 };
 
 export type StatsPageData = {
-  allDailyTotals: Array<{
-    date: string;
-    proteinG: number;
-    carbsG: number;
-    fatG: number;
-    caloriesKcal: number;
-    plannedTotals: MacroNumbers;
-  }>;
+  allDailyTotals: Array<
+    MacroNumbers & {
+      date: string;
+      plannedTotals: MacroNumbers;
+    }
+  >;
   totalDaysTracked: number;
   currentStreak: number;
   longestStreak: number;
@@ -595,12 +593,8 @@ export type StatsPageData = {
 
 export type QuickAddSource = "preset" | "recent";
 
-export type QuickAddCandidate = {
+export type QuickAddCandidate = MacroNumbers & {
   label: string;
-  proteinG: number;
-  carbsG: number;
-  fatG: number;
-  caloriesKcal: number;
   source: QuickAddSource;
   /** ISO date string of the most recent log entry seen in history, if any */
   sourceDate?: string;

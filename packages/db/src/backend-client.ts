@@ -1,4 +1,3 @@
-/** Default deadline for an internal RPC round-trip. */
 const DEFAULT_BACKEND_TIMEOUT_MS = 10_000;
 
 export type BackendFetchInit = RequestInit & {

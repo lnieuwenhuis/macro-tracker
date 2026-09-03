@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { backendFetch, getBackendUrl, resolveBackendUrl } from "../src/backend-client";
 
@@ -7,7 +7,23 @@ const originalBackendUrl = process.env.BACKEND_URL;
 const originalBackendInternalSecret = process.env.BACKEND_INTERNAL_SECRET;
 const originalFetch = globalThis.fetch;
 
+function mockFetch() {
+  const fetchMock = vi.fn().mockResolvedValue(new Response("{}"));
+  globalThis.fetch = fetchMock as unknown as typeof fetch;
+  return fetchMock;
+}
+
+function sentSecret(fetchMock: ReturnType<typeof mockFetch>) {
+  const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+  return (init.headers as Headers).get("x-backend-internal-secret");
+}
+
 describe("backend client", () => {
+  beforeEach(() => {
+    process.env.NODE_ENV = "test";
+    process.env.BACKEND_URL = "http://127.0.0.1:4000";
+  });
+
   afterEach(() => {
     process.env.NODE_ENV = originalNodeEnv;
     if (originalBackendUrl == null) {
@@ -45,36 +61,26 @@ describe("backend client", () => {
   });
 
   it("keeps the localhost backend URL default outside production", () => {
-    process.env.NODE_ENV = "test";
     delete process.env.BACKEND_URL;
 
     expect(getBackendUrl()).toBe("http://127.0.0.1:4000");
   });
 
   it("sends the configured backend internal secret", async () => {
-    process.env.NODE_ENV = "test";
-    process.env.BACKEND_URL = "http://127.0.0.1:4000";
     process.env.BACKEND_INTERNAL_SECRET = "  test-backend-secret  ";
-    const fetchMock = vi.fn().mockResolvedValue(new Response("{}"));
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const fetchMock = mockFetch();
 
     await backendFetch("/internal/rpc", {
       method: "POST",
       body: "{}",
     });
 
-    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
-    expect((init.headers as Headers).get("x-backend-internal-secret")).toBe(
-      "test-backend-secret",
-    );
+    expect(sentSecret(fetchMock)).toBe("test-backend-secret");
   });
 
   it("overwrites a client-supplied internal-secret header instead of appending to it", async () => {
-    process.env.NODE_ENV = "test";
-    process.env.BACKEND_URL = "http://127.0.0.1:4000";
     process.env.BACKEND_INTERNAL_SECRET = "real-secret";
-    const fetchMock = vi.fn().mockResolvedValue(new Response("{}"));
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const fetchMock = mockFetch();
 
     await backendFetch("/internal/rpc", {
       method: "POST",
@@ -82,32 +88,24 @@ describe("backend client", () => {
       headers: { "x-backend-internal-secret": "spoofed-secret" },
     });
 
-    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
-    expect((init.headers as Headers).get("x-backend-internal-secret")).toBe("real-secret");
+    expect(sentSecret(fetchMock)).toBe("real-secret");
   });
 
   it("strips a client-supplied internal-secret header when attachInternalSecret is false", async () => {
-    process.env.NODE_ENV = "test";
-    process.env.BACKEND_URL = "http://127.0.0.1:4000";
     process.env.BACKEND_INTERNAL_SECRET = "real-secret";
-    const fetchMock = vi.fn().mockResolvedValue(new Response("{}"));
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const fetchMock = mockFetch();
 
     await backendFetch("/api/v1/foods", {
       attachInternalSecret: false,
       headers: { "x-backend-internal-secret": "spoofed-secret" },
     });
 
-    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
-    expect((init.headers as Headers).get("x-backend-internal-secret")).toBeNull();
+    expect(sentSecret(fetchMock)).toBeNull();
   });
 
   it("strips a client-supplied internal-secret header when no secret is configured outside production", async () => {
-    process.env.NODE_ENV = "test";
-    process.env.BACKEND_URL = "http://127.0.0.1:4000";
     delete process.env.BACKEND_INTERNAL_SECRET;
-    const fetchMock = vi.fn().mockResolvedValue(new Response("{}"));
-    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const fetchMock = mockFetch();
 
     await backendFetch("/internal/rpc", {
       method: "POST",
@@ -115,24 +113,15 @@ describe("backend client", () => {
       headers: { "x-backend-internal-secret": "spoofed-secret" },
     });
 
-    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
-    expect((init.headers as Headers).get("x-backend-internal-secret")).toBeNull();
+    expect(sentSecret(fetchMock)).toBeNull();
   });
 
-  it("rejects a literal traversal segment before URL normalization can rewrite it", () => {
-    process.env.NODE_ENV = "test";
-    process.env.BACKEND_URL = "http://127.0.0.1:4000";
-
-    expect(() => resolveBackendUrl("/api/v1/../../internal/rpc")).toThrow(
-      "Backend path must not contain traversal segments.",
-    );
-  });
-
-  it("rejects a percent-encoded traversal segment, which WHATWG URL parsing would decode to `..`", () => {
-    process.env.NODE_ENV = "test";
-    process.env.BACKEND_URL = "http://127.0.0.1:4000";
-
-    expect(() => resolveBackendUrl("/api/v1/%2e%2e/internal/rpc")).toThrow(
+  it.each([
+    "/api/v1/../../internal/rpc",
+    "/api/v1/%2e%2e/internal/rpc",
+    "/api/v1/../internal/rpc?next=/internal/rpc",
+  ])("rejects traversal path %s", (path) => {
+    expect(() => resolveBackendUrl(path)).toThrow(
       "Backend path must not contain traversal segments.",
     );
   });

@@ -1,7 +1,4 @@
-// Also unified with the loopback list in test-database-safety.ts (see LOW-F2):
-// `URL.hostname` always returns the bracketed form for IPv6, so the bare
-// `::1` form is never actually produced by `new URL(...).hostname` and would
-// be a dead entry here.
+// Shared with test-database-safety.ts; URL.hostname never yields bare ::1, only [::1].
 const LOCAL_DATABASE_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 const INSECURE_REMOTE_SSL_MODES = new Set([
   "allow",
@@ -10,10 +7,7 @@ const INSECURE_REMOTE_SSL_MODES = new Set([
   "prefer",
 ]);
 const REMOTE_SSL_MODES = new Set(["require", "verify-full"]);
-// `require` used to mean "encrypt but don't verify the certificate" here,
-// which is the exact insecure posture `no-verify` is rejected for a few
-// lines above. Both now verify by default; use ALLOW_UNVERIFIED_DB_TLS to
-// deliberately opt back out (see getSslConfig below).
+// require verifies by default; ALLOW_UNVERIFIED_DB_TLS deliberately opts out.
 const VERIFY_REMOTE_SSL_MODES = new Set(["require", "verify-full"]);
 const RAILWAY_PRIVATE_DATABASE_SUFFIX = ".railway.internal";
 const ALLOW_UNVERIFIED_DB_TLS_ENV = "ALLOW_UNVERIFIED_DB_TLS";
@@ -25,10 +19,6 @@ export function isPgliteConnectionString(connectionString) {
   return connectionString === "memory:" || connectionString.startsWith("file:");
 }
 
-// Exported so test-database-safety.ts can share this list instead of
-// keeping its own (LOW-F2): that copy included a bare `::1` entry that
-// `URL.hostname` never actually produces (it always returns the bracketed
-// `[::1]` form), so it was silently dead there.
 export function isLocalDatabaseHost(hostname) {
   return LOCAL_DATABASE_HOSTS.has(hostname.toLowerCase());
 }
@@ -53,7 +43,7 @@ function validateRemoteSslMode(url) {
   }
 }
 
-function readPositiveIntegerEnv(name, fallback) {
+export function readPositiveIntegerEnv(name, fallback) {
   const value = process.env[name];
 
   if (!value) {
@@ -88,9 +78,7 @@ export function getSslConfig(connectionString, env = process.env) {
   const shouldVerifyRemoteCertificate =
     sslMode === undefined || VERIFY_REMOTE_SSL_MODES.has(sslMode);
 
-  // Railway's private Postgres network is encrypted with its platform-issued
-  // self-signed chain. `sslmode=require` promises encryption, while
-  // `verify-full` remains available when CA/hostname verification is required.
+  // Railway private Postgres uses a self-signed chain, so require skips CA verification here.
   if (usesRailwayPrivateCertificate(url, sslMode)) {
     return { rejectUnauthorized: false };
   }

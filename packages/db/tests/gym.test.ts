@@ -18,6 +18,15 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 const MONDAY = "2026-09-07";
 const TUESDAY = "2026-09-08";
 
+function weeklySlot(
+  startMinute: number,
+  endMinute: number,
+  weekday = 1,
+  extra: Record<string, unknown> = {},
+) {
+  return { recurrence: "weekly" as const, weekday, startMinute, endMinute, ...extra };
+}
+
 describe("gym schedule sharing", () => {
   let runtime: DatabaseRuntime;
   let aliceId: string;
@@ -63,24 +72,19 @@ describe("gym schedule sharing", () => {
   }
 
   it("creates, edits and deletes slots with ownership enforced", async () => {
-    const slot = await createGymSlot(aliceId, {
-      recurrence: "weekly",
-      weekday: 1,
-      startMinute: 17 * 60,
-      endMinute: 18 * 60 + 30,
-    });
+    const slot = await createGymSlot(aliceId, weeklySlot(17 * 60, 18 * 60 + 30));
     expect(slot.title).toBe("Gym");
     expect(slot.weekday).toBe(1);
     expect(slot.slotDate).toBeNull();
 
-    const updated = await updateGymSlot(aliceId, slot.id, {
-      title: "Leg day",
-      description: "Squats first",
-      recurrence: "weekly",
-      weekday: 1,
-      startMinute: 17 * 60,
-      endMinute: 19 * 60,
-    });
+    const updated = await updateGymSlot(
+      aliceId,
+      slot.id,
+      weeklySlot(17 * 60, 19 * 60, 1, {
+        title: "Leg day",
+        description: "Squats first",
+      }),
+    );
     expect(updated.title).toBe("Leg day");
     expect(updated.description).toBe("Squats first");
     expect(updated.endMinute).toBe(19 * 60);
@@ -96,13 +100,7 @@ describe("gym schedule sharing", () => {
     ).rejects.toThrow("repeat kind can't be changed");
 
     await expect(
-      updateGymSlot(bobId, slot.id, {
-        title: "Hijacked",
-        recurrence: "weekly",
-        weekday: 1,
-        startMinute: 0,
-        endMinute: 60,
-      }),
+      updateGymSlot(bobId, slot.id, weeklySlot(0, 60, 1, { title: "Hijacked" })),
     ).rejects.toThrow("Gym slot not found.");
     await expect(deleteGymSlot(bobId, slot.id)).rejects.toThrow(
       "Gym slot not found.",
@@ -131,22 +129,12 @@ describe("gym schedule sharing", () => {
       }),
     ).rejects.toThrow("Weekday must be between 1 (Monday) and 7 (Sunday).");
     // Ending exactly at midnight is allowed.
-    const slot = await createGymSlot(aliceId, {
-      recurrence: "weekly",
-      weekday: 1,
-      startMinute: 23 * 60,
-      endMinute: 1440,
-    });
+    const slot = await createGymSlot(aliceId, weeklySlot(23 * 60, 1440));
     expect(slot.endMinute).toBe(1440);
   });
 
   it("upserts per-date statuses with ownership and occurrence checks", async () => {
-    const weekly = await createGymSlot(aliceId, {
-      recurrence: "weekly",
-      weekday: 1,
-      startMinute: 600,
-      endMinute: 660,
-    });
+    const weekly = await createGymSlot(aliceId, weeklySlot(600, 660));
 
     const set = await setGymSlotStatus(aliceId, weekly.id, MONDAY, "skipped");
     expect(set.status).toBe("skipped");
@@ -183,36 +171,16 @@ describe("gym schedule sharing", () => {
   });
 
   it("drops day statuses when a slot moves to another day, keeps them otherwise", async () => {
-    const slot = await createGymSlot(aliceId, {
-      recurrence: "weekly",
-      weekday: 1,
-      startMinute: 600,
-      endMinute: 660,
-    });
+    const slot = await createGymSlot(aliceId, weeklySlot(600, 660));
     await setGymSlotStatus(aliceId, slot.id, MONDAY, "skipped");
 
-    await updateGymSlot(aliceId, slot.id, {
-      recurrence: "weekly",
-      weekday: 1,
-      startMinute: 630,
-      endMinute: 690,
-    });
+    await updateGymSlot(aliceId, slot.id, weeklySlot(630, 690));
     let page = await getGymPageData(aliceId, MONDAY);
     expect(page.day.own[0]?.status).toBe("skipped");
 
     // Moving back to Monday must NOT resurrect the old skip.
-    await updateGymSlot(aliceId, slot.id, {
-      recurrence: "weekly",
-      weekday: 2,
-      startMinute: 630,
-      endMinute: 690,
-    });
-    await updateGymSlot(aliceId, slot.id, {
-      recurrence: "weekly",
-      weekday: 1,
-      startMinute: 630,
-      endMinute: 690,
-    });
+    await updateGymSlot(aliceId, slot.id, weeklySlot(630, 690, 2));
+    await updateGymSlot(aliceId, slot.id, weeklySlot(630, 690));
     page = await getGymPageData(aliceId, MONDAY);
     expect(page.day.own[0]?.status).toBe("going");
   });
@@ -321,14 +289,13 @@ describe("gym schedule sharing", () => {
   });
 
   it("shares day schedules with buddies but never the description", async () => {
-    await createGymSlot(aliceId, {
-      title: "Secret session",
-      description: "Private notes",
-      recurrence: "weekly",
-      weekday: 1,
-      startMinute: 17 * 60,
-      endMinute: 18 * 60,
-    });
+    await createGymSlot(
+      aliceId,
+      weeklySlot(17 * 60, 18 * 60, 1, {
+        title: "Secret session",
+        description: "Private notes",
+      }),
+    );
     await makeBuddies(aliceId, "bob@example.com");
 
     const bobPage = await getGymPageData(bobId, MONDAY);
@@ -350,12 +317,7 @@ describe("gym schedule sharing", () => {
   });
 
   it("computes overlaps with the 30-minute boundary and status rules", async () => {
-    const aliceSlot = await createGymSlot(aliceId, {
-      recurrence: "weekly",
-      weekday: 1,
-      startMinute: 17 * 60,
-      endMinute: 18 * 60 + 30,
-    });
+    const aliceSlot = await createGymSlot(aliceId, weeklySlot(17 * 60, 18 * 60 + 30));
     // Bob's slot overlaps Alice's by exactly 30 minutes, the counting boundary.
     await createGymSlot(bobId, {
       recurrence: "once",
@@ -380,21 +342,11 @@ describe("gym schedule sharing", () => {
     });
 
     // 29 shared minutes must NOT count: shrink Alice's slot by one minute.
-    await updateGymSlot(aliceId, aliceSlot.id, {
-      recurrence: "weekly",
-      weekday: 1,
-      startMinute: 17 * 60,
-      endMinute: 18 * 60 + 29,
-    });
+    await updateGymSlot(aliceId, aliceSlot.id, weeklySlot(17 * 60, 18 * 60 + 29));
     summary = await getGymHomeSummary(aliceId, MONDAY);
     expect(summary.overlaps).toEqual([]);
 
-    await updateGymSlot(aliceId, aliceSlot.id, {
-      recurrence: "weekly",
-      weekday: 1,
-      startMinute: 17 * 60,
-      endMinute: 18 * 60 + 30,
-    });
+    await updateGymSlot(aliceId, aliceSlot.id, weeklySlot(17 * 60, 18 * 60 + 30));
     // A `maybe` status on either side makes the overlap tentative.
     await setGymSlotStatus(aliceId, aliceSlot.id, MONDAY, "maybe");
     summary = await getGymHomeSummary(aliceId, MONDAY);
