@@ -222,16 +222,24 @@ fn is_local_database_host(host: Option<url::Host<&str>>) -> bool {
     }
 }
 
+fn require_local_app_url(flag: bool, app_url: &str, env_var: &str) -> anyhow::Result<()> {
+    if flag && !is_local_app_url(app_url) {
+        bail!(
+            "{env_var}=true is only allowed when APP_URL points to localhost or a loopback address."
+        );
+    }
+    Ok(())
+}
+
 fn validate_insecure_local_backend_mode(
     allow_insecure_local: bool,
     app_url: &str,
 ) -> anyhow::Result<()> {
-    if allow_insecure_local && !is_local_app_url(app_url) {
-        bail!(
-            "{ALLOW_INSECURE_LOCAL_BACKEND_ENV}=true is only allowed when APP_URL points to localhost or a loopback address."
-        );
-    }
-    Ok(())
+    require_local_app_url(
+        allow_insecure_local,
+        app_url,
+        ALLOW_INSECURE_LOCAL_BACKEND_ENV,
+    )
 }
 
 fn is_local_app_url(app_url: &str) -> bool {
@@ -299,12 +307,7 @@ fn validate_secret(name: &str, value: &str, allow_insecure_local: bool) -> anyho
 
 // SEC-05: `ensureUserRoleForTesting` has none of the admin path's guards; loopback-only, like the insecure-local flag.
 fn validate_test_routes_mode(enable_test_routes: bool, app_url: &str) -> anyhow::Result<()> {
-    if enable_test_routes && !is_local_app_url(app_url) {
-        bail!(
-            "{ENABLE_TEST_ROUTES_ENV}=true is only allowed when APP_URL points to localhost or a loopback address."
-        );
-    }
-    Ok(())
+    require_local_app_url(enable_test_routes, app_url, ENABLE_TEST_ROUTES_ENV)
 }
 
 fn parse_env_bool(value: Option<&str>) -> bool {

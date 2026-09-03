@@ -34,24 +34,20 @@ fn weight_validation_rejects_invalid_values_and_trims_notes() {
     let values = normalize_weight_entry_input(&base).expect("valid weight entry");
     assert_eq!(values.notes.as_deref(), Some("hello"));
 
-    let mut zero = base.clone();
-    zero.insert("weightKg".to_string(), json!(0));
-    assert_eq!(
-        bad_request_message(normalize_weight_entry_input(&zero)),
-        "Weight must be a positive number."
-    );
-
-    let mut huge = base.clone();
-    huge.insert("weightKg".to_string(), json!(1000));
-    assert_eq!(
-        bad_request_message(normalize_weight_entry_input(&huge)),
-        "Weight must be less than 1000 kg."
-    );
-
-    let mut bad_body_fat = base;
-    bad_body_fat.insert("bodyFatPct".to_string(), json!(101));
-    assert_eq!(
-        bad_request_message(normalize_weight_entry_input(&bad_body_fat)),
-        "Body fat percentage must be between 0 and 100."
-    );
+    for (key, value, message) in [
+        ("weightKg", json!(0), "Weight must be a positive number."),
+        ("weightKg", json!(1000), "Weight must be less than 1000 kg."),
+        (
+            "bodyFatPct",
+            json!(101),
+            "Body fat percentage must be between 0 and 100.",
+        ),
+    ] {
+        let mut input = base.clone();
+        input.insert(key.to_string(), value);
+        assert_eq!(
+            bad_request_message(normalize_weight_entry_input(&input)),
+            message
+        );
+    }
 }

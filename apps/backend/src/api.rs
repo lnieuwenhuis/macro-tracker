@@ -158,13 +158,13 @@ async fn handle_api_v1(
     };
 
     match result {
-        Ok((status, data)) => json_response(status, json!({ "ok": true, "data": data }), None),
+        Ok((status, data)) => raw_json_response(status, json!({ "ok": true, "data": data }), None),
         Err(failure) => failure_response(failure),
     }
 }
 
 fn failure_response(failure: ApiFailure) -> Response {
-    json_response(
+    raw_json_response(
         failure.status,
         json!({
             "ok": false,
@@ -317,33 +317,24 @@ async fn dispatch_api_request(
         (Some("meal-entries"), Some(entry_id), None, "PATCH") => {
             let entry_id = require_uuid(entry_id)?;
             let patch = require_object(read_json(&body)?)?;
-            if let Some(date) = patch.get("date").and_then(Value::as_str) {
-                require_date(date)?;
-            } else if patch.contains_key("date") {
-                return Err(bad_request("Date must use YYYY-MM-DD."));
-            }
+            require_optional_date(&patch)?;
             if has_non_null(&patch, "productId") {
                 require_scope(&auth, "read:foods")?;
             }
-            let existing = user_rpc!(state, auth, "getMealEntryById", "entryId": entry_id).await?;
-            if existing.is_null() {
-                return Err(not_found("Meal entry not found."));
-            }
+            let existing = require_found(
+                user_rpc!(state, auth, "getMealEntryById", "entryId": entry_id).await?,
+                "Meal entry not found.",
+            )?;
             let merged = merge_meal_entry_patch(require_object(existing)?, patch);
             ok(
                 user_rpc!(state, auth, "updateMealEntry", "entryId": entry_id, "input": merged)
                     .await?,
             )
         }
-        (Some("meal-entries"), Some(entry_id), None, "DELETE") => {
-            let deleted =
-                user_rpc!(state, auth, "deleteMealEntry", "entryId": require_uuid(entry_id)?)
-                    .await?;
-            if !deleted.as_bool().unwrap_or(false) {
-                return Err(not_found("Meal entry not found."));
-            }
-            ok(json!({ "deleted": true }))
-        }
+        (Some("meal-entries"), Some(entry_id), None, "DELETE") => require_deleted(
+            user_rpc!(state, auth, "deleteMealEntry", "entryId": require_uuid(entry_id)?).await?,
+            "Meal entry not found.",
+        ),
         (Some("meal-entries"), Some(entry_id), Some("status"), "PATCH") => {
             let status = require_string_field(
                 &require_object(read_json(&body)?)?,
@@ -383,15 +374,10 @@ async fn dispatch_api_request(
                     .await?,
             )
         }
-        (Some("meal-groups"), Some(group_id), None, "DELETE") => {
-            let deleted =
-                user_rpc!(state, auth, "deleteMealGroup", "groupId": require_uuid(group_id)?)
-                    .await?;
-            if !deleted.as_bool().unwrap_or(false) {
-                return Err(not_found("Meal group not found."));
-            }
-            ok(json!({ "deleted": true }))
-        }
+        (Some("meal-groups"), Some(group_id), None, "DELETE") => require_deleted(
+            user_rpc!(state, auth, "deleteMealGroup", "groupId": require_uuid(group_id)?).await?,
+            "Meal group not found.",
+        ),
         (Some("foods"), Some("search"), None, "GET") => {
             let query = query_param(uri, "q").unwrap_or_default();
             let products = user_rpc!(state, auth, "searchFoodProducts", "query": query).await?;
@@ -456,12 +442,11 @@ async fn dispatch_api_request(
             created(user_rpc!(state, auth, "applyTemplateToDate", "input": input).await?)
         }
         (Some("templates"), Some(template_id), None, "GET") => {
-            let template =
+            let template = require_found(
                 user_rpc!(state, auth, "getTemplateById", "templateId": require_uuid(template_id)?)
-                    .await?;
-            if template.is_null() {
-                return Err(not_found("Template not found."));
-            }
+                    .await?,
+                "Template not found.",
+            )?;
             ok(template)
         }
         (Some("templates"), Some(template_id), None, "PATCH") => {
@@ -471,15 +456,11 @@ async fn dispatch_api_request(
                     .await?,
             )
         }
-        (Some("templates"), Some(template_id), None, "DELETE") => {
-            let deleted =
-                user_rpc!(state, auth, "deleteTemplate", "templateId": require_uuid(template_id)?)
-                    .await?;
-            if !deleted.as_bool().unwrap_or(false) {
-                return Err(not_found("Template not found."));
-            }
-            ok(json!({ "deleted": true }))
-        }
+        (Some("templates"), Some(template_id), None, "DELETE") => require_deleted(
+            user_rpc!(state, auth, "deleteTemplate", "templateId": require_uuid(template_id)?)
+                .await?,
+            "Template not found.",
+        ),
         (Some("recipes"), None, None, "GET") => ok(user_rpc!(state, auth, "getRecipes").await?),
         (Some("recipes"), None, None, "POST") => {
             let input = require_object(read_json(&body)?)?;
@@ -496,12 +477,11 @@ async fn dispatch_api_request(
             created(user_rpc!(state, auth, "createMealEntry", "input": input).await?)
         }
         (Some("recipes"), Some(recipe_id), None, "GET") => {
-            let recipe =
+            let recipe = require_found(
                 user_rpc!(state, auth, "getRecipeById", "recipeId": require_uuid(recipe_id)?)
-                    .await?;
-            if recipe.is_null() {
-                return Err(not_found("Recipe not found."));
-            }
+                    .await?,
+                "Recipe not found.",
+            )?;
             ok(recipe)
         }
         (Some("recipes"), Some(recipe_id), None, "PATCH") => {
@@ -511,15 +491,10 @@ async fn dispatch_api_request(
                     .await?,
             )
         }
-        (Some("recipes"), Some(recipe_id), None, "DELETE") => {
-            let deleted =
-                user_rpc!(state, auth, "deleteRecipe", "recipeId": require_uuid(recipe_id)?)
-                    .await?;
-            if !deleted.as_bool().unwrap_or(false) {
-                return Err(not_found("Recipe not found."));
-            }
-            ok(json!({ "deleted": true }))
-        }
+        (Some("recipes"), Some(recipe_id), None, "DELETE") => require_deleted(
+            user_rpc!(state, auth, "deleteRecipe", "recipeId": require_uuid(recipe_id)?).await?,
+            "Recipe not found.",
+        ),
         (Some("weight"), None, None, "GET") => ok(
             user_rpc!(state, auth, "getWeightPageData", "selectedDate": reference_date(uri)?)
                 .await?,
@@ -541,16 +516,11 @@ async fn dispatch_api_request(
         (Some("weight"), Some("entries"), Some(entry_id), "PATCH") => {
             let entry_id = require_uuid(entry_id)?;
             let patch = require_object(read_json(&body)?)?;
-            if let Some(date) = patch.get("date").and_then(Value::as_str) {
-                require_date(date)?;
-            } else if patch.contains_key("date") {
-                return Err(bad_request("Date must use YYYY-MM-DD."));
-            }
-            let existing =
-                user_rpc!(state, auth, "getWeightEntryById", "entryId": entry_id).await?;
-            if existing.is_null() {
-                return Err(not_found("Weight entry not found."));
-            }
+            require_optional_date(&patch)?;
+            let existing = require_found(
+                user_rpc!(state, auth, "getWeightEntryById", "entryId": entry_id).await?,
+                "Weight entry not found.",
+            )?;
             let merged = apply_client_patch(require_object(existing)?, patch);
             let date = require_string_field(&merged, "date", "Date must use YYYY-MM-DD.")?;
             require_date(&date)?;
@@ -560,15 +530,10 @@ async fn dispatch_api_request(
                     .await?,
             )
         }
-        (Some("weight"), Some("entries"), Some(entry_id), "DELETE") => {
-            let deleted =
-                user_rpc!(state, auth, "deleteWeightEntry", "entryId": require_uuid(entry_id)?)
-                    .await?;
-            if !deleted.as_bool().unwrap_or(false) {
-                return Err(not_found("Weight entry not found."));
-            }
-            ok(json!({ "deleted": true }))
-        }
+        (Some("weight"), Some("entries"), Some(entry_id), "DELETE") => require_deleted(
+            user_rpc!(state, auth, "deleteWeightEntry", "entryId": require_uuid(entry_id)?).await?,
+            "Weight entry not found.",
+        ),
         (Some("weight"), Some("goal"), None, "GET") => {
             ok(json!({ "goalWeightKg": user_rpc!(state, auth, "getWeightGoal").await? }))
         }
@@ -920,6 +885,29 @@ fn has_non_null(record: &Map<String, Value>, key: &str) -> bool {
     record.get(key).is_some_and(|value| !value.is_null())
 }
 
+fn require_found(value: Value, message: impl Into<String>) -> ApiResult<Value> {
+    if value.is_null() {
+        return Err(not_found(message));
+    }
+    Ok(value)
+}
+
+fn require_deleted(deleted: Value, message: impl Into<String>) -> ApiResult<(StatusCode, Value)> {
+    if !deleted.as_bool().unwrap_or(false) {
+        return Err(not_found(message));
+    }
+    ok(json!({ "deleted": true }))
+}
+
+fn require_optional_date(patch: &Map<String, Value>) -> ApiResult<()> {
+    if let Some(date) = patch.get("date").and_then(Value::as_str) {
+        require_date(date)?;
+    } else if patch.contains_key("date") {
+        return Err(bad_request("Date must use YYYY-MM-DD."));
+    }
+    Ok(())
+}
+
 /// Reserved prefix for RPC `input` control flags that `db.rs` reads back; must never be settable by a client.
 const PRIVATE_INPUT_KEY_PREFIX: &str = "__";
 
@@ -972,18 +960,15 @@ fn merge_goals(current: Value, patch: Value) -> ApiResult<Value> {
             .or_else(|| current.get(key))
             .cloned()
             .unwrap_or(Value::Null);
+        let message = format!("{key} must be null or a finite non-negative number.");
         if !(value.is_null() || value.as_f64().is_some()) {
-            return Err(bad_request(format!(
-                "{key} must be null or a finite non-negative number."
-            )));
+            return Err(bad_request(message));
         }
         if value
             .as_f64()
             .is_some_and(|number| number < 0.0 || !number.is_finite())
         {
-            return Err(bad_request(format!(
-                "{key} must be null or a finite non-negative number."
-            )));
+            return Err(bad_request(message));
         }
         if key == "caloriesKcal" && value.as_f64().is_some_and(|number| number.fract() != 0.0) {
             return Err(bad_request("caloriesKcal must be an integer."));
@@ -1073,6 +1058,14 @@ fn map_food_product(product: Value) -> Value {
     Value::Object(object)
 }
 
+fn finite_or_nan(body: &Map<String, Value>, key: &str) -> Option<f64> {
+    match body.get(key) {
+        Some(Value::Number(number)) => Some(number.as_f64().unwrap_or(f64::NAN)),
+        Some(_) => Some(f64::NAN),
+        None => None,
+    }
+}
+
 async fn build_recipe_log_input(
     state: &AppState,
     user_id: Uuid,
@@ -1088,24 +1081,14 @@ async fn build_recipe_log_input(
         json!({ "userId": user_id, "recipeId": recipe_id }),
     )
     .await?;
-    if recipe.is_null() {
-        return Err(not_found("Recipe not found."));
-    }
-    let portion_count = match body.get("portionCount") {
-        Some(Value::Number(number)) => number.as_f64().unwrap_or(f64::NAN),
-        Some(_) => f64::NAN,
-        None => 1.0,
-    };
+    let recipe = require_found(recipe, "Recipe not found.")?;
+    let portion_count = finite_or_nan(&body, "portionCount").unwrap_or(1.0);
     if !portion_count.is_finite() || portion_count <= 0.0 {
         return Err(bad_request(
             "portionCount must be a finite positive number.",
         ));
     }
-    let grams_consumed = match body.get("gramsConsumed") {
-        Some(Value::Number(number)) => Some(number.as_f64().unwrap_or(f64::NAN)),
-        Some(_) => Some(f64::NAN),
-        None => None,
-    };
+    let grams_consumed = finite_or_nan(&body, "gramsConsumed");
     if grams_consumed.is_some_and(|value| !value.is_finite() || value <= 0.0) {
         return Err(bad_request(
             "gramsConsumed must be a finite positive number.",
@@ -1167,6 +1150,7 @@ async fn build_recipe_log_input(
             }
         )
     };
+    let scaled = |key: &str| per_portion.get(key).and_then(Value::as_f64).unwrap_or(0.0) * factor;
     Ok(Map::from_iter([
         ("date".to_string(), Value::String(date)),
         ("status".to_string(), Value::String(status)),
@@ -1186,46 +1170,12 @@ async fn build_recipe_log_input(
                 .to_string(),
             ),
         ),
-        (
-            "proteinG".to_string(),
-            json!(round1(
-                per_portion
-                    .get("proteinG")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0)
-                    * factor
-            )),
-        ),
-        (
-            "carbsG".to_string(),
-            json!(round1(
-                per_portion
-                    .get("carbsG")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0)
-                    * factor
-            )),
-        ),
-        (
-            "fatG".to_string(),
-            json!(round1(
-                per_portion
-                    .get("fatG")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0)
-                    * factor
-            )),
-        ),
+        ("proteinG".to_string(), json!(round1(scaled("proteinG")))),
+        ("carbsG".to_string(), json!(round1(scaled("carbsG")))),
+        ("fatG".to_string(), json!(round1(scaled("fatG")))),
         (
             "caloriesKcal".to_string(),
-            json!(
-                (per_portion
-                    .get("caloriesKcal")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0)
-                    * factor)
-                    .round() as i32
-            ),
+            json!(scaled("caloriesKcal").round() as i32),
         ),
     ]))
 }
@@ -1348,10 +1298,6 @@ fn api_failure_from_app_error(error: AppError) -> ApiFailure {
             ApiFailure::new(status, code, error.to_string())
         }
     }
-}
-
-fn json_response(status: StatusCode, body: Value, allow: Option<&str>) -> Response {
-    raw_json_response(status, body, allow)
 }
 
 fn raw_json_response(status: StatusCode, body: Value, allow: Option<&str>) -> Response {

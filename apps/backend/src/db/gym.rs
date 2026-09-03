@@ -18,6 +18,8 @@ const GYM_MAX_TITLE_LENGTH: usize = 100;
 const GYM_MAX_OVERLAP_BUDDIES: usize = 20;
 const GYM_MAX_OVERLAP_WINDOWS_PER_BUDDY: usize = 3;
 
+const GYM_SLOT_JSON_FIELDS: &str = "'id', id, 'title', title, 'description', description, 'recurrence', recurrence, 'slotDate', slot_date, 'weekday', weekday, 'startMinute', start_minute, 'endMinute', end_minute";
+
 /// Every cross-user read builds on this CTE; `LIMIT 120` sits above the cap of 100 so overshoot never drops a buddy.
 macro_rules! gym_accepted_buddies_cte {
     () => {
@@ -358,37 +360,23 @@ pub(super) async fn create_gym_slot_json(
     let values = gym_slot_values(input)?;
     let mut tx = pool.begin().await?;
     gym_advisory_lock(&mut tx, vec![user_id]).await?;
-    let row = sqlx::query(
-        r#"
-        INSERT INTO gym_slots (
-          id, user_id, title, description, recurrence, slot_date, weekday, start_minute, end_minute
-        )
-        SELECT $2, $1, $3, $4, $5, $6::date, $7, $8, $9
-        WHERE (SELECT count(*) FROM gym_slots WHERE user_id = $1) < $10
-        RETURNING jsonb_build_object(
-          'id', id,
-          'title', title,
-          'description', description,
-          'recurrence', recurrence,
-          'slotDate', slot_date,
-          'weekday', weekday,
-          'startMinute', start_minute,
-          'endMinute', end_minute
-        ) AS data
-        "#,
-    )
-    .bind(user_id)
-    .bind(Uuid::new_v4())
-    .bind(&values.title)
-    .bind(&values.description)
-    .bind(&values.recurrence)
-    .bind(&values.slot_date)
-    .bind(values.weekday)
-    .bind(values.start_minute)
-    .bind(values.end_minute)
-    .bind(GYM_MAX_SLOTS_PER_USER)
-    .fetch_optional(&mut *tx)
-    .await?;
+    let sql = format!(
+        "INSERT INTO gym_slots (id, user_id, title, description, recurrence, slot_date, weekday, start_minute, end_minute) SELECT $2, $1, $3, $4, $5, $6::date, $7, $8, $9 WHERE (SELECT count(*) FROM gym_slots WHERE user_id = $1) < $10 RETURNING jsonb_build_object({fields}) AS data",
+        fields = GYM_SLOT_JSON_FIELDS
+    );
+    let row = sqlx::query(&sql)
+        .bind(user_id)
+        .bind(Uuid::new_v4())
+        .bind(&values.title)
+        .bind(&values.description)
+        .bind(&values.recurrence)
+        .bind(&values.slot_date)
+        .bind(values.weekday)
+        .bind(values.start_minute)
+        .bind(values.end_minute)
+        .bind(GYM_MAX_SLOTS_PER_USER)
+        .fetch_optional(&mut *tx)
+        .await?;
     let Some(row) = row else {
         return Err(AppError::Conflict(format!(
             "You can have at most {GYM_MAX_SLOTS_PER_USER} gym slots; delete one first."
@@ -431,39 +419,21 @@ pub(super) async fn update_gym_slot_json(
     let existing_date: Option<String> = existing.try_get("slot_date")?;
     let existing_weekday: Option<i32> = existing.try_get("weekday")?;
 
-    let row = sqlx::query(
-        r#"
-        UPDATE gym_slots
-        SET title = $3,
-            description = $4,
-            slot_date = $5::date,
-            weekday = $6,
-            start_minute = $7,
-            end_minute = $8,
-            updated_at = now()
-        WHERE id = $2 AND user_id = $1
-        RETURNING jsonb_build_object(
-          'id', id,
-          'title', title,
-          'description', description,
-          'recurrence', recurrence,
-          'slotDate', slot_date,
-          'weekday', weekday,
-          'startMinute', start_minute,
-          'endMinute', end_minute
-        ) AS data
-        "#,
-    )
-    .bind(user_id)
-    .bind(slot_id)
-    .bind(&values.title)
-    .bind(&values.description)
-    .bind(&values.slot_date)
-    .bind(values.weekday)
-    .bind(values.start_minute)
-    .bind(values.end_minute)
-    .fetch_one(&mut *tx)
-    .await?;
+    let sql = format!(
+        "UPDATE gym_slots SET title = $3, description = $4, slot_date = $5::date, weekday = $6, start_minute = $7, end_minute = $8, updated_at = now() WHERE id = $2 AND user_id = $1 RETURNING jsonb_build_object({fields}) AS data",
+        fields = GYM_SLOT_JSON_FIELDS
+    );
+    let row = sqlx::query(&sql)
+        .bind(user_id)
+        .bind(slot_id)
+        .bind(&values.title)
+        .bind(&values.description)
+        .bind(&values.slot_date)
+        .bind(values.weekday)
+        .bind(values.start_minute)
+        .bind(values.end_minute)
+        .fetch_one(&mut *tx)
+        .await?;
     let data: Value = row.try_get("data")?;
 
     // Statuses are keyed to concrete dates; they must not survive a move or they'd resurrect if it moved back.

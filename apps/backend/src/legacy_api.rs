@@ -660,10 +660,7 @@ async fn lookup_albert_heijn(state: &AppState, barcode: &str) -> Option<Value> {
         .and_then(Value::as_str)
         .or_else(|| product.get("image").and_then(Value::as_str));
 
-    let mut calories_kcal = 0.0;
-    let mut protein_g = 0.0;
-    let mut carbs_g = 0.0;
-    let mut fat_g = 0.0;
+    let mut macros = ParsedMacros::default();
 
     if let Some(product_id) = string_field(product, &["webshopId", "hqId", "id", "productId"]) {
         let detail_url = format!(
@@ -675,7 +672,7 @@ async fn lookup_albert_heijn(state: &AppState, barcode: &str) -> Option<Value> {
             PROVIDER_REQUEST_TIMEOUT,
         )
         .await
-            && let Some(macros) = parse_albert_heijn_nutrients(
+            && let Some(parsed) = parse_albert_heijn_nutrients(
                 detail
                     .get("nutritionInfo")
                     .or_else(|| detail.get("nutritionTable"))
@@ -683,25 +680,18 @@ async fn lookup_albert_heijn(state: &AppState, barcode: &str) -> Option<Value> {
                     .or_else(|| detail.get("nix")),
             )
         {
-            calories_kcal = macros.calories_kcal;
-            protein_g = macros.protein_g;
-            carbs_g = macros.carbs_g;
-            fat_g = macros.fat_g;
+            macros = parsed;
         }
     }
 
-    Some(json!({
-        "name": name,
-        "brands": brands,
-        "barcode": barcode,
-        "proteinG": protein_g,
-        "carbsG": carbs_g,
-        "fatG": fat_g,
-        "caloriesKcal": calories_kcal,
-        "servingSizeG": Value::Null,
-        "imageUrl": image_url,
-        "source": "albert_heijn"
-    }))
+    Some(provider_product_json(
+        barcode,
+        name,
+        brands,
+        image_url,
+        macros,
+        "albert_heijn",
+    ))
 }
 
 async fn get_albert_heijn_token(state: &AppState) -> Option<String> {
@@ -753,10 +743,7 @@ async fn lookup_jumbo(state: &AppState, barcode: &str) -> Option<Value> {
         .and_then(|image| image.get("url"))
         .and_then(Value::as_str);
 
-    let mut calories_kcal = 0.0;
-    let mut protein_g = 0.0;
-    let mut carbs_g = 0.0;
-    let mut fat_g = 0.0;
+    let mut macros = ParsedMacros::default();
     if let Some(product_id) = product.get("id").and_then(Value::as_str) {
         let detail_url = format!(
             "{base_url}/v17/products/{}",
@@ -767,7 +754,7 @@ async fn lookup_jumbo(state: &AppState, barcode: &str) -> Option<Value> {
             PROVIDER_REQUEST_TIMEOUT,
         )
         .await
-            && let Some(macros) = parse_jumbo_nutrients(
+            && let Some(parsed) = parse_jumbo_nutrients(
                 get_path(&detail, &["product", "data", "nutritionInfo"])
                     .or_else(|| get_path(&detail, &["product", "data", "nutrients"]))
                     .or_else(|| get_path(&detail, &["data", "nutritionInfo"]))
@@ -776,25 +763,13 @@ async fn lookup_jumbo(state: &AppState, barcode: &str) -> Option<Value> {
                     .or_else(|| detail.get("nutrients")),
             )
         {
-            calories_kcal = macros.calories_kcal;
-            protein_g = macros.protein_g;
-            carbs_g = macros.carbs_g;
-            fat_g = macros.fat_g;
+            macros = parsed;
         }
     }
 
-    Some(json!({
-        "name": name,
-        "brands": "Jumbo",
-        "barcode": barcode,
-        "proteinG": protein_g,
-        "carbsG": carbs_g,
-        "fatG": fat_g,
-        "caloriesKcal": calories_kcal,
-        "servingSizeG": Value::Null,
-        "imageUrl": image_url,
-        "source": "jumbo"
-    }))
+    Some(provider_product_json(
+        barcode, name, "Jumbo", image_url, macros, "jumbo",
+    ))
 }
 
 #[derive(Default)]
@@ -803,6 +778,28 @@ struct ParsedMacros {
     protein_g: f64,
     carbs_g: f64,
     fat_g: f64,
+}
+
+fn provider_product_json(
+    barcode: &str,
+    name: &str,
+    brands: &str,
+    image_url: Option<&str>,
+    macros: ParsedMacros,
+    source: &str,
+) -> Value {
+    json!({
+        "name": name,
+        "brands": brands,
+        "barcode": barcode,
+        "proteinG": macros.protein_g,
+        "carbsG": macros.carbs_g,
+        "fatG": macros.fat_g,
+        "caloriesKcal": macros.calories_kcal,
+        "servingSizeG": Value::Null,
+        "imageUrl": image_url,
+        "source": source
+    })
 }
 
 fn first_albert_heijn_product(data: &Value) -> Option<&Value> {
@@ -939,11 +936,11 @@ fn assign_nutrient(
     macros: &mut ParsedMacros,
     found: &mut bool,
 ) {
-    if name.contains("energie") || name.contains("energy") || name.contains("calor") {
-        if unit.contains("kcal") || name.contains("kcal") {
-            macros.calories_kcal = value.round();
-            *found = true;
-        }
+    if (name.contains("energie") || name.contains("energy") || name.contains("calor"))
+        && (unit.contains("kcal") || name.contains("kcal"))
+    {
+        macros.calories_kcal = value.round();
+        *found = true;
     } else if name.contains("eiwit") || name.contains("protein") {
         macros.protein_g = round1(value);
         *found = true;
