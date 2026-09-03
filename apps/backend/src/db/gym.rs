@@ -307,7 +307,7 @@ pub(super) fn gym_slot_values(input: &serde_json::Map<String, Value>) -> AppResu
     })
 }
 
-/// Serializes count-guarded cap checks; locks are always taken in ascending user-id order, before any row lock.
+/// Deadlock-free by construction: locks are taken in ascending user-id order, before any row lock.
 async fn gym_advisory_lock(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     mut user_ids: Vec<Uuid>,
