@@ -400,30 +400,6 @@ async fn test_db_with_connections(max_connections: u32) -> TestDb {
     TestDb { pool, schema }
 }
 
-/// Rollback-injection tests (`save_barcode_food_product_rolls_back_*`)
-/// assert that a forced mid-transaction failure left neither the
-/// product row nor any revision row behind. Both fault points check the
-/// same postcondition, so it lives here once.
-async fn assert_no_barcode_product_or_revision_rows(pool: &PgPool, barcode: &str) {
-    let product_count: i64 =
-        sqlx::query("SELECT count(*)::bigint AS count FROM food_products WHERE barcode = $1")
-            .bind(barcode)
-            .fetch_one(pool)
-            .await
-            .expect("product count should query")
-            .try_get("count")
-            .unwrap();
-    let revision_count: i64 =
-        sqlx::query("SELECT count(*)::bigint AS count FROM food_product_revisions")
-            .fetch_one(pool)
-            .await
-            .expect("revision count should query")
-            .try_get("count")
-            .unwrap();
-    assert_eq!(product_count, 0);
-    assert_eq!(revision_count, 0);
-}
-
 /// Pulls the `id` field out of every element of a `*_json` search
 /// result array, in order. Several search tests assert on nothing but
 /// this ordered id list.
@@ -984,34 +960,13 @@ async fn list_admin_barcode_products_applies_catalogue_filters_to_items_and_tota
     test_db.cleanup().await;
 }
 
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
-#[tokio::test]
-async fn search_food_products_blank_query_returns_empty_array() {
-    let test_db = test_db().await;
-    let user_id = insert_test_user(&test_db.pool).await;
-    insert_test_food_product(
-        &test_db.pool,
-        Some(user_id),
-        "Blank Match",
-        "Macro Test",
-        None,
-    )
-    .await;
-
-    let results = search_food_products_json(&test_db.pool, user_id, "   ")
-        .await
-        .expect("product search should succeed");
-
-    assert!(
-        results
-            .as_array()
-            .expect("search result should be array")
-            .is_empty()
-    );
-    test_db.cleanup().await;
+enum ProductSearchExpectation {
+    Empty,
+    Contains {
+        present: &'static [usize],
+        absent: &'static [usize],
+    },
+    LeadingOrder(&'static [usize]),
 }
 
 #[cfg_attr(
@@ -1019,72 +974,83 @@ async fn search_food_products_blank_query_returns_empty_array() {
     ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
 )]
 #[tokio::test]
-async fn search_food_products_matches_each_word_independently() {
-    let test_db = test_db().await;
-    let user_id = insert_test_user(&test_db.pool).await;
-    let product_id = insert_test_food_product(
-        &test_db.pool,
-        Some(user_id),
-        "Plain Yogurt",
-        "Greek House",
-        None,
-    )
-    .await;
-    let unrelated_id =
-        insert_test_food_product(&test_db.pool, Some(user_id), "Apple", "", None).await;
+async fn search_food_products_ranks_and_filters_the_catalogue() {
+    // Seeds are (personal to the searcher, name, brand, index of the product this one corrects).
+    for (intent, seeds, query, expectation) in [
+        (
+            "a blank query returns nothing",
+            &[(true, "Blank Match", "Macro Test", None)][..],
+            "   ",
+            ProductSearchExpectation::Empty,
+        ),
+        (
+            "every word matches independently across name and brand",
+            &[
+                (true, "Plain Yogurt", "Greek House", None),
+                (true, "Apple", "", None),
+            ][..],
+            "greek yogurt",
+            ProductSearchExpectation::Contains {
+                present: &[0],
+                absent: &[1],
+            },
+        ),
+        (
+            "a correction outranks the personal product, which outranks the global one",
+            &[
+                (false, "Alpha Yogurt", "Macro", None),
+                (true, "Beta Yogurt", "Macro", None),
+                (true, "Gamma Yogurt", "Macro", Some(0)),
+            ][..],
+            "yogurt",
+            ProductSearchExpectation::LeadingOrder(&[2, 1, 0]),
+        ),
+    ] {
+        let test_db = test_db().await;
+        let pool = &test_db.pool;
+        let user_id = insert_test_user(pool).await;
+        let mut seeded: Vec<Uuid> = Vec::new();
+        for &(personal, name, brand, corrects) in seeds {
+            let owner = personal.then_some(user_id);
+            let corrected_from = corrects.map(|index| seeded[index]);
+            seeded.push(insert_test_food_product(pool, owner, name, brand, corrected_from).await);
+        }
 
-    let results = search_food_products_json(&test_db.pool, user_id, "greek yogurt")
-        .await
-        .expect("product search should succeed");
-    let product_id_value = product_id.to_string();
-    let ids = results
-        .as_array()
-        .expect("search result should be array")
-        .iter()
-        .filter_map(|item| item.get("id").and_then(Value::as_str))
-        .collect::<Vec<_>>();
+        let results = search_food_products_json(pool, user_id, query)
+            .await
+            .unwrap_or_else(|error| panic!("{intent}: search failed: {error:?}"));
+        let ids = search_result_ids(&results);
 
-    assert!(ids.contains(&product_id_value.as_str()));
-    assert!(!ids.contains(&unrelated_id.to_string().as_str()));
-    test_db.cleanup().await;
-}
-
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
-#[tokio::test]
-async fn search_food_products_prioritizes_corrected_and_personal_products() {
-    let test_db = test_db().await;
-    let user_id = insert_test_user(&test_db.pool).await;
-    let global_id =
-        insert_test_food_product(&test_db.pool, None, "Alpha Yogurt", "Macro", None).await;
-    let personal_id =
-        insert_test_food_product(&test_db.pool, Some(user_id), "Beta Yogurt", "Macro", None).await;
-    let corrected_id = insert_test_food_product(
-        &test_db.pool,
-        Some(user_id),
-        "Gamma Yogurt",
-        "Macro",
-        Some(global_id),
-    )
-    .await;
-
-    let results = search_food_products_json(&test_db.pool, user_id, "yogurt")
-        .await
-        .expect("product search should succeed");
-    let ids = results
-        .as_array()
-        .expect("search result should be array")
-        .iter()
-        .map(|item| {
-            Uuid::parse_str(item.get("id").and_then(Value::as_str).unwrap())
-                .expect("result id should be uuid")
-        })
-        .collect::<Vec<_>>();
-
-    assert_eq!(&ids[..3], &[corrected_id, personal_id, global_id]);
-    test_db.cleanup().await;
+        match expectation {
+            ProductSearchExpectation::Empty => {
+                assert!(ids.is_empty(), "{intent}, got {ids:?}");
+            }
+            ProductSearchExpectation::Contains { present, absent } => {
+                for index in present {
+                    let id = seeded[*index].to_string();
+                    assert!(
+                        ids.contains(&id.as_str()),
+                        "{intent}: seed {index} is missing"
+                    );
+                }
+                for index in absent {
+                    let id = seeded[*index].to_string();
+                    assert!(
+                        !ids.contains(&id.as_str()),
+                        "{intent}: seed {index} matched"
+                    );
+                }
+            }
+            ProductSearchExpectation::LeadingOrder(order) => {
+                let expected = order
+                    .iter()
+                    .map(|index| seeded[*index].to_string())
+                    .collect::<Vec<_>>();
+                assert_eq!(ids[..order.len()], expected[..], "{intent}");
+            }
+        }
+        test_db.cleanup().await;
+    }
 }
 
 #[cfg_attr(
@@ -1216,52 +1182,9 @@ async fn admin_user_detail_preserves_recent_activity_contracts() {
     test_db.cleanup().await;
 }
 
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
-#[tokio::test]
-async fn search_meal_entries_excludes_planned_and_skipped_entries() {
-    let test_db = test_db().await;
-    let user_id = insert_test_user(&test_db.pool).await;
-    let eaten_id = insert_test_meal_entry(
-        &test_db.pool,
-        user_id,
-        "2026-07-03",
-        "eaten",
-        "Protein Bowl",
-        1,
-        (30.0, 40.0, 10.0, 370),
-    )
-    .await;
-    insert_test_meal_entry(
-        &test_db.pool,
-        user_id,
-        "2026-07-04",
-        "planned",
-        "Protein Bowl Planned",
-        0,
-        (30.0, 40.0, 10.0, 370),
-    )
-    .await;
-    insert_test_meal_entry(
-        &test_db.pool,
-        user_id,
-        "2026-07-05",
-        "skipped",
-        "Protein Bowl Skipped",
-        0,
-        (30.0, 40.0, 10.0, 370),
-    )
-    .await;
-
-    let results = search_meal_entries_json(&test_db.pool, user_id, "protein bowl")
-        .await
-        .expect("meal search should succeed");
-    let ids = search_result_ids(&results);
-
-    assert_eq!(ids, vec![eaten_id.to_string()]);
-    test_db.cleanup().await;
+enum MealEntryReader {
+    Search(&'static str),
+    Recent,
 }
 
 #[cfg_attr(
@@ -1269,47 +1192,72 @@ async fn search_meal_entries_excludes_planned_and_skipped_entries() {
     ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
 )]
 #[tokio::test]
-async fn search_meal_entries_deduplicates_equivalent_historical_foods() {
-    let test_db = test_db().await;
-    let user_id = insert_test_user(&test_db.pool).await;
-    let newest_id = insert_test_meal_entry(
-        &test_db.pool,
-        user_id,
-        "2026-07-06",
-        "eaten",
-        "Turkey Chili",
-        2,
-        (35.0, 45.0, 12.0, 428),
-    )
-    .await;
-    insert_test_meal_entry(
-        &test_db.pool,
-        user_id,
-        "2026-07-01",
-        "eaten",
-        "turkey chili",
-        0,
-        (35.0, 45.0, 12.0, 428),
-    )
-    .await;
-    let distinct_id = insert_test_meal_entry(
-        &test_db.pool,
-        user_id,
-        "2026-07-02",
-        "eaten",
-        "Turkey Chili",
-        1,
-        (36.0, 45.0, 12.0, 432),
-    )
-    .await;
+async fn meal_entry_readers_return_only_the_expected_history() {
+    // (protein g, carbs g, fat g, calories kcal) per seeded entry.
+    const BOWL: (f64, f64, f64, i32) = (30.0, 40.0, 10.0, 370);
+    const CHILI: (f64, f64, f64, i32) = (35.0, 45.0, 12.0, 428);
+    const CHILI_HEAVIER: (f64, f64, f64, i32) = (36.0, 45.0, 12.0, 432);
+    const RECENT: (f64, f64, f64, i32) = (20.0, 30.0, 8.0, 272);
 
-    let results = search_meal_entries_json(&test_db.pool, user_id, "turkey chili")
-        .await
-        .expect("meal search should succeed");
-    let ids = search_result_ids(&results);
+    for (intent, seeds, reader, expected) in [
+        (
+            "search hides planned and skipped entries",
+            &[
+                ("2026-07-03", "eaten", "Protein Bowl", 1, BOWL),
+                ("2026-07-04", "planned", "Protein Bowl Planned", 0, BOWL),
+                ("2026-07-05", "skipped", "Protein Bowl Skipped", 0, BOWL),
+            ][..],
+            MealEntryReader::Search("protein bowl"),
+            &[0][..],
+        ),
+        (
+            "search keeps the newest of two equivalent foods and any distinct one",
+            &[
+                ("2026-07-06", "eaten", "Turkey Chili", 2, CHILI),
+                ("2026-07-01", "eaten", "turkey chili", 0, CHILI),
+                ("2026-07-02", "eaten", "Turkey Chili", 1, CHILI_HEAVIER),
+            ][..],
+            MealEntryReader::Search("turkey chili"),
+            &[0, 2][..],
+        ),
+        (
+            "the recent list hides planned and skipped entries",
+            &[
+                ("2026-07-03", "eaten", "Recent Eaten", 0, RECENT),
+                ("2026-07-04", "planned", "Recent Planned", 0, RECENT),
+                ("2026-07-05", "skipped", "Recent Skipped", 0, RECENT),
+            ][..],
+            MealEntryReader::Recent,
+            &[0][..],
+        ),
+    ] {
+        let test_db = test_db().await;
+        let pool = &test_db.pool;
+        let user_id = insert_test_user(pool).await;
+        let mut seeded = Vec::new();
+        for &(date, status, label, sort_order, macros) in seeds {
+            seeded.push(
+                insert_test_meal_entry(pool, user_id, date, status, label, sort_order, macros)
+                    .await,
+            );
+        }
 
-    assert_eq!(ids, vec![newest_id.to_string(), distinct_id.to_string()]);
-    test_db.cleanup().await;
+        let results = match reader {
+            MealEntryReader::Search(query) => search_meal_entries_json(pool, user_id, query).await,
+            MealEntryReader::Recent => list_recent_meal_entries_json(pool, user_id, 10, true).await,
+        }
+        .unwrap_or_else(|error| panic!("{intent}: reader failed: {error:?}"));
+
+        assert_eq!(
+            search_result_ids(&results),
+            expected
+                .iter()
+                .map(|index| seeded[*index].to_string())
+                .collect::<Vec<_>>(),
+            "{intent}"
+        );
+        test_db.cleanup().await;
+    }
 }
 
 #[cfg_attr(
@@ -1586,54 +1534,6 @@ async fn leaderboard_handles_empty_grace_gaps_ties_and_large_history() {
     ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
 )]
 #[tokio::test]
-async fn list_recent_meal_entries_excludes_planned_and_skipped_entries() {
-    let test_db = test_db().await;
-    let user_id = insert_test_user(&test_db.pool).await;
-    let eaten_id = insert_test_meal_entry(
-        &test_db.pool,
-        user_id,
-        "2026-07-03",
-        "eaten",
-        "Recent Eaten",
-        0,
-        (20.0, 30.0, 8.0, 272),
-    )
-    .await;
-    insert_test_meal_entry(
-        &test_db.pool,
-        user_id,
-        "2026-07-04",
-        "planned",
-        "Recent Planned",
-        0,
-        (20.0, 30.0, 8.0, 272),
-    )
-    .await;
-    insert_test_meal_entry(
-        &test_db.pool,
-        user_id,
-        "2026-07-05",
-        "skipped",
-        "Recent Skipped",
-        0,
-        (20.0, 30.0, 8.0, 272),
-    )
-    .await;
-
-    let results = list_recent_meal_entries_json(&test_db.pool, user_id, 10, true)
-        .await
-        .expect("recent meals should list");
-    let ids = search_result_ids(&results);
-
-    assert_eq!(ids, vec![eaten_id.to_string()]);
-    test_db.cleanup().await;
-}
-
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
-#[tokio::test]
 async fn concurrent_owner_demotions_cannot_remove_last_owner() {
     let test_db = test_db_with_connections(4).await;
     let actor_id = insert_test_user_with_email(&test_db.pool, "owner-a@example.test").await;
@@ -1682,136 +1582,66 @@ async fn concurrent_owner_demotions_cannot_remove_last_owner() {
     test_db.cleanup().await;
 }
 
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
-#[tokio::test]
-async fn set_user_role_rolls_back_role_when_audit_insert_fails() {
-    let test_db = test_db().await;
-    let actor_id = insert_test_user_with_email(&test_db.pool, "owner@example.test").await;
-    let target_id = insert_test_user_with_email(&test_db.pool, "target@example.test").await;
-    ensure_user_role(&test_db.pool, actor_id, "owner")
-        .await
-        .expect("actor should become owner");
-
-    let result = rpc_json(
-        &test_db.pool,
-        "setUserRole",
-        json!({
-            "actorUserId": actor_id,
-            "targetUserId": target_id,
-            "nextRole": "admin",
-            "testFault": {
-                "kind": "admin_audit_event",
-                "message": "forced audit failure"
-            }
-        }),
-    )
-    .await;
-
-    assert_eq!(bad_request_message(result), "forced audit failure");
-    let role: String = sqlx::query("SELECT role FROM users WHERE id = $1")
-        .bind(target_id)
-        .fetch_one(&test_db.pool)
-        .await
-        .expect("target role should query")
-        .try_get("role")
-        .unwrap();
-    let audit_count: i64 = sqlx::query("SELECT count(*)::bigint AS count FROM admin_audit_events")
-        .fetch_one(&test_db.pool)
-        .await
-        .expect("audit count should query")
-        .try_get("count")
-        .unwrap();
-    assert_eq!(role, "user");
-    assert_eq!(audit_count, 0);
-
-    test_db.cleanup().await;
+struct RollbackFixture {
+    actor_id: Uuid,
+    target_id: Uuid,
+    product_id: Uuid,
+    seed_barcode: String,
+    barcode: String,
 }
 
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
-#[tokio::test]
-async fn create_admin_barcode_product_rolls_back_product_and_revision_when_audit_fails() {
-    let test_db = test_db().await;
-    let actor_id = insert_test_user_with_email(&test_db.pool, "admin@example.test").await;
-    ensure_user_role(&test_db.pool, actor_id, "admin")
-        .await
-        .expect("actor should become admin");
-    let barcode = format!("admin-create-{}", Uuid::new_v4());
+/// A `SELECT <expr>::text` check, its optional text bind, and the value it must return.
+type ScalarChecks = Vec<(&'static str, Option<String>, String)>;
 
-    let result = rpc_json(
-        &test_db.pool,
-        "createAdminBarcodeProduct",
-        json!({
-            "actorUserId": actor_id,
-            "input": barcode_payload(&barcode),
-            "testFault": {
-                "kind": "admin_audit_event",
-                "message": "forced audit failure"
-            }
-        }),
-    )
-    .await;
-
-    assert_eq!(bad_request_message(result), "forced audit failure");
-    assert_no_barcode_product_or_revision_rows(&test_db.pool, &barcode).await;
-
-    test_db.cleanup().await;
+struct RollbackCase {
+    op: &'static str,
+    intent: &'static str,
+    actor_role: &'static str,
+    fault: (&'static str, &'static str),
+    args: fn(&RollbackFixture) -> Value,
+    postconditions: fn(&RollbackFixture) -> ScalarChecks,
 }
 
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
-#[tokio::test]
-async fn update_admin_barcode_product_rolls_back_product_when_revision_fails() {
-    let test_db = test_db().await;
-    let actor_id = insert_test_user_with_email(&test_db.pool, "admin-update@example.test").await;
-    ensure_user_role(&test_db.pool, actor_id, "admin")
+const SEED_PRODUCT_NAME: &str = "Original Bar";
+
+async fn rollback_fixture(pool: &PgPool, actor_role: &str) -> RollbackFixture {
+    let actor_id = insert_test_user(pool).await;
+    let target_id = insert_test_user(pool).await;
+    ensure_user_role(pool, actor_id, actor_role)
         .await
-        .expect("actor should become admin");
+        .expect("actor role should be set");
+    let seed_barcode = format!("seed-{}", Uuid::new_v4());
     let product_id = insert_test_admin_barcode_product(
-        &test_db.pool,
-        "admin-update-original",
-        "Original Bar",
+        pool,
+        &seed_barcode,
+        SEED_PRODUCT_NAME,
         "Original Brand",
         Some(actor_id),
         false,
     )
     .await;
+    RollbackFixture {
+        actor_id,
+        target_id,
+        product_id,
+        seed_barcode,
+        barcode: format!("case-{}", Uuid::new_v4()),
+    }
+}
 
-    let result = rpc_json(
-        &test_db.pool,
-        "updateAdminBarcodeProduct",
-        json!({
-            "actorUserId": actor_id,
-            "barcodeProductId": product_id,
-            "input": barcode_payload("admin-update-next"),
-            "testFault": {
-                "kind": "food_product_revision",
-                "message": "forced revision failure"
-            }
-        }),
-    )
-    .await;
-
-    assert_eq!(bad_request_message(result), "forced revision failure");
-    let row = sqlx::query("SELECT barcode, name FROM food_products WHERE id = $1")
-        .bind(product_id)
-        .fetch_one(&test_db.pool)
-        .await
-        .expect("product should query");
-    assert_eq!(
-        row.try_get::<String, _>("barcode").unwrap(),
-        "admin-update-original"
-    );
-    assert_eq!(row.try_get::<String, _>("name").unwrap(), "Original Bar");
-
-    test_db.cleanup().await;
+fn no_barcode_product_or_revision(fixture: &RollbackFixture) -> ScalarChecks {
+    vec![
+        (
+            "SELECT count(*)::text FROM food_products WHERE barcode = $1",
+            Some(fixture.barcode.clone()),
+            "0".to_string(),
+        ),
+        (
+            "SELECT count(*)::text FROM food_product_revisions",
+            None,
+            "0".to_string(),
+        ),
+    ]
 }
 
 #[cfg_attr(
@@ -1819,56 +1649,140 @@ async fn update_admin_barcode_product_rolls_back_product_when_revision_fails() {
     ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
 )]
 #[tokio::test]
-async fn delete_admin_barcode_product_rolls_back_product_when_audit_fails() {
-    let test_db = test_db().await;
-    let actor_id = insert_test_user_with_email(&test_db.pool, "admin-delete@example.test").await;
-    ensure_user_role(&test_db.pool, actor_id, "admin")
-        .await
-        .expect("actor should become admin");
-    let product_id = insert_test_admin_barcode_product(
-        &test_db.pool,
-        "admin-delete-original",
-        "Delete Bar",
-        "Delete Brand",
-        Some(actor_id),
-        false,
-    )
-    .await;
+async fn an_injected_fault_rolls_back_the_whole_write() {
+    for case in [
+        RollbackCase {
+            op: "setUserRole",
+            intent: "a failed audit insert must not leave the promotion behind",
+            actor_role: "owner",
+            fault: ("admin_audit_event", "forced audit failure"),
+            args: |fixture| {
+                json!({
+                    "actorUserId": fixture.actor_id,
+                    "targetUserId": fixture.target_id,
+                    "nextRole": "admin",
+                })
+            },
+            postconditions: |fixture| {
+                vec![
+                    (
+                        "SELECT role FROM users WHERE id = $1::uuid",
+                        Some(fixture.target_id.to_string()),
+                        "user".to_string(),
+                    ),
+                    (
+                        "SELECT count(*)::text FROM admin_audit_events",
+                        None,
+                        "0".to_string(),
+                    ),
+                ]
+            },
+        },
+        RollbackCase {
+            op: "createAdminBarcodeProduct",
+            intent: "a failed audit insert must not leave the product or its revision behind",
+            actor_role: "admin",
+            fault: ("admin_audit_event", "forced audit failure"),
+            args: |fixture| {
+                json!({
+                    "actorUserId": fixture.actor_id,
+                    "input": barcode_payload(&fixture.barcode),
+                })
+            },
+            postconditions: no_barcode_product_or_revision,
+        },
+        RollbackCase {
+            op: "updateAdminBarcodeProduct",
+            intent: "a failed revision insert must leave the stored product untouched",
+            actor_role: "admin",
+            fault: ("food_product_revision", "forced revision failure"),
+            args: |fixture| {
+                json!({
+                    "actorUserId": fixture.actor_id,
+                    "barcodeProductId": fixture.product_id,
+                    "input": barcode_payload(&fixture.barcode),
+                })
+            },
+            postconditions: |fixture| {
+                vec![
+                    (
+                        "SELECT barcode FROM food_products WHERE id = $1::uuid",
+                        Some(fixture.product_id.to_string()),
+                        fixture.seed_barcode.clone(),
+                    ),
+                    (
+                        "SELECT name FROM food_products WHERE id = $1::uuid",
+                        Some(fixture.product_id.to_string()),
+                        SEED_PRODUCT_NAME.to_string(),
+                    ),
+                ]
+            },
+        },
+        RollbackCase {
+            op: "softDeleteAdminBarcodeProduct",
+            intent: "a failed audit insert must not leave the product soft-deleted",
+            actor_role: "admin",
+            fault: ("admin_audit_event", "forced audit failure"),
+            args: |fixture| {
+                json!({
+                    "actorUserId": fixture.actor_id,
+                    "barcodeProductId": fixture.product_id,
+                })
+            },
+            postconditions: |fixture| {
+                vec![
+                    (
+                        "SELECT (deleted_at IS NULL)::text FROM food_products WHERE id = $1::uuid",
+                        Some(fixture.product_id.to_string()),
+                        "true".to_string(),
+                    ),
+                    (
+                        "SELECT count(*)::text FROM food_product_revisions",
+                        None,
+                        "0".to_string(),
+                    ),
+                ]
+            },
+        },
+        RollbackCase {
+            op: "saveBarcodeFoodProduct",
+            intent: "a failed created-revision insert must not leave the product behind",
+            actor_role: "user",
+            fault: ("barcode_food_product_revision", "forced revision failure"),
+            args: |fixture| {
+                json!({
+                    "userId": fixture.actor_id,
+                    "input": barcode_payload(&fixture.barcode),
+                })
+            },
+            postconditions: no_barcode_product_or_revision,
+        },
+    ] {
+        let context = format!("{}: {}", case.op, case.intent);
+        let test_db = test_db().await;
+        let fixture = rollback_fixture(&test_db.pool, case.actor_role).await;
+        let (fault_kind, fault_message) = case.fault;
+        let mut args = (case.args)(&fixture);
+        args["testFault"] = json!({ "kind": fault_kind, "message": fault_message });
 
-    let result = rpc_json(
-        &test_db.pool,
-        "softDeleteAdminBarcodeProduct",
-        json!({
-            "actorUserId": actor_id,
-            "barcodeProductId": product_id,
-            "testFault": {
-                "kind": "admin_audit_event",
-                "message": "forced audit failure"
-            }
-        }),
-    )
-    .await;
+        let result = rpc_json(&test_db.pool, case.op, args).await;
+        assert_eq!(bad_request_message(result), fault_message, "{context}");
 
-    assert_eq!(bad_request_message(result), "forced audit failure");
-    let deleted_at: Option<DateTime<Utc>> =
-        sqlx::query("SELECT deleted_at FROM food_products WHERE id = $1")
-            .bind(product_id)
-            .fetch_one(&test_db.pool)
-            .await
-            .expect("product should query")
-            .try_get("deleted_at")
-            .unwrap();
-    let revision_count: i64 =
-        sqlx::query("SELECT count(*)::bigint AS count FROM food_product_revisions")
-            .fetch_one(&test_db.pool)
-            .await
-            .expect("revision count should query")
-            .try_get("count")
-            .unwrap();
-    assert!(deleted_at.is_none());
-    assert_eq!(revision_count, 0);
+        for (sql, bind, expected) in (case.postconditions)(&fixture) {
+            let query = sqlx::query_scalar::<_, String>(sql);
+            let query = match bind {
+                Some(value) => query.bind(value),
+                None => query,
+            };
+            let actual = query
+                .fetch_one(&test_db.pool)
+                .await
+                .unwrap_or_else(|error| panic!("{context}: {sql} should query: {error}"));
+            assert_eq!(actual, expected, "{context}: {sql}");
+        }
 
-    test_db.cleanup().await;
+        test_db.cleanup().await;
+    }
 }
 
 #[cfg_attr(
@@ -1914,36 +1828,6 @@ async fn save_barcode_food_product_rpc_creates_created_revision() {
     let snapshot: Value = revision.try_get("snapshot_json").unwrap();
     assert_eq!(snapshot.get("id"), product.get("id"));
     assert_eq!(snapshot.get("barcode"), product.get("barcode"));
-
-    test_db.cleanup().await;
-}
-
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
-#[tokio::test]
-async fn save_barcode_food_product_rolls_back_product_when_created_revision_fails() {
-    let test_db = test_db().await;
-    let user_id = insert_test_user(&test_db.pool).await;
-    let barcode = format!("test-{}", Uuid::new_v4());
-
-    let result = rpc_json(
-        &test_db.pool,
-        "saveBarcodeFoodProduct",
-        json!({
-            "userId": user_id,
-            "input": barcode_payload(&barcode),
-            "testFault": {
-                "kind": "barcode_food_product_revision",
-                "message": "forced revision failure"
-            }
-        }),
-    )
-    .await;
-
-    assert_eq!(bad_request_message(result), "forced revision failure");
-    assert_no_barcode_product_or_revision_rows(&test_db.pool, &barcode).await;
 
     test_db.cleanup().await;
 }
@@ -2047,23 +1931,6 @@ fn optional_f64_rejects_non_finite_strings() {
 }
 
 #[test]
-fn macros_are_bounded_to_the_column_domain() {
-    // numeric(6, 1) overflows past 99_999.9; without this bound the INSERT
-    // raises numeric-field-overflow and the caller gets a 500.
-    let payload = meal_payload(&[("proteinG", json!(1e30))]);
-    assert!(normalize_meal_food_values(&payload, 0, "Meal name is required.").is_err());
-
-    let payload = meal_payload(&[("proteinG", json!(MAX_MACRO_GRAMS))]);
-    assert!(normalize_meal_food_values(&payload, 0, "Meal name is required.").is_ok());
-}
-
-#[test]
-fn quantities_are_bounded_to_the_column_domain() {
-    let payload = meal_payload(&[("quantity", json!(1e12))]);
-    assert!(normalize_meal_food_values(&payload, 0, "Meal name is required.").is_err());
-}
-
-#[test]
 fn goal_weight_is_bounded_after_rounding() {
     assert_eq!(
         validate_goal_weight_kg(None).expect("none is allowed"),
@@ -2095,65 +1962,71 @@ fn search_like_patterns_never_exceed_the_term_cap() {
     assert_eq!(search_like_patterns(&query).len(), MAX_SEARCH_TERMS);
 }
 
+/// Without these bounds the INSERT raises a numeric-field-overflow and the caller gets a 500.
 #[test]
-fn meal_template_and_recipe_item_validation_rejects_invalid_payloads() {
-    assert_eq!(
-        bad_request_message(normalize_meal_food_values(
-            &meal_payload(&[("label", json!("   "))]),
-            0,
-            "Meal name is required.",
-        )),
-        "Meal name is required."
-    );
-    assert_eq!(
-        bad_request_message(normalize_meal_food_values(
-            &meal_payload(&[("quantity", json!(0))]),
-            0,
-            "Meal name is required.",
-        )),
-        "Quantity must be a positive number."
-    );
-    assert_eq!(
-        bad_request_message(normalize_meal_food_values(
-            &meal_payload(&[("unit", json!("oz"))]),
-            0,
-            "Meal name is required.",
-        )),
-        "Quantity unit is invalid."
-    );
-    assert_eq!(
-        bad_request_message(normalize_meal_food_values(
-            &meal_payload(&[("servingMultiplier", json!(0))]),
-            0,
-            "Meal name is required.",
-        )),
-        "Serving multiplier must be a positive number."
-    );
-    assert_eq!(
-        bad_request_message(normalize_meal_food_values(
-            &meal_payload(&[
+fn normalize_meal_food_values_pins_the_meal_item_contract() {
+    const LABEL_MESSAGE: &str = "Meal name is required.";
+
+    for (intent, payload, expected) in [
+        (
+            "a macro exactly on the column bound",
+            meal_payload(&[("proteinG", json!(MAX_MACRO_GRAMS))]),
+            None,
+        ),
+        (
+            "a macro past the column bound",
+            meal_payload(&[("proteinG", json!(1e30))]),
+            Some(format!("proteinG must be at most {MAX_MACRO_GRAMS}.")),
+        ),
+        (
+            "a quantity past the column bound",
+            meal_payload(&[("quantity", json!(1e12))]),
+            Some(format!("Quantity must be at most {MAX_QUANTITY}.")),
+        ),
+        (
+            "a blank label",
+            meal_payload(&[("label", json!("   "))]),
+            Some(LABEL_MESSAGE.to_string()),
+        ),
+        (
+            "a zero quantity",
+            meal_payload(&[("quantity", json!(0))]),
+            Some("Quantity must be a positive number.".to_string()),
+        ),
+        (
+            "an unsupported quantity unit",
+            meal_payload(&[("unit", json!("oz"))]),
+            Some("Quantity unit is invalid.".to_string()),
+        ),
+        (
+            "a zero serving multiplier",
+            meal_payload(&[("servingMultiplier", json!(0))]),
+            Some("Serving multiplier must be a positive number.".to_string()),
+        ),
+        (
+            "an all-zero nutrition block",
+            meal_payload(&[
                 ("proteinG", json!(0)),
                 ("carbsG", json!(0)),
                 ("fatG", json!(0)),
                 ("caloriesKcal", json!(0)),
             ]),
-            0,
-            "Meal name is required.",
-        )),
-        "At least one macro or calorie value must be greater than zero."
-    );
-}
-
-#[test]
-fn meal_validation_rejects_overflowing_integer_fields() {
-    assert_eq!(
-        bad_request_message(normalize_meal_food_values(
-            &meal_payload(&[("caloriesKcal", json!(4_294_967_296_u64))]),
-            0,
-            "Meal name is required.",
-        )),
-        "caloriesKcal must be a non-negative integer."
-    );
+            Some("At least one macro or calorie value must be greater than zero.".to_string()),
+        ),
+        (
+            "calories that overflow i32",
+            meal_payload(&[("caloriesKcal", json!(4_294_967_296_u64))]),
+            Some("caloriesKcal must be a non-negative integer.".to_string()),
+        ),
+    ] {
+        let result = normalize_meal_food_values(&payload, 0, LABEL_MESSAGE);
+        match expected {
+            None => assert!(result.is_ok(), "must accept {intent}"),
+            Some(message) => {
+                assert_eq!(bad_request_message(result), message, "must reject {intent}")
+            }
+        }
+    }
 }
 
 #[test]
@@ -2380,187 +2253,131 @@ fn shoo_profile(sub: &str, email: &str) -> ShooProfile {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ShooOutcome {
+    Created,
+    ReusesSeed(usize),
+    Conflict { must_not_leak: Option<&'static str> },
+}
+
 #[tokio::test]
 #[cfg_attr(
     not(has_test_database),
     ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
 )]
-async fn shoo_login_refuses_to_rebind_an_existing_email_to_a_new_subject() {
-    let test_db = test_db().await;
-    let victim_id = insert_test_user_with_email(&test_db.pool, "victim@example.test").await;
-    let original_sub: String = sqlx::query("SELECT shoo_pairwise_sub FROM users WHERE id = $1")
-        .bind(victim_id)
-        .fetch_one(&test_db.pool)
-        .await
-        .expect("victim should exist")
-        .try_get("shoo_pairwise_sub")
-        .expect("sub should read");
-
-    let result = upsert_user_from_shoo_profile(
-        &test_db.pool,
-        &shoo_profile("attacker-sub", "victim@example.test"),
-    )
-    .await;
-
-    match result {
-        Err(AppError::Conflict(message)) => {
-            assert!(
-                !message.contains("victim@example.test"),
-                "conflict message must not echo the address back: {message}"
+async fn shoo_login_pins_the_subject_and_address_rebinding_contract() {
+    for (intent, seeds, profile, outcome) in [
+        (
+            "a new subject may not claim an address that already has an account",
+            &[("victim-sub", "victim@example.test")][..],
+            ("attacker-sub", "victim@example.test"),
+            ShooOutcome::Conflict {
+                must_not_leak: Some("victim@example.test"),
+            },
+        ),
+        (
+            "a known subject may change its address",
+            &[("stable-sub", "before@example.test")][..],
+            ("stable-sub", "after@example.test"),
+            ShooOutcome::ReusesSeed(0),
+        ),
+        (
+            "a known subject may not move onto an address another account holds",
+            &[
+                ("victim-sub", "victim@example.test"),
+                ("attacker-sub", "attacker@example.test"),
+            ][..],
+            ("attacker-sub", "victim@example.test"),
+            ShooOutcome::Conflict {
+                must_not_leak: None,
+            },
+        ),
+        (
+            "an unused subject and address create an account",
+            &[][..],
+            ("fresh-sub", "fresh@example.test"),
+            ShooOutcome::Created,
+        ),
+    ] {
+        let test_db = test_db().await;
+        let mut seeded = Vec::new();
+        for (sub, email) in seeds {
+            seeded.push(
+                upsert_user_from_shoo_profile(&test_db.pool, &shoo_profile(sub, email))
+                    .await
+                    .unwrap_or_else(|error| panic!("{intent}: seeding {sub} failed: {error:?}")),
             );
         }
-        Err(error) => panic!("expected a conflict, got {error:?}"),
-        Ok(_) => panic!("expected a conflict, got a successful login"),
-    }
 
-    let stored_sub: String = sqlx::query("SELECT shoo_pairwise_sub FROM users WHERE id = $1")
-        .bind(victim_id)
-        .fetch_one(&test_db.pool)
-        .await
-        .expect("victim should still exist")
-        .try_get("shoo_pairwise_sub")
-        .expect("sub should read");
-    assert_eq!(
-        stored_sub, original_sub,
-        "the victim row must keep its original subject"
-    );
-    let user_count: i64 = sqlx::query("SELECT count(*) AS total FROM users")
-        .fetch_one(&test_db.pool)
-        .await
-        .expect("count should run")
-        .try_get("total")
-        .expect("count should read");
-    assert_eq!(user_count, 1, "no shadow account may be created either");
+        let result =
+            upsert_user_from_shoo_profile(&test_db.pool, &shoo_profile(profile.0, profile.1)).await;
 
-    test_db.cleanup().await;
-}
-
-#[tokio::test]
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
-async fn shoo_login_updates_the_email_of_a_known_subject() {
-    let test_db = test_db().await;
-    let created = upsert_user_from_shoo_profile(
-        &test_db.pool,
-        &shoo_profile("stable-sub", "before@example.test"),
-    )
-    .await
-    .expect("first login should create the account");
-
-    let updated = upsert_user_from_shoo_profile(
-        &test_db.pool,
-        &shoo_profile("stable-sub", "after@example.test"),
-    )
-    .await
-    .expect("a known subject may change its email");
-
-    assert_eq!(updated.id, created.id, "row identity must be preserved");
-    assert_eq!(updated.email, "after@example.test");
-    assert_eq!(updated.shoo_pairwise_sub, "stable-sub");
-
-    test_db.cleanup().await;
-}
-
-#[tokio::test]
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
-async fn shoo_login_refuses_to_move_a_known_subject_onto_a_taken_email() {
-    let test_db = test_db().await;
-    let victim = upsert_user_from_shoo_profile(
-        &test_db.pool,
-        &shoo_profile("victim-sub", "victim@example.test"),
-    )
-    .await
-    .expect("victim account should be created");
-    upsert_user_from_shoo_profile(
-        &test_db.pool,
-        &shoo_profile("attacker-sub", "attacker@example.test"),
-    )
-    .await
-    .expect("attacker account should be created");
-
-    // The subject matches an existing row, so the update path runs and the
-    // `users_email_key` violation must surface as a conflict, not a 500.
-    let result = upsert_user_from_shoo_profile(
-        &test_db.pool,
-        &shoo_profile("attacker-sub", "victim@example.test"),
-    )
-    .await;
-    assert!(
-        matches!(result, Err(AppError::Conflict(_))),
-        "expected a conflict, got {result:?}"
-    );
-
-    let victim_email: String = sqlx::query("SELECT email FROM users WHERE id = $1")
-        .bind(victim.id)
-        .fetch_one(&test_db.pool)
-        .await
-        .expect("victim should still exist")
-        .try_get("email")
-        .expect("email should read");
-    assert_eq!(victim_email, "victim@example.test");
-
-    test_db.cleanup().await;
-}
-
-#[tokio::test]
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
-async fn shoo_login_creates_a_user_for_an_unused_subject_and_email() {
-    let test_db = test_db().await;
-    let created = upsert_user_from_shoo_profile(
-        &test_db.pool,
-        &shoo_profile("fresh-sub", "fresh@example.test"),
-    )
-    .await
-    .expect("a brand-new subject should create an account");
-    assert_eq!(created.shoo_pairwise_sub, "fresh-sub");
-    assert_eq!(created.email, "fresh@example.test");
-
-    test_db.cleanup().await;
-}
-
-#[tokio::test]
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
-async fn product_linked_meal_writes_are_bounded_like_the_manual_path() {
-    let test_db = test_db().await;
-    let user_id = insert_test_user(&test_db.pool).await;
-    let product_id =
-        insert_test_food_product(&test_db.pool, Some(user_id), "Oats", "Brand", None).await;
-
-    // DATA-01: the product path never applied MAX_QUANTITY, so this reached
-    // the INSERT and came back as a numeric-overflow 500.
-    let result = rpc_json(
-        &test_db.pool,
-        "createMealEntry",
-        json!({
-            "userId": user_id,
-            "input": {
-                "date": "2026-01-01",
-                "productId": product_id,
-                "unit": "g",
-                "quantity": 1e12,
+        match outcome {
+            ShooOutcome::Conflict { must_not_leak } => {
+                let Err(AppError::Conflict(message)) = result else {
+                    panic!("{intent}: expected a conflict, got {result:?}");
+                };
+                if let Some(address) = must_not_leak {
+                    assert!(
+                        !message.contains(address),
+                        "{intent}: the conflict must not echo the address back: {message}"
+                    );
+                }
+                for (index, (sub, email)) in seeds.iter().enumerate() {
+                    let stored: (String, String) =
+                        sqlx::query_as("SELECT shoo_pairwise_sub, email FROM users WHERE id = $1")
+                            .bind(seeded[index].id)
+                            .fetch_one(&test_db.pool)
+                            .await
+                            .expect("seeded user should still exist");
+                    assert_eq!(
+                        stored,
+                        ((*sub).to_string(), (*email).to_string()),
+                        "{intent}: seeded account {index} must be untouched"
+                    );
+                }
             }
-        }),
-    )
-    .await;
-    assert!(
-        matches!(result, Err(AppError::BadRequest(_))),
-        "expected a 400 for an out-of-range quantity, got {result:?}"
-    );
+            ShooOutcome::ReusesSeed(index) => {
+                let user = result.unwrap_or_else(|error| panic!("{intent}: {error:?}"));
+                assert_eq!(user.id, seeded[index].id, "{intent}: row identity is kept");
+                assert_eq!(user.shoo_pairwise_sub, profile.0, "{intent}");
+                assert_eq!(user.email, profile.1, "{intent}");
+            }
+            ShooOutcome::Created => {
+                let user = result.unwrap_or_else(|error| panic!("{intent}: {error:?}"));
+                assert_eq!(user.shoo_pairwise_sub, profile.0, "{intent}");
+                assert_eq!(user.email, profile.1, "{intent}");
+            }
+        }
 
-    // Same for the macro columns. Creates always recalculate from the
-    // product, so the overflow arrives as `per-100 value x quantity` rather
-    // than as a client-supplied macro.
+        let users: i64 = sqlx::query_scalar("SELECT count(*) FROM users")
+            .fetch_one(&test_db.pool)
+            .await
+            .expect("user count should query");
+        let expected = seeds.len() as i64 + i64::from(matches!(outcome, ShooOutcome::Created));
+        assert_eq!(
+            users, expected,
+            "{intent}: no shadow account may be created"
+        );
+
+        test_db.cleanup().await;
+    }
+}
+
+struct BoundsFixture {
+    user_id: Uuid,
+    product_id: Uuid,
+    dense_product_id: Uuid,
+    entry_id: String,
+    entry_calories: i32,
+}
+
+/// The operation, what makes its payload out of range, and the args built from the fixture.
+type BoundsCase = (&'static str, &'static str, fn(&BoundsFixture) -> Value);
+
+async fn bounds_fixture(pool: &PgPool) -> BoundsFixture {
+    let user_id = insert_test_user(pool).await;
+    let product_id = insert_test_food_product(pool, Some(user_id), "Oats", "Brand", None).await;
     let dense_product_id = Uuid::new_v4();
     sqlx::query(
         r#"
@@ -2574,52 +2391,12 @@ async fn product_linked_meal_writes_are_bounded_like_the_manual_path() {
     )
     .bind(dense_product_id)
     .bind(user_id)
-    .execute(&test_db.pool)
+    .execute(pool)
     .await
     .expect("dense product should insert");
 
-    let result = rpc_json(
-        &test_db.pool,
-        "createMealEntry",
-        json!({
-            "userId": user_id,
-            "input": {
-                "date": "2026-01-01",
-                "productId": dense_product_id,
-                "unit": "g",
-                "quantity": 500_000,
-            }
-        }),
-    )
-    .await;
-    assert!(
-        matches!(result, Err(AppError::BadRequest(_))),
-        "expected a 400 for out-of-range macros, got {result:?}"
-    );
-
-    let stored: i64 = sqlx::query("SELECT count(*) AS total FROM meal_entries")
-        .fetch_one(&test_db.pool)
-        .await
-        .expect("count should run")
-        .try_get("total")
-        .expect("count should read");
-    assert_eq!(stored, 0, "no out-of-range row may reach the table");
-
-    test_db.cleanup().await;
-}
-
-#[tokio::test]
-#[cfg_attr(
-    not(has_test_database),
-    ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-)]
-async fn preserved_product_snapshots_cannot_write_negative_macros() {
-    let test_db = test_db().await;
-    let user_id = insert_test_user(&test_db.pool).await;
-    let product_id =
-        insert_test_food_product(&test_db.pool, Some(user_id), "Oats", "Brand", None).await;
     let created = rpc_json(
-        &test_db.pool,
+        pool,
         "createMealEntry",
         json!({
             "userId": user_id,
@@ -2633,122 +2410,157 @@ async fn preserved_product_snapshots_cannot_write_negative_macros() {
     )
     .await
     .expect("baseline product-linked entry should be created");
-    let entry_id = created
-        .get("id")
-        .and_then(Value::as_str)
+    let entry_id = created["id"]
+        .as_str()
         .expect("created entry should carry an id")
         .to_string();
-    let before: i32 = sqlx::query("SELECT calories_kcal FROM meal_entries WHERE id = $1::uuid")
-        .bind(&entry_id)
-        .fetch_one(&test_db.pool)
-        .await
-        .expect("entry should exist")
-        .try_get("calories_kcal")
-        .expect("calories should read");
+    let entry_calories: i32 =
+        sqlx::query_scalar("SELECT calories_kcal FROM meal_entries WHERE id = $1::uuid")
+            .bind(&entry_id)
+            .fetch_one(pool)
+            .await
+            .expect("baseline entry should exist");
 
-    let result = rpc_json(
-        &test_db.pool,
-        "updateMealEntry",
-        json!({
-            "userId": user_id,
-            "entryId": entry_id,
-            "input": {
-                "date": "2026-01-01",
-                "productId": product_id,
-                "unit": "serving",
-                "quantity": 1,
-                "proteinG": 1.0,
-                "carbsG": 1.0,
-                "fatG": 1.0,
-                "caloriesKcal": -2000000000,
-                "__recalculateProductMacros": false,
-            }
-        }),
-    )
-    .await;
-    assert!(
-        matches!(result, Err(AppError::BadRequest(_))),
-        "expected a 400 for negative calories, got {result:?}"
-    );
-
-    // The same preserved-snapshot path must also respect the upper bounds.
-    let result = rpc_json(
-        &test_db.pool,
-        "updateMealEntry",
-        json!({
-            "userId": user_id,
-            "entryId": entry_id,
-            "input": {
-                "date": "2026-01-01",
-                "productId": product_id,
-                "unit": "serving",
-                "quantity": 1,
-                "proteinG": 1.0e9,
-                "carbsG": 1.0,
-                "fatG": 1.0,
-                "caloriesKcal": 100,
-                "__recalculateProductMacros": false,
-            }
-        }),
-    )
-    .await;
-    assert!(
-        matches!(result, Err(AppError::BadRequest(_))),
-        "expected a 400 for out-of-range macros, got {result:?}"
-    );
-
-    let after: i32 = sqlx::query("SELECT calories_kcal FROM meal_entries WHERE id = $1::uuid")
-        .bind(&entry_id)
-        .fetch_one(&test_db.pool)
-        .await
-        .expect("entry should still exist")
-        .try_get("calories_kcal")
-        .expect("calories should read");
-    assert_eq!(after, before, "the stored row must be unchanged");
-
-    test_db.cleanup().await;
+    BoundsFixture {
+        user_id,
+        product_id,
+        dense_product_id,
+        entry_id,
+        entry_calories,
+    }
 }
 
+/// DATA-01: the product-linked and preserved-snapshot paths each once skipped a bound
+/// the manual path applied, and reached the INSERT as a numeric-overflow 500.
 #[tokio::test]
 #[cfg_attr(
     not(has_test_database),
     ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
 )]
-async fn calories_are_bounded_to_the_column_domain() {
-    let test_db = test_db().await;
-    let user_id = insert_test_user(&test_db.pool).await;
+async fn out_of_range_meal_and_product_writes_are_refused() {
+    let cases: [BoundsCase; 6] = [
+        (
+            "createMealEntry",
+            "a quantity past the column bound on the product path",
+            |fixture| {
+                json!({
+                    "userId": fixture.user_id,
+                    "input": {
+                        "date": "2026-01-01",
+                        "productId": fixture.product_id,
+                        "unit": "g",
+                        "quantity": 1e12,
+                    }
+                })
+            },
+        ),
+        (
+            "createMealEntry",
+            "macros that overflow once the product's per-100 values are scaled",
+            |fixture| {
+                json!({
+                    "userId": fixture.user_id,
+                    "input": {
+                        "date": "2026-01-01",
+                        "productId": fixture.dense_product_id,
+                        "unit": "g",
+                        "quantity": 500_000,
+                    }
+                })
+            },
+        ),
+        (
+            "updateMealEntry",
+            "negative calories on the preserved-snapshot path",
+            |fixture| {
+                json!({
+                    "userId": fixture.user_id,
+                    "entryId": fixture.entry_id,
+                    "input": {
+                        "date": "2026-01-01",
+                        "productId": fixture.product_id,
+                        "unit": "serving",
+                        "quantity": 1,
+                        "proteinG": 1.0,
+                        "carbsG": 1.0,
+                        "fatG": 1.0,
+                        "caloriesKcal": -2000000000,
+                        "__recalculateProductMacros": false,
+                    }
+                })
+            },
+        ),
+        (
+            "updateMealEntry",
+            "macros above the upper bound on the preserved-snapshot path",
+            |fixture| {
+                json!({
+                    "userId": fixture.user_id,
+                    "entryId": fixture.entry_id,
+                    "input": {
+                        "date": "2026-01-01",
+                        "productId": fixture.product_id,
+                        "unit": "serving",
+                        "quantity": 1,
+                        "proteinG": 1.0e9,
+                        "carbsG": 1.0,
+                        "fatG": 1.0,
+                        "caloriesKcal": 100,
+                        "__recalculateProductMacros": false,
+                    }
+                })
+            },
+        ),
+        (
+            "createMealEntry",
+            "an absurd caloriesKcal on the manual path",
+            |fixture| {
+                json!({
+                    "userId": fixture.user_id,
+                    "input": meal_payload(&[("caloriesKcal", json!(2_000_000_000i64))]),
+                })
+            },
+        ),
+        (
+            // The same unbounded helper fed the catalogue every other account searches.
+            "createPersonalFoodProduct",
+            "an absurd caloriesPer100",
+            |fixture| {
+                json!({
+                    "userId": fixture.user_id,
+                    "input": food_payload(&[("caloriesPer100", json!(2_000_000_000i64))]),
+                })
+            },
+        ),
+    ];
 
-    let result = rpc_json(
-        &test_db.pool,
-        "createMealEntry",
-        json!({
-            "userId": user_id,
-            "input": meal_payload(&[("caloriesKcal", json!(2_000_000_000i64))]),
-        }),
-    )
-    .await;
-    assert!(
-        matches!(result, Err(AppError::BadRequest(_))),
-        "expected a 400 for an absurd caloriesKcal, got {result:?}"
-    );
+    for (op, intent, args) in cases {
+        let test_db = test_db().await;
+        let fixture = bounds_fixture(&test_db.pool).await;
+        let result = rpc_json(&test_db.pool, op, args(&fixture)).await;
+        assert!(
+            matches!(result, Err(AppError::BadRequest(_))),
+            "{op} must refuse {intent}, got {result:?}"
+        );
 
-    // The same unbounded helper fed `caloriesPer100`, which lands in the
-    // shared catalogue every other account searches.
-    let result = rpc_json(
-        &test_db.pool,
-        "createPersonalFoodProduct",
-        json!({
-            "userId": user_id,
-            "input": food_payload(&[("caloriesPer100", json!(2_000_000_000i64))]),
-        }),
-    )
-    .await;
-    assert!(
-        matches!(result, Err(AppError::BadRequest(_))),
-        "expected a 400 for an absurd caloriesPer100, got {result:?}"
-    );
+        let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM meal_entries")
+            .fetch_one(&test_db.pool)
+            .await
+            .expect("meal entry count should query");
+        let calories: i32 =
+            sqlx::query_scalar("SELECT calories_kcal FROM meal_entries WHERE id = $1::uuid")
+                .bind(&fixture.entry_id)
+                .fetch_one(&test_db.pool)
+                .await
+                .expect("baseline entry should still exist");
+        assert_eq!(stored, 1, "{op}: {intent} must not reach the table");
+        assert_eq!(
+            calories, fixture.entry_calories,
+            "{op}: {intent} must leave the stored row unchanged"
+        );
 
-    test_db.cleanup().await;
+        test_db.cleanup().await;
+    }
 }
 
 #[tokio::test]

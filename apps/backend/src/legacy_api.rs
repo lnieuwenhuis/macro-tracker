@@ -28,13 +28,9 @@ mod benchmark_fixtures;
 
 use benchmark_fixtures::{BENCHMARK_FIXTURES, CATEGORIES};
 
-/// Effort suffixes are parsed by CLIProxyAPI and mapped to the reasoning
-/// parameter of the Codex backend; the fallback bumps effort in case low
-/// returns unparseable JSON (invalid_json failures are retryable).
+/// The `(effort)` suffix is CLIProxyAPI's reasoning-effort selector; the retry raises it.
 const DEFAULT_FOOD_PHOTO_MODELS: &[&str] = &["gpt-5.6-luna(low)", "gpt-5.6-luna(medium)"];
-/// Reasoning happens inside the output-token budget on the Codex backend, so
-/// the cap must leave room for thinking tokens on top of the ~300 tokens of
-/// JSON the prompt asks for.
+/// Output budget shared by the reasoning tokens and the ~300-token JSON answer.
 const FOOD_PHOTO_MAX_TOKENS: u16 = 4_000;
 /// Reasoning models need headroom per attempt even at low effort.
 const FOOD_PHOTO_MODEL_TIMEOUT_MS_DEFAULT: u64 = 20_000;
@@ -46,14 +42,7 @@ const FOOD_PHOTO_REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
 const BENCHMARK_ROUTE_RUNTIME_BUDGET_MS: u64 = 270_000;
 const BENCHMARK_RUN_LOCK_TTL: Duration = Duration::from_secs(300);
 
-/// The benchmark run currently believed to be in flight.
-///
-/// API-08: this used to be a bare expiry stamp, and the guard's `Drop` set it
-/// back to `None` unconditionally. A run that overran [`BENCHMARK_RUN_LOCK_TTL`]
-/// would therefore clear the stamp of the run that had legitimately replaced
-/// it, letting a third run start alongside the second — two concurrent
-/// benchmarks, twice the upstream spend. The generation makes the release
-/// conditional on still owning the lock.
+/// `generation` keeps an overrunning run's release from freeing its successor (API-08).
 #[derive(Clone, Copy)]
 struct BenchmarkRun {
     generation: u64,
@@ -63,10 +52,7 @@ struct BenchmarkRun {
 static BENCHMARK_LOCK: OnceLock<Mutex<Option<BenchmarkRun>>> = OnceLock::new();
 static BENCHMARK_GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// Each in-flight photo holds the decoded upload plus its base64 data URL, so
-/// peak footprint is a multiple of `MAX_IMAGE_BYTES` per request. Cap how many
-/// can be resident at once; excess requests wait rather than all buffering
-/// concurrently.
+/// Each in-flight photo holds the decoded upload plus its base64 copy; excess requests wait.
 const MAX_CONCURRENT_FOOD_PHOTO_UPLOADS: usize = 4;
 static FOOD_PHOTO_SLOTS: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
 
@@ -74,14 +60,7 @@ fn food_photo_slots() -> &'static tokio::sync::Semaphore {
     FOOD_PHOTO_SLOTS.get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_FOOD_PHOTO_UPLOADS))
 }
 
-/// How many of the global slots any one account may hold at once.
-///
-/// API-04: the global semaphore alone was not enough. A single account could
-/// take all four permits and hold them from before the multipart read through
-/// the entire 25s upstream round trip, so every other user hit the 2s wait
-/// timeout and got a 503 — one account starving the feature for everyone. Two
-/// leaves room for a retry while an upload is still in flight and still keeps
-/// half the capacity available to other accounts.
+/// Per-account share of the global slots, so one account cannot starve the feature (API-04).
 const MAX_FOOD_PHOTO_UPLOADS_PER_USER: usize = 2;
 static FOOD_PHOTO_USER_SLOTS: OnceLock<Mutex<HashMap<Uuid, usize>>> = OnceLock::new();
 
@@ -89,8 +68,7 @@ fn food_photo_user_slots() -> &'static Mutex<HashMap<Uuid, usize>> {
     FOOD_PHOTO_USER_SLOTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Held for the lifetime of one food-photo request; releases the account's slot
-/// on drop, including on an early return or a panic.
+/// Releases the account's slot on drop, including on an early return or a panic.
 struct FoodPhotoUserSlot {
     user_id: Uuid,
 }
@@ -103,17 +81,14 @@ impl Drop for FoodPhotoUserSlot {
         if let Some(count) = slots.get_mut(&self.user_id) {
             *count = count.saturating_sub(1);
             if *count == 0 {
-                // Keeps the map bounded by the number of accounts actually
-                // in flight rather than by every account that ever uploaded.
+                // Bounds the map by accounts in flight, not by every account that ever uploaded.
                 slots.remove(&self.user_id);
             }
         }
     }
 }
 
-/// Takes one of `user_id`'s slots, or `None` if the account is already at its
-/// cap. Deliberately does not wait: an account at its own limit should be told
-/// so immediately rather than sitting in the shared queue.
+/// Returns `None` at the account's cap rather than waiting in the shared queue.
 fn acquire_food_photo_user_slot(user_id: Uuid) -> Option<FoodPhotoUserSlot> {
     let mut slots = food_photo_user_slots()
         .lock()
@@ -126,10 +101,7 @@ fn acquire_food_photo_user_slot(user_id: Uuid) -> Option<FoodPhotoUserSlot> {
     Some(FoodPhotoUserSlot { user_id })
 }
 
-/// Barcode lookups fan out to up to five upstream requests, each of which
-/// buffers a JSON body. Bound how many lookups may be in flight at once so a
-/// burst cannot multiply into unbounded concurrent reads against the
-/// supermarket APIs (which rate-limit by source IP).
+/// One lookup fans out to up to five buffered upstream reads; providers rate-limit by source IP.
 const MAX_CONCURRENT_BARCODE_LOOKUPS: usize = 8;
 const BARCODE_LOOKUP_SLOT_WAIT_TIMEOUT: Duration = Duration::from_secs(3);
 static BARCODE_LOOKUP_SLOTS: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
@@ -138,27 +110,21 @@ fn barcode_lookup_slots() -> &'static tokio::sync::Semaphore {
     BARCODE_LOOKUP_SLOTS.get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_BARCODE_LOOKUPS))
 }
 
-/// Length window a barcode must fall in. Shared with `api.rs` so the public
-/// token API and this session-authenticated route agree on what a barcode is
-/// (API-11).
+/// Shared with `api.rs` so the token API and this route agree on what a barcode is (API-11).
 pub(crate) const MIN_BARCODE_LENGTH: usize = 4;
 pub(crate) const MAX_BARCODE_LENGTH: usize = 20;
 
-/// Largest provider response we will buffer. Without this, `response.json()`
-/// reads whatever the upstream sends straight into memory.
+/// Hard buffer budget for any provider body; an uncapped read takes whatever the upstream sends.
 const MAX_PROVIDER_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 
-/// Reads a JSON body with a hard byte budget, returning `None` if the upstream
-/// exceeds it (or sends something that is not JSON).
+const PROVIDER_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const ALBERT_HEIJN_TOKEN_TIMEOUT: Duration = Duration::from_secs(4);
+
 async fn read_capped_json(response: reqwest::Response) -> Option<Value> {
     read_capped_json_result(response).await.ok().flatten()
 }
 
-/// [`read_capped_json`] that keeps the transport error.
-///
-/// `Ok(None)` means the upstream answered but the body was over budget or not
-/// JSON; `Err` means the read itself failed, which the food-photo path needs in
-/// order to tell a timeout from a malformed response.
+/// `Ok(None)` is an over-budget or non-JSON body; `Err` is a failed read, which the caller must tell apart.
 async fn read_capped_json_result(
     mut response: reqwest::Response,
 ) -> Result<Option<Value>, reqwest::Error> {
@@ -178,6 +144,17 @@ async fn read_capped_json_result(
     }
 
     Ok(serde_json::from_slice(&buffer).ok())
+}
+
+async fn fetch_provider_json(request: reqwest::RequestBuilder, timeout: Duration) -> Option<Value> {
+    let response = tokio::time::timeout(timeout, request.send())
+        .await
+        .ok()?
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    read_capped_json(response).await
 }
 
 async fn acquire_food_photo_slot(
@@ -266,16 +243,7 @@ async fn lookup_barcode(
     headers: HeaderMap,
     Path(barcode): Path<String>,
 ) -> Response {
-    // Every cache miss fans out to as many as five upstream requests, so this
-    // has to sit behind an account gate — otherwise the backend is an open
-    // amplifier for anyone who can reach it.
-    //
-    // API-14: this used to verify the session *signature* only, on the grounds
-    // that the lookup is not user-scoped. But session tokens live for seven
-    // days and are renewed on use, so a deleted or de-onboarded account kept
-    // full access to the fan-out. `/api/v1/barcodes/{barcode}` gates the same
-    // capability on the user record plus onboarding; the two now agree, at the
-    // cost of one primary-key read per scan.
+    // A live user record, not just a valid signature: a seven-day token outlives the account (API-14).
     let user = match auth::current_user_from_headers(State(state.clone()), headers).await {
         Ok(user) => user,
         Err(_) => {
@@ -340,9 +308,7 @@ async fn lookup_barcode_for_user(state: &AppState, barcode: String) -> Response 
             StatusCode::OK,
             json!({ "found": false, "barcode": barcode }),
         ),
-        // Overload is not evidence that the product is missing. Reporting it as
-        // a miss would send the user off to re-enter a product that may well
-        // exist.
+        // Overload is not evidence the product is missing, so it must not read as a miss.
         BarcodeLookup::Busy => legacy_json(
             StatusCode::SERVICE_UNAVAILABLE,
             json!({
@@ -369,8 +335,7 @@ async fn food_photo(
             );
         }
     };
-    // API-14: `/api/v1` refuses token calls until onboarding is finished; this
-    // route skipped that check even though it spends money upstream.
+    // Matches the onboarding gate `/api/v1` applies; this route also spends money upstream (API-14).
     if user.onboarding_completed_at.is_none() {
         return legacy_json(
             StatusCode::FORBIDDEN,
@@ -378,8 +343,7 @@ async fn food_photo(
         );
     }
 
-    // Taken before the shared permit so an account at its own limit is told
-    // immediately instead of consuming the shared wait budget (API-04).
+    // Before the shared permit, so an account at its own cap never eats the shared wait budget (API-04).
     let _user_slot = match acquire_food_photo_user_slot(user.id) {
         Some(slot) => slot,
         None => {
@@ -389,8 +353,7 @@ async fn food_photo(
         }
     };
 
-    // Held until the response is built, so the permit covers both the buffered
-    // upload and the base64 payload derived from it.
+    // Held until the response is built, covering the buffered upload and its base64 copy.
     let _slot =
         match acquire_food_photo_slot(food_photo_slots(), FOOD_PHOTO_SLOT_WAIT_TIMEOUT).await {
             Some(slot) => slot,
@@ -445,9 +408,7 @@ async fn food_photo(
     legacy_json(status, result)
 }
 
-/// A benchmark request is a model id, a fixture count, a mode and at most one
-/// previously returned baseline. Generous, but far below the 2 MB an
-/// unauthenticated caller used to be able to make the server parse.
+/// Room for a model id, a fixture count, a mode and one baseline — nothing here needs megabytes.
 const MAX_BENCHMARK_REQUEST_BYTES: usize = 256 * 1024;
 
 async fn admin_benchmark(
@@ -482,20 +443,14 @@ async fn admin_benchmark(
         );
     }
 
-    // API-09: the body is read and parsed only once the caller is known to be
-    // an admin. With `Json<Value>` in the signature the extractor ran first, so
-    // an unauthenticated caller got 400 for malformed JSON and 401 for valid
-    // JSON — a reliable existence probe for a route that deliberately 404s to
-    // authenticated non-admins — and could make the server parse a 2 MB body
-    // with no credentials at all. The `application/json` requirement is kept
-    // from `Json<Value>`: this route authenticates from the session cookie, so
-    // accepting a CORS-safelisted content type would open it to form CSRF.
+    // Session-cookie auth, so a CORS-safelisted content type would open this to form CSRF (API-09).
     if !content_type_is_json {
         return legacy_json(
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             json!({ "ok": false, "error": "Expected application/json." }),
         );
     }
+    // Read after the admin check, so the 400-vs-401 split cannot probe this route's existence (API-09).
     let payload = match axum::body::to_bytes(body, MAX_BENCHMARK_REQUEST_BYTES).await {
         Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
             Ok(payload) => payload,
@@ -581,14 +536,7 @@ async fn lookup_open_food_facts(state: &AppState, barcode: &str) -> Option<Value
         state.config.open_food_facts_base_url.trim_end_matches('/'),
         url::form_urlencoded::byte_serialize(barcode.as_bytes()).collect::<String>()
     );
-    let response = tokio::time::timeout(Duration::from_secs(5), state.http.get(url).send())
-        .await
-        .ok()?
-        .ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    let data: Value = read_capped_json(response).await?;
+    let data: Value = fetch_provider_json(state.http.get(url), PROVIDER_REQUEST_TIMEOUT).await?;
     if data.get("status").and_then(Value::as_i64) != Some(1) {
         return None;
     }
@@ -645,14 +593,12 @@ async fn lookup_barcode_provider_chain(state: &AppState, barcode: &str) -> Barco
         Ok(Err(_)) | Err(_) => return BarcodeLookup::Busy,
     };
 
-    // OpenFoodFacts stays a standalone first hop: it covers most barcodes, and
-    // keeping it alone means a hit costs exactly one outbound request.
+    // Alone on the first hop: it covers most barcodes, so a hit costs one outbound request.
     if let Some(product) = lookup_open_food_facts(state, barcode).await {
         return BarcodeLookup::Found(product);
     }
 
-    // Start both supermarket fallbacks together. Albert Heijn keeps priority,
-    // but a hit there returns immediately instead of waiting for Jumbo.
+    // Both supermarkets run together; Albert Heijn keeps priority without waiting on Jumbo.
     match prefer_primary_provider(
         lookup_albert_heijn(state, barcode),
         lookup_jumbo(state, barcode),
@@ -697,17 +643,11 @@ async fn lookup_albert_heijn(state: &AppState, barcode: &str) -> Option<Value> {
         "{base_url}/mobile-services/product/search/v2?query={}&size=1",
         url::form_urlencoded::byte_serialize(barcode.as_bytes()).collect::<String>()
     );
-    let response = tokio::time::timeout(
-        Duration::from_secs(5),
-        headers(state.http.get(search_url)).send(),
+    let search_data: Value = fetch_provider_json(
+        headers(state.http.get(search_url)),
+        PROVIDER_REQUEST_TIMEOUT,
     )
-    .await
-    .ok()?
-    .ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    let search_data: Value = read_capped_json(response).await?;
+    .await?;
     let product = first_albert_heijn_product(&search_data)?;
 
     let name = string_field(product, &["title", "description"]).unwrap_or("Unknown product");
@@ -730,13 +670,11 @@ async fn lookup_albert_heijn(state: &AppState, barcode: &str) -> Option<Value> {
             "{base_url}/mobile-services/product/detail/v4/fir/{}",
             url::form_urlencoded::byte_serialize(product_id.as_bytes()).collect::<String>()
         );
-        if let Ok(Ok(response)) = tokio::time::timeout(
-            Duration::from_secs(5),
-            headers(state.http.get(detail_url)).send(),
+        if let Some(detail) = fetch_provider_json(
+            headers(state.http.get(detail_url)),
+            PROVIDER_REQUEST_TIMEOUT,
         )
         .await
-            && response.status().is_success()
-            && let Some(detail) = read_capped_json(response).await
             && let Some(macros) = parse_albert_heijn_nutrients(
                 detail
                     .get("nutritionInfo")
@@ -771,29 +709,21 @@ async fn get_albert_heijn_token(state: &AppState) -> Option<String> {
         "{}/mobile-auth/v1/auth/token/anonymous",
         state.config.albert_heijn_base_url.trim_end_matches('/')
     );
-    let response = tokio::time::timeout(
-        Duration::from_secs(4),
+    fetch_provider_json(
         state
             .http
             .post(url)
             .header("Content-Type", "application/json")
             .header("User-Agent", "Appie/8.8.2 Model/phone Android/7.0-API24")
             .header("x-application", "AHWEBSHOP")
-            .json(&json!({ "clientId": "appie" }))
-            .send(),
+            .json(&json!({ "clientId": "appie" })),
+        ALBERT_HEIJN_TOKEN_TIMEOUT,
     )
-    .await
-    .ok()?
-    .ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    read_capped_json(response)
-        .await?
-        .get("access_token")
-        .and_then(Value::as_str)
-        .filter(|token| !token.is_empty())
-        .map(str::to_string)
+    .await?
+    .get("access_token")
+    .and_then(Value::as_str)
+    .filter(|token| !token.is_empty())
+    .map(str::to_string)
 }
 
 async fn lookup_jumbo(state: &AppState, barcode: &str) -> Option<Value> {
@@ -803,21 +733,11 @@ async fn lookup_jumbo(state: &AppState, barcode: &str) -> Option<Value> {
         url::form_urlencoded::byte_serialize(barcode.as_bytes()).collect::<String>()
     );
     let user_agent = "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.120 Mobile Safari/537.36";
-    let response = tokio::time::timeout(
-        Duration::from_secs(5),
-        state
-            .http
-            .get(search_url)
-            .header("User-Agent", user_agent)
-            .send(),
+    let search_data: Value = fetch_provider_json(
+        state.http.get(search_url).header("User-Agent", user_agent),
+        PROVIDER_REQUEST_TIMEOUT,
     )
-    .await
-    .ok()?
-    .ok()?;
-    if !response.status().is_success() {
-        return None;
-    }
-    let search_data: Value = read_capped_json(response).await?;
+    .await?;
     let product = search_data
         .get("products")
         .and_then(|products| products.get("data"))
@@ -842,17 +762,11 @@ async fn lookup_jumbo(state: &AppState, barcode: &str) -> Option<Value> {
             "{base_url}/v17/products/{}",
             url::form_urlencoded::byte_serialize(product_id.as_bytes()).collect::<String>()
         );
-        if let Ok(Ok(response)) = tokio::time::timeout(
-            Duration::from_secs(5),
-            state
-                .http
-                .get(detail_url)
-                .header("User-Agent", user_agent)
-                .send(),
+        if let Some(detail) = fetch_provider_json(
+            state.http.get(detail_url).header("User-Agent", user_agent),
+            PROVIDER_REQUEST_TIMEOUT,
         )
         .await
-            && response.status().is_success()
-            && let Some(detail) = read_capped_json(response).await
             && let Some(macros) = parse_jumbo_nutrients(
                 get_path(&detail, &["product", "data", "nutritionInfo"])
                     .or_else(|| get_path(&detail, &["product", "data", "nutrients"]))
@@ -916,26 +830,48 @@ fn get_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
         .try_fold(value, |current, key| current.get(*key))
 }
 
+struct NutrientKeys {
+    values: &'static [&'static str],
+    units: &'static [&'static str],
+}
+
+const ALBERT_HEIJN_NUTRIENT_KEYS: NutrientKeys = NutrientKeys {
+    values: &["value", "valuePer100g", "per100g"],
+    units: &["unit"],
+};
+
+const JUMBO_NUTRIENT_KEYS: NutrientKeys = NutrientKeys {
+    values: &["value", "per100g"],
+    units: &[],
+};
+
+fn assign_nutrient_from_item(
+    item: &Value,
+    name: &str,
+    keys: &NutrientKeys,
+    fallback_value: f64,
+    macros: &mut ParsedMacros,
+    found: &mut bool,
+) {
+    let unit = string_field(item, keys.units)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let value = keys
+        .values
+        .iter()
+        .find_map(|key| item.get(*key))
+        .and_then(number_from_value)
+        .unwrap_or(fallback_value);
+    assign_nutrient(&name.to_ascii_lowercase(), &unit, value, macros, found);
+}
+
 fn parse_albert_heijn_nutrients(raw: Option<&Value>) -> Option<ParsedMacros> {
     let mut macros = ParsedMacros::default();
     let mut found = false;
     fn walk(items: &[Value], macros: &mut ParsedMacros, found: &mut bool) {
         for item in items {
-            let name = string_field(item, &["name", "title", "key"])
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            let value = item
-                .get("value")
-                .or_else(|| item.get("valuePer100g"))
-                .or_else(|| item.get("per100g"))
-                .and_then(number_from_value)
-                .unwrap_or(0.0);
-            let unit = item
-                .get("unit")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            assign_nutrient(&name, &unit, value, macros, found);
+            let name = string_field(item, &["name", "title", "key"]).unwrap_or_default();
+            assign_nutrient_from_item(item, name, &ALBERT_HEIJN_NUTRIENT_KEYS, 0.0, macros, found);
             if let Some(children) = item
                 .get("nutrients")
                 .or_else(|| item.get("children"))
@@ -967,29 +903,25 @@ fn parse_jumbo_nutrients(raw: Option<&Value>) -> Option<ParsedMacros> {
     match raw? {
         Value::Array(items) => {
             for (index, item) in items.iter().enumerate() {
-                let name = string_field(item, &["name", "key"])
-                    .map(str::to_string)
-                    .unwrap_or_else(|| index.to_string())
-                    .to_ascii_lowercase();
-                let value = item
-                    .get("value")
-                    .or_else(|| item.get("per100g"))
-                    .and_then(number_from_value)
-                    .unwrap_or_else(|| number_from_value(item).unwrap_or(0.0));
-                assign_nutrient(&name, "", value, &mut macros, &mut found);
+                let position = index.to_string();
+                let name = string_field(item, &["name", "key"]).unwrap_or(&position);
+                assign_nutrient_from_item(
+                    item,
+                    name,
+                    &JUMBO_NUTRIENT_KEYS,
+                    number_from_value(item).unwrap_or(0.0),
+                    &mut macros,
+                    &mut found,
+                );
             }
         }
         Value::Object(object) => {
             for (key, value) in object {
-                let nutrient_value = value
-                    .get("value")
-                    .or_else(|| value.get("per100g"))
-                    .and_then(number_from_value)
-                    .unwrap_or_else(|| number_from_value(value).unwrap_or(0.0));
-                assign_nutrient(
-                    &key.to_ascii_lowercase(),
-                    "",
-                    nutrient_value,
+                assign_nutrient_from_item(
+                    value,
+                    key,
+                    &JUMBO_NUTRIENT_KEYS,
+                    number_from_value(value).unwrap_or(0.0),
                     &mut macros,
                     &mut found,
                 );
@@ -1166,14 +1098,7 @@ async fn analyze_food_photo_url_with_limits(
         }
     }
 
-    // API-13: the free-model allowlist that used to reject a caller-named model
-    // here is gone with the OpenRouter path, so this is no longer a place where
-    // "the caller asked for a model we refuse" can happen. The only remaining
-    // source of `unsupported_model` is `classify_food_photo_failure` — the
-    // gateway telling us the model cannot accept an image — and that is just as
-    // reachable for a model out of `AI_GATEWAY_MODELS` as for a benchmark-named
-    // one. It is therefore reported through `upstream_photo_failure`, which
-    // owns the status (502) rather than blaming the caller with a 400.
+    // A caller-named model is never refused here; only the gateway can reject one, as a 502 (API-13).
     let models = requested_model
         .map(|model| vec![model.trim().to_string()])
         .unwrap_or_else(|| configured_food_photo_models(&state.config));
@@ -1216,8 +1141,7 @@ async fn analyze_food_photo_url_with_limits(
                 }
                 last_failure = Some(failure);
             }
-            // CLEAN-C1: the same byte budget every barcode provider is read
-            // under. `response.json()` buffered whatever the gateway sent.
+            // Read under the same byte budget as every barcode provider (CLEAN-C1).
             Ok(response) => match read_capped_json_result(response).await {
                 Ok(None) => {
                     let failure = upstream_photo_failure(
@@ -1273,11 +1197,7 @@ async fn analyze_food_photo_url_with_limits(
                         .and_then(|item| item.get("message"))
                         .and_then(|message| message.get("content"))
                         .and_then(extract_message_content);
-                    // API-02: the upstream payload used to be echoed back as
-                    // `aiResponse`. It carries `provider`, `model`, `usage`
-                    // (token counts and spend) and any provider-side error
-                    // text, so it goes to the log and never to the browser —
-                    // the same rule every other upstream failure follows.
+                    // The payload carries provider, model and spend, so it is logged, never returned (API-02).
                     let Some(content) = content else {
                         last_failure = Some(upstream_photo_failure(
                             &payload.to_string(),
@@ -1321,8 +1241,7 @@ async fn analyze_food_photo_url_with_limits(
                     return food_photo_timeout_failure(request_timeout);
                 }
                 let retryable = error.is_timeout();
-                // API-12: `reqwest::Error`'s Display embeds the request URL, so
-                // the raw string must not reach the caller.
+                // `reqwest::Error`'s Display embeds the request URL, so it is logged, never returned (API-12).
                 let failure =
                     upstream_photo_failure(&error.to_string(), "provider_error", None, retryable);
                 if !retryable {
@@ -1381,11 +1300,7 @@ struct ChatImageUrl<'a> {
     url: &'a str,
 }
 
-/// Chat-completions body for the AI gateway (an OpenAI-compatible endpoint,
-/// normally CLIProxyAPI in front of the Codex backend). Reasoning effort
-/// travels in the model id suffix, e.g. `gpt-5.6-luna(low)`. `temperature`
-/// is omitted because reasoning models reject it; JSON-only output is
-/// enforced by the prompt and re-checked by the parser.
+/// OpenAI-compatible chat-completions body; `temperature` is omitted because reasoning models reject it.
 #[derive(Serialize)]
 struct FoodPhotoRequest<'a> {
     model: &'a str,
@@ -1422,13 +1337,7 @@ fn build_food_photo_request_body<'a>(
                 ),
             },
         ),
-        // CLEAN-C2: deliberate. The chat-completions `user` field is the
-        // per-end-user abuse-attribution and rate-limiting key, so a stable
-        // per-account identifier is required for a shared API key not to be
-        // throttled as one caller. The
-        // account UUID is an opaque internal identifier — no email, name or
-        // other personal data is sent — and it is the same value the rest of
-        // the system already logs.
+        // Opaque account UUID, not personal data: the gateway rate-limits a shared key per `user` (CLEAN-C2).
         user: user_id,
         max_tokens: FOOD_PHOTO_MAX_TOKENS,
     }
@@ -1436,9 +1345,7 @@ fn build_food_photo_request_body<'a>(
 
 async fn read_upstream_error(response: reqwest::Response) -> String {
     let status = response.status();
-    // CLEAN-C1 applies on the error path too: an unbounded `response.json()` here
-    // lets a hostile or broken gateway buffer an arbitrarily large error body,
-    // which is the exact exhaustion the success path is capped against.
+    // Capped like the success path: an error body is just as able to exhaust memory (CLEAN-C1).
     match read_capped_json(response).await.ok_or(()) {
         Ok(payload) => {
             let message = payload
@@ -1655,8 +1562,7 @@ async fn run_fixture_for_model(
     let clarification = format!("Benchmark fixture: {}", fixture.serving_description);
     let result = analyze_food_photo_url(
         state,
-        // The direct file URL, not the Commons article page — see
-        // `BenchmarkFixture::image_url`.
+        // The direct file URL, not the Commons article page (see `BenchmarkFixture::image_url`).
         fixture.image_url,
         &clarification,
         Some(model),
@@ -1834,8 +1740,7 @@ fn acquire_benchmark_lock() -> Option<BenchmarkLockGuard> {
 
 fn acquire_benchmark_lock_with_ttl(ttl: Duration) -> Option<BenchmarkLockGuard> {
     let lock = BENCHMARK_LOCK.get_or_init(|| Mutex::new(None));
-    // Poison recovery: the guarded value is a plain stamp, so a panic elsewhere
-    // must not permanently wedge the benchmark route.
+    // The guarded value is a plain stamp, so a poisoned lock must not wedge the route.
     let mut active = lock.lock().unwrap_or_else(|error| error.into_inner());
     if active.is_some_and(|run| run.expires_at > Instant::now()) {
         return None;
@@ -1848,8 +1753,7 @@ fn acquire_benchmark_lock_with_ttl(ttl: Duration) -> Option<BenchmarkLockGuard> 
     Some(BenchmarkLockGuard { generation })
 }
 
-/// Clears the lock only if `generation` still owns it. A run that outlived its
-/// TTL has already been replaced, so its release is a no-op.
+/// A run that outlived its TTL no longer owns the lock, so its release is a no-op.
 fn release_benchmark_lock(generation: u64) {
     let lock = BENCHMARK_LOCK.get_or_init(|| Mutex::new(None));
     let mut active = lock.lock().unwrap_or_else(|error| error.into_inner());
@@ -1862,11 +1766,7 @@ fn legacy_json(status: StatusCode, body: Value) -> Response {
     (status, Json(body)).into_response()
 }
 
-/// Copy shown to the user for an upstream AI-provider failure.
-///
-/// The provider's own message is never forwarded: it can carry
-/// `metadata.raw`, `provider_name`, and — for a misconfigured deployment —
-/// details of *our* server-side problem dressed up as the caller's fault.
+/// Server-owned copy; the provider's own message can describe *our* misconfiguration, so it never ships.
 fn public_provider_message(kind: &str) -> &'static str {
     match kind {
         "provider_quota" => "Photo analysis is temporarily unavailable. Please try again later.",
@@ -1879,9 +1779,7 @@ fn public_provider_message(kind: &str) -> &'static str {
     }
 }
 
-/// Status *we* own for an upstream failure. The provider's status is logged,
-/// never reflected: a provider 401 (our key) or 402 (our credits) must not
-/// reach the browser as an authentication or payment error.
+/// Server-owned status; a provider 401 (our key) or 402 (our credits) must not reach the browser.
 fn public_provider_status(kind: &str) -> u16 {
     match kind {
         "provider_rate_limit" => 429,
@@ -1889,8 +1787,7 @@ fn public_provider_status(kind: &str) -> u16 {
     }
 }
 
-/// Builds a failure from an upstream response, logging the raw provider text
-/// and exposing only the stable `kind` plus server-owned copy and status.
+/// Logs the raw provider text and exposes only the stable `kind` plus server-owned copy and status.
 fn upstream_photo_failure(
     provider_error: &str,
     kind: &str,
@@ -2046,11 +1943,7 @@ fn is_retryable_upstream_error(error: &str, status_code: Option<u16>) -> bool {
         || lower.contains("upstream")
 }
 
-/// API-05: the `clarification` multipart field had no cap while the image field
-/// was capped at [`MAX_IMAGE_BYTES`], so a caller could push ~9 MB of prose
-/// straight into the model prompt while holding a concurrency slot — paying for
-/// the tokens and the latency. A clarification is one sentence of context ("the
-/// bowl is 300 ml"); anything past this is not a clarification.
+/// A clarification is one sentence ("the bowl is 300 ml"); uncapped prose is billable prompt (API-05).
 const MAX_CLARIFICATION_CHARS: usize = 500;
 
 fn build_prompt(clarification: &str, force_ready: bool) -> String {
@@ -2149,23 +2042,9 @@ struct BenchmarkFixture {
     name: &'static str,
     serving_description: &'static str,
     asset_file_name: &'static str,
-    /// The URL whose bytes are handed to the model.
-    ///
-    /// For the Wikimedia fixtures this is the direct `upload.wikimedia.org`
-    /// file URL. **Do not "tidy" it back into a
-    /// `commons.wikimedia.org/wiki/File:...` article URL** — those serve
-    /// `text/html`, so every run would score the model against a web page
-    /// instead of a photo. The pasta fixture keeps its parentheses
-    /// percent-encoded for the same reason.
-    ///
-    /// The ten `loremflickr.com` fixtures are **not** yet resolved: that
-    /// service redirects to a different random keyword-matching photo on every
-    /// request, so those fixtures cannot be reproducible and their expected
-    /// macros describe a serving no particular photo shows. They are left
-    /// as-is pending replacement images.
+    /// Direct file URL fetched by the model; article URLs serve `text/html`, hence the pasta fixture's encoded parens.
     image_url: &'static str,
-    /// Human-facing Commons article page, linked from the admin UI for
-    /// attribution and licensing. Never fetched.
+    /// Commons article page shown in the admin UI for attribution. Never fetched.
     image_source_url: &'static str,
     expected_source: &'static str,
     category: &'static str,
