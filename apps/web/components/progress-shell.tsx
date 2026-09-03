@@ -7,7 +7,7 @@ import type {
   WeightUnit,
 } from "@macro-tracker/db";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   deleteWeightEntryAction,
@@ -19,6 +19,7 @@ import {
 import { formatShortDate } from "@/lib/formatting";
 import { convertWeight } from "@/lib/onboarding-weight";
 import type { ProgressTab } from "@/lib/progress-tab";
+import { useActionRunner } from "@/lib/use-action-runner";
 import { buildWeightGoalProjection } from "@/lib/weight-trend";
 
 import { ConfirmDeleteButton } from "./confirm-delete-button";
@@ -41,11 +42,7 @@ type ProgressShellProps = {
   todayStr?: string;
 };
 
-/**
- * Weights are stored in kg. The user's chosen unit was collected at onboarding
- * and then never used again, so someone who picked pounds saw kg everywhere.
- * Display and input both go through these two helpers.
- */
+// Weights are stored in kg; every display and input value passes through these two helpers.
 function toDisplayWeight(weightKg: number, unit: WeightUnit) {
   return convertWeight(weightKg, "kg", unit);
 }
@@ -69,10 +66,8 @@ function GoalsPanel({
   goals: MacroGoals;
   initialWeightKg: number | null;
 }) {
-  const router = useRouter();
-  const [isPending, startTransition] = useTransition();
+  const { run, isPending, error, clearError } = useActionRunner();
   const [saved, setSaved] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [calories, setCalories] = useState(
     goals.caloriesKcal != null ? String(goals.caloriesKcal) : "",
   );
@@ -90,27 +85,26 @@ function GoalsPanel({
     return (value: string) => {
       setter(value);
       setSaved(false);
-      setError(null);
+      clearError();
     };
   }
 
   function handleSave() {
-    startTransition(async () => {
-      const result = await saveGoalsAction({
-        caloriesKcal: toNullableNumber(calories),
-        proteinG: toNullableNumber(protein),
-        carbsG: toNullableNumber(carbs),
-        fatG: toNullableNumber(fat),
-      });
-
-      if (!result.ok) {
-        setError(result.error ?? "Unable to save goals.");
-        return;
-      }
-
-      setSaved(true);
-      router.refresh();
-    });
+    run(
+      () =>
+        saveGoalsAction({
+          caloriesKcal: toNullableNumber(calories),
+          proteinG: toNullableNumber(protein),
+          carbsG: toNullableNumber(carbs),
+          fatG: toNullableNumber(fat),
+        }),
+      {
+        fallbackError: "Unable to save goals.",
+        refresh: true,
+        clearErrorFirst: false,
+        onSuccess: () => setSaved(true),
+      },
+    );
   }
 
   function handleApplyCalculatedTargets(targets: MacroTargetDraft) {
@@ -119,7 +113,7 @@ function GoalsPanel({
     setCarbs(formatMacroInputValue(targets.carbsG));
     setFat(formatMacroInputValue(targets.fatG));
     setSaved(false);
-    setError(null);
+    clearError();
   }
 
   function handleClear() {
@@ -128,7 +122,7 @@ function GoalsPanel({
     setCarbs("");
     setFat("");
     setSaved(false);
-    setError(null);
+    clearError();
   }
 
   return (
@@ -209,14 +203,10 @@ const CHART_PADDING_Y = 14;
 const CHART_PLOT_WIDTH = CHART_WIDTH - CHART_PADDING_X * 2;
 const CHART_PLOT_HEIGHT = CHART_HEIGHT - CHART_PADDING_Y * 2;
 
-/** Mirrors the backend limit so a long note fails in the field, not with an
- * opaque server error. */
+// Mirrors the backend limit so a long note fails in the field, not with an opaque server error.
 const WEIGHT_NOTES_MAX_LENGTH = 500;
 
-/**
- * Project the weight history into chart space. Returns `null` when there is
- * not enough history to draw a trend.
- */
+// Returns `null` when there is not enough history to draw a trend.
 function buildWeightTrendGeometry(weightData: WeightPageData) {
   const entries = [...weightData.entries].sort((a, b) =>
     a.date.localeCompare(b.date),
@@ -229,9 +219,7 @@ function buildWeightTrendGeometry(weightData: WeightPageData) {
   const minTime = new Date(entries[0]!.date).getTime();
   const maxTime = new Date(entries[entries.length - 1]!.date).getTime();
 
-  // A single pass rather than `Math.min(...weights)`: spreading pushes one
-  // argument per logged weight onto the stack, which a long history can grow
-  // past the engine's argument limit.
+  // A single pass rather than `Math.min(...weights)`: a long history overflows the argument limit.
   let minWeight = Number.POSITIVE_INFINITY;
   let maxWeight = Number.NEGATIVE_INFINITY;
   for (const entry of entries) {
@@ -250,8 +238,7 @@ function buildWeightTrendGeometry(weightData: WeightPageData) {
   const timeSpan = Math.max(1, maxTime - minTime);
   const weightSpan = Math.max(0.1, maxWeight - minWeight);
 
-  // Each point is placed once; the polyline and the markers both read it back
-  // instead of re-parsing every date a second time.
+  // Placed once here; the polyline and the markers both read these back instead of re-deriving them.
   const points = entries.map((entry) => ({
     id: entry.id,
     entry,
@@ -298,8 +285,7 @@ function WeightTrendChart({
   }
 
   const { points, polyline, goalY } = geometry;
-  // A bare "Weight trend chart" label carries no data at all for a screen
-  // reader; summarise the series instead.
+  // A bare "Weight trend chart" label tells a screen reader nothing; summarise the series instead.
   const first = points[0]?.entry;
   const last = points[points.length - 1]?.entry;
   const chartLabel = [
@@ -376,8 +362,7 @@ function WeightPanel({
   weightData: WeightPageData;
   unit: WeightUnit;
 }) {
-  const router = useRouter();
-  const [isPending, startTransition] = useTransition();
+  const { run, isPending, error, setError, clearError } = useActionRunner();
   const [formDate, setFormDate] = useState(selectedDate);
   const [weightKg, setWeightKg] = useState("");
   const [bodyFatPct, setBodyFatPct] = useState("");
@@ -389,7 +374,6 @@ function WeightPanel({
       ? String(toDisplayWeight(weightData.goalWeightKg, unit))
       : "",
   );
-  const [error, setError] = useState<string | null>(null);
   const [goalSaved, setGoalSaved] = useState(false);
 
   useEffect(() => {
@@ -402,7 +386,7 @@ function WeightPanel({
     setBodyFatPct("");
     setNotes("");
     setEditingEntry(null);
-    setError(null);
+    clearError();
   }
 
   function handleStartEdit(entry: WeightEntryRecord) {
@@ -411,7 +395,7 @@ function WeightPanel({
     setBodyFatPct(entry.bodyFatPct != null ? String(entry.bodyFatPct) : "");
     setNotes(entry.notes ?? "");
     setEditingEntry(entry);
-    setError(null);
+    clearError();
 
     if (typeof window !== "undefined") {
       requestAnimationFrame(() => {
@@ -438,33 +422,24 @@ function WeightPanel({
       return;
     }
 
-    setError(null);
-    startTransition(async () => {
-      const submittedDate = formDate;
-      const weightInKg = convertWeight(parsedWeight, unit, "kg");
-      const result = editingEntry
-        ? await updateWeightEntryAction({
-            id: editingEntry.id,
-            date: submittedDate,
-            weightKg: weightInKg,
-            bodyFatPct: parsedBodyFat,
-            notes: notes.trim() || null,
-          })
-        : await saveWeightEntryAction({
-            date: submittedDate,
-            weightKg: weightInKg,
-            bodyFatPct: parsedBodyFat,
-            notes: notes.trim() || null,
-          });
-
-      if (!result.ok) {
-        setError(result.error ?? "Unable to save weight.");
-        return;
-      }
-
-      resetEntryForm();
-      router.refresh();
-    });
+    run(
+      () => {
+        const entryInput = {
+          date: formDate,
+          weightKg: convertWeight(parsedWeight, unit, "kg"),
+          bodyFatPct: parsedBodyFat,
+          notes: notes.trim() || null,
+        };
+        return editingEntry
+          ? updateWeightEntryAction({ id: editingEntry.id, ...entryInput })
+          : saveWeightEntryAction(entryInput);
+      },
+      {
+        fallbackError: "Unable to save weight.",
+        refresh: true,
+        onSuccess: () => resetEntryForm(),
+      },
+    );
   }
 
   function handleSaveGoal() {
@@ -474,31 +449,29 @@ function WeightPanel({
       return;
     }
 
-    setError(null);
-    startTransition(async () => {
-      const result = await saveWeightGoalAction({
-        goalWeightKg: parsedGoal == null ? null : convertWeight(parsedGoal, unit, "kg"),
-      });
-      if (!result.ok) {
-        setError(result.error ?? "Unable to save goal weight.");
-        return;
-      }
-      setGoalSaved(true);
-      router.refresh();
-    });
+    run(
+      () =>
+        saveWeightGoalAction({
+          goalWeightKg: parsedGoal == null ? null : convertWeight(parsedGoal, unit, "kg"),
+        }),
+      {
+        fallbackError: "Unable to save goal weight.",
+        refresh: true,
+        onSuccess: () => setGoalSaved(true),
+      },
+    );
   }
 
   function handleDeleteEntry(entryId: string) {
-    startTransition(async () => {
-      const result = await deleteWeightEntryAction({ id: entryId });
-      if (!result.ok) {
-        setError(result.error ?? "Unable to delete entry.");
-        return;
-      }
-      if (editingEntry?.id === entryId) {
-        resetEntryForm();
-      }
-      router.refresh();
+    run(() => deleteWeightEntryAction({ id: entryId }), {
+      fallbackError: "Unable to delete entry.",
+      refresh: true,
+      clearErrorFirst: false,
+      onSuccess: () => {
+        if (editingEntry?.id === entryId) {
+          resetEntryForm();
+        }
+      },
     });
   }
 

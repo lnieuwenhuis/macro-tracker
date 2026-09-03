@@ -3,13 +3,14 @@
 import type { MealTemplate, RecipeRecord } from "@macro-tracker/db";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
-import { useMemo, useState, useTransition } from "react";
+import { useMemo, useState } from "react";
 
 import {
   saveRecipeAction,
 } from "@/lib/actions";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
 import type { OpenFoodFactsProduct } from "@/lib/openfoodfacts";
+import { useActionRunner } from "@/lib/use-action-runner";
 
 import { AddFoodButton } from "./add-food-button";
 import { AppShell } from "./app-shell";
@@ -22,10 +23,7 @@ import {
 import { RecipeTotalsBar } from "./recipe-totals-bar";
 import { useTemplateMutations } from "./use-template-mutations";
 
-// Matches the dashboard: neither modal is on the first paint path, and the
-// barcode bundle pulls in the zxing scanner. The options must stay inline
-// object literals — the bundler analyzes dynamic() options statically and
-// rejects a shared const.
+// The dynamic() options must stay inline literals: the bundler analyzes them statically.
 const BarcodeCaptureModals = dynamic(
   () => import("./barcode-capture-modals").then((mod) => mod.BarcodeCaptureModals),
   { loading: () => <OverlayBackdropFallback /> },
@@ -64,16 +62,13 @@ export function RecipeBuilderShell({
   todayStr,
 }: RecipeBuilderShellProps) {
   const router = useRouter();
-  const [isPending, startTransition] = useTransition();
-
-  // Recipe fields
+  const { run, isPending, error, clearError } = useActionRunner();
   const [label, setLabel] = useState(recipe?.label ?? "");
   const [portions, setPortions] = useState(String(recipe?.portions ?? 1));
   const [totalCookedWeightG, setTotalCookedWeightG] = useState(
     recipe?.totalCookedWeightG != null ? String(recipe.totalCookedWeightG) : "",
   );
 
-  // Ingredients
   const [ingredients, setIngredients] = useState<IngredientDraft[]>(() => {
     if (!recipe) return [];
     return recipe.ingredients.map((ing) => ({
@@ -90,10 +85,6 @@ export function RecipeBuilderShell({
     }));
   });
 
-  // Error / save state
-  const [error, setError] = useState<string | null>(null);
-
-  // Presets state
   const [showPresetsModal, setShowPresetsModal] = useState(false);
   const [localTemplates, setLocalTemplates] = useState<MealTemplate[]>(initialTemplates);
   const [presetMutation, setPresetMutation] = useState<PresetMutationState | null>(null);
@@ -109,13 +100,11 @@ export function RecipeBuilderShell({
     setPresetMutation,
   });
 
-  // Barcode state
   const [showScanner, setShowScanner] = useState(false);
   const [scanResult, setScanResult] = useState<OpenFoodFactsProduct | null>(null);
   const [notFoundBarcode, setNotFoundBarcode] = useState<string | null>(null);
 
-  // Also used as the dismissal handler for the lazy chunk fallbacks, so a slow
-  // chunk load can be cancelled instead of trapping the user behind a backdrop.
+  // Also the dismissal handler for the lazy chunk fallbacks, so a slow chunk load can be cancelled.
   function dismissBarcodeCapture() {
     setShowScanner(false);
     setScanResult(null);
@@ -127,7 +116,6 @@ export function RecipeBuilderShell({
     setShowPresetsModal(false);
   }
 
-  // Computed totals
   const recipeTotals = useMemo(
     () =>
       ingredients.reduce(
@@ -183,7 +171,7 @@ export function RecipeBuilderShell({
     setIngredients((prev) =>
       prev.map((ing) => (ing.clientId === clientId ? draft : ing)),
     );
-    setError(null);
+    clearError();
   }
 
   function deleteIngredient(clientId: string) {
@@ -206,44 +194,42 @@ export function RecipeBuilderShell({
   }
 
   function handleSave() {
-    setError(null);
-    startTransition(async () => {
-      const result = await saveRecipeAction({
-        id: recipe?.id,
-        label,
-        portions: parsedPortions,
-        totalCookedWeightG: totalCookedWeightG.trim()
-          ? Math.max(toNumber(totalCookedWeightG), 0)
-          : null,
-        ingredients: ingredients.map((ing) => ({
-          productId: ing.productId ?? null,
-          label: ing.label,
-          quantity: toNumber(ing.quantity || "1"),
-          unit: ing.unit ?? "serving",
-          servingMultiplier: toNumber(ing.servingMultiplier || "1"),
-          proteinG: toNumber(ing.proteinG),
-          carbsG: toNumber(ing.carbsG),
-          fatG: toNumber(ing.fatG),
-          caloriesKcal: Math.round(toNumber(ing.caloriesKcal)),
-        })),
-      });
-
-      if (!result.ok) {
-        setError(result.error ?? "Unable to save recipe.");
-        return;
-      }
-
-      const href = `/recipes?date=${selectedDate}`;
-      prepareNavigationMotion(href, "screen");
-      router.push(href);
-      router.refresh();
-    });
+    run(
+      () =>
+        saveRecipeAction({
+          id: recipe?.id,
+          label,
+          portions: parsedPortions,
+          totalCookedWeightG: totalCookedWeightG.trim()
+            ? Math.max(toNumber(totalCookedWeightG), 0)
+            : null,
+          ingredients: ingredients.map((ing) => ({
+            productId: ing.productId ?? null,
+            label: ing.label,
+            quantity: toNumber(ing.quantity || "1"),
+            unit: ing.unit ?? "serving",
+            servingMultiplier: toNumber(ing.servingMultiplier || "1"),
+            proteinG: toNumber(ing.proteinG),
+            carbsG: toNumber(ing.carbsG),
+            fatG: toNumber(ing.fatG),
+            caloriesKcal: Math.round(toNumber(ing.caloriesKcal)),
+          })),
+        }),
+      {
+        fallbackError: "Unable to save recipe.",
+        refresh: true,
+        onSuccess: () => {
+          const href = `/recipes?date=${selectedDate}`;
+          prepareNavigationMotion(href, "screen");
+          router.push(href);
+        },
+      },
+    );
   }
 
   const content = (
     <>
       <div className="space-y-5">
-        {/* Recipe name + portions */}
         <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5 shadow-[0_12px_32px_rgba(0,0,0,0.06)]">
           <label className="block">
             <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--color-muted-strong)]">
@@ -253,7 +239,7 @@ export function RecipeBuilderShell({
               type="text"
               value={label}
               disabled={isPending}
-              onChange={(e) => { setLabel(e.target.value); setError(null); }}
+              onChange={(e) => { setLabel(e.target.value); clearError(); }}
               placeholder="Pasta bolognese, overnight oats..."
               className="w-full rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-3 py-2.5 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
               autoFocus={mode === "create"}
@@ -271,7 +257,7 @@ export function RecipeBuilderShell({
               step="1"
               value={portions}
               disabled={isPending}
-              onChange={(e) => { setPortions(e.target.value); setError(null); }}
+              onChange={(e) => { setPortions(e.target.value); clearError(); }}
               className="w-28 rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-3 py-2.5 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
             />
           </label>
@@ -287,7 +273,7 @@ export function RecipeBuilderShell({
                 step="1"
                 value={totalCookedWeightG}
                 disabled={isPending}
-                onChange={(e) => { setTotalCookedWeightG(e.target.value); setError(null); }}
+                onChange={(e) => { setTotalCookedWeightG(e.target.value); clearError(); }}
                 placeholder="Optional"
                 className="w-full rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-3 py-2.5 pr-9 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
               />
@@ -296,7 +282,6 @@ export function RecipeBuilderShell({
           </label>
         </section>
 
-        {/* Ingredients */}
         <section>
           <div className="mb-4 flex items-center justify-between">
             <h2 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
@@ -357,7 +342,6 @@ export function RecipeBuilderShell({
           </div>
         </section>
 
-        {/* Totals */}
         {ingredients.length > 0 && (
           <RecipeTotalsBar
             totalProteinG={recipeTotals.proteinG}
@@ -368,14 +352,12 @@ export function RecipeBuilderShell({
           />
         )}
 
-        {/* Error */}
         {error ? (
           <p className="rounded-xl border border-[var(--color-danger)]/20 bg-[var(--color-danger)]/8 px-3 py-2 text-sm text-[var(--color-danger)]">
             {error}
           </p>
         ) : null}
 
-        {/* Save button */}
         <button
           type="button"
           disabled={isPending}
@@ -385,7 +367,6 @@ export function RecipeBuilderShell({
           {isPending ? "Saving..." : mode === "edit" ? "Update Recipe" : "Save Recipe"}
         </button>
 
-        {/* Back link */}
         <button
           type="button"
           disabled={isPending}
@@ -400,7 +381,6 @@ export function RecipeBuilderShell({
         </button>
       </div>
 
-      {/* Presets modal */}
       {showPresetsModal && (
         <ModalChunkDismissProvider onDismiss={dismissPresetModal}>
           <PresetModal
@@ -416,9 +396,7 @@ export function RecipeBuilderShell({
         </ModalChunkDismissProvider>
       )}
 
-      {/* Mirrors the component's own render condition so its chunk stays
-          unloaded — and its full-screen loading backdrop unrendered — until a
-          capture flow actually starts. */}
+      {/* Mirrors the component's own render condition so its chunk stays unloaded until a capture starts. */}
       {(showScanner || scanResult || notFoundBarcode) && (
         <ModalChunkDismissProvider onDismiss={dismissBarcodeCapture}>
       <BarcodeCaptureModals
