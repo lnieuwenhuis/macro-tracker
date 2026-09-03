@@ -9,15 +9,10 @@ export type OpenFoodFactsProduct = {
   caloriesKcal: number;
   servingSizeG: number | null;
   imageUrl: string | null;
-  /** Which data source provided this result */
   source?: "openfoodfacts" | "albert_heijn" | "jumbo" | "custom";
 };
 
-/**
- * `reason` distinguishes a genuine catalogue miss from "we could not ask".
- * Without it a backend outage was presented to the user as "product not
- * found", which invites them to re-enter a product that already exists.
- */
+// Distinguishes a genuine catalogue miss ("not_found") from "we could not ask" ("unavailable").
 export type BarcodeLookupFailureReason = "not_found" | "unavailable";
 
 export type OpenFoodFactsResult =
@@ -39,12 +34,7 @@ function readNullableString(value: unknown) {
   return typeof value === "string" && value ? value : null;
 }
 
-/**
- * Coerces to a finite, non-negative number. `??` alone let a string, `null`
- * inside an object, or `NaN` from the upstream shape through untouched, so a
- * malformed provider response reached React state (and the macro maths) as
- * whatever it happened to be.
- */
+// Rejects non-finite/negative/non-number upstream values instead of letting them reach the macro maths.
 function readNumber(value: unknown, fallback: number) {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? value
@@ -64,10 +54,7 @@ function readSource(value: unknown): OpenFoodFactsProduct["source"] {
     : "openfoodfacts";
 }
 
-/**
- * Validates the untyped upstream payload at the trust boundary so nothing past
- * this point has to treat a barcode product as `any`.
- */
+// Validates the untyped upstream payload so nothing past this point treats a barcode product as `any`.
 function toProduct(raw: unknown, barcode: string): OpenFoodFactsProduct | null {
   if (typeof raw !== "object" || raw === null) {
     return null;
@@ -90,17 +77,7 @@ function toProduct(raw: unknown, barcode: string): OpenFoodFactsProduct | null {
   };
 }
 
-/**
- * Look up a barcode via our server-side API route.
- *
- * The route chains three providers:
- *   1. OpenFoodFacts (free, public)
- *   2. Albert Heijn (unofficial mobile API)
- *   3. Jumbo (unofficial mobile API)
- *
- * This avoids CORS issues with the supermarket APIs and keeps
- * token management server-side.
- */
+// The API route chains OpenFoodFacts, Albert Heijn and Jumbo server-side, avoiding supermarket-API CORS and keeping tokens off the client.
 export async function lookupBarcode(
   barcode: string,
   signal?: AbortSignal,
@@ -108,8 +85,7 @@ export async function lookupBarcode(
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10_000);
 
-  // Respect an externally provided signal as well. Detached in `finally`,
-  // otherwise a long-lived caller signal keeps every controller reachable.
+  // Detached in `finally`, otherwise a long-lived caller signal keeps every controller reachable.
   const abortFromCaller = () => controller.abort();
   signal?.addEventListener("abort", abortFromCaller, { once: true });
 
@@ -138,9 +114,7 @@ export async function lookupBarcode(
     const product = toProduct(envelope.product, barcode);
 
     if (!product) {
-      // A `found: true` with an unusable body is an upstream problem, not a
-      // catalogue miss — telling the user "not found" would invite them to
-      // re-enter a product that already exists.
+      // An unusable body with `found: true` is an upstream problem, not a catalogue miss.
       console.error(`Barcode lookup for ${barcode} returned an unusable product`);
       return { found: false, barcode, reason: "unavailable" };
     }

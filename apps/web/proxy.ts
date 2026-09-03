@@ -1,6 +1,7 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 
+import type { VerifiedSession } from "@/lib/session";
 import {
   applySessionCookie,
   isSecureRequest,
@@ -8,12 +9,7 @@ import {
   verifySessionToken,
 } from "@/lib/session";
 
-/**
- * Static files served straight out of `public/`. Listed explicitly rather than
- * matched by extension: `pathname.endsWith(".png")` also matched
- * `/api/barcode/1234.png` and `/admin/barcodes/abc.png`, which let any route
- * skip the session gate simply by ending in an image extension.
- */
+// Listed explicitly, not matched by extension: an extension match would also exempt routes like /api/barcode/1234.png from the session gate below.
 const PUBLIC_STATIC_FILES = new Set([
   "/favicon.ico",
   "/icon.svg",
@@ -25,26 +21,14 @@ const PUBLIC_STATIC_FILES = new Set([
 
 const CSP_HEADER = "content-security-policy";
 
-/**
- * Header the root layout reads the request's nonce back from. Next also parses
- * the nonce out of the `Content-Security-Policy` *request* header on its own
- * (see `getScriptNonceFromHeader`) to nonce React's bootstrap and RSC payload
- * scripts; this header is only so `app/layout.tsx` can put the same value on
- * the two `next/script` bootstraps.
- */
+// Header app/layout.tsx reads the request's nonce back from, to put on its two next/script bootstraps.
 export const NONCE_HEADER = "x-nonce";
 
 const isDev = process.env.NODE_ENV === "development";
 
 export const DEFAULT_SHOO_BASE_URL = "https://shoo.dev";
 
-/**
- * Origin the browser talks to directly during sign-in.
- *
- * `@shoojs/auth` runs the code-for-token exchange **in the browser**
- * (`fetch("<shooBaseUrl>/token")`) and re-checks the session against
- * `/session/check`, so the identity provider has to be in `connect-src`.
- */
+// @shoojs/auth exchanges the code for a token from the browser, so the identity provider must be in connect-src.
 export function getShooConnectOrigin(
   shooBaseUrl = process.env.SHOO_BASE_URL ?? DEFAULT_SHOO_BASE_URL,
 ) {
@@ -55,10 +39,7 @@ export function getShooConnectOrigin(
   }
 }
 
-/**
- * 128 random bits, base64. Must be unpredictable and must differ per request —
- * a reused nonce is exactly as good as `'unsafe-inline'`.
- */
+// 128 random bits, base64: a reused nonce is exactly as good as 'unsafe-inline'.
 function createNonce() {
   const bytes = new Uint8Array(16);
   crypto.getRandomValues(bytes);
@@ -66,41 +47,7 @@ function createNonce() {
   return btoa(String.fromCharCode(...bytes));
 }
 
-/**
- * Defence-in-depth. There is no known XSS here (no `dangerouslySetInnerHTML`,
- * no `eval`, `httpOnly` + `SameSite=Lax` cookies), so this exists to bound the
- * damage of a future one.
- *
- * `script-src` is nonce-based: `'unsafe-inline'` is gone, so an injected
- * `<script>` or `onerror=` attribute cannot run. Next applies `nonce` to its
- * own bootstrap and RSC payload scripts by parsing it out of the CSP request
- * header, and `app/layout.tsx` passes it to the two `next/script` bootstraps.
- * The cost is that every route now renders dynamically, because the root
- * layout reads the nonce from `headers()`.
- *
- * `'strict-dynamic'` is deliberately **absent**. It would make `'self'` be
- * ignored, so every script tag — including ones Next may add without a nonce —
- * would have to be nonced or injected by already-trusted code, for no gain
- * here: nothing on this origin serves attacker-controlled JavaScript, so
- * `'self'` is not a usable injection source. Keeping `'self'` also means a
- * missing nonce degrades to today's behaviour for external scripts instead of
- * blanking the app.
- *
- * `style-src` keeps `'unsafe-inline'` and gets **no** nonce on purpose: adding
- * one would make the browser ignore `'unsafe-inline'` and break every inline
- * style Next and `next/font` emit.
- *
- * `img-src https:` covers supermarket product thumbnails; `blob:` covers the
- * camera preview and the AI photo preview.
- *
- * `form-action` is deliberately **absent**. Chromium enforces it across the
- * whole redirect chain, and this app's forms are all POST-then-redirect —
- * signing out (`/api/auth/logout` → `/login`) and every admin server action
- * that calls `redirect()`. With `form-action 'self'` those submissions are
- * blocked outright and the page silently stays put. The directive only guards
- * against form-jacking to an external origin, and no form here takes a
- * caller-supplied action, so the trade is not worth a broken sign-out.
- */
+// Defence-in-depth: no known XSS exists here, so this bounds the damage of a future one.
 export function buildContentSecurityPolicy(
   nonce: string,
   shooOrigin = getShooConnectOrigin(),
@@ -108,9 +55,11 @@ export function buildContentSecurityPolicy(
 ) {
   return [
     "default-src 'self'",
+    // The nonce forces every route to render dynamically: app/layout.tsx reads it from headers(). No strict-dynamic: nothing here serves attacker-controlled JS.
     `script-src 'self' 'nonce-${nonce}'${dev ? " 'unsafe-eval'" : ""}`,
+    // No nonce: that would make the browser ignore 'unsafe-inline' and break Next/next/font inline styles.
     "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' blob: data: https:",
+    "img-src 'self' blob: data: https:", // https: for supermarket thumbnails, blob: for camera/AI photo previews
     "font-src 'self' data:",
     `connect-src 'self' ${shooOrigin}`,
     "media-src 'self' blob:",
@@ -120,6 +69,7 @@ export function buildContentSecurityPolicy(
     "base-uri 'self'",
     "frame-ancestors 'none'",
     "upgrade-insecure-requests",
+    // form-action omitted: Chromium enforces it across redirects, breaking POST-then-redirect sign-out; safe only while no form takes a caller-supplied action.
   ].join("; ");
 }
 
@@ -137,14 +87,26 @@ function isPublicPath(pathname: string) {
   );
 }
 
+// `?error=` marks a bounce from a failed authorization check; redirecting it to `/` again would loop.
+function isAuthenticatedVisitToLoginWithoutErrorBounce(
+  sessionUser: VerifiedSession | null,
+  request: NextRequest,
+) {
+  return (
+    request.nextUrl.pathname === "/login" &&
+    sessionUser !== null &&
+    !request.nextUrl.searchParams.has("error")
+  );
+}
+
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const nonce = createNonce();
   const contentSecurityPolicy = buildContentSecurityPolicy(nonce);
 
-  // `set`, never `append`: a caller can send its own `content-security-policy`
-  // or `x-nonce` request header, and the renderer trusts whatever it finds.
+  // `set`, never `append`: a caller-supplied header here would be trusted by the renderer.
   const requestHeaders = new Headers(request.headers);
+  // Next (getScriptNonceFromHeader) parses the nonce back out of this request-header CSP for its own bootstrap/RSC scripts.
   requestHeaders.set(CSP_HEADER, contentSecurityPolicy);
   requestHeaders.set(NONCE_HEADER, nonce);
 
@@ -153,9 +115,7 @@ export async function proxy(request: NextRequest) {
     return response;
   }
 
-  // The nonce only reaches the renderer through the forwarded *request*
-  // headers; setting it on the response alone would leave every inline script
-  // unnonced and therefore blocked.
+  // The nonce reaches the renderer only via the forwarded request headers, not the response.
   function renderResponse() {
     return withPolicy(
       NextResponse.next({ request: { headers: requestHeaders } }),
@@ -165,16 +125,7 @@ export async function proxy(request: NextRequest) {
   const token = request.cookies.get(SESSION_COOKIE_NAME)?.value;
   const sessionUser = await verifySessionToken(token);
 
-  // `?error=` means the user was just bounced here by a failed authorization
-  // check. Bouncing them back to `/` would restart that check and loop, which
-  // is reachable whenever the token still verifies but the account behind it
-  // does not resolve (deleted account), or when `/api/auth/logout` declined to
-  // clear the cookie for a cross-site request.
-  if (
-    pathname === "/login" &&
-    sessionUser &&
-    !request.nextUrl.searchParams.has("error")
-  ) {
+  if (isAuthenticatedVisitToLoginWithoutErrorBounce(sessionUser, request)) {
     return withPolicy(NextResponse.redirect(new URL("/", request.url)));
   }
 
