@@ -18,8 +18,7 @@ const CORS_ALLOW_METHODS: &str = "GET, POST, PATCH, DELETE, OPTIONS";
 const CORS_ALLOW_HEADERS: &str = "Authorization, Content-Type";
 const CORS_MAX_AGE: &str = "86400";
 const API_V1_OPENAPI_JSON: &[u8] = include_bytes!("generated/api-v1-openapi.json");
-/// Deadline for a single `/api/v1` request. Matches the backend's other data
-/// routes; see `handle_api_v1` for why it is not a tower layer.
+/// Deadline for one `/api/v1` request; see `handle_api_v1` for why this is not a tower layer.
 pub const API_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 type ApiResult<T> = Result<T, ApiFailure>;
@@ -48,12 +47,7 @@ impl ApiFailure {
     }
 }
 
-/// One `/api/v1` endpoint shape.
-///
-/// `path` is the OpenAPI path template published at `/openapi.json`; a segment
-/// wrapped in braces is a wildcard when routing. Routing and the published
-/// contract share this one literal so the scope-contract tests can derive their
-/// coverage from [`API_V1_ENDPOINTS`] instead of restating it by hand (API-01).
+/// One `/api/v1` endpoint shape; `path` doubles as the OpenAPI path template (a `{brace}` segment is a wildcard).
 #[derive(Clone, Copy)]
 struct Endpoint {
     path: &'static str,
@@ -67,13 +61,7 @@ pub fn router() -> Router<AppState> {
         .route("/{*path}", any(api_v1_request))
 }
 
-// API-06: `Bytes` and `Path` are taken as `Result`s rather than as plain
-// extractors. An extractor that rejects does so *before* the handler runs, so
-// an over-limit body came back as a bare `413` with a plain-text body and none
-// of the CORS headers below — a browser client saw a CORS failure instead of
-// the documented error envelope, and a direct client got a body it could not
-// parse. Handling the rejection inside the handler keeps every `/api/v1`
-// response one shape.
+// API-06: `Bytes`/`Path` are taken as `Result`s so a rejection still gets the documented envelope and CORS headers.
 async fn api_v1_root(
     State(state): State<AppState>,
     method: Method,
@@ -127,10 +115,7 @@ async fn handle_api_v1(
         Err(rejection) => return failure_response(body_rejection_failure(&rejection)),
     };
 
-    // The deadline is enforced here rather than by a transport-level timeout
-    // layer: a layer would emit a bare 504 with no body and none of the CORS
-    // headers below, which breaks the documented error envelope for direct API
-    // clients and shows up as a CORS failure in browsers.
+    // Enforced here, not by a transport-level timeout layer, so the 504 still carries the envelope and CORS headers.
     let result = async {
         let method_name = method.as_str();
         let endpoint = endpoint_for(&path).ok_or_else(|| not_found("API endpoint not found."))?;
@@ -150,9 +135,7 @@ async fn handle_api_v1(
             .with_allow(allow));
         }
 
-        // API-01: an endpoint that allows a method but declares no scopes for it
-        // is a server-side contract bug. Refusing is the only safe reading —
-        // the previous empty-slice default let any valid token through.
+        // API-01: a method allowed but with no declared scopes is a contract bug; refuse rather than default-allow.
         let Some(scopes) = required_scopes(&endpoint, method_name) else {
             tracing::error!(
                 endpoint = endpoint.path,
@@ -650,9 +633,7 @@ async fn rpc(state: &AppState, op: &str, args: Value) -> ApiResult<Value> {
         .map_err(api_failure_from_app_error)
 }
 
-/// Every endpoint the public API serves, matched **in order**: a shape with a
-/// literal segment must precede the wildcard shape that would otherwise swallow
-/// it (`/foods/search` before `/foods/{id}`).
+/// Every endpoint the public API serves, matched **in order**: a literal shape must precede any wildcard it shadows.
 const API_V1_ENDPOINTS: &[Endpoint] = &[
     Endpoint {
         path: "/me",
@@ -819,8 +800,7 @@ const API_V1_ENDPOINTS: &[Endpoint] = &[
         methods: &["POST"],
         scopes: &[("POST", &["write:daily"])],
     },
-    // Answered before authentication in `handle_api_v1`. The empty scope list
-    // is the contract published for it, not a routing default.
+    // Answered before authentication in `handle_api_v1`; the empty scope list is the published contract, not a default.
     Endpoint {
         path: "/openapi.json",
         methods: &["GET"],
@@ -835,8 +815,7 @@ fn endpoint_for(path: &[String]) -> Option<Endpoint> {
         .copied()
 }
 
-/// A template segment in braces matches any single path segment; every other
-/// segment must match exactly, and the two lengths must agree.
+/// A `{brace}` template segment matches any single path segment; every other segment must match exactly.
 fn path_template_matches(template: &str, path: &[String]) -> bool {
     let mut matched = 0usize;
     for segment in template.split('/').filter(|segment| !segment.is_empty()) {
@@ -851,13 +830,7 @@ fn path_template_matches(template: &str, path: &[String]) -> bool {
     matched == path.len()
 }
 
-/// Required scopes for `method` on `endpoint`, or `None` when the endpoint
-/// declares none for it.
-///
-/// API-01: this lookup used to end in `.unwrap_or(&[])`, so a method listed in
-/// `Endpoint::methods` but missing from `Endpoint::scopes` silently required no
-/// scope at all and any valid token could call it. The caller now refuses such
-/// a request, making the default deny.
+/// Required scopes for `method` on `endpoint`, or `None` when the endpoint declares none for it (API-01: default-deny).
 fn required_scopes(endpoint: &Endpoint, method: &str) -> Option<&'static [&'static str]> {
     endpoint
         .scopes
@@ -921,16 +894,11 @@ fn require_string_field(
 }
 
 fn require_date(value: &str) -> ApiResult<()> {
-    // Same rule the internal RPC path enforces, so both entry points agree on
-    // what a date is.
+    // Same rule the internal RPC path enforces, so both entry points agree on what a date is.
     crate::db::ensure_date_string(value).map_err(|_| bad_request("Date must use YYYY-MM-DD."))
 }
 
-/// API-11: `/api/v1/barcodes/{barcode}` accepted anything while its
-/// session-authenticated twin in `legacy_api.rs` has always required 4–20
-/// characters. Not exploitable — the lookup is a parameterised equality — but
-/// two entry points to one capability should not disagree about what a barcode
-/// is, so both now read the same bounds.
+/// API-11: bounds match the session-authenticated twin in `legacy_api.rs`, so both entry points agree on a barcode.
 fn require_barcode(value: &str) -> ApiResult<()> {
     use crate::legacy_api::{MAX_BARCODE_LENGTH, MIN_BARCODE_LENGTH};
 
@@ -952,21 +920,10 @@ fn has_non_null(record: &Map<String, Value>, key: &str) -> bool {
     record.get(key).is_some_and(|value| !value.is_null())
 }
 
-/// Prefix reserved for control flags that this module adds to an RPC `input`
-/// map. `db.rs` reads them back out of that same map, so they are part of the
-/// internal calling convention and must never be settable by a client.
+/// Reserved prefix for RPC `input` control flags that `db.rs` reads back; must never be settable by a client.
 const PRIVATE_INPUT_KEY_PREFIX: &str = "__";
 
-/// Copies a client patch onto a stored record, dropping every reserved key.
-///
-/// DATA-02: `PATCH` handlers merge the raw request body onto the row they just
-/// read and hand the result to the RPC layer as `input`. Copying every key
-/// meant a caller could inject `__recalculateProductMacros`, the private flag
-/// that decides whether a product-linked entry's macros are recomputed from the
-/// product row or taken verbatim from the request — i.e. the client could
-/// choose to have its own macro numbers stored against someone else's product
-/// snapshot. Reserved keys are stripped here; only the callers below may add
-/// one back.
+/// Copies a client patch onto a record, dropping reserved keys (DATA-02); only the callers below may add one back.
 fn apply_client_patch(
     mut record: Map<String, Value>,
     patch: Map<String, Value>,
@@ -980,12 +937,7 @@ fn apply_client_patch(
     record
 }
 
-/// Merges a meal-entry patch and re-derives the product-snapshot flag.
-///
-/// The flag is set only when the entry is product-linked and the patch touches
-/// none of the fields the product snapshot is derived from — patching any of
-/// them means the caller wants the entry recalculated. It is computed from the
-/// stored row and the patch's *key set*, never from a client-supplied value.
+/// Merges a meal-entry patch and re-derives the product-snapshot flag from the stored row and the patch's key set only.
 fn merge_meal_entry_patch(
     existing: Map<String, Value>,
     patch: Map<String, Value>,
@@ -1359,21 +1311,14 @@ fn internal_error() -> ApiFailure {
 }
 
 fn api_failure_from_app_error(error: AppError) -> ApiFailure {
-    // Everything the backend already classifies is taken straight from
-    // `AppError`, so the status/code strings live in exactly one place. Only
-    // the two genuine API-surface divergences are spelled out.
+    // `AppError` is taken straight through; only the two API-surface divergences below are spelled out.
     match error {
-        // The public API authenticates with Bearer tokens, so an auth failure
-        // is reported as `invalid_token` rather than the internal
-        // `unauthorized`.
+        // Bearer-token auth, so a failure is reported as `invalid_token` rather than the internal `unauthorized`.
         AppError::Unauthorized(message) => {
             ApiFailure::new(StatusCode::UNAUTHORIZED, "invalid_token", message)
         }
-        // API-03: only the weight-date constraint used to be recognised, so
-        // every other unique violation — reusing a `clientMutationId`, say —
-        // surfaced as a 500 `internal_error`, telling the caller the server
-        // broke when in fact their request collided with an existing row. The
-        // constraint name is logged, never returned: it names internal schema.
+        // API-03: every unique violation maps to a conflict.
+        // The constraint name is logged, never returned (names internal schema).
         AppError::Sqlx(ref sqlx_error)
             if sqlx_error
                 .as_database_error()

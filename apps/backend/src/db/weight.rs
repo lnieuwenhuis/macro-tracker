@@ -1,8 +1,4 @@
 //! Weight-entry persistence and progress statistics.
-//!
-//! Extracted verbatim from `db.rs` (godfiles audit, step 3). The RPC
-//! dispatch arms stay in `db.rs`; onboarding and admin queries call
-//! `normalize_weight_entry_input` and `weight_entries_json_limited` here.
 
 use super::{MAX_COLLECTION_ROWS, optional_f64, required_date, trim_optional_string};
 use crate::errors::{AppError, AppResult};
@@ -24,9 +20,7 @@ pub(super) async fn weight_entries_json(pool: &PgPool, user_id: Uuid) -> AppResu
     weight_entries_json_limited(pool, user_id, MAX_COLLECTION_ROWS).await
 }
 
-/// PERF-03: the row set is selected most-recent-first so a limit keeps the
-/// newest entries, then re-sorted ascending because every consumer charts the
-/// series forwards in time.
+/// PERF-03: selected most-recent-first so the limit keeps the newest entries, then re-sorted ascending for charting.
 pub(super) async fn weight_entries_json_limited(
     pool: &PgPool,
     user_id: Uuid,
@@ -290,9 +284,7 @@ pub(super) async fn delete_weight_entry_json(
 pub(super) fn normalize_weight_entry_input(
     input: &serde_json::Map<String, Value>,
 ) -> AppResult<WeightEntryValues> {
-    // Rounded before the bound check: `weight_kg` lands in a `numeric(5, 2)`
-    // column, so a value that only overflows *after* rounding (999.995) has to
-    // be rejected too.
+    // Rounds before the bound check: `numeric(5, 2)` also rejects values that only overflow after rounding.
     let weight_kg = optional_f64(input, "weightKg")
         .map(round2)
         .filter(|value| value.is_finite() && *value > 0.0)

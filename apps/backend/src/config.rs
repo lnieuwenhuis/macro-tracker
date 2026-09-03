@@ -10,7 +10,7 @@ pub const ENABLE_TEST_ROUTES_ENV: &str = "BACKEND_ENABLE_TEST_ROUTES";
 const MIN_SECRET_LENGTH: usize = 32;
 
 // SEC-08: secrets published in this repo/docs; `apps/web/lib/env.ts` keeps the same list (one shared HMAC key).
-// CI's `macro-tracker-ci-*-secret-32-chars` literals are absent: CI runs loopback with no insecure-local flag.
+// CI runs loopback, so no insecure-local flag.
 const KNOWN_INSECURE_SECRETS: &[&str] = &[
     LOCAL_SESSION_SECRET, // also the `playwright.config.ts` session default
     "macro-tracker-local-backend-secret", // the internal-secret default in `apps/web/playwright.config.ts`

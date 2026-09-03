@@ -1,8 +1,4 @@
 //! API-token persistence: creation, listing, revocation and authentication.
-//!
-//! Extracted verbatim from `db.rs` (godfiles audit, step 3 canary). The RPC
-//! dispatch arms stay in `db.rs`; `authenticate_api_token` is re-exported
-//! there so callers keep the `db::authenticate_api_token` path.
 
 use super::{MAX_COLLECTION_ROWS, required_string};
 use crate::errors::{AppError, AppResult};
@@ -66,9 +62,7 @@ pub async fn authenticate_api_token(pool: &PgPool, token: &str) -> AppResult<Val
         return Ok(json!({ "ok": false, "reason": "expired" }));
     }
     let id: Uuid = row.try_get("id")?;
-    // `RETURNING` instead of a follow-up SELECT. The throttle means the UPDATE
-    // matches no row most of the time, in which case the row already read
-    // above is current.
+    // `RETURNING` avoids a follow-up SELECT; the throttle usually skips the UPDATE, so `row` above stays current.
     let refreshed = sqlx::query(
         r#"
         UPDATE api_tokens
