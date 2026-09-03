@@ -33,8 +33,7 @@ export function uniqueTestEmail(base: TestUserBase, testInfo: TestInfo) {
   return `${base}+w${testInfo.workerIndex}-r${testInfo.retry}-l${testInfo.line}-${slug}@example.com`;
 }
 
-// Call after any full page load of an app-shell screen and before the first interaction,
-// or hydration races the interaction (e.g. a `fill()` gets silently reverted).
+// Call after app-shell loads and before interacting, or hydration races and reverts the interaction.
 export async function waitForAppReady(page: Page) {
   await page.waitForSelector("html[data-app-hydrated]", { state: "attached" });
 }

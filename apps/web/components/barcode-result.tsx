@@ -204,7 +204,6 @@ function NotFoundForm({
         dismissable={!isSaving}
         className="relative z-10 mx-4 mb-4 w-full max-w-sm rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] shadow-2xl outline-none sm:mb-0"
       >
-        {/* Header */}
         <div className="flex items-center justify-between border-b border-[var(--color-border)] px-5 py-4">
           <div>
             <h3 className="text-base font-bold text-[var(--color-ink)]">
@@ -226,7 +225,6 @@ function NotFoundForm({
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-3 p-5">
-          {/* Name */}
           <div>
             <label className="text-xs font-medium text-[var(--color-muted)]">
               Product name <span className="text-[var(--color-danger)]">*</span>
@@ -241,7 +239,6 @@ function NotFoundForm({
             />
           </div>
 
-          {/* Brand */}
           <div>
             <label className="text-xs font-medium text-[var(--color-muted)]">
               Brand
@@ -255,12 +252,10 @@ function NotFoundForm({
             />
           </div>
 
-          {/* Macros per 100 g label */}
           <p className="pt-1 text-[11px] font-semibold uppercase tracking-widest text-[var(--color-muted)]">
             Nutrition per 100 g
           </p>
 
-          {/* Macro grid */}
           <div className="grid grid-cols-2 gap-2">
             {(
               [
@@ -307,7 +302,6 @@ function NotFoundForm({
             ))}
           </div>
 
-          {/* Serving size */}
           <div>
             <label className="text-xs font-medium text-[var(--color-muted)]">
               Default serving size (g) — optional
@@ -330,7 +324,6 @@ function NotFoundForm({
             </p>
           )}
 
-          {/* Actions */}
           <div className="flex gap-2 pt-1">
             <button
               type="button"
@@ -494,7 +487,6 @@ export function BarcodeResult({
           onClose={onClose}
           className="relative z-10 mx-4 w-full max-w-sm rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-6 shadow-2xl outline-none"
         >
-          {/* Header */}
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0 flex-1">
               <h3 className="truncate text-lg font-bold text-[var(--color-ink)]">
@@ -536,7 +528,6 @@ export function BarcodeResult({
             />
           </div>
 
-          {/* Serving size — hidden while editing since scaling is paused */}
           {!isEditing && (
             <div className="mt-4">
               <label className="text-xs text-[var(--color-muted)]">
@@ -554,7 +545,6 @@ export function BarcodeResult({
             </div>
           )}
 
-          {/* Name field — only visible while editing */}
           {isEditing && (
             <div className="mt-4">
               <label className="text-xs text-[var(--color-muted)]">Name</label>
@@ -567,7 +557,6 @@ export function BarcodeResult({
             </div>
           )}
 
-          {/* Macro display / inputs */}
           <div className="mt-4 grid grid-cols-2 gap-2">
             {(
               [
@@ -653,7 +642,6 @@ export function BarcodeResult({
             </p>
           )}
 
-          {/* Actions */}
           <div className="mt-5 space-y-2">
             <button
               type="button"

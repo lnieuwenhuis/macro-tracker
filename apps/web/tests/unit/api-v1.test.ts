@@ -18,21 +18,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { handleApiV1Request } from "@/lib/api-v1";
 import { API_V1_ENDPOINTS, formatApiV1ScopeSummary } from "@/lib/api-v1-openapi";
 import * as apiV1Route from "@/app/api/v1/[[...path]]/route";
+import { withBackendUrl } from "./helpers/test-env";
 
 describe("API v1 backend proxy failures", () => {
-  async function withBackendUrl<T>(url: string, operation: () => Promise<T>) {
-    const previous = process.env.BACKEND_URL;
-    process.env.BACKEND_URL = url;
-    try {
-      return await operation();
-    } finally {
-      if (previous === undefined) {
-        delete process.env.BACKEND_URL;
-      } else {
-        process.env.BACKEND_URL = previous;
-      }
-    }
-  }
 
   it("returns upstream_error with CORS headers when backendFetch rejects", async () => {
     const response = await withBackendUrl("http://127.0.0.1:9", () =>
@@ -121,20 +109,6 @@ describe("Macro Tracker API v1", () => {
     );
   }
 
-  async function withBackendUrl<T>(url: string, operation: () => Promise<T>) {
-    const previous = process.env.BACKEND_URL;
-    process.env.BACKEND_URL = url;
-    try {
-      return await operation();
-    } finally {
-      if (previous === undefined) {
-        delete process.env.BACKEND_URL;
-      } else {
-        process.env.BACKEND_URL = previous;
-      }
-    }
-  }
-
   function expectNoInternalFoodFields(product: Record<string, unknown>) {
     expect(product).not.toHaveProperty("ownerUserId");
     expect(product).not.toHaveProperty("submittedByUserId");
@@ -143,6 +117,43 @@ describe("Macro Tracker API v1", () => {
     expect(product).not.toHaveProperty("sourceConfidence");
     expect(product).not.toHaveProperty("sourceMetadata");
     expect(product).not.toHaveProperty("correctedFromProductId");
+  }
+
+  const WEIGHT_ENTRY_BASE = {
+    date: "2026-03-19",
+    weightKg: 80,
+    bodyFatPct: 18.5,
+  };
+
+  async function createProductBackedEntry(foodBody: Record<string, unknown>, entryQty: number) {    const foodResponse = await apiRequest("POST", "/foods", {
+      token: fullToken,
+      body: foodBody,
+    });
+    expect(foodResponse.status).toBe(201);
+    const food = (await foodResponse.json()).data;
+
+    const entryResponse = await apiRequest("POST", "/days/2026-03-19/entries", {
+      token: fullToken,
+      body: {
+        productId: food.id,
+        label: "",
+        quantity: entryQty,
+        unit: "g",
+        proteinG: 0,
+        carbsG: 0,
+        fatG: 0,
+        caloriesKcal: 1,
+      },
+    });
+    expect(entryResponse.status).toBe(201);
+    const entry = (await entryResponse.json()).data;
+    expect(entry).toMatchObject({
+      proteinG: 20,
+      carbsG: 8,
+      fatG: 2,
+      caloriesKcal: 130,
+    });
+    return { food, entry };
   }
 
   it("returns CORS preflight headers for API v1 paths", async () => {
@@ -638,9 +649,8 @@ describe("Macro Tracker API v1", () => {
   });
 
   it("preserves product-backed meal entry macros when patching only the label", async () => {
-    const foodResponse = await apiRequest("POST", "/foods", {
-      token: fullToken,
-      body: {
+    const { food, entry } = await createProductBackedEntry(
+      {
         name: "Patchable skyr",
         brand: "Macro Dairy",
         defaultServingQuantity: 100,
@@ -651,31 +661,8 @@ describe("Macro Tracker API v1", () => {
         caloriesPer100: 65,
         servingWeightG: 100,
       },
-    });
-    expect(foodResponse.status).toBe(201);
-    const food = (await foodResponse.json()).data;
-
-    const entryResponse = await apiRequest("POST", "/days/2026-03-19/entries", {
-      token: fullToken,
-      body: {
-        productId: food.id,
-        label: "",
-        quantity: 200,
-        unit: "g",
-        proteinG: 0,
-        carbsG: 0,
-        fatG: 0,
-        caloriesKcal: 1,
-      },
-    });
-    expect(entryResponse.status).toBe(201);
-    const entry = (await entryResponse.json()).data;
-    expect(entry).toMatchObject({
-      proteinG: 20,
-      carbsG: 8,
-      fatG: 2,
-      caloriesKcal: 130,
-    });
+      200,
+    );
 
     const foodUpdateResponse = await apiRequest("PATCH", `/foods/${food.id}`, {
       token: fullToken,
@@ -706,12 +693,10 @@ describe("Macro Tracker API v1", () => {
     });
   });
 
-  // api.rs strips any `__`-prefixed key from a PATCH body before merging it, so a client
-  // can't set `__recalculateProductMacros: false` to pin its own macro numbers.
+  // api.rs strips __-prefixed PATCH keys so clients can't pin macros via __recalculateProductMacros.
   it("ignores a client-supplied __recalculateProductMacros flag and recalculates a product-linked entry's macros from the product", async () => {
-    const foodResponse = await apiRequest("POST", "/foods", {
-      token: fullToken,
-      body: {
+    const { food, entry } = await createProductBackedEntry(
+      {
         name: "Mass-assignment skyr",
         brand: "Macro Dairy",
         defaultServingQuantity: 100,
@@ -722,31 +707,8 @@ describe("Macro Tracker API v1", () => {
         caloriesPer100: 65,
         servingWeightG: 100,
       },
-    });
-    expect(foodResponse.status).toBe(201);
-    const food = (await foodResponse.json()).data;
-
-    const entryResponse = await apiRequest("POST", "/days/2026-03-19/entries", {
-      token: fullToken,
-      body: {
-        productId: food.id,
-        label: "",
-        quantity: 200,
-        unit: "g",
-        proteinG: 0,
-        carbsG: 0,
-        fatG: 0,
-        caloriesKcal: 1,
-      },
-    });
-    expect(entryResponse.status).toBe(201);
-    const entry = (await entryResponse.json()).data;
-    expect(entry).toMatchObject({
-      proteinG: 20,
-      carbsG: 8,
-      fatG: 2,
-      caloriesKcal: 130,
-    });
+      200,
+    );
 
     // Distinguishes a "recalculated from the product" result from the original entry and the client-supplied proteinG.
     const foodUpdateResponse = await apiRequest("PATCH", `/foods/${food.id}`, {
@@ -1148,9 +1110,7 @@ describe("Macro Tracker API v1", () => {
     const created = await apiRequest("POST", "/weight/entries", {
       token: fullToken,
       body: {
-        date: "2026-03-19",
-        weightKg: 80,
-        bodyFatPct: 18.5,
+        ...WEIGHT_ENTRY_BASE,
         notes: "Morning weigh-in",
       },
     });
@@ -1179,9 +1139,7 @@ describe("Macro Tracker API v1", () => {
     const first = await apiRequest("POST", "/weight/entries", {
       token: fullToken,
       body: {
-        date: "2026-03-19",
-        weightKg: 80,
-        bodyFatPct: 18.5,
+        ...WEIGHT_ENTRY_BASE,
         notes: "Original entry",
       },
     });
@@ -1190,7 +1148,7 @@ describe("Macro Tracker API v1", () => {
     const duplicate = await apiRequest("POST", "/weight/entries", {
       token: fullToken,
       body: {
-        date: "2026-03-19",
+        ...WEIGHT_ENTRY_BASE,
         weightKg: 79,
         bodyFatPct: 17,
         notes: "Should not overwrite",
@@ -1225,16 +1183,14 @@ describe("Macro Tracker API v1", () => {
       apiRequest("POST", "/weight/entries", {
         token: fullToken,
         body: {
-          date: "2026-03-19",
-          weightKg: 80,
-          bodyFatPct: 18.5,
+          ...WEIGHT_ENTRY_BASE,
           notes: "Original entry",
         },
       }),
       apiRequest("POST", "/weight/entries", {
         token: fullToken,
         body: {
-          date: "2026-03-19",
+          ...WEIGHT_ENTRY_BASE,
           weightKg: 79,
           bodyFatPct: 17,
           notes: "Should not overwrite",
@@ -2065,8 +2021,7 @@ describe("Macro Tracker API v1", () => {
       fatG: 10,
       caloriesKcal: 400,
     });
-    // A backfilled entry must land on the day it was eaten, not the day it
-    // was logged, and no sample may ever sit in the future.
+    // Backfilled entries land on the eaten day, never the logged day or the future.
     expect(oldest!.sampleTime.startsWith(yesterday)).toBe(true);
     expect(newest).toMatchObject({ id: eaten.id, date: today });
     expect(new Date(newest!.sampleTime).getTime()).toBeLessThanOrEqual(Date.now() + 1000);

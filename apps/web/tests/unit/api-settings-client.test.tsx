@@ -1,6 +1,4 @@
-/**
- * @vitest-environment jsdom
- */
+/** @vitest-environment jsdom */
 // Reveal-once, DB-backed revoke are asserted here; "never in localStorage, a URL or a log" rests on code review only.
 import { randomUUID } from "node:crypto";
 
@@ -26,9 +24,7 @@ vi.mock("next/cache", () => ({
 
 import { ApiSettingsClient } from "@/components/api-settings-client";
 
-// `createTestDatabase` is avoided here: it resolves migrations via
-// `import.meta.url`, which Vitest resolves against the jsdom document
-// location, not the filesystem, in this environment.
+// Avoid createTestDatabase: it resolves migrations via import.meta.url against the jsdom document, not the filesystem.
 let pool: Pool;
 
 beforeAll(() => {
@@ -74,9 +70,7 @@ describe("ApiSettingsClient", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Create token" }));
 
-    // Scoped to the reveal section, since the token list below also renders
-    // truncated prefixes matching the same shape; waits for the content to
-    // change since the section itself persists across creations.
+    // Scoped to the reveal section; the token list also renders matching prefixes and the section persists across creations.
     const secret = await waitFor(() => {
       const revealHeading = screen.getByText("New token");
       const revealSection = revealHeading.closest("section");
@@ -102,16 +96,14 @@ describe("ApiSettingsClient", () => {
       screen.getByText("Copy this now. It will not be shown again."),
     ).not.toBeNull();
 
-    // Creating a second token replaces `state.token` with the new result;
-    // the first secret must be gone from the DOM, not just superseded.
+    // A second creation replaces state.token; the first secret must be gone from the DOM.
     const secretB = await createTokenThroughForm("Shortcut B", secretA);
     expect(secretB).toMatch(/^mtk_v1_/);
     expect(secretB).not.toBe(secretA);
     expect(screen.queryByText(secretA)).toBeNull();
     expect(screen.getAllByText("New token")).toHaveLength(1);
 
-    // `state.token` is only ever set on a successful creation, so a failing
-    // action result also clears the previously revealed secret.
+    // state.token is only set on success, so a failing result also clears the revealed secret.
     fireEvent.change(screen.getByLabelText("Token name"), {
       target: { value: "   " },
     });
@@ -135,8 +127,7 @@ describe("ApiSettingsClient", () => {
     const [createdRecord] = await listApiTokens(mocked.userId);
     expect(createdRecord?.revokedAt).toBeNull();
 
-    // The revoke form only carries a hidden `tokenId` field; confirm the raw
-    // secret never leaks into it.
+    // The revoke form only carries tokenId; the raw secret must never leak into it.
     const revokeForm = screen.getByRole("button", { name: "Revoke" }).closest("form");
     if (!revokeForm) {
       throw new Error("Expected a revoke form.");
@@ -155,8 +146,7 @@ describe("ApiSettingsClient", () => {
       expect(revoked?.revokedAt).toBeTruthy();
     });
 
-    // Revoking runs through a separate server action from the one that
-    // revealed the secret and must not cause it to be shown again.
+    // Revoking uses a separate action and must not re-show the revealed secret.
     expect(screen.getAllByText(secret)).toHaveLength(1);
     const tokenArticle = screen.getByText("Shortcut").closest("article");
     if (!tokenArticle) {

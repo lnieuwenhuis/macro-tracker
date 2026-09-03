@@ -1,9 +1,5 @@
-/**
- * @vitest-environment jsdom
- *
- * The manual-entry "Add product" form must not be dismissable (Escape,
- * backdrop click, or close button) while a save is in flight.
- */
+/** @vitest-environment jsdom */
+// The manual-entry form must not be dismissable while a save is in flight.
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -39,8 +35,7 @@ describe("BarcodeResult manual-entry form dismissal", () => {
   }
 
   it("does not close on Escape, backdrop click, or the close button while saving", async () => {
-    // A promise the test controls so the component stays "isSaving" for as
-    // long as needed.
+    // A test-controlled promise so the component stays isSaving as long as needed.
     let resolveSave!: (value: { ok: boolean }) => void;
     mocked.saveBarcodeFoodProductAction.mockReturnValue(
       new Promise((resolve) => {
@@ -73,8 +68,7 @@ describe("BarcodeResult manual-entry form dismissal", () => {
     fireEvent.click(closeButton);
     expect(onClose).not.toHaveBeenCalled();
 
-    // Waiting only for the button's DOM state can observe the commit before
-    // `useEscapeDismiss` has reattached its document listener.
+    // Waiting only for DOM state can observe the commit before useEscapeDismiss reattaches its listener.
     await act(async () => {
       resolveSave({ ok: false });
     });

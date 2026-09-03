@@ -37,23 +37,10 @@ import {
   getVisibleApiTokens,
 } from "@/components/api-settings-client";
 import ApiSettingsPage from "@/app/settings/api/page";
+import { withBackendUrl } from "./helpers/test-env";
 
 describe("API token settings actions", () => {
   let runtime: DatabaseRuntime;
-
-  async function withBackendUrl<T>(url: string, operation: () => Promise<T>) {
-    const previous = process.env.BACKEND_URL;
-    process.env.BACKEND_URL = url;
-    try {
-      return await operation();
-    } finally {
-      if (previous === undefined) {
-        delete process.env.BACKEND_URL;
-      } else {
-        process.env.BACKEND_URL = previous;
-      }
-    }
-  }
 
   beforeEach(async () => {
     runtime = await createTestDatabase();

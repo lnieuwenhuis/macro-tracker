@@ -37,6 +37,10 @@ type ApiEndpoint = {
   methods: ApiEndpointMethod[];
 };
 
+const PRODUCT_ID_CONDITIONAL_SCOPES: NonNullable<ApiEndpointMethod["conditionalRequiredScopes"]> = [
+  { scopes: ["read:foods"], when: "non-null productId is supplied" },
+];
+
 export const API_V1_ENDPOINTS: ApiEndpoint[] = [
   {
     path: "/me",
@@ -60,7 +64,7 @@ export const API_V1_ENDPOINTS: ApiEndpoint[] = [
         method: "post",
         summary: "Create a meal entry on a date",
         scopes: ["write:daily"],
-        conditionalRequiredScopes: [{ scopes: ["read:foods"], when: "non-null productId is supplied" }],
+        conditionalRequiredScopes: PRODUCT_ID_CONDITIONAL_SCOPES,
         successStatus: 201,
         requestBody: "mealEntryCreate",
       },
@@ -73,7 +77,7 @@ export const API_V1_ENDPOINTS: ApiEndpoint[] = [
         method: "patch",
         summary: "Update a meal entry",
         scopes: ["write:daily", "read:daily"],
-        conditionalRequiredScopes: [{ scopes: ["read:foods"], when: "non-null productId is supplied" }],
+        conditionalRequiredScopes: PRODUCT_ID_CONDITIONAL_SCOPES,
         requestBody: "mealEntryPatch",
         hasConflictResponse: true,
       },

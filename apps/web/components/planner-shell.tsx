@@ -310,13 +310,9 @@ export function PlannerShell({
               />
             ) : null}
           </div>
-          {dayTemplates.length === 0 ? (
+          {dayTemplates.length === 0 || visibleDayTemplates.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-[var(--color-border-strong)] bg-[var(--color-shell-panel)] px-5 py-8 text-center">
-              <p className="text-sm text-[var(--color-muted)]">No day templates yet.</p>
-            </div>
-          ) : visibleDayTemplates.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-[var(--color-border-strong)] bg-[var(--color-shell-panel)] px-5 py-8 text-center">
-              <p className="text-sm text-[var(--color-muted)]">No day templates found.</p>
+              <p className="text-sm text-[var(--color-muted)]">{dayTemplates.length === 0 ? "No day templates yet." : "No day templates found."}</p>
             </div>
           ) : (
             <div className="space-y-3">

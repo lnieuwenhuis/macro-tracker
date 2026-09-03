@@ -32,6 +32,12 @@ export function RecipePickerModal({
         : recipes,
     [normalizedQuery, recipes],
   );
+  const emptyCopy =
+    recipes.length === 0
+      ? "No recipes yet — create one from the Recipes page."
+      : visibleRecipes.length === 0
+        ? "No recipes found."
+        : null;
 
   return (
     <CompactModal ariaLabel="Pick a Recipe" title="Pick a Recipe" onClose={onClose}>
@@ -46,20 +52,12 @@ export function RecipePickerModal({
           />
         ) : null}
 
-        {/* Empty state */}
-        {recipes.length === 0 && (
+        {emptyCopy ? (
           <p className="py-3 text-center text-sm text-[var(--color-muted)]">
-            No recipes yet — create one from the Recipes page.
-          </p>
-        )}
-
-        {recipes.length > 0 && visibleRecipes.length === 0 ? (
-          <p className="py-3 text-center text-sm text-[var(--color-muted)]">
-            No recipes found.
+            {emptyCopy}
           </p>
         ) : null}
 
-        {/* Recipe list */}
         {visibleRecipes.length > 0 && (
           <div className="space-y-2">
             {visibleRecipes.map((recipe) => (

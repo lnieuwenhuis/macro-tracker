@@ -93,6 +93,13 @@ const MACRO_COLORS = {
   fat: "var(--color-bar-fat)",
 };
 
+const MACRO_BAR_CONFIG = [
+  { field: "caloriesKcal" as const, label: "Calories", unit: " kcal", color: MACRO_COLORS.calories, fallbackMax: VISUAL_MAX.calories },
+  { field: "proteinG" as const, label: "Protein", unit: "g", color: MACRO_COLORS.protein, fallbackMax: VISUAL_MAX.protein },
+  { field: "carbsG" as const, label: "Carbs", unit: "g", color: MACRO_COLORS.carbs, fallbackMax: VISUAL_MAX.carbs },
+  { field: "fatG" as const, label: "Fat", unit: "g", color: MACRO_COLORS.fat, fallbackMax: VISUAL_MAX.fat },
+];
+
 type MacroBarGroupProps = {
   proteinG: number;
   carbsG: number;
@@ -110,44 +117,21 @@ export function MacroBarGroup({
   plannedTotals,
   goals,
 }: MacroBarGroupProps) {
+  const values = { caloriesKcal, proteinG, carbsG, fatG };
   return (
     <div className="space-y-4">
-      <MacroBar
-        label="Calories"
-        value={caloriesKcal}
-        plannedValue={plannedTotals?.caloriesKcal ?? 0}
-        unit=" kcal"
-        color={MACRO_COLORS.calories}
-        goal={goals?.caloriesKcal ?? null}
-        fallbackMax={VISUAL_MAX.calories}
-      />
-      <MacroBar
-        label="Protein"
-        value={proteinG}
-        plannedValue={plannedTotals?.proteinG ?? 0}
-        unit="g"
-        color={MACRO_COLORS.protein}
-        goal={goals?.proteinG ?? null}
-        fallbackMax={VISUAL_MAX.protein}
-      />
-      <MacroBar
-        label="Carbs"
-        value={carbsG}
-        plannedValue={plannedTotals?.carbsG ?? 0}
-        unit="g"
-        color={MACRO_COLORS.carbs}
-        goal={goals?.carbsG ?? null}
-        fallbackMax={VISUAL_MAX.carbs}
-      />
-      <MacroBar
-        label="Fat"
-        value={fatG}
-        plannedValue={plannedTotals?.fatG ?? 0}
-        unit="g"
-        color={MACRO_COLORS.fat}
-        goal={goals?.fatG ?? null}
-        fallbackMax={VISUAL_MAX.fat}
-      />
+      {MACRO_BAR_CONFIG.map(({ field, label, unit, color, fallbackMax }) => (
+        <MacroBar
+          key={field}
+          label={label}
+          value={values[field]}
+          plannedValue={plannedTotals?.[field] ?? 0}
+          unit={unit}
+          color={color}
+          goal={goals?.[field] ?? null}
+          fallbackMax={fallbackMax}
+        />
+      ))}
     </div>
   );
 }

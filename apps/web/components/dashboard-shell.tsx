@@ -13,6 +13,7 @@ import type { OpenFoodFactsProduct } from "@/lib/openfoodfacts";
 import type { PresetTemplateKind } from "@/lib/preset-modal-state";
 import { getLocalDateString } from "@/lib/startup-date";
 import { createClientMutationIdStore } from "@/lib/client-mutation-id";
+import { useCopiedFlash } from "@/lib/use-copied-flash";
 import { useLazyCollection } from "@/lib/use-lazy-collection";
 import { prefetchOnIdle } from "@/lib/idle-prefetch";
 
@@ -62,6 +63,9 @@ function prefetchModalChunks() {
     import("./recipe-picker-modal"),
   ]);
 }
+
+const GROUP_INPUT_CLASS =
+  "min-w-0 flex-1 rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-3 py-2 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]";
 
 type DashboardShellProps = {
   userEmail: string;
@@ -129,10 +133,21 @@ function reconcileDraftsWithSavedMeals(
   return [...savedDrafts, ...unsavedDrafts];
 }
 
-function createEmptyDraft(sortOrder: number, status: MealEntryStatus): MealDraft {
+function baseDraft(
+  sortOrder: number,
+  status: MealEntryStatus,
+  fields: Omit<MealDraft, "clientId" | "sortOrder" | "status">,
+): MealDraft {
   return {
     clientId: `draft-${crypto.randomUUID()}`,
     status,
+    sortOrder,
+    ...fields,
+  };
+}
+
+function createEmptyDraft(sortOrder: number, status: MealEntryStatus): MealDraft {
+  return baseDraft(sortOrder, status, {
     label: "",
     quantity: "1",
     unit: "serving",
@@ -141,8 +156,7 @@ function createEmptyDraft(sortOrder: number, status: MealEntryStatus): MealDraft
     carbsG: "",
     fatG: "",
     caloriesKcal: "",
-    sortOrder,
-  };
+  });
 }
 
 function createDraftFromCandidate(
@@ -150,9 +164,7 @@ function createDraftFromCandidate(
   sortOrder: number,
   status: MealEntryStatus,
 ): MealDraft {
-  return {
-    clientId: `draft-${crypto.randomUUID()}`,
-    status,
+  return baseDraft(sortOrder, status, {
     label: candidate.label,
     quantity: "1",
     unit: "serving",
@@ -161,8 +173,7 @@ function createDraftFromCandidate(
     carbsG: String(candidate.carbsG),
     fatG: String(candidate.fatG),
     caloriesKcal: String(candidate.caloriesKcal),
-    sortOrder,
-  };
+  });
 }
 
 function createDraftFromMacroSelection(
@@ -180,9 +191,7 @@ function createDraftFromMacroSelection(
   sortOrder: number,
   status: MealEntryStatus,
 ): MealDraft {
-  return {
-    clientId: `draft-${crypto.randomUUID()}`,
-    status,
+  return baseDraft(sortOrder, status, {
     productId: selection.productId ?? null,
     label: selection.label,
     quantity: String(selection.quantity ?? 1),
@@ -192,8 +201,7 @@ function createDraftFromMacroSelection(
     carbsG: String(selection.carbsG),
     fatG: String(selection.fatG),
     caloriesKcal: String(selection.caloriesKcal),
-    sortOrder,
-  };
+  });
 }
 
 function toNumber(value: string, fallback = 0) {
@@ -254,6 +262,21 @@ function mealDraftToSaveInput(
 
 function getNextSortOrder(drafts: MealDraft[]) {
   return drafts.reduce((highest, draft) => Math.max(highest, draft.sortOrder), -1) + 1;
+}
+
+function loadNamedCollection<Item>(
+  action: () => Promise<{ ok: boolean; error?: string; [key: string]: unknown }>,
+  key: string,
+  fallbackError: string,
+) {
+  return async (): Promise<Item[]> => {
+    const result = await action();
+    const items = result[key] as Item[] | undefined;
+    if (!result.ok || !items) {
+      throw new Error(result.error ?? fallbackError);
+    }
+    return items;
+  };
 }
 
 function CollectionLoadStateModal({
@@ -325,13 +348,7 @@ export function DashboardShell({
   const [showPresetsModal, setShowPresetsModal] = useState(false);
   const [presetInitialKind, setPresetInitialKind] =
     useState<PresetTemplateKind | null>(null);
-  const templates = useLazyCollection(async () => {
-    const result = await loadTemplatesAction();
-    if (!result.ok || !result.templates) {
-      throw new Error(result.error ?? "Unable to load templates.");
-    }
-    return result.templates;
-  }, "Unable to load templates.");
+  const templates = useLazyCollection(loadNamedCollection<MealTemplate>(loadTemplatesAction, "templates", "Unable to load templates."), "Unable to load templates.");
   const [presetMutation, setPresetMutation] = useState<PresetMutationState | null>(null);
   const [presetError, setPresetError] = useState<string | null>(null);
   const {
@@ -353,13 +370,7 @@ export function DashboardShell({
   const [groupMutationId, setGroupMutationId] = useState<string | null>(null);
 
   const [showRecipePickerModal, setShowRecipePickerModal] = useState(false);
-  const recipes = useLazyCollection(async () => {
-    const result = await loadRecipesAction();
-    if (!result.ok || !result.recipes) {
-      throw new Error(result.error ?? "Unable to load recipes.");
-    }
-    return result.recipes;
-  }, "Unable to load recipes.");
+  const recipes = useLazyCollection(loadNamedCollection<RecipeRecord>(loadRecipesAction, "recipes", "Unable to load recipes."), "Unable to load recipes.");
 
   const [showSearchModal, setShowSearchModal] = useState(false);
 
@@ -384,18 +395,7 @@ export function DashboardShell({
     selectedDateRef.current = selectedDate;
   }, [dailySummary.mealGroups, dailySummary.meals, selectedDate]);
 
-  const [copiedCardIds, setCopiedCardIds] = useState<Set<string>>(new Set());
-  const copiedTimersRef = useRef<Map<string, number>>(new Map());
-
-  useEffect(() => {
-    const timers = copiedTimersRef.current;
-    return () => {
-      for (const timer of timers.values()) {
-        window.clearTimeout(timer);
-      }
-      timers.clear();
-    };
-  }, []);
+  const { copiedIds: copiedCardIds, flash: flashCopied } = useCopiedFlash(2000);
 
   const [showScanner, setShowScanner] = useState(false);
   const [scanResult, setScanResult] = useState<OpenFoodFactsProduct | null>(null);
@@ -432,6 +432,24 @@ export function DashboardShell({
     [quickAddCandidates, todayStr],
   );
 
+  function clearDraftError(clientId: string) {
+    setErrors((currentErrors) => ({
+      ...currentErrors,
+      [clientId]: null,
+    }));
+  }
+
+  function appendMacroSelectionAsDraft(macros: Parameters<typeof createDraftFromMacroSelection>[0]) {
+    setDrafts((currentDrafts) => [
+      ...currentDrafts,
+      createDraftFromMacroSelection(
+        macros,
+        getNextSortOrder(currentDrafts),
+        defaultEntryStatus,
+      ),
+    ]);
+  }
+
   function updateDraft(
     clientId: string,
     field: keyof Omit<MealDraft, "clientId" | "id" | "sortOrder">,
@@ -447,10 +465,7 @@ export function DashboardShell({
           : draft,
       ),
     );
-    setErrors((currentErrors) => ({
-      ...currentErrors,
-      [clientId]: null,
-    }));
+    clearDraftError(clientId);
   }
 
   function isOnlyGroupDirty(draft: MealDraft, nextGroupId: string | null) {
@@ -488,10 +503,7 @@ export function DashboardShell({
         item.clientId === clientId ? { ...item, mealGroupId } : item,
       ),
     );
-    setErrors((currentErrors) => ({
-      ...currentErrors,
-      [clientId]: null,
-    }));
+    clearDraftError(clientId);
 
     if (!draft.id || !isOnlyGroupDirty(draft, mealGroupId)) {
       return;
@@ -664,10 +676,7 @@ export function DashboardShell({
         currentDraft.clientId === clientId ? restored : currentDraft,
       ),
     );
-    setErrors((currentErrors) => ({
-      ...currentErrors,
-      [clientId]: null,
-    }));
+    clearDraftError(clientId);
   }
 
   async function handleSave(clientId: string): Promise<boolean> {
@@ -960,11 +969,6 @@ export function DashboardShell({
       const draft = currentDrafts.find((d) => d.clientId === clientId);
       if (!draft) return currentDrafts;
 
-      const maxSortOrder = currentDrafts.reduce(
-        (max, d) => Math.max(max, d.sortOrder),
-        -1,
-      );
-
       return [
         ...currentDrafts,
         {
@@ -980,7 +984,7 @@ export function DashboardShell({
           carbsG: draft.carbsG,
           fatG: draft.fatG,
           caloriesKcal: draft.caloriesKcal,
-          sortOrder: maxSortOrder + 1,
+          sortOrder: getNextSortOrder(currentDrafts),
         },
       ];
     });
@@ -1011,23 +1015,7 @@ export function DashboardShell({
           [clientId]: result.error ?? "Unable to copy entry to today.",
         }));
       } else {
-        // Show a brief "copied" confirmation on the button, then clear it.
-        setCopiedCardIds((prev) => new Set([...prev, clientId]));
-        const existingTimer = copiedTimersRef.current.get(clientId);
-        if (existingTimer !== undefined) {
-          window.clearTimeout(existingTimer);
-        }
-        copiedTimersRef.current.set(
-          clientId,
-          window.setTimeout(() => {
-            copiedTimersRef.current.delete(clientId);
-            setCopiedCardIds((prev) => {
-              const next = new Set(prev);
-              next.delete(clientId);
-              return next;
-            });
-          }, 2000),
-        );
+        flashCopied(clientId);
       }
 
       setActiveMutation(null);
@@ -1277,7 +1265,7 @@ export function DashboardShell({
                         event.currentTarget.blur();
                       }
                     }}
-                    className="min-w-0 flex-1 rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-3 py-2 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)] disabled:opacity-60"
+                    className={`${GROUP_INPUT_CLASS} disabled:opacity-60`}
                   />
                   <button
                     type="button"
@@ -1301,7 +1289,7 @@ export function DashboardShell({
                   }
                 }}
                 placeholder="New group"
-                className="min-w-0 flex-1 rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-3 py-2 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
+                className={GROUP_INPUT_CLASS}
               />
               <button
                 type="button"
@@ -1447,14 +1435,7 @@ export function DashboardShell({
           <AiFoodPhotoModal
             onClose={() => setShowPhotoModal(false)}
             onAddToLog={(macros) => {
-              setDrafts((currentDrafts) => [
-                ...currentDrafts,
-                createDraftFromMacroSelection(
-                  macros,
-                  getNextSortOrder(currentDrafts),
-                  defaultEntryStatus,
-                ),
-              ]);
+              appendMacroSelectionAsDraft(macros);
               setShowPhotoModal(false);
             }}
             onSaveAsPreset={(input) => {
@@ -1475,14 +1456,7 @@ export function DashboardShell({
             setScanResult={setScanResult}
             setNotFoundBarcode={setNotFoundBarcode}
             onAddToLog={(macros) => {
-              setDrafts((currentDrafts) => [
-                ...currentDrafts,
-                createDraftFromMacroSelection(
-                  macros,
-                  getNextSortOrder(currentDrafts),
-                  defaultEntryStatus,
-                ),
-              ]);
+              appendMacroSelectionAsDraft(macros);
             }}
             onSaveAsPreset={(input) => {
               handleSavePreset(input);

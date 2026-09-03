@@ -1,6 +1,4 @@
-/**
- * @vitest-environment jsdom
- */
+/** @vitest-environment jsdom */
 import { CompactModal } from "@/components/compact-modal";
 import { ConfirmSubmitButton } from "@/components/confirm-delete-button";
 import { fireEvent, render, screen } from "@testing-library/react";

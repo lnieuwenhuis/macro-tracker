@@ -18,16 +18,7 @@ type ConfirmDeleteButtonProps = {
   title?: string;
 };
 
-// Double-tap confirm (arm, then act on the second tap): less friction than window.confirm on mobile.
-export function ConfirmDeleteButton({
-  onConfirm,
-  ariaLabel,
-  children,
-  disabled,
-  timeoutMs = 3000,
-  className,
-  title,
-}: ConfirmDeleteButtonProps) {
+function useArmTimeout(timeoutMs: number) {
   const [armed, setArmed] = useState(false);
   const timerRef = useRef<number | null>(null);
 
@@ -38,9 +29,38 @@ export function ConfirmDeleteButton({
     }
   }
 
+  function arm() {
+    setArmed(true);
+    clearTimer();
+    timerRef.current = window.setTimeout(() => {
+      setArmed(false);
+      timerRef.current = null;
+    }, timeoutMs);
+  }
+
+  function disarm() {
+    clearTimer();
+    setArmed(false);
+  }
+
   useEffect(() => {
     return clearTimer;
   }, []);
+
+  return { armed, setArmed, timerRef, clearTimer, arm, disarm };
+}
+
+// Double-tap confirm (arm, then act on the second tap): less friction than window.confirm on mobile.
+export function ConfirmDeleteButton({
+  onConfirm,
+  ariaLabel,
+  children,
+  disabled,
+  timeoutMs = 3000,
+  className,
+  title,
+}: ConfirmDeleteButtonProps) {
+  const { armed, arm, disarm } = useArmTimeout(timeoutMs);
 
   function handleClick(event: MouseEvent<HTMLButtonElement>) {
     event.preventDefault();
@@ -49,17 +69,11 @@ export function ConfirmDeleteButton({
     if (disabled) return;
 
     if (!armed) {
-      setArmed(true);
-      clearTimer();
-      timerRef.current = window.setTimeout(() => {
-        setArmed(false);
-        timerRef.current = null;
-      }, timeoutMs);
+      arm();
       return;
     }
 
-    clearTimer();
-    setArmed(false);
+    disarm();
     onConfirm();
   }
 
@@ -109,16 +123,7 @@ export function ConfirmSubmitButton({
   disabled,
   timeoutMs = 3000,
 }: ConfirmSubmitButtonProps) {
-  const [armed, setArmed] = useState(false);
-  const timerRef = useRef<number | null>(null);
-
-  useEffect(() => {
-    return () => {
-      if (timerRef.current !== null) {
-        window.clearTimeout(timerRef.current);
-      }
-    };
-  }, []);
+  const { armed, arm } = useArmTimeout(timeoutMs);
 
   function handleClick(event: MouseEvent<HTMLButtonElement>) {
     if (disabled || armed) {
@@ -126,11 +131,7 @@ export function ConfirmSubmitButton({
     }
 
     event.preventDefault();
-    setArmed(true);
-    timerRef.current = window.setTimeout(() => {
-      setArmed(false);
-      timerRef.current = null;
-    }, timeoutMs);
+    arm();
   }
 
   return (

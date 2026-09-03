@@ -48,7 +48,6 @@ export const IngredientCard = memo(function IngredientCard({
   return (
     <article className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-card-subtle)] shadow-[0_4px_16px_rgba(74,45,28,0.05)]">
       <div className="px-4 pb-4 pt-3">
-        {/* Name + delete row */}
         <div className="flex items-start gap-2">
           <label className="block min-w-0 flex-1">
             <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--color-muted-strong)]">
@@ -134,7 +133,6 @@ export const IngredientCard = memo(function IngredientCard({
           </label>
         </div>
 
-        {/* Macro inputs */}
         <div className="mt-2 grid grid-cols-2 gap-2">
           <NumberInputField
             label="Protein"
@@ -170,7 +168,6 @@ export const IngredientCard = memo(function IngredientCard({
           />
         </div>
 
-        {/* Inline macro summary */}
         {hasValues && (
           <div className="mt-2 flex flex-wrap gap-x-2.5 gap-y-0.5">
             {isPositive(draft.proteinG) ? (

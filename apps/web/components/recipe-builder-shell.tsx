@@ -52,6 +52,32 @@ function toNumber(value: string) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function makeIngredientDraft(source: {
+  clientId: string;
+  productId?: string | null;
+  label: string;
+  quantity?: number | string;
+  unit?: IngredientDraft["unit"];
+  servingMultiplier?: number | string;
+  proteinG: number | string;
+  carbsG: number | string;
+  fatG: number | string;
+  caloriesKcal: number | string;
+}): IngredientDraft {
+  return {
+    clientId: source.clientId,
+    productId: source.productId ?? null,
+    label: source.label,
+    quantity: source.quantity == null ? "1" : String(source.quantity),
+    unit: source.unit ?? "serving",
+    servingMultiplier: source.servingMultiplier == null ? "1" : String(source.servingMultiplier),
+    proteinG: String(source.proteinG),
+    carbsG: String(source.carbsG),
+    fatG: String(source.fatG),
+    caloriesKcal: String(source.caloriesKcal),
+  };
+}
+
 export function RecipeBuilderShell({
   userEmail,
   canAccessAdmin,
@@ -71,18 +97,20 @@ export function RecipeBuilderShell({
 
   const [ingredients, setIngredients] = useState<IngredientDraft[]>(() => {
     if (!recipe) return [];
-    return recipe.ingredients.map((ing) => ({
-      clientId: `ing-${ing.id}`,
-      productId: ing.productId ?? null,
-      label: ing.label,
-      quantity: String(ing.quantity ?? 1),
-      unit: ing.unit ?? "serving",
-      servingMultiplier: String(ing.servingMultiplier ?? 1),
-      proteinG: String(ing.proteinG),
-      carbsG: String(ing.carbsG),
-      fatG: String(ing.fatG),
-      caloriesKcal: String(ing.caloriesKcal),
-    }));
+    return recipe.ingredients.map((ing) =>
+      makeIngredientDraft({
+        clientId: `ing-${ing.id}`,
+        productId: ing.productId ?? null,
+        label: ing.label,
+        quantity: ing.quantity ?? 1,
+        unit: ing.unit ?? "serving",
+        servingMultiplier: ing.servingMultiplier ?? 1,
+        proteinG: ing.proteinG,
+        carbsG: ing.carbsG,
+        fatG: ing.fatG,
+        caloriesKcal: ing.caloriesKcal,
+      }),
+    );
   });
 
   const [showPresetsModal, setShowPresetsModal] = useState(false);
@@ -134,7 +162,7 @@ export function RecipeBuilderShell({
   function addEmptyIngredient() {
     setIngredients((prev) => [
       ...prev,
-      {
+      makeIngredientDraft({
         clientId: `ing-${crypto.randomUUID()}`,
         label: "",
         quantity: "1",
@@ -144,25 +172,27 @@ export function RecipeBuilderShell({
         carbsG: "",
         fatG: "",
         caloriesKcal: "",
-      },
+      }),
     ]);
   }
 
   function addIngredientFromPreset(template: MealTemplate) {
     setIngredients((prev) => [
       ...prev,
-      ...template.items.map((item) => ({
-        clientId: `ing-${crypto.randomUUID()}`,
-        productId: item.productId ?? null,
-        label: item.label,
-        quantity: String(item.quantity),
-        unit: item.unit,
-        servingMultiplier: String(item.servingMultiplier),
-        proteinG: String(item.proteinG),
-        carbsG: String(item.carbsG),
-        fatG: String(item.fatG),
-        caloriesKcal: String(item.caloriesKcal),
-      })),
+      ...template.items.map((item) =>
+        makeIngredientDraft({
+          clientId: `ing-${crypto.randomUUID()}`,
+          productId: item.productId ?? null,
+          label: item.label,
+          quantity: item.quantity,
+          unit: item.unit,
+          servingMultiplier: item.servingMultiplier,
+          proteinG: item.proteinG,
+          carbsG: item.carbsG,
+          fatG: item.fatG,
+          caloriesKcal: item.caloriesKcal,
+        }),
+      ),
     ]);
     setShowPresetsModal(false);
   }

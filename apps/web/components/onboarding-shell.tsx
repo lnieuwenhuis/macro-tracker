@@ -8,9 +8,8 @@ import { completeOnboardingAction } from "@/lib/actions";
 import {
   convertWeight,
   normalizeOnboardingWeightKg,
-  parsePositiveNumber,
 } from "@/lib/onboarding-weight";
-import { formatMacroValue } from "@/lib/numbers";
+import { formatMacroValue, parsePositiveNumber } from "@/lib/numbers";
 import { getLocalDateString } from "@/lib/startup-date";
 import { useActionRunner } from "@/lib/use-action-runner";
 
@@ -20,6 +19,7 @@ import {
   type MacroTargetDraft,
 } from "./macro-calculator-panel";
 import { NumberInputField } from "./number-input-field";
+import { presetDraftToInput } from "./preset-modal";
 import { ThemePicker } from "./theme-toggle";
 
 type OnboardingShellProps = {
@@ -103,13 +103,13 @@ export function OnboardingShell({
     run(
       () => {
         const starterTemplate = templateLabel.trim()
-          ? {
-              label: templateLabel.trim(),
-              proteinG: Number(templateProtein) || 0,
-              carbsG: Number(templateCarbs) || 0,
-              fatG: Number(templateFat) || 0,
-              caloriesKcal: Math.round(Number(templateCalories) || 0),
-            }
+          ? presetDraftToInput({
+              label: templateLabel,
+              proteinG: templateProtein,
+              carbsG: templateCarbs,
+              fatG: templateFat,
+              caloriesKcal: templateCalories,
+            })
           : null;
 
         // Resolved on the device, not the server, so the first weigh-in lands on the user's own calendar day.

@@ -4,8 +4,6 @@ import { parsePositiveNumber, roundToTwoDecimals } from "./numbers";
 
 const POUNDS_PER_KG = 2.2046226218;
 
-export { parsePositiveNumber };
-
 export function convertWeight(
   value: number,
   from: WeightUnit,

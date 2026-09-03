@@ -22,7 +22,6 @@ function applyTheme(theme: ThemeId) {
 function getActiveTheme(): ThemeId {
   if (typeof window === "undefined") return DEFAULT_THEME;
   const stored = window.localStorage.getItem(STORAGE_KEY);
-  // Migrate legacy values
   if (stored === "light") return "sandstone";
   if (stored === "dark") return "ember";
   return isValidTheme(stored ?? "") ? (stored as ThemeId) : DEFAULT_THEME;
