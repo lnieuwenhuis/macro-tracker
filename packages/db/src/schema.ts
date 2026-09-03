@@ -83,8 +83,7 @@ export const users = pgTable(
     preferredWeightUnit: text("preferred_weight_unit")
       .notNull()
       .default("kg"),
-    // Static gym-buddy friend code; generated lazily by the backend so it is
-    // app-generated like every other identifier (no gen_random_uuid()).
+    // Generated lazily by the backend, not gen_random_uuid(), like every other identifier.
     friendCode: text("friend_code"),
   },
   (table) => [
@@ -93,10 +92,7 @@ export const users = pgTable(
     uniqueIndex("users_friend_code_key")
       .on(table.friendCode)
       .where(sql`${table.friendCode} IS NOT NULL`),
-    // DB-09: matches ADMIN_ROLE_VALUES / WEIGHT_UNIT_VALUES in types.ts.
-    // Added NOT VALID in migration 0016 (see that file for why); Drizzle's
-    // schema builder always emits VALID syntax, so this reflects the target
-    // end state, not the exact migration SQL that got there.
+    // DB-09: matches ADMIN_ROLE_VALUES/WEIGHT_UNIT_VALUES in types.ts; migration 0016 adds it NOT VALID, Drizzle always emits VALID.
     check("users_role_check", sql`${table.role} IN ('user', 'admin', 'owner')`),
     check(
       "users_preferred_weight_unit_check",
@@ -132,11 +128,7 @@ export const adminAuditEvents = pgTable(
   "admin_audit_events",
   {
     id: uuid("id").primaryKey().notNull(),
-    // Nullable + `set null` (migration 0015, DB-05): audit rows must outlive
-    // the actor's account. Every other user-referencing FK here is cascade
-    // or set-null; this one used to be the sole `NO ACTION` holdout, which
-    // would fail the first account-deletion feature for any user who ever
-    // performed an admin action.
+    // set null (migration 0015, DB-05): audit rows must outlive the actor's deleted account.
     actorUserId: uuid("actor_user_id").references(() => users.id, {
       onDelete: "set null",
     }),
@@ -218,8 +210,7 @@ export const foodProducts = pgTable(
     index("food_products_deleted_at_idx").on(table.deletedAt),
     index("food_products_submitted_by_idx").on(table.submittedByUserId),
     index("food_products_corrected_from_idx").on(table.correctedFromProductId),
-    // DB-09: matches FOOD_PRODUCT_SCOPE_VALUES / FOOD_PRODUCT_SOURCE_VALUES
-    // in types.ts. Added NOT VALID in migration 0016 — see that file.
+    // DB-09: matches FOOD_PRODUCT_SCOPE_VALUES/FOOD_PRODUCT_SOURCE_VALUES in types.ts; NOT VALID in migration 0016.
     check(
       "food_products_scope_check",
       sql`${table.scope} IN ('global', 'personal', 'legacy')`,
@@ -254,31 +245,7 @@ export const foodProductRevisions = pgTable(
   ],
 );
 
-/**
- * NOT modeled in this Drizzle schema (Drizzle has no trigger DSL); defined by
- * hand-authored migration `0013_deduplicate_default_meal_groups.sql`:
- *
- *   CREATE TRIGGER "meal_groups_default_insert_compat"
- *   BEFORE INSERT ON "meal_groups"
- *   FOR EACH ROW
- *   EXECUTE FUNCTION "ignore_duplicate_active_default_meal_group"();
- *
- * The function returns NULL when the inserted row would duplicate an
- * already-active default group for the same (user_id, label) — i.e. it
- * silently discards the INSERT instead of raising the unique-violation that
- * `meal_groups_active_default_label_key` would otherwise throw. This exists
- * to keep an older backend code path (which unconditionally inserts a
- * default group) compatible after the 0013 dedupe.
- *
- * Consequence for callers: `INSERT INTO meal_groups ... RETURNING` followed
- * by `fetch_one` (sqlx) on a duplicate default-group insert gets
- * `RowNotFound`, not the inserted/existing row — there is nothing here to
- * explain that failure mode without this comment.
- *
- * The trigger covers **INSERT only**. An `UPDATE` that clears `deleted_at`
- * (or flips `is_default` to true) on a group that would collide is NOT
- * covered and still raises a raw unique-violation from the index above.
- */
+/** Trigger `meal_groups_default_insert_compat` (migration 0013, no Drizzle DSL for it) silently discards an INSERT that duplicates an active default group instead of raising the unique violation below, so `INSERT ... RETURNING` + `fetch_one` gets RowNotFound on a duplicate; UPDATE is not covered by the trigger. */
 export const mealGroups = pgTable(
   "meal_groups",
   {
@@ -343,8 +310,7 @@ export const mealEntries = pgTable(
     index("meal_entries_healthkit_unsynced_idx")
       .on(table.userId, table.entryDate)
       .where(sql`${table.healthkitSyncedAt} IS NULL AND ${table.status} = 'eaten'`),
-    // DB-09: matches MEAL_ENTRY_STATUS_VALUES in types.ts. Added NOT VALID
-    // in migration 0016 — see that file.
+    // DB-09: matches MEAL_ENTRY_STATUS_VALUES in types.ts; NOT VALID in migration 0016.
     check(
       "meal_entries_status_check",
       sql`${table.status} IN ('planned', 'eaten', 'skipped')`,
@@ -436,10 +402,7 @@ export const mealTemplates = pgTable(
   (table) => [
     index("meal_templates_user_type_idx").on(table.userId, table.type),
     index("meal_templates_deleted_at_idx").on(table.deletedAt),
-    // DB-09: matches MEAL_TEMPLATE_TYPE_VALUES in types.ts. Added NOT VALID
-    // in migration 0016 — see that file for why (the backend does not
-    // currently validate this column against the enum before writing it;
-    // API-07 tracks the write-path fix, owned by another group).
+    // DB-09: matches MEAL_TEMPLATE_TYPE_VALUES in types.ts; NOT VALID in migration 0016, the backend does not yet validate this before writing (API-07).
     check("meal_templates_type_check", sql`${table.type} IN ('meal', 'day')`),
   ],
 );
@@ -489,14 +452,12 @@ export const gymSlots = pgTable(
       "gym_slots_recurrence_check",
       sql`${table.recurrence} IN ('once', 'weekly')`,
     ),
-    // A slot is either one-off (has a date, no weekday) or weekly recurring
-    // (ISO weekday 1-7, no date). The kind is immutable after creation.
+    // Immutable after creation: 'once' requires slotDate and no weekday; 'weekly' requires an ISO weekday (1-7) and no slotDate.
     check(
       "gym_slots_recurrence_shape_check",
       sql`(${table.recurrence} = 'once' AND ${table.slotDate} IS NOT NULL AND ${table.weekday} IS NULL) OR (${table.recurrence} = 'weekly' AND ${table.weekday} BETWEEN 1 AND 7 AND ${table.slotDate} IS NULL)`,
     ),
-    // end_minute may be 1440 ("until midnight") so 23:00-00:00 stays
-    // representable; overnight slots are out of scope.
+    // endMinute may reach 1440 ("until midnight") so 23:00-00:00 stays representable; overnight slots are out of scope.
     check(
       "gym_slots_minutes_check",
       sql`${table.startMinute} >= 0 AND ${table.endMinute} <= 1440 AND ${table.startMinute} < ${table.endMinute}`,
@@ -504,11 +465,7 @@ export const gymSlots = pgTable(
   ],
 );
 
-/**
- * Per-date status for a slot (both recurrence kinds). No row for a date means
- * the implicit default 'going' — status belongs to a day, never to the slot
- * definition, so editing a slot cannot silently rewrite past days.
- */
+/** Per-date status for a slot; no row for a date means the implicit default 'going'. */
 export const gymSlotStatuses = pgTable(
   "gym_slot_statuses",
   {
@@ -532,13 +489,7 @@ export const gymSlotStatuses = pgTable(
   ],
 );
 
-/**
- * One row per unordered user pair (enforced by the LEAST/GREATEST expression
- * index — an index, not a constraint, because constraints cannot use
- * expressions). A 'declined' row doubles as a block: it survives, keeps the
- * pair index occupied so re-invites fail, and only the decliner (addressee)
- * may delete it.
- */
+/** One row per unordered user pair, enforced below by a LEAST/GREATEST expression index (constraints can't use expressions); a 'declined' row survives as a block until the addressee deletes it. */
 export const gymBuddies = pgTable(
   "gym_buddies",
   {
@@ -550,9 +501,7 @@ export const gymBuddies = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     status: text("status").notNull().default("pending"),
-    // Exactly what the requester typed (normalized email or friend code); the
-    // sent-invites list echoes this back so a code invite never reveals the
-    // target's email. Nullable only for pre-0018 rows (backfilled with email).
+    // What the requester typed (normalized); echoed back in sent-invites so a code invite never reveals the target's email. Nullable only for pre-0018 rows.
     inviteIdentifier: text("invite_identifier"),
     ...createdUpdatedTimestamps(),
   },
@@ -562,9 +511,7 @@ export const gymBuddies = pgTable(
       sql`GREATEST(${table.requesterUserId}, ${table.addresseeUserId})`,
     ),
     index("gym_buddies_addressee_idx").on(table.addresseeUserId, table.status),
-    // The accepted-buddies lookup is an OR over both sides; the expression
-    // index above cannot serve `requester_user_id = $1`, so without this
-    // btree the lookup seq-scans.
+    // The expression index above can't serve a plain requester_user_id lookup; without this the accepted-buddies OR query seq-scans.
     index("gym_buddies_requester_idx").on(table.requesterUserId, table.status),
     check(
       "gym_buddies_not_self_check",
