@@ -31,13 +31,7 @@ pub struct AppState {
     pub http: reqwest::Client,
 }
 
-/// Ceiling for any outbound request that does not set its own deadline.
-///
-/// `tokio::time::timeout(.., send())` only bounds the *headers*; the body read
-/// that follows had no deadline at all, so a provider that answered and then
-/// stalled pinned the handler indefinitely. `Client::timeout` covers the whole
-/// exchange, and per-request `RequestBuilder::timeout` still overrides it where
-/// a longer budget is intended (the AI paths).
+// Bounds headers and body together; a bare `tokio::time::timeout(send())` would only bound the headers.
 const HTTP_CLIENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const HTTP_CLIENT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -52,31 +46,15 @@ pub fn build_http_client() -> reqwest::Result<reqwest::Client> {
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const POSTGRES_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// SEC-09: `/api/v1` looks a bearer token up in `api_tokens` *before* it can
-/// know the token is garbage, so the cheapest possible unauthenticated request
-/// still costs a connection permit. These bounds sit far below the pool
-/// (`POSTGRES_POOL_MAX`, default 10) so a flood is refused at the edge instead
-/// of starving authenticated traffic.
-///
-/// Not brute-force protection — the tokens carry 244 bits of entropy. This is
-/// purely about availability.
+// SEC-09: below `POSTGRES_POOL_MAX` so a pre-auth flood is refused here. Availability, not brute-force protection.
 const API_RATE_LIMIT_REPLENISH_MS: u64 = 50;
 const API_RATE_LIMIT_BURST: u32 = 100;
-/// Only reachable with `BACKEND_ENABLE_TEST_ROUTES`, which SEC-05 restricts to
-/// a loopback `APP_URL`.
+// Only reachable via `BACKEND_ENABLE_TEST_ROUTES`, which SEC-05 restricts to a loopback `APP_URL`.
 const API_RATE_LIMIT_TEST_BURST: u32 = 100_000;
-/// Drops rate-limit state for IPs that have gone quiet, so the keyed map cannot
-/// grow without bound and become its own memory-exhaustion vector.
+// Evicts quiet IPs so the rate-limit map cannot grow into its own memory-exhaustion vector.
 const API_RATE_LIMIT_GC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// SEC-06: when the internal-secret check is disabled, `InternalAuth` returns
-/// `Ok` for a request carrying **no header at all** — so `/internal/rpc`
-/// (`getUserById`, `createApiToken`, `upsertUserFromShooProfile`, every
-/// user-scoped read and write for an arbitrary `userId`) would be wide open to
-/// anyone on the same network as the developer. The config already forces a
-/// loopback `APP_URL` for that mode; the listener has to agree.
-///
-/// Pure so it can be tested without opening a socket.
+// SEC-06: with internal-secret checks disabled, `InternalAuth` accepts requests with no header at all.
 fn listen_address(config: &Config) -> IpAddr {
     if config.allows_insecure_internal_auth_for_app_url() {
         IpAddr::V4(Ipv4Addr::LOCALHOST)
@@ -85,8 +63,7 @@ fn listen_address(config: &Config) -> IpAddr {
     }
 }
 
-/// Answers a throttled `/api/v1` request in the same envelope every other
-/// `/api/v1` failure uses, rather than the layer's default plain-text body.
+// Answers a throttled `/api/v1` request in the same JSON envelope every other `/api/v1` failure uses.
 fn rate_limited_response(error: GovernorError) -> axum::response::Response {
     use axum::response::IntoResponse;
 
@@ -96,8 +73,7 @@ fn rate_limited_response(error: GovernorError) -> axum::response::Response {
             "rate_limited",
             "Too many requests. Slow down and try again shortly.",
         ),
-        // Only reachable if the service is mounted without connection info.
-        // Fail closed rather than silently dropping the limit.
+        // Fail closed: only reachable if the service were ever mounted without connection info.
         _ => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             "internal_error",
@@ -105,9 +81,7 @@ fn rate_limited_response(error: GovernorError) -> axum::response::Response {
         ),
     };
 
-    // The limiter sits in front of the handler, so without this a throttled
-    // browser client sees a CORS failure rather than the 429 - the same defect
-    // API-06 fixed for the body-limit and path rejections.
+    // API-06: attach CORS headers here too, or a throttled browser client sees a CORS failure instead of a 429.
     (
         status,
         api::cors_headers(),
@@ -120,12 +94,7 @@ fn rate_limited_response(error: GovernorError) -> axum::response::Response {
 }
 
 fn build_router(state: AppState) -> Router {
-    // The request-level suite in `apps/web/tests/unit/api-v1.test.ts` drives
-    // hundreds of sequential calls from one address, which is exactly the
-    // shape the limiter exists to stop - it cannot tell that traffic from a
-    // flood. `enable_test_routes` is the existing "this is a test deployment"
-    // switch and SEC-05 refuses it unless `APP_URL` is loopback, so widening
-    // the burst behind it cannot loosen a real deployment.
+    // `enable_test_routes` is refused for a non-loopback `APP_URL` by SEC-05, so widening the burst behind it is safe.
     let burst = if state.config.enable_test_routes {
         API_RATE_LIMIT_TEST_BURST
     } else {
@@ -142,10 +111,7 @@ fn build_router_with_rate_limit(state: AppState, replenish_ms: u64, burst: u32) 
             .finish()
             .expect("rate-limit period and burst size must both be non-zero"),
     );
-    // The limiter keys its state by IP and never forgets on its own, so an
-    // attacker cycling source addresses would trade the connection pool for
-    // unbounded memory. Every caller of this function is already inside the
-    // Tokio runtime; the task ends when that runtime does.
+    // The keyed map never forgets on its own; GC it or a source-cycling attacker trades the pool for unbounded memory.
     let governor_limiter = Arc::clone(&governor);
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(API_RATE_LIMIT_GC_INTERVAL);
@@ -154,20 +120,11 @@ fn build_router_with_rate_limit(state: AppState, replenish_ms: u64, burst: u32) 
             governor_limiter.limiter().retain_recent();
         }
     });
-    // Per `build_router` call, so each test gets its own and a probe result
-    // never leaks between them.
+    // One per `build_router` call, so a probe result never leaks between tests.
     let health_cache = Arc::new(routes::HealthCache::default());
 
     Router::new()
-        // `/api/v1` enforces its own deadline inside the handler so a timeout
-        // still returns the documented JSON envelope and CORS headers, which a
-        // transport-level layer cannot do.
-        //
-        // SEC-09: the limiter is deliberately scoped to `/api/v1` only.
-        // `/health` must keep answering during a flood (a 503 there trips the
-        // platform's restart policy), and `/internal` is already secret-gated
-        // and served entirely from the web tier's single address, where a
-        // per-IP limit would throttle the whole application.
+        // SEC-09: scoped to `/api/v1` only — `/health` must answer through a flood and `/internal` is secret-gated.
         .nest(
             "/api/v1",
             api::router().layer(GovernorLayer::new(governor).error_handler(rate_limited_response)),
@@ -187,8 +144,7 @@ fn build_router_with_rate_limit(state: AppState, replenish_ms: u64, burst: u32) 
                     REQUEST_TIMEOUT,
                 )),
         )
-        // The AI routes are deliberately excluded — they carry their own (much
-        // longer) deadlines and semaphores.
+        // AI routes carry their own, much longer, deadlines and semaphores, so they stay off this timeout layer.
         .merge(legacy_api::router())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -207,9 +163,7 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_env()?;
     let db = PgPoolOptions::new()
         .max_connections(config.postgres_pool_max)
-        // Below the request timeout layer, so a starved pool surfaces as a
-        // fast 500 rather than queueing behind sqlx's 30s default while the
-        // proxy in front has already given up.
+        // Below `REQUEST_TIMEOUT`, so a starved pool fails fast instead of queueing past sqlx's 30s default.
         .acquire_timeout(POSTGRES_ACQUIRE_TIMEOUT)
         .connect_with(config.postgres_connect_options()?)
         .await
@@ -230,8 +184,7 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("failed to bind backend port {}", config.port))?;
 
     tracing::info!(%address, port = config.port, "macro tracker backend listening");
-    // `ConnectInfo` is what the rate limiter keys on; without it every request
-    // would fail key extraction.
+    // The rate limiter keys on `ConnectInfo`; without it every request fails key extraction.
     axum::serve(
         listener,
         build_router(state).into_make_service_with_connect_info::<SocketAddr>(),
