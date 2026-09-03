@@ -92,6 +92,7 @@ const DRIZZLE_MIGRATION_JOURNAL: &str =
     include_str!("../../../packages/db/drizzle/meta/_journal.json");
 const DEFAULT_MEAL_GROUP_LABELS: [&str; 4] = ["Breakfast", "Lunch", "Dinner", "Snack"];
 
+/// SQL is only ever assembled from compile-time constants in `db/sql.rs`, never from runtime values.
 /// Contract: a preceding CTE named `streak_days` with one row per eaten-entry date, and `$2` bound to the reference date.
 macro_rules! streak_summary_ctes {
     () => {
@@ -3436,7 +3437,7 @@ async fn list_admin_users_json(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        // The SQL declares `ESCAPE '\\'`, so the backslash itself has to be escaped too.
+        // The SQL declares `ESCAPE '\'`, so the backslash itself has to be escaped too.
         .map(|value| format!("%{}%", escape_like_pattern(value)));
     let role = input
         .get("role")
