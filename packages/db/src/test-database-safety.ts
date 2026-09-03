@@ -25,14 +25,17 @@ function isClearlyTestDatabaseName(name: string) {
   return TEST_DATABASE_MARKER_PATTERN.test(name);
 }
 
+function isTruthyEnvToggle(value: string | undefined) {
+  const normalized = value?.trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
 function allowsDestructiveLocalDatabase(env: TestDatabaseEnv) {
-  const value = env[ALLOW_DESTRUCTIVE_LOCAL_DB_ENV]?.trim().toLowerCase();
-  return value === "1" || value === "true" || value === "yes" || value === "on";
+  return isTruthyEnvToggle(env[ALLOW_DESTRUCTIVE_LOCAL_DB_ENV]);
 }
 
 function allowsDestructiveRemoteDatabase(env: TestDatabaseEnv) {
-  const value = env[ALLOW_DESTRUCTIVE_REMOTE_DB_ENV]?.trim().toLowerCase();
-  return value === "1" || value === "true" || value === "yes" || value === "on";
+  return isTruthyEnvToggle(env[ALLOW_DESTRUCTIVE_REMOTE_DB_ENV]);
 }
 
 function parsePostgresUrl(connectionString: string, source: string) {

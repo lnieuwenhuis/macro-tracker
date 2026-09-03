@@ -25,6 +25,31 @@ import { createTestDatabase } from "../src/testing";
 import { eq, sql } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
+function barcodeProductInput(
+  barcode: string,
+  name: string,
+  overrides: Partial<{
+    brands: string | null;
+    proteinG: number;
+    carbsG: number;
+    fatG: number;
+    caloriesKcal: number;
+    servingSizeG: number | null;
+  }> = {},
+) {
+  return {
+    barcode,
+    name,
+    brands: "Macro Lab",
+    proteinG: 10,
+    carbsG: 20,
+    fatG: 5,
+    caloriesKcal: 165,
+    servingSizeG: 100,
+    ...overrides,
+  };
+}
+
 describe("admin queries", () => {
   let runtime: DatabaseRuntime;
   let ownerId: string;
@@ -128,16 +153,7 @@ describe("admin queries", () => {
     for (let index = 0; index < 5; index += 1) {
       await createAdminBarcodeProduct(
         adminId,
-        {
-          barcode: `99000000004${index}`,
-          name: `Admin Submitted Food ${index}`,
-          brands: "Macro Lab",
-          proteinG: 10,
-          carbsG: 20,
-          fatG: 5,
-          caloriesKcal: 165,
-          servingSizeG: 100,
-        },
+        barcodeProductInput(`99000000004${index}`, `Admin Submitted Food ${index}`),
       );
     }
 
@@ -173,16 +189,13 @@ describe("admin queries", () => {
   it("creates, updates, soft-deletes, restores, and filters barcode records", async () => {
     const created = await createAdminBarcodeProduct(
       adminId,
-      {
-        barcode: "9900000000001",
-        name: "Admin Peanut Butter",
-        brands: "Macro Lab",
+      barcodeProductInput("9900000000001", "Admin Peanut Butter", {
         proteinG: 25,
         carbsG: 18,
         fatG: 50,
         caloriesKcal: 620,
         servingSizeG: 15,
-      },
+      }),
     );
 
     expect(await lookupBarcodeFoodProduct("9900000000001")).toMatchObject({
@@ -202,16 +215,13 @@ describe("admin queries", () => {
     const updated = await updateAdminBarcodeProduct(
       adminId,
       created.id,
-      {
-        barcode: "9900000000002",
-        name: "Admin Peanut Butter Deluxe",
-        brands: "Macro Lab",
+      barcodeProductInput("9900000000002", "Admin Peanut Butter Deluxe", {
         proteinG: 26,
         carbsG: 17,
         fatG: 49,
         caloriesKcal: 615,
         servingSizeG: 15,
-      },
+      }),
     );
 
     expect(updated.name).toBe("Admin Peanut Butter Deluxe");
@@ -303,16 +313,7 @@ describe("admin queries", () => {
   it("builds barcode review queue reasons", async () => {
     const lowConfidence = await createAdminBarcodeProduct(
       adminId,
-      {
-        barcode: "9900000000501",
-        name: "Review Queue Duplicate",
-        brands: "Macro Lab",
-        proteinG: 10,
-        carbsG: 20,
-        fatG: 5,
-        caloriesKcal: 165,
-        servingSizeG: 100,
-      },
+      barcodeProductInput("9900000000501", "Review Queue Duplicate"),
     );
     await runtime.db
       .update(foodProducts)
@@ -325,100 +326,46 @@ describe("admin queries", () => {
 
     const duplicateName = await createAdminBarcodeProduct(
       adminId,
-      {
-        barcode: "9900000000502",
-        name: "Review Queue Duplicate",
-        brands: "Macro Lab",
-        proteinG: 10,
-        carbsG: 20,
-        fatG: 5,
-        caloriesKcal: 165,
-        servingSizeG: 100,
-      },
+      barcodeProductInput("9900000000502", "Review Queue Duplicate"),
     );
     const deleted = await createAdminBarcodeProduct(
       adminId,
-      {
-        barcode: "9900000000503",
-        name: "Recently Deleted Food",
-        brands: "Macro Lab",
-        proteinG: 10,
-        carbsG: 20,
-        fatG: 5,
-        caloriesKcal: 165,
-        servingSizeG: 100,
-      },
+      barcodeProductInput("9900000000503", "Recently Deleted Food"),
     );
     await softDeleteAdminBarcodeProduct(adminId, deleted.id);
     const restored = await createAdminBarcodeProduct(
       adminId,
-      {
-        barcode: "9900000000504",
-        name: "Recently Restored Food",
-        brands: "Macro Lab",
-        proteinG: 10,
-        carbsG: 20,
-        fatG: 5,
-        caloriesKcal: 165,
-        servingSizeG: 100,
-      },
+      barcodeProductInput("9900000000504", "Recently Restored Food"),
     );
     await softDeleteAdminBarcodeProduct(adminId, restored.id);
     await restoreAdminBarcodeProduct(adminId, restored.id);
     await updateAdminBarcodeProduct(
       adminId,
       restored.id,
-      {
-        barcode: "9900000000504",
-        name: "Recently Restored Food Updated",
-        brands: "Macro Lab",
+      barcodeProductInput("9900000000504", "Recently Restored Food Updated", {
         proteinG: 11,
-        carbsG: 20,
-        fatG: 5,
         caloriesKcal: 169,
-        servingSizeG: 100,
-      },
+      }),
     );
     const frequent = await createAdminBarcodeProduct(
       adminId,
-      {
-        barcode: "9900000000505",
-        name: "Frequently Revised Food",
-        brands: "Macro Lab",
-        proteinG: 10,
-        carbsG: 20,
-        fatG: 5,
-        caloriesKcal: 165,
-        servingSizeG: 100,
-      },
+      barcodeProductInput("9900000000505", "Frequently Revised Food"),
     );
     await updateAdminBarcodeProduct(
       adminId,
       frequent.id,
-      {
-        barcode: "9900000000505",
-        name: "Frequently Revised Food V2",
-        brands: "Macro Lab",
+      barcodeProductInput("9900000000505", "Frequently Revised Food V2", {
         proteinG: 11,
-        carbsG: 20,
-        fatG: 5,
         caloriesKcal: 169,
-        servingSizeG: 100,
-      },
+      }),
     );
     await updateAdminBarcodeProduct(
       adminId,
       frequent.id,
-      {
-        barcode: "9900000000505",
-        name: "Frequently Revised Food V3",
-        brands: "Macro Lab",
+      barcodeProductInput("9900000000505", "Frequently Revised Food V3", {
         proteinG: 12,
-        carbsG: 20,
-        fatG: 5,
         caloriesKcal: 173,
-        servingSizeG: 100,
-      },
+      }),
     );
 
     const queue = await listAdminBarcodeReviewQueue(
@@ -446,30 +393,20 @@ describe("admin queries", () => {
   it("prevents restoring a deleted barcode when an active replacement uses the same barcode", async () => {
     const deletedOriginal = await createAdminBarcodeProduct(
       adminId,
-      {
-        barcode: "9900000000099",
-        name: "Original Barcode Food",
-        brands: "Macro Lab",
+      barcodeProductInput("9900000000099", "Original Barcode Food", {
         proteinG: 12,
-        carbsG: 20,
         fatG: 4,
         caloriesKcal: 164,
-        servingSizeG: 100,
-      },
+      }),
     );
     await softDeleteAdminBarcodeProduct(adminId, deletedOriginal.id);
     await createAdminBarcodeProduct(
       adminId,
-      {
-        barcode: "9900000000099",
-        name: "Replacement Barcode Food",
-        brands: "Macro Lab",
+      barcodeProductInput("9900000000099", "Replacement Barcode Food", {
         proteinG: 14,
         carbsG: 18,
-        fatG: 5,
         caloriesKcal: 173,
-        servingSizeG: 100,
-      },
+      }),
     );
 
     await expect(
@@ -489,62 +426,41 @@ describe("admin queries", () => {
   it("prevents duplicate active barcode creates and updates", async () => {
     await createAdminBarcodeProduct(
       adminId,
-      {
-        barcode: "9900000000101",
-        name: "Original Duplicate Guard Food",
-        brands: "Macro Lab",
-        proteinG: 10,
-        carbsG: 20,
-        fatG: 5,
-        caloriesKcal: 165,
-        servingSizeG: 100,
-      },
+      barcodeProductInput("9900000000101", "Original Duplicate Guard Food"),
     );
 
     await expect(
       createAdminBarcodeProduct(
         adminId,
-        {
-          barcode: "9900000000101",
-          name: "Duplicate Guard Food",
-          brands: "Macro Lab",
+        barcodeProductInput("9900000000101", "Duplicate Guard Food", {
           proteinG: 12,
           carbsG: 19,
           fatG: 6,
           caloriesKcal: 178,
-          servingSizeG: 100,
-        },
+        }),
       ),
     ).rejects.toThrow("That barcode already exists.");
 
     const other = await createAdminBarcodeProduct(
       adminId,
-      {
-        barcode: "9900000000102",
-        name: "Other Duplicate Guard Food",
-        brands: "Macro Lab",
+      barcodeProductInput("9900000000102", "Other Duplicate Guard Food", {
         proteinG: 14,
         carbsG: 18,
         fatG: 4,
         caloriesKcal: 164,
-        servingSizeG: 100,
-      },
+      }),
     );
 
     await expect(
       updateAdminBarcodeProduct(
         adminId,
         other.id,
-        {
-          barcode: "9900000000101",
-          name: "Other Duplicate Guard Food",
-          brands: "Macro Lab",
+        barcodeProductInput("9900000000101", "Other Duplicate Guard Food", {
           proteinG: 14,
           carbsG: 18,
           fatG: 4,
           caloriesKcal: 164,
-          servingSizeG: 100,
-        },
+        }),
       ),
     ).rejects.toThrow("That barcode already exists.");
 
@@ -556,16 +472,7 @@ describe("admin queries", () => {
   it("enforces active global barcode uniqueness at the database level", async () => {
     await createAdminBarcodeProduct(
       adminId,
-      {
-        barcode: "9900000000201",
-        name: "Indexed Barcode Food",
-        brands: "Macro Lab",
-        proteinG: 10,
-        carbsG: 20,
-        fatG: 5,
-        caloriesKcal: 165,
-        servingSizeG: 100,
-      },
+      barcodeProductInput("9900000000201", "Indexed Barcode Food"),
     );
 
     await expect(
@@ -648,16 +555,7 @@ describe("admin queries", () => {
   it("finds active barcode duplicates when a newer deleted duplicate also exists", async () => {
     const active = await createAdminBarcodeProduct(
       adminId,
-      {
-        barcode: "9900000000301",
-        name: "Active Masking Guard Food",
-        brands: "Macro Lab",
-        proteinG: 10,
-        carbsG: 20,
-        fatG: 5,
-        caloriesKcal: 165,
-        servingSizeG: 100,
-      },
+      barcodeProductInput("9900000000301", "Active Masking Guard Food"),
     );
 
     await runtime.db.execute(sql.raw(`
@@ -701,32 +599,24 @@ describe("admin queries", () => {
 
     const other = await createAdminBarcodeProduct(
       adminId,
-      {
-        barcode: "9900000000302",
-        name: "Other Masking Guard Food",
-        brands: "Macro Lab",
+      barcodeProductInput("9900000000302", "Other Masking Guard Food", {
         proteinG: 14,
         carbsG: 18,
         fatG: 4,
         caloriesKcal: 164,
-        servingSizeG: 100,
-      },
+      }),
     );
 
     await expect(
       updateAdminBarcodeProduct(
         adminId,
         other.id,
-        {
-          barcode: "9900000000301",
-          name: "Other Masking Guard Food",
-          brands: "Macro Lab",
+        barcodeProductInput("9900000000301", "Other Masking Guard Food", {
           proteinG: 14,
           carbsG: 18,
           fatG: 4,
           caloriesKcal: 164,
-          servingSizeG: 100,
-        },
+        }),
       ),
     ).rejects.toThrow("That barcode already exists.");
 

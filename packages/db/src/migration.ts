@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { createDatabaseRuntime, getDatabaseRuntime, type DatabaseRuntime } from "./client";
 import * as schema from "./schema";
+import { readPositiveIntegerEnv } from "./postgres-config.js";
 import { resolveDestructiveTestDatabaseUrl } from "./test-database-safety";
 
 const migratedPostgresTestDatabaseUrls = new Set<string>();
@@ -19,22 +20,10 @@ const POSTGRES_MIGRATION_LOCK_ID = 1_836_027_411;
 
 // Caps how long blocked DDL stalls the migration, which runs as a Railway preDeployCommand while the old version still serves traffic.
 const DEFAULT_MIGRATION_LOCK_TIMEOUT_MS = 3_000;
-/** Overall cap per migration statement, independent of lock waits. */
 const DEFAULT_MIGRATION_STATEMENT_TIMEOUT_MS = 300_000;
 // Without this bound, a hung-but-alive previous migration process holding the advisory lock blocks every subsequent deploy indefinitely.
 const DEFAULT_MIGRATION_LOCK_ACQUIRE_TIMEOUT_MS = 60_000;
 const MIGRATION_LOCK_RETRY_INTERVAL_MS = 1_000;
-
-function readPositiveIntegerEnv(name: string, fallback: number) {
-  const value = process.env[name];
-
-  if (!value) {
-    return fallback;
-  }
-
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
-}
 
 function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));

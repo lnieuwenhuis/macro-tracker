@@ -79,6 +79,25 @@ async function applyMigration(runtime: DatabaseRuntime, fileName: string) {
   }
 }
 
+const POSTGRES_RESET_SQL =
+  "DROP SCHEMA public CASCADE; DROP SCHEMA IF EXISTS drizzle CASCADE; CREATE SCHEMA public";
+
+async function requirePostgresRuntime(purpose: string) {
+  const databaseUrl = resolveDestructiveTestDatabaseUrl(process.env, {
+    explicitEnvNames: ["TEST_DATABASE_URL"],
+    purpose,
+  });
+  if (!databaseUrl) {
+    throw new Error("TEST_DATABASE_URL is required");
+  }
+
+  return createDatabaseRuntime(databaseUrl);
+}
+
+async function resetPostgresSchema(runtime: DatabaseRuntime) {
+  await runtime.db.execute(sql.raw(POSTGRES_RESET_SQL));
+}
+
 describe("database migrations", () => {
   let runtime: DatabaseRuntime | undefined;
   let tempDir: string | undefined;
@@ -750,21 +769,11 @@ describe("database migrations", () => {
 
 describe.skipIf(!process.env.TEST_DATABASE_URL)("PostgreSQL migration regressions", () => {
   it("accepts the previous backend default-group insert after migration 0013", async () => {
-    const databaseUrl = resolveDestructiveTestDatabaseUrl(process.env, {
-      explicitEnvNames: ["TEST_DATABASE_URL"],
-      purpose: "default meal-group rollout regression test",
-    });
-    if (!databaseUrl) {
-      throw new Error("TEST_DATABASE_URL is required");
-    }
-
-    const postgresRuntime = await createDatabaseRuntime(databaseUrl);
+    const postgresRuntime = await requirePostgresRuntime(
+      "default meal-group rollout regression test",
+    );
     try {
-      await postgresRuntime.db.execute(
-        sql.raw(
-          "DROP SCHEMA public CASCADE; DROP SCHEMA IF EXISTS drizzle CASCADE; CREATE SCHEMA public",
-        ),
-      );
+      await resetPostgresSchema(postgresRuntime);
 
       for (const fileName of migrationFiles.slice(0, 8)) {
         await applyMigration(postgresRuntime, fileName);
@@ -839,16 +848,11 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PostgreSQL migration regression
   });
 
   it("keeps food search working when the migration role cannot install pg_trgm", async () => {
-    const databaseUrl = resolveDestructiveTestDatabaseUrl(process.env, {
-      explicitEnvNames: ["TEST_DATABASE_URL"],
-      purpose: "restricted-role trigram migration regression test",
-    });
-    if (!databaseUrl) {
-      throw new Error("TEST_DATABASE_URL is required");
-    }
+    const postgresRuntime = await requirePostgresRuntime(
+      "restricted-role trigram migration regression test",
+    );
 
     const roleName = "macro_tracker_no_trgm_migrator";
-    const postgresRuntime = await createDatabaseRuntime(databaseUrl);
     const migrationPool = postgresRuntime.migrationPool;
     if (!migrationPool) {
       await postgresRuntime.close();
@@ -979,22 +983,13 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PostgreSQL migration regression
   });
 
   it("serializes concurrent migration runners", async () => {
-    const databaseUrl = resolveDestructiveTestDatabaseUrl(process.env, {
-      explicitEnvNames: ["TEST_DATABASE_URL"],
-      purpose: "concurrent migration regression test",
-    });
-    if (!databaseUrl) {
-      throw new Error("TEST_DATABASE_URL is required");
-    }
+    const setupRuntime = await requirePostgresRuntime(
+      "concurrent migration regression test",
+    );
 
     const migrationsFolder = await mkdtemp(join(tmpdir(), "macro-tracker-migrations-"));
-    const setupRuntime = await createDatabaseRuntime(databaseUrl);
     try {
-      await setupRuntime.db.execute(
-        sql.raw(
-          "DROP SCHEMA public CASCADE; DROP SCHEMA IF EXISTS drizzle CASCADE; CREATE SCHEMA public",
-        ),
-      );
+      await resetPostgresSchema(setupRuntime);
       await mkdir(join(migrationsFolder, "meta"));
       await writeFile(
         join(migrationsFolder, "meta", "_journal.json"),
@@ -1023,8 +1018,8 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PostgreSQL migration regression
       );
 
       const runtimes = await Promise.all([
-        createDatabaseRuntime(databaseUrl),
-        createDatabaseRuntime(databaseUrl),
+        requirePostgresRuntime("concurrent migration regression test"),
+        requirePostgresRuntime("concurrent migration regression test"),
       ]);
       try {
         await Promise.all(
@@ -1046,11 +1041,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PostgreSQL migration regression
       );
       expect(journal.rows).toEqual([{ count: "1" }]);
     } finally {
-      await setupRuntime.db.execute(
-        sql.raw(
-          "DROP SCHEMA public CASCADE; DROP SCHEMA IF EXISTS drizzle CASCADE; CREATE SCHEMA public",
-        ),
-      );
+      await resetPostgresSchema(setupRuntime);
       await migrateDatabase(setupRuntime);
       await setupRuntime.close();
       await rm(migrationsFolder, { recursive: true, force: true });
@@ -1058,30 +1049,19 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PostgreSQL migration regression
   });
 
   it("sets lock_timeout and statement_timeout on the migration connection before migrating (DB-02)", async () => {
-    const databaseUrl = resolveDestructiveTestDatabaseUrl(process.env, {
-      explicitEnvNames: ["TEST_DATABASE_URL"],
-      purpose: "migration connection timeout regression test",
-    });
-    if (!databaseUrl) {
-      throw new Error("TEST_DATABASE_URL is required");
-    }
-
     const previousPoolMax = process.env.POSTGRES_POOL_MAX;
     // Forces a single physical connection so the one we inspect is the one the migration ran on.
     process.env.POSTGRES_POOL_MAX = "1";
 
-    const postgresRuntime = await createDatabaseRuntime(databaseUrl);
+    const postgresRuntime = await requirePostgresRuntime(
+      "migration connection timeout regression test",
+    );
     try {
-      await postgresRuntime.db.execute(
-        sql.raw(
-          "DROP SCHEMA public CASCADE; DROP SCHEMA IF EXISTS drizzle CASCADE; CREATE SCHEMA public",
-        ),
-      );
+      await resetPostgresSchema(postgresRuntime);
 
       await migrateDatabase(postgresRuntime);
 
-      // `SET` (not `SET LOCAL`) persists for the session, so this reconnect on the
-      // single pooled connection (POSTGRES_POOL_MAX=1) sees the migration's settings.
+      // `SET` persists for the session, so this reconnect on the single pooled connection (POSTGRES_POOL_MAX=1) sees the migration's settings.
       const lockTimeoutResult = await postgresRuntime.migrationPool?.query<{
         lock_timeout: string;
       }>("SHOW lock_timeout");
@@ -1092,11 +1072,7 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PostgreSQL migration regression
       expect(lockTimeoutResult?.rows[0]?.lock_timeout).toBe("3s");
       expect(statementTimeoutResult?.rows[0]?.statement_timeout).toBe("5min");
     } finally {
-      await postgresRuntime.db.execute(
-        sql.raw(
-          "DROP SCHEMA public CASCADE; DROP SCHEMA IF EXISTS drizzle CASCADE; CREATE SCHEMA public",
-        ),
-      );
+      await resetPostgresSchema(postgresRuntime);
       await migrateDatabase(postgresRuntime);
       await postgresRuntime.close();
       if (previousPoolMax === undefined) {
@@ -1108,19 +1084,15 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PostgreSQL migration regression
   });
 
   it("gives up acquiring the migration advisory lock after a bounded timeout instead of hanging forever (DB-07)", async () => {
-    const databaseUrl = resolveDestructiveTestDatabaseUrl(process.env, {
-      explicitEnvNames: ["TEST_DATABASE_URL"],
-      purpose: "migration advisory lock timeout regression test",
-    });
-    if (!databaseUrl) {
-      throw new Error("TEST_DATABASE_URL is required");
-    }
-
     const previousAcquireTimeout = process.env.MIGRATION_LOCK_ACQUIRE_TIMEOUT_MS;
     process.env.MIGRATION_LOCK_ACQUIRE_TIMEOUT_MS = "1500";
 
-    const lockHolderRuntime = await createDatabaseRuntime(databaseUrl);
-    const contendingRuntime = await createDatabaseRuntime(databaseUrl);
+    const lockHolderRuntime = await requirePostgresRuntime(
+      "migration advisory lock timeout regression test",
+    );
+    const contendingRuntime = await requirePostgresRuntime(
+      "migration advisory lock timeout regression test",
+    );
     try {
       const holderClient = await lockHolderRuntime.migrationPool?.connect();
       if (!holderClient) {
@@ -1285,8 +1257,7 @@ describe("migration tooling invariants", () => {
   );
 
   it("does not offer db:generate now that migrations 0005+ are hand-authored (DB-01)", () => {
-    // `meta/` snapshots stop at 0004; `drizzle-kit generate` would diff against that
-    // stale baseline and emit a destructive migration. See MIGRATIONS.md.
+    // `meta/` snapshots stop at 0004, so `drizzle-kit generate` would emit a destructive migration. See MIGRATIONS.md.
     const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
       scripts?: Record<string, string>;
     };

@@ -40,7 +40,7 @@ import {
   recipeIngredients,
   recipes,
 } from "../src/schema";
-import { createTestDatabase } from "../src/testing";
+import { setupSingleUserContext } from "./helpers";
 import { eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -50,15 +50,7 @@ describe("database queries", () => {
   let userId: string;
 
   beforeEach(async () => {
-    runtime = await createTestDatabase();
-    const user = await upsertUserFromShooProfile(
-      {
-        pairwiseSub: "ps_test_user",
-        email: "coach@example.com",
-        displayName: "Coach",
-      },
-    );
-    userId = user.id;
+    ({ runtime, userId } = await setupSingleUserContext());
   });
 
   afterEach(async () => {
