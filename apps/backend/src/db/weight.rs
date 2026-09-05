@@ -4,7 +4,7 @@ use super::{MAX_COLLECTION_ROWS, optional_f64, required_date, trim_optional_stri
 use crate::errors::{AppError, AppResult};
 use crate::shared::{round1, round2};
 use chrono::{Duration, NaiveDate};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
@@ -116,7 +116,7 @@ pub(super) async fn weight_page_data_json(
             .fetch_one(pool)
             .await?;
     let goal_weight_kg: Option<f64> = row.try_get("goal_weight_kg")?;
-    let entry_array = entries.as_array().cloned().unwrap_or_default();
+    let entry_array = entries.as_array().map(Vec::as_slice).unwrap_or_default();
     let stat_entries = entry_array
         .iter()
         .map(weight_stat_entry)
@@ -146,16 +146,16 @@ pub(super) async fn weight_page_data_json(
             Some(trend_direction_from_diff((first_diff + second_diff) / 2.0))
         }
     };
-    Ok(json!({
-        "entries": entries,
-        "goalWeightKg": goal_weight_kg,
-        "stats": {
-            "currentWeight": current_weight,
-            "weekChange": week_change,
-            "monthChange": month_change,
-            "trendDirection": trend_direction
-        }
-    }))
+    let mut stats = Map::with_capacity(4);
+    stats.insert("currentWeight".to_string(), json!(current_weight));
+    stats.insert("weekChange".to_string(), json!(week_change));
+    stats.insert("monthChange".to_string(), json!(month_change));
+    stats.insert("trendDirection".to_string(), json!(trend_direction));
+    let mut response = Map::with_capacity(3);
+    response.insert("entries".to_string(), entries);
+    response.insert("goalWeightKg".to_string(), json!(goal_weight_kg));
+    response.insert("stats".to_string(), Value::Object(stats));
+    Ok(Value::Object(response))
 }
 
 pub(super) async fn create_weight_entry_json(

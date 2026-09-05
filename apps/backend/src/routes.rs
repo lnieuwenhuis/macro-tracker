@@ -124,22 +124,22 @@ async fn internal_rpc(
     State(state): State<AppState>,
     _auth: InternalAuth,
     Json(payload): Json<InternalRpcRequest>,
-) -> AppResult<Json<Value>> {
+) -> AppResult<Json<crate::types::OkResponse<Value>>> {
     if let Some(value) = config_scoped_rpc(&state, &payload.op, &payload.args).await? {
-        return Ok(Json(serde_json::to_value(ok(value))?));
+        return Ok(Json(ok(value)));
     }
 
     let value = db::rpc_json(&state.db, &payload.op, payload.args).await?;
-    Ok(Json(serde_json::to_value(ok(value))?))
+    Ok(Json(ok(value)))
 }
 
 async fn current_session(
     state: State<AppState>,
     _auth: InternalAuth,
     headers: HeaderMap,
-) -> AppResult<Json<Value>> {
+) -> AppResult<Json<crate::types::OkResponse<crate::types::AppUser>>> {
     let user = auth::current_user_from_headers(state, headers).await?;
-    Ok(Json(serde_json::to_value(ok(user))?))
+    Ok(Json(ok(user)))
 }
 
 #[derive(Deserialize)]
@@ -161,7 +161,7 @@ async fn verify_shoo(
     State(state): State<AppState>,
     _auth: InternalAuth,
     Json(payload): Json<ShooVerifyRequest>,
-) -> AppResult<Json<Value>> {
+) -> AppResult<Json<crate::types::OkResponse<ShooVerifyResponse>>> {
     if !state.config.is_trusted_origin(&payload.app_origin) {
         return Err(AppError::Forbidden("Origin is not trusted.".to_string()));
     }
@@ -169,9 +169,9 @@ async fn verify_shoo(
     let (session, _user) =
         auth::authorize_shoo_login(&state, &payload.id_token, &payload.app_origin).await?;
     let session_token = auth::create_session_token(&state.config, &session)?;
-    Ok(Json(serde_json::to_value(ok(ShooVerifyResponse {
+    Ok(Json(ok(ShooVerifyResponse {
         session_token,
         session_max_age_seconds: auth::SESSION_MAX_AGE_SECONDS,
         user: session,
-    }))?))
+    })))
 }

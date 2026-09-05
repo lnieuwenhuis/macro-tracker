@@ -26,7 +26,9 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Clone)]
 pub struct AppState {
-    pub config: Config,
+    /// Router clones state for request handling. Configuration is immutable after startup, so
+    /// share it instead of copying its strings and origin lists on every state clone.
+    pub config: Arc<Config>,
     pub db: sqlx::PgPool,
     pub http: reqwest::Client,
 }
@@ -173,17 +175,18 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("failed to verify database migrations")?;
 
+    let address = listen_address(&config);
+    let port = config.port;
     let state = AppState {
-        config: config.clone(),
+        config: Arc::new(config),
         db,
         http: build_http_client().context("failed to build the outbound HTTP client")?,
     };
-    let address = listen_address(&config);
-    let listener = TcpListener::bind((address, config.port))
+    let listener = TcpListener::bind((address, port))
         .await
-        .with_context(|| format!("failed to bind backend port {}", config.port))?;
+        .with_context(|| format!("failed to bind backend port {port}"))?;
 
-    tracing::info!(%address, port = config.port, "macro tracker backend listening");
+    tracing::info!(%address, port, "macro tracker backend listening");
     // The rate limiter keys on `ConnectInfo`; without it every request fails key extraction.
     axum::serve(
         listener,
