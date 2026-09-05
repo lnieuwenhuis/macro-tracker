@@ -38,7 +38,7 @@ fn test_config(session_secret: &str) -> crate::config::Config {
 
 fn test_state() -> crate::AppState {
     crate::AppState {
-        config: test_config("session-secret-with-at-least-32-chars"),
+        config: Arc::new(test_config("session-secret-with-at-least-32-chars")),
         db: PgPoolOptions::new()
             .connect_lazy("postgres://postgres:postgres@127.0.0.1:5432/macro_tracker")
             .expect("test pool should be created lazily"),
@@ -118,7 +118,7 @@ async fn jwks_base_url(jwks_body: String) -> (String, Arc<AtomicUsize>) {
 
 /// Throwaway P-256 keypair for these tests only; Shoo signs ID tokens with ES256 (see SEC-19).
 const TEST_EC_PRIVATE_KEY_PEM: &str = concat!(
-    "-----BEGIN PRIVATE KEY-----\n",
+    "-----BEGIN PRIVATE KEY-----\n", // gitleaks:allow -- deterministic loopback-only test fixture, never loaded in production.
     "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgl7f/GjQzI961QUMc\n",
     "9mCHWJo8/lNDAwg3zxZzakX5IbmhRANCAATa0cFohs0y4U+YZ4z04JTsZWB5XQjx\n",
     "hOc/kCgxv30TfZ9j0RGhSh2nw1h0n4dDKoIm/1HmggrwIu2WjiAozhFT\n",
@@ -214,7 +214,7 @@ async fn internal_auth_does_not_reveal_that_the_secret_is_unconfigured() {
     let mut config = test_config("session-secret-with-at-least-32-chars");
     config.backend_internal_secret = None;
     let state = crate::AppState {
-        config,
+        config: Arc::new(config),
         db: PgPoolOptions::new()
             .connect_lazy("postgres://postgres:***@127.0.0.1:5432/macro_tracker")
             .expect("test pool should be created lazily"),
@@ -329,6 +329,23 @@ async fn shoo_jwks_are_cached_per_base_url() {
     assert_eq!(request_count.load(Ordering::SeqCst), 1);
 }
 
+#[tokio::test]
+async fn cached_shoo_jwks_reuses_the_fetched_key_set_allocation() {
+    let kid = "shared-key";
+    let (base_url, request_count) = jwks_base_url(ec_jwks(kid)).await;
+    let state = shoo_state_for(&base_url);
+
+    let first = fetch_shoo_jwks(&state)
+        .await
+        .expect("initial JWKS fetch should succeed");
+    let second = fetch_shoo_jwks(&state)
+        .await
+        .expect("cached JWKS fetch should succeed");
+
+    assert!(Arc::ptr_eq(&first, &second));
+    assert_eq!(request_count.load(Ordering::SeqCst), 1);
+}
+
 /// Like `jwks_base_url`, but every request fails upstream.
 async fn failing_jwks_base_url() -> (String, Arc<AtomicUsize>) {
     spawn_looping_stub_server(
@@ -341,7 +358,7 @@ fn shoo_state_for(base_url: &str) -> crate::AppState {
     let mut config = test_config("session-secret-with-at-least-32-chars");
     config.shoo_base_url = base_url.to_string();
     crate::AppState {
-        config,
+        config: Arc::new(config),
         db: PgPoolOptions::new()
             .connect_lazy("postgres://postgres:***@127.0.0.1:5432/macro_tracker")
             .expect("test pool should be created lazily"),
@@ -414,7 +431,7 @@ async fn shoo_state_with_jwks(jwks_body: String) -> (crate::AppState, String) {
     let mut config = test_config("session-secret-with-at-least-32-chars");
     config.shoo_base_url = base_url.clone();
     let state = crate::AppState {
-        config,
+        config: Arc::new(config),
         db: PgPoolOptions::new()
             .connect_lazy("postgres://postgres:***@127.0.0.1:5432/macro_tracker")
             .expect("test pool should be created lazily"),

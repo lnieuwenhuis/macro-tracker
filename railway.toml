@@ -27,7 +27,7 @@ watchPatterns = [
 ]
 
 [deploy]
-startCommand = "pnpm --filter @macro-tracker/web start"
+startCommand = "node apps/web/scripts/start-with-migrations.mjs"
 # NOT "/": the session proxy 307-redirects unauthenticated requests, and as of
 # 2026-08-31 Railway's healthcheck rejects non-2xx (the 2026-08-19 deploy
 # passed with the identical app returning 307 on "/", so the platform

@@ -13,6 +13,7 @@
         "app/**/{page,layout,route}.{ts,tsx}",
         "scripts/*.mjs",
         "tests/**/*.test.ts",
+        "tests/fixtures/auth-render.mjs",
         "next.config.ts"
       ],
       "project": ["**/*.{ts,tsx,mts,mjs}"]

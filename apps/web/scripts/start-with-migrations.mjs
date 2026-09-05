@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -89,23 +90,26 @@ export function getNextServerEnv(env = process.env) {
   };
 }
 
-function startNext() {
+async function startNext() {
   const standaloneServerPath = getStandaloneServerPath();
-  const command = standaloneServerPath ? process.execPath : "next";
-  const args = standaloneServerPath ? [standaloneServerPath] : ["start"];
-  const child = spawn(command, args, {
-    stdio: "inherit",
-    env: getNextServerEnv(),
-  });
+  Object.assign(process.env, getNextServerEnv());
 
-  child.on("exit", (code, signal) => {
-    if (signal) {
-      process.kill(process.pid, signal);
-      return;
-    }
+  if (standaloneServerPath) {
+    // The generated entrypoint owns config, binding, startup errors and graceful
+    // shutdown. Load it here so there is no idle Node parent around the server.
+    await import(pathToFileURL(standaloneServerPath).href);
+    return;
+  }
 
-    process.exit(code ?? 0);
-  });
+  // Keep the real CLI's validation/defaults when standalone output is absent.
+  // Resolve from this app, independently of the caller's working directory/PATH.
+  const require = createRequire(import.meta.url);
+  const nextCli = require.resolve("next/dist/bin/next");
+  process.argv = [
+    process.execPath, nextCli, "start", getAppDir(),
+    "--hostname", process.env.HOSTNAME,
+  ];
+  await import(pathToFileURL(nextCli).href);
 }
 
 function isMainModule() {
@@ -119,7 +123,7 @@ if (isMainModule()) {
   runMigrationsIfNeeded()
     .then(startNext)
     .catch((error) => {
-      console.error("Startup migrations failed", error);
+      console.error("Frontend startup failed", error);
       process.exit(1);
     });
 }

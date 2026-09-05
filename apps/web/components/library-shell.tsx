@@ -1,6 +1,6 @@
 "use client";
 
-import type { FoodProduct, MealTemplate, RecipeRecord } from "@macro-tracker/db";
+import type { FoodProduct, MealTemplateSummary, RecipeSummary } from "@macro-tracker/db";
 import { useRouter } from "next/navigation";
 import { useDeferredValue, useEffect, useMemo, useState, useTransition } from "react";
 
@@ -8,11 +8,7 @@ import {
   filterLibraryItemsByQuery,
   normalizeLibraryQuery,
 } from "@/lib/library-search";
-import {
-  getTemplateMacroTotals,
-  isDayTemplate,
-  isFoodItemTemplate,
-} from "@/lib/template-macros";
+import { isDayTemplate, isFoodItemTemplate } from "@/lib/template-macros";
 import { AppShell, SettingsButton } from "./app-shell";
 import { LibraryHubNav } from "./library-hub-nav";
 import { TransitionLink } from "./transition-link";
@@ -23,8 +19,8 @@ type LibraryShellProps = {
   selectedDate: string;
   query: string;
   products: FoodProduct[];
-  templates: MealTemplate[];
-  recipes: RecipeRecord[];
+  templates: MealTemplateSummary[];
+  recipes: RecipeSummary[];
   todayStr?: string;
 };
 
@@ -43,11 +39,11 @@ function LibraryTemplateSection({
   title: string;
   linkHref: string;
   linkLabel: string;
-  templates: MealTemplate[];
+  templates: MealTemplateSummary[];
   emptyFoundCopy: string;
   emptySavedCopy: string;
   hasActiveSearch: boolean;
-  renderMeta: (template: MealTemplate, totals: { proteinG: number; caloriesKcal: number }) => React.ReactNode;
+  renderMeta: (template: MealTemplateSummary) => React.ReactNode;
 }) {
   return (
     <section>
@@ -65,7 +61,6 @@ function LibraryTemplateSection({
       </div>
       <div className="space-y-2">
         {templates.map((template) => {
-          const totals = getTemplateMacroTotals(template.items);
           return (
             <article
               key={template.id}
@@ -73,7 +68,7 @@ function LibraryTemplateSection({
             >
               <p className="font-semibold text-[var(--color-ink)]">{template.label}</p>
               <p className="mt-1 text-xs text-[var(--color-muted)]">
-                {renderMeta(template, totals)}
+                {renderMeta(template)}
               </p>
             </article>
           );
@@ -216,8 +211,8 @@ export function LibraryShell({
           emptyFoundCopy="No food item templates found."
           emptySavedCopy="No food item templates saved."
           hasActiveSearch={hasActiveTemplateSearch}
-          renderMeta={(_template, totals) => (
-            <>{totals.caloriesKcal} kcal - P {totals.proteinG}g</>
+          renderMeta={(template) => (
+            <>{template.totalMacros.caloriesKcal} kcal - P {template.totalMacros.proteinG}g</>
           )}
         />
 
@@ -229,8 +224,8 @@ export function LibraryShell({
           emptyFoundCopy="No day templates found."
           emptySavedCopy="No day templates saved."
           hasActiveSearch={hasActiveTemplateSearch}
-          renderMeta={(template, totals) => (
-            <>{template.items.length} item{template.items.length === 1 ? "" : "s"} - {totals.caloriesKcal} kcal - P {totals.proteinG}g</>
+          renderMeta={(template) => (
+            <>{template.itemCount} item{template.itemCount === 1 ? "" : "s"} - {template.totalMacros.caloriesKcal} kcal - P {template.totalMacros.proteinG}g</>
           )}
         />
 
