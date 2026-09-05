@@ -5,13 +5,14 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use std::env;
+use std::sync::Arc;
 use tower::ServiceExt;
 
 use config::test_config;
 
 fn test_state(config: Config) -> AppState {
     AppState {
-        config,
+        config: Arc::new(config),
         db: PgPoolOptions::new()
             .connect_lazy("postgres://postgres:***@127.0.0.1:5432/macro_tracker")
             .expect("test pool should be created lazily"),
@@ -21,7 +22,7 @@ fn test_state(config: Config) -> AppState {
 
 fn test_state_with_db(config: Config, db: sqlx::PgPool) -> AppState {
     AppState {
-        config,
+        config: Arc::new(config),
         db,
         http: reqwest::Client::new(),
     }

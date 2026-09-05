@@ -2,16 +2,29 @@ use super::*;
 use axum::{body::Body, http::Request};
 use http_body_util::BodyExt;
 use sqlx::postgres::PgPoolOptions;
+use std::sync::Arc;
 use tower::ServiceExt;
 
 fn test_state() -> AppState {
     AppState {
-        config: crate::config::test_config(),
+        config: Arc::new(crate::config::test_config()),
         db: PgPoolOptions::new()
             .connect_lazy("postgres://postgres:***@127.0.0.1:5432/macro_tracker")
             .expect("test pool should be created lazily"),
         http: reqwest::Client::new(),
     }
+}
+
+#[test]
+fn public_food_mapping_removes_private_fields_without_copying_the_array() {
+    let mapped = map_food_array(json!([{
+        "id": "food-1",
+        "name": "Oats",
+        "ownerUserId": "private-owner",
+        "sourceMetadata": { "upstream": "private" }
+    }]));
+
+    assert_eq!(mapped, json!([{ "id": "food-1", "name": "Oats" }]));
 }
 
 #[tokio::test]
