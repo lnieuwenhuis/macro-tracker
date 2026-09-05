@@ -4,16 +4,11 @@ import { addDays, format, parseISO, subDays } from "date-fns";
 export { formatMacroValue } from "./numbers";
 
 export function formatSelectedDate(value: string) {
-  // Short forms ("Mon, 31 Aug"): the header row now carries a round button on
-  // BOTH sides of the date pill, and the long form no longer fits at 375px.
+  // Short form: the date pill has a round button on both sides, and the long form no longer fits at 375px.
   return format(parseISO(value), "EEE, d MMM");
 }
 
-/**
- * Renders minutes-since-midnight as "HH:MM". Owns the one special case in the
- * gym schedule's time model: minute 1440 means "until midnight" and renders as
- * "00:00" (never "24:00"), so every render site must go through this helper.
- */
+// Owns gym time's one special case: minute 1440 ("until midnight") renders as "00:00", never "24:00".
 export function formatMinutesAsTime(minute: number) {
   const normalized = minute === 1440 ? 0 : minute;
   const hours = Math.floor(normalized / 60);

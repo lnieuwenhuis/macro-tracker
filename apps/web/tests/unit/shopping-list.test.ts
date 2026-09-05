@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import type { DailySummary, MealEntryRecord } from "@macro-tracker/db";
+import type { DailySummary, MealEntryRecord, PlannedShoppingSummary } from "@macro-tracker/db";
 
 import { buildShoppingList, formatShoppingListText } from "@/lib/shopping-list";
 
@@ -74,6 +74,28 @@ describe("buildShoppingList", () => {
         notes: ["2 planned entries"],
       }),
     ]);
+  });
+
+  it("keeps cross-group shopping display and clipboard output identical for compact summaries", () => {
+    const fullDailySummary = summary("2026-06-01", [
+      meal({ id: "breakfast", label: "Greek yogurt", quantity: 1.45, unit: "g", sortOrder: 0 }),
+      meal({ id: "dinner", label: " greek   yogurt ", quantity: 2.55, unit: "g", sortOrder: 0 }),
+    ]);
+    const compactSummary: PlannedShoppingSummary = {
+      date: "2026-06-01",
+      entryCount: 2,
+      plannedCaloriesKcal: 0,
+      meals: [
+        { label: "Greek yogurt", quantity: 1.45, unit: "g" },
+        { label: " greek   yogurt ", quantity: 2.55, unit: "g" },
+      ],
+    };
+
+    const fullItems = buildShoppingList([fullDailySummary]);
+    const compactItems = buildShoppingList([compactSummary]);
+    expect(compactItems).toEqual(fullItems);
+    expect(formatShoppingListText(compactItems)).toBe(formatShoppingListText(fullItems));
+    expect(formatShoppingListText(compactItems)).toBe("- Greek yogurt: 4 g (2 planned entries)");
   });
 
   it("keeps matching labels with different units separate", () => {

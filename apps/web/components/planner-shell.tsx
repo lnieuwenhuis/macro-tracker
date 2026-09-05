@@ -1,28 +1,19 @@
 "use client";
 
-import type { DailySummary, MealTemplate } from "@macro-tracker/db";
-import { useRouter } from "next/navigation";
-import {
-  useDeferredValue,
-  useMemo,
-  useState,
-  useTransition,
-} from "react";
+import type { MealTemplateSummary, PlannedShoppingSummary } from "@macro-tracker/db";
+import { useDeferredValue, useMemo, useState } from "react";
 
 import {
   applyTemplateAction,
   createTemplateFromDateAction,
 } from "@/lib/actions";
-import {
-  getTemplateMacroTotals,
-  isDayTemplate,
-  isFoodItemTemplate,
-} from "@/lib/template-macros";
+import { isDayTemplate, isFoodItemTemplate } from "@/lib/template-macros";
 import { formatShortDate } from "@/lib/formatting";
 import {
   buildShoppingList,
   formatShoppingListText,
 } from "@/lib/shopping-list";
+import { useActionRunner } from "@/lib/use-action-runner";
 
 import { AppShell, SettingsButton } from "./app-shell";
 import { LibraryHubNav } from "./library-hub-nav";
@@ -32,10 +23,11 @@ type PlannerShellProps = {
   userEmail: string;
   canAccessAdmin: boolean;
   selectedDate: string;
-  templates: MealTemplate[];
+  templates: MealTemplateSummary[];
   recipeCount: number;
-  dailySummary: DailySummary;
-  shoppingSummaries: DailySummary[];
+  selectedDayEntryCount: number;
+  selectedDayPlannedCaloriesKcal: number;
+  shoppingSummaries: PlannedShoppingSummary[];
   todayStr?: string;
 };
 
@@ -53,13 +45,12 @@ export function PlannerShell({
   selectedDate,
   templates,
   recipeCount,
-  dailySummary,
+  selectedDayEntryCount,
+  selectedDayPlannedCaloriesKcal,
   shoppingSummaries,
   todayStr,
 }: PlannerShellProps) {
-  const router = useRouter();
-  const [isPending, startTransition] = useTransition();
-  const [error, setError] = useState<string | null>(null);
+  const { run, isPending, error, setError } = useActionRunner();
   const [templateLabel, setTemplateLabel] = useState("");
   const [templateSearch, setTemplateSearch] = useState("");
   const [activeMode, setActiveMode] = useState<PlannerMode>("templates");
@@ -90,7 +81,7 @@ export function PlannerShell({
         : dayTemplates,
     [dayTemplates, normalizedTemplateSearch],
   );
-  const selectedDaySummary = `${dailySummary.meals.length} entries, ${dailySummary.plannedTotals.caloriesKcal} planned kcal`;
+  const selectedDaySummary = `${selectedDayEntryCount} entries, ${selectedDayPlannedCaloriesKcal} planned kcal`;
   const filteredShoppingSummaries = useMemo(
     () =>
       shoppingSummaries.filter(
@@ -132,21 +123,15 @@ export function PlannerShell({
   ];
 
   function applyTemplate(templateId: string) {
-    setError(null);
-    startTransition(async () => {
-      const result = await applyTemplateAction({
-        templateId,
-        date: selectedDate,
-        status: "planned",
-      });
-
-      if (!result.ok) {
-        setError(result.error ?? "Unable to apply template.");
-        return;
-      }
-
-      router.refresh();
-    });
+    run(
+      () =>
+        applyTemplateAction({
+          templateId,
+          date: selectedDate,
+          status: "planned",
+        }),
+      { fallbackError: "Unable to apply template.", refresh: true },
+    );
   }
 
   function saveDateAsTemplate() {
@@ -156,22 +141,15 @@ export function PlannerShell({
       return;
     }
 
-    setError(null);
-    startTransition(async () => {
-      const result = await createTemplateFromDateAction({
-        date: selectedDate,
-        type: "day",
-        label,
-      });
-
-      if (!result.ok) {
-        setError(result.error ?? "Unable to create template.");
-        return;
-      }
-
-      setTemplateLabel("");
-      router.refresh();
-    });
+    run(
+      () =>
+        createTemplateFromDateAction({ date: selectedDate, type: "day", label }),
+      {
+        fallbackError: "Unable to create template.",
+        refresh: true,
+        onSuccess: () => setTemplateLabel(""),
+      },
+    );
   }
 
   function updateShoppingStartDate(value: string) {
@@ -275,7 +253,7 @@ export function PlannerShell({
             />
             <button
               type="button"
-              disabled={isPending || dailySummary.meals.length === 0}
+              disabled={isPending || selectedDayEntryCount === 0}
               onClick={saveDateAsTemplate}
               className="rounded-xl bg-[var(--color-accent)] px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
             >
@@ -330,18 +308,13 @@ export function PlannerShell({
               />
             ) : null}
           </div>
-          {dayTemplates.length === 0 ? (
+          {dayTemplates.length === 0 || visibleDayTemplates.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-[var(--color-border-strong)] bg-[var(--color-shell-panel)] px-5 py-8 text-center">
-              <p className="text-sm text-[var(--color-muted)]">No day templates yet.</p>
-            </div>
-          ) : visibleDayTemplates.length === 0 ? (
-            <div className="rounded-2xl border border-dashed border-[var(--color-border-strong)] bg-[var(--color-shell-panel)] px-5 py-8 text-center">
-              <p className="text-sm text-[var(--color-muted)]">No day templates found.</p>
+              <p className="text-sm text-[var(--color-muted)]">{dayTemplates.length === 0 ? "No day templates yet." : "No day templates found."}</p>
             </div>
           ) : (
             <div className="space-y-3">
               {visibleDayTemplates.map((template) => {
-                const totals = getTemplateMacroTotals(template.items);
                 return (
                   <article
                     key={template.id}
@@ -351,7 +324,7 @@ export function PlannerShell({
                       <div>
                         <h4 className="font-semibold text-[var(--color-ink)]">{template.label}</h4>
                         <p className="mt-1 text-xs text-[var(--color-muted)]">
-                          {template.items.length} item{template.items.length === 1 ? "" : "s"} · {totals.caloriesKcal} kcal
+                          {template.itemCount} item{template.itemCount === 1 ? "" : "s"} · {template.totalMacros.caloriesKcal} kcal
                         </p>
                       </div>
                       <button

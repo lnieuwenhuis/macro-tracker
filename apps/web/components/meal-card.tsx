@@ -52,6 +52,36 @@ type MealCardProps = {
 const MENU_BOTTOM_INSET_PX = 112;
 const MENU_VIEWPORT_MARGIN_PX = 8;
 
+const MEAL_CARD_NUMBER_INPUT_CLASS =
+  "w-full rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-3 py-2.5 pr-16 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]";
+
+const MEAL_MACRO_CHIPS = [
+  {
+    key: "proteinG" as const,
+    prefix: "P",
+    colorClass:
+      "rounded-md bg-[color-mix(in_srgb,var(--color-bar-protein)_12%,transparent)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-bar-protein)]",
+  },
+  {
+    key: "carbsG" as const,
+    prefix: "C",
+    colorClass:
+      "rounded-md bg-[color-mix(in_srgb,var(--color-bar-carbs)_12%,transparent)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-bar-carbs)]",
+  },
+  {
+    key: "fatG" as const,
+    prefix: "F",
+    colorClass:
+      "rounded-md bg-[color-mix(in_srgb,var(--color-bar-fat)_12%,transparent)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-bar-fat)]",
+  },
+  {
+    key: "caloriesKcal" as const,
+    prefix: "",
+    colorClass:
+      "rounded-md bg-[var(--color-shell-panel)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-muted-strong)]",
+  },
+];
+
 function MealCardComponent({ draft, busy, error, isCopied = false, mealGroups = [], onChange, onSave, onDelete, onDuplicate, onGroupChange, onStatusChange, onCopyToToday, onDiscardChanges }: MealCardProps) {
   const isSaved = Boolean(draft.id);
   const [isExpanded, setIsExpanded] = useState(!isSaved);
@@ -63,8 +93,7 @@ function MealCardComponent({ draft, busy, error, isCopied = false, mealGroups = 
   const menuContainerRef = useRef<HTMLDivElement>(null);
 
   const heading = draft.label.trim() || "New item";
-  // A macro chip is only worth showing when the value is meaningfully positive.
-  // parseFloat handles both "" (NaN → false) and "0" (0 → false) correctly.
+  // A macro chip only shows when meaningfully positive; parseFloat treats "" and "0" as not positive.
   const isPositive = (v: string) => parseFloat(v) > 0;
   const hasValues =
     isPositive(draft.proteinG) ||
@@ -123,11 +152,7 @@ function MealCardComponent({ draft, busy, error, isCopied = false, mealGroups = 
     setMenuOpen(false);
   }, []);
 
-  // Matches the outside-pointerdown + Escape dismissal every other dropdown
-  // in this codebase gets via this hook (see add-food-button.tsx). The menu
-  // and menuitem roles stay -- this only fixes the missing dismiss paths a
-  // keyboard or screen-reader user needs; it does not add roving-tabindex
-  // arrow-key navigation, which is a separate, larger change.
+  // Same outside-pointerdown + Escape dismissal as other dropdowns (see add-food-button.tsx); no roving-tabindex nav.
   useDismissableLayer({
     active: menuOpen,
     layerRef: menuContainerRef,
@@ -157,9 +182,7 @@ function MealCardComponent({ draft, busy, error, isCopied = false, mealGroups = 
 
   return (
     <article className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-card-subtle)] shadow-[0_4px_16px_rgba(74,45,28,0.05)]">
-      {/* Header — always visible */}
       <div className="px-4 py-3">
-        {/* Row 1: name + contextual primary action + overflow */}
         <div className="flex items-center gap-2">
           <h3 className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--color-ink)]">
             {heading}
@@ -389,32 +412,17 @@ function MealCardComponent({ draft, busy, error, isCopied = false, mealGroups = 
           </div>
         </div>
 
-        {/* Row 2 (collapsed only): macro chips + action buttons */}
         {!isExpanded && (
           <div className="mt-1.5 flex items-center gap-1">
-            {/* Macro chips */}
             {hasValues && (
               <div className="flex flex-1 flex-wrap items-center gap-1">
-                {isPositive(draft.proteinG) ? (
-                  <span className="rounded-md bg-[color-mix(in_srgb,var(--color-bar-protein)_12%,transparent)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-bar-protein)]">
-                    P {draft.proteinG}g
-                  </span>
-                ) : null}
-                {isPositive(draft.carbsG) ? (
-                  <span className="rounded-md bg-[color-mix(in_srgb,var(--color-bar-carbs)_12%,transparent)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-bar-carbs)]">
-                    C {draft.carbsG}g
-                  </span>
-                ) : null}
-                {isPositive(draft.fatG) ? (
-                  <span className="rounded-md bg-[color-mix(in_srgb,var(--color-bar-fat)_12%,transparent)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-bar-fat)]">
-                    F {draft.fatG}g
-                  </span>
-                ) : null}
-                {isPositive(draft.caloriesKcal) ? (
-                  <span className="rounded-md bg-[var(--color-shell-panel)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-muted-strong)]">
-                    {draft.caloriesKcal} kcal
-                  </span>
-                ) : null}
+                {MEAL_MACRO_CHIPS.map(({ key, prefix, colorClass }) =>
+                  isPositive(draft[key]) ? (
+                    <span key={key} className={colorClass}>
+                      {prefix ? `${prefix} ${draft[key]}g` : `${draft[key]} kcal`}
+                    </span>
+                  ) : null,
+                )}
               </div>
             )}
 
@@ -425,10 +433,8 @@ function MealCardComponent({ draft, busy, error, isCopied = false, mealGroups = 
         )}
       </div>
 
-      {/* Expanded body */}
       {isExpanded && (
         <div className="border-t border-[var(--color-border)] px-4 pb-4 pt-3">
-          {/* Name input */}
           <label className="block">
             <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--color-muted-strong)]">
               Name
@@ -451,7 +457,7 @@ function MealCardComponent({ draft, busy, error, isCopied = false, mealGroups = 
               disabled={busy}
               step="0.01"
               unit={draft.unit}
-              inputClassName="w-full rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-3 py-2.5 pr-16 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
+              inputClassName={MEAL_CARD_NUMBER_INPUT_CLASS}
               onChange={(value) => onChange(draft.clientId, "quantity", value)}
             />
             <label className="block min-w-28">
@@ -498,7 +504,6 @@ function MealCardComponent({ draft, busy, error, isCopied = false, mealGroups = 
             </select>
           </label>
 
-          {/* Macro inputs — 2×2 grid */}
           <div className="mt-3 grid grid-cols-2 gap-2">
             <NumberInputField
               label="Protein"
@@ -506,7 +511,7 @@ function MealCardComponent({ draft, busy, error, isCopied = false, mealGroups = 
               disabled={busy}
               step="0.1"
               unit="g"
-              inputClassName="w-full rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-3 py-2.5 pr-16 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
+              inputClassName={MEAL_CARD_NUMBER_INPUT_CLASS}
               onChange={(value) => onChange(draft.clientId, "proteinG", value)}
             />
             <NumberInputField
@@ -515,7 +520,7 @@ function MealCardComponent({ draft, busy, error, isCopied = false, mealGroups = 
               disabled={busy}
               step="0.1"
               unit="g"
-              inputClassName="w-full rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-3 py-2.5 pr-16 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
+              inputClassName={MEAL_CARD_NUMBER_INPUT_CLASS}
               onChange={(value) => onChange(draft.clientId, "carbsG", value)}
             />
             <NumberInputField
@@ -524,7 +529,7 @@ function MealCardComponent({ draft, busy, error, isCopied = false, mealGroups = 
               disabled={busy}
               step="0.1"
               unit="g"
-              inputClassName="w-full rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-3 py-2.5 pr-16 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
+              inputClassName={MEAL_CARD_NUMBER_INPUT_CLASS}
               onChange={(value) => onChange(draft.clientId, "fatG", value)}
             />
             <NumberInputField
@@ -533,7 +538,7 @@ function MealCardComponent({ draft, busy, error, isCopied = false, mealGroups = 
               disabled={busy}
               step="1"
               unit="kcal"
-              inputClassName="w-full rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-3 py-2.5 pr-16 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
+              inputClassName={MEAL_CARD_NUMBER_INPUT_CLASS}
               onChange={(value) => onChange(draft.clientId, "caloriesKcal", value)}
             />
           </div>
@@ -542,7 +547,6 @@ function MealCardComponent({ draft, busy, error, isCopied = false, mealGroups = 
             <p className="mt-3 text-sm text-[var(--color-danger)]">{error}</p>
           ) : null}
 
-          {/* Save button */}
           <button
             type="button"
             disabled={busy}
@@ -557,11 +561,7 @@ function MealCardComponent({ draft, busy, error, isCopied = false, mealGroups = 
   );
 }
 
-/**
- * A day's log renders one card per entry and every keystroke updates the shared
- * draft array, so without memoisation editing one card re-renders all of them.
- * Callers must pass stable callback identities for this to pay off.
- */
+// Memoized: a day's log re-renders every card on each keystroke otherwise; callers must pass stable callbacks.
 export const MealCard = memo(MealCardComponent);
 
 export type { MealDraft };

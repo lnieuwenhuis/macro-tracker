@@ -18,8 +18,7 @@ const CORS_ALLOW_METHODS: &str = "GET, POST, PATCH, DELETE, OPTIONS";
 const CORS_ALLOW_HEADERS: &str = "Authorization, Content-Type";
 const CORS_MAX_AGE: &str = "86400";
 const API_V1_OPENAPI_JSON: &[u8] = include_bytes!("generated/api-v1-openapi.json");
-/// Deadline for a single `/api/v1` request. Matches the backend's other data
-/// routes; see `handle_api_v1` for why it is not a tower layer.
+/// Deadline for one `/api/v1` request; see `handle_api_v1` for why this is not a tower layer.
 pub const API_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 type ApiResult<T> = Result<T, ApiFailure>;
@@ -48,12 +47,7 @@ impl ApiFailure {
     }
 }
 
-/// One `/api/v1` endpoint shape.
-///
-/// `path` is the OpenAPI path template published at `/openapi.json`; a segment
-/// wrapped in braces is a wildcard when routing. Routing and the published
-/// contract share this one literal so the scope-contract tests can derive their
-/// coverage from [`API_V1_ENDPOINTS`] instead of restating it by hand (API-01).
+/// One `/api/v1` endpoint shape; `path` doubles as the OpenAPI path template (a `{brace}` segment is a wildcard).
 #[derive(Clone, Copy)]
 struct Endpoint {
     path: &'static str,
@@ -67,13 +61,7 @@ pub fn router() -> Router<AppState> {
         .route("/{*path}", any(api_v1_request))
 }
 
-// API-06: `Bytes` and `Path` are taken as `Result`s rather than as plain
-// extractors. An extractor that rejects does so *before* the handler runs, so
-// an over-limit body came back as a bare `413` with a plain-text body and none
-// of the CORS headers below — a browser client saw a CORS failure instead of
-// the documented error envelope, and a direct client got a body it could not
-// parse. Handling the rejection inside the handler keeps every `/api/v1`
-// response one shape.
+// API-06: `Bytes`/`Path` are taken as `Result`s so a rejection still gets the documented envelope and CORS headers.
 async fn api_v1_root(
     State(state): State<AppState>,
     method: Method,
@@ -115,11 +103,7 @@ async fn handle_api_v1(
 
     // A path we could not even decode cannot name an endpoint.
     let Ok(path) = path else {
-        return failure_response(ApiFailure::new(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "API endpoint not found.",
-        ));
+        return failure_response(not_found("API endpoint not found."));
     };
 
     if method == Method::GET && path.as_slice() == ["openapi.json"] {
@@ -131,19 +115,10 @@ async fn handle_api_v1(
         Err(rejection) => return failure_response(body_rejection_failure(&rejection)),
     };
 
-    // The deadline is enforced here rather than by a transport-level timeout
-    // layer: a layer would emit a bare 504 with no body and none of the CORS
-    // headers below, which breaks the documented error envelope for direct API
-    // clients and shows up as a CORS failure in browsers.
+    // Enforced here, not by a transport-level timeout layer, so the 504 still carries the envelope and CORS headers.
     let result = async {
         let method_name = method.as_str();
-        let endpoint = endpoint_for(&path).ok_or_else(|| {
-            ApiFailure::new(
-                StatusCode::NOT_FOUND,
-                "not_found",
-                "API endpoint not found.",
-            )
-        })?;
+        let endpoint = endpoint_for(&path).ok_or_else(|| not_found("API endpoint not found."))?;
         if !endpoint.methods.contains(&method_name) {
             let allow = endpoint
                 .methods
@@ -160,9 +135,7 @@ async fn handle_api_v1(
             .with_allow(allow));
         }
 
-        // API-01: an endpoint that allows a method but declares no scopes for it
-        // is a server-side contract bug. Refusing is the only safe reading —
-        // the previous empty-slice default let any valid token through.
+        // API-01: a method allowed but with no declared scopes is a contract bug; refuse rather than default-allow.
         let Some(scopes) = required_scopes(&endpoint, method_name) else {
             tracing::error!(
                 endpoint = endpoint.path,
@@ -185,13 +158,22 @@ async fn handle_api_v1(
     };
 
     match result {
-        Ok((status, data)) => json_response(status, json!({ "ok": true, "data": data }), None),
+        Ok((status, data)) => success_response(status, data),
         Err(failure) => failure_response(failure),
     }
 }
 
+/// `json!` serializes an expression through `to_value(&expression)`. Build the envelope by
+/// moving the RPC value into its object so a large response tree is not duplicated first.
+fn success_response(status: StatusCode, data: Value) -> Response {
+    let mut body = Map::with_capacity(2);
+    body.insert("ok".to_string(), Value::Bool(true));
+    body.insert("data".to_string(), data);
+    raw_json_response(status, Value::Object(body), None)
+}
+
 fn failure_response(failure: ApiFailure) -> Response {
-    json_response(
+    raw_json_response(
         failure.status,
         json!({
             "ok": false,
@@ -294,6 +276,15 @@ async fn authenticate_request(
     })
 }
 
+macro_rules! user_rpc {
+    ($state:expr, $auth:expr, $op:expr) => {
+        rpc($state, $op, json!({ "userId": $auth.user_id }))
+    };
+    ($state:expr, $auth:expr, $op:expr, $($field:tt)+) => {
+        rpc($state, $op, json!({ "userId": $auth.user_id, $($field)+ }))
+    };
+}
+
 async fn dispatch_api_request(
     state: &AppState,
     method: &str,
@@ -308,113 +299,51 @@ async fn dispatch_api_request(
 
     match (resource, id, action, method) {
         (Some("me"), None, None, "GET") => {
-            let user = rpc(state, "getUserById", json!({ "userId": auth.user_id })).await?;
-            let goals = rpc(state, "getUserGoals", json!({ "userId": auth.user_id })).await?;
-            Ok((
-                StatusCode::OK,
-                json!({ "user": map_account(user), "goals": goals }),
-            ))
+            let user = user_rpc!(state, auth, "getUserById").await?;
+            let goals = user_rpc!(state, auth, "getUserGoals").await?;
+            ok(json!({ "user": map_account(user), "goals": goals }))
         }
-        (Some("goals"), None, None, "GET") => Ok((
-            StatusCode::OK,
-            rpc(state, "getUserGoals", json!({ "userId": auth.user_id })).await?,
-        )),
+        (Some("goals"), None, None, "GET") => ok(user_rpc!(state, auth, "getUserGoals").await?),
         (Some("goals"), None, None, "PATCH") => {
-            let current = rpc(state, "getUserGoals", json!({ "userId": auth.user_id })).await?;
+            let current = user_rpc!(state, auth, "getUserGoals").await?;
             let goals = merge_goals(current, read_json(&body)?)?;
-            rpc(
-                state,
-                "saveUserGoals",
-                json!({ "userId": auth.user_id, "goals": goals }),
-            )
-            .await?;
-            Ok((
-                StatusCode::OK,
-                rpc(state, "getUserGoals", json!({ "userId": auth.user_id })).await?,
-            ))
+            user_rpc!(state, auth, "saveUserGoals", "goals": goals).await?;
+            ok(user_rpc!(state, auth, "getUserGoals").await?)
         }
         (Some("days"), Some(date), None, "GET") => {
             require_date(date)?;
-            Ok((
-                StatusCode::OK,
-                rpc(
-                    state,
-                    "getDailySummary",
-                    json!({ "userId": auth.user_id, "date": date }),
-                )
-                .await?,
-            ))
+            ok(user_rpc!(state, auth, "getDailySummary", "date": date).await?)
         }
         (Some("days"), Some(date), Some("entries"), "POST") => {
             require_date(date)?;
             let mut input = require_object(read_json(&body)?)?;
-            if has_non_null(&input, "productId")
-                && !auth.scopes.iter().any(|scope| scope == "read:foods")
-            {
-                return Err(insufficient_scope("read:foods"));
+            if has_non_null(&input, "productId") {
+                require_scope(&auth, "read:foods")?;
             }
             input.insert("date".to_string(), Value::String(date.to_string()));
-            let entry = rpc(
-                state,
-                "createMealEntry",
-                json!({ "userId": auth.user_id, "input": input }),
-            )
-            .await?;
-            Ok((StatusCode::CREATED, entry))
+            created(user_rpc!(state, auth, "createMealEntry", "input": input).await?)
         }
         (Some("meal-entries"), Some(entry_id), None, "PATCH") => {
             let entry_id = require_uuid(entry_id)?;
             let patch = require_object(read_json(&body)?)?;
-            if let Some(date) = patch.get("date").and_then(Value::as_str) {
-                require_date(date)?;
-            } else if patch.contains_key("date") {
-                return Err(bad_request("Date must use YYYY-MM-DD."));
+            require_optional_date(&patch)?;
+            if has_non_null(&patch, "productId") {
+                require_scope(&auth, "read:foods")?;
             }
-            if has_non_null(&patch, "productId")
-                && !auth.scopes.iter().any(|scope| scope == "read:foods")
-            {
-                return Err(insufficient_scope("read:foods"));
-            }
-            let existing = rpc(
-                state,
-                "getMealEntryById",
-                json!({ "userId": auth.user_id, "entryId": entry_id }),
-            )
-            .await?;
-            if existing.is_null() {
-                return Err(ApiFailure::new(
-                    StatusCode::NOT_FOUND,
-                    "not_found",
-                    "Meal entry not found.",
-                ));
-            }
+            let existing = require_found(
+                user_rpc!(state, auth, "getMealEntryById", "entryId": entry_id).await?,
+                "Meal entry not found.",
+            )?;
             let merged = merge_meal_entry_patch(require_object(existing)?, patch);
-            Ok((
-                StatusCode::OK,
-                rpc(
-                    state,
-                    "updateMealEntry",
-                    json!({ "userId": auth.user_id, "entryId": entry_id, "input": merged }),
-                )
-                .await?,
-            ))
-        }
-        (Some("meal-entries"), Some(entry_id), None, "DELETE") => {
-            let deleted = rpc(
-                state,
-                "deleteMealEntry",
-                json!({ "userId": auth.user_id, "entryId": require_uuid(entry_id)? }),
+            ok(
+                user_rpc!(state, auth, "updateMealEntry", "entryId": entry_id, "input": merged)
+                    .await?,
             )
-            .await?;
-            if !deleted.as_bool().unwrap_or(false) {
-                return Err(ApiFailure::new(
-                    StatusCode::NOT_FOUND,
-                    "not_found",
-                    "Meal entry not found.",
-                ));
-            }
-            Ok((StatusCode::OK, json!({ "deleted": true })))
         }
+        (Some("meal-entries"), Some(entry_id), None, "DELETE") => require_deleted(
+            user_rpc!(state, auth, "deleteMealEntry", "entryId": require_uuid(entry_id)?).await?,
+            "Meal entry not found.",
+        ),
         (Some("meal-entries"), Some(entry_id), Some("status"), "PATCH") => {
             let status = require_string_field(
                 &require_object(read_json(&body)?)?,
@@ -424,24 +353,18 @@ async fn dispatch_api_request(
             if !matches!(status.as_str(), "planned" | "eaten" | "skipped") {
                 return Err(bad_request("Meal status is invalid."));
             }
-            Ok((StatusCode::OK, rpc(state, "markMealEntryStatus", json!({ "userId": auth.user_id, "entryId": require_uuid(entry_id)?, "status": status })).await?))
+            ok(
+                user_rpc!(state, auth, "markMealEntryStatus", "entryId": require_uuid(entry_id)?, "status": status)
+                    .await?,
+            )
         }
-        (Some("meal-groups"), None, None, "GET") => Ok((
-            StatusCode::OK,
-            rpc(state, "getMealGroups", json!({ "userId": auth.user_id })).await?,
-        )),
+        (Some("meal-groups"), None, None, "GET") => {
+            ok(user_rpc!(state, auth, "getMealGroups").await?)
+        }
         (Some("meal-groups"), None, None, "POST") => {
             let input = require_object(read_json(&body)?)?;
             require_string_field(&input, "label", "Meal group name is required.")?;
-            Ok((
-                StatusCode::CREATED,
-                rpc(
-                    state,
-                    "createMealGroup",
-                    json!({ "userId": auth.user_id, "input": input }),
-                )
-                .await?,
-            ))
+            created(user_rpc!(state, auth, "createMealGroup", "input": input).await?)
         }
         (Some("meal-groups"), Some("reorder"), None, "POST") => {
             let body = require_object(read_json(&body)?)?;
@@ -450,78 +373,47 @@ async fn dispatch_api_request(
                 .or_else(|| body.get("groupIds"))
                 .cloned()
                 .ok_or_else(|| bad_request("orderedIds must be an array of group IDs."))?;
-            Ok((
-                StatusCode::OK,
-                rpc(
-                    state,
-                    "reorderMealGroups",
-                    json!({ "userId": auth.user_id, "orderedIds": ordered_ids }),
-                )
-                .await?,
-            ))
+            ok(user_rpc!(state, auth, "reorderMealGroups", "orderedIds": ordered_ids).await?)
         }
         (Some("meal-groups"), Some(group_id), None, "PATCH") => {
             let input = require_object(read_json(&body)?)?;
             require_string_field(&input, "label", "Meal group name is required.")?;
-            Ok((StatusCode::OK, rpc(state, "updateMealGroup", json!({ "userId": auth.user_id, "groupId": require_uuid(group_id)?, "input": input })).await?))
-        }
-        (Some("meal-groups"), Some(group_id), None, "DELETE") => {
-            let deleted = rpc(
-                state,
-                "deleteMealGroup",
-                json!({ "userId": auth.user_id, "groupId": require_uuid(group_id)? }),
+            ok(
+                user_rpc!(state, auth, "updateMealGroup", "groupId": require_uuid(group_id)?, "input": input)
+                    .await?,
             )
-            .await?;
-            if !deleted.as_bool().unwrap_or(false) {
-                return Err(ApiFailure::new(
-                    StatusCode::NOT_FOUND,
-                    "not_found",
-                    "Meal group not found.",
-                ));
-            }
-            Ok((StatusCode::OK, json!({ "deleted": true })))
         }
+        (Some("meal-groups"), Some(group_id), None, "DELETE") => require_deleted(
+            user_rpc!(state, auth, "deleteMealGroup", "groupId": require_uuid(group_id)?).await?,
+            "Meal group not found.",
+        ),
         (Some("foods"), Some("search"), None, "GET") => {
-            let products = rpc(state, "searchFoodProducts", json!({ "userId": auth.user_id, "query": query_param(uri, "q").unwrap_or_default() })).await?;
-            Ok((StatusCode::OK, map_food_array(products)))
+            let query = query_param(uri, "q").unwrap_or_default();
+            let products = user_rpc!(state, auth, "searchFoodProducts", "query": query).await?;
+            ok(map_food_array(products))
         }
         (Some("foods"), None, None, "POST") => {
             let input = sanitize_api_food_input(read_json(&body)?, None)?;
-            let product = rpc(
-                state,
-                "createPersonalFoodProduct",
-                json!({ "userId": auth.user_id, "input": input }),
-            )
-            .await?;
-            Ok((StatusCode::CREATED, map_food_product(product)))
+            let product =
+                user_rpc!(state, auth, "createPersonalFoodProduct", "input": input).await?;
+            created(map_food_product(product))
         }
         (Some("foods"), Some(product_id), None, "PATCH") => {
             let product_id = require_uuid(product_id)?;
-            let existing = rpc(
-                state,
-                "getFoodProductByIdForUser",
-                json!({ "userId": auth.user_id, "productId": product_id }),
-            )
-            .await?;
+            let existing =
+                user_rpc!(state, auth, "getFoodProductByIdForUser", "productId": product_id)
+                    .await?;
             if existing.is_null()
                 || existing.get("ownerUserId").and_then(Value::as_str)
                     != Some(auth.user_id.to_string().as_str())
                 || existing.get("scope").and_then(Value::as_str) != Some("personal")
             {
-                return Err(ApiFailure::new(
-                    StatusCode::NOT_FOUND,
-                    "not_found",
-                    "Food product not found.",
-                ));
+                return Err(not_found("Food product not found."));
             }
             let input = sanitize_api_food_input(read_json(&body)?, Some(existing))?;
-            let product = rpc(
-                state,
-                "updatePersonalFoodProduct",
-                json!({ "userId": auth.user_id, "productId": product_id, "input": input }),
-            )
-            .await?;
-            Ok((StatusCode::OK, map_food_product(product)))
+            let product = user_rpc!(state, auth, "updatePersonalFoodProduct", "productId": product_id, "input": input)
+                .await?;
+            ok(map_food_product(product))
         }
         (Some("barcodes"), Some(barcode), None, "GET") => {
             require_barcode(barcode)?;
@@ -531,44 +423,22 @@ async fn dispatch_api_request(
                 json!({ "barcode": barcode }),
             )
             .await?;
-            Ok((
-                StatusCode::OK,
-                if product.is_null() {
-                    Value::Null
-                } else {
-                    map_food_product(product)
-                },
-            ))
+            ok(if product.is_null() {
+                Value::Null
+            } else {
+                map_food_product(product)
+            })
         }
         (Some("templates"), Some("from-day"), None, "POST") => {
             let input = require_object(read_json(&body)?)?;
             let date = require_string_field(&input, "date", "Date must use YYYY-MM-DD.")?;
             require_date(&date)?;
-            Ok((
-                StatusCode::CREATED,
-                rpc(
-                    state,
-                    "createTemplateFromDate",
-                    json!({ "userId": auth.user_id, "input": input }),
-                )
-                .await?,
-            ))
+            created(user_rpc!(state, auth, "createTemplateFromDate", "input": input).await?)
         }
-        (Some("templates"), None, None, "GET") => Ok((
-            StatusCode::OK,
-            rpc(state, "getTemplates", json!({ "userId": auth.user_id })).await?,
-        )),
+        (Some("templates"), None, None, "GET") => ok(user_rpc!(state, auth, "getTemplates").await?),
         (Some("templates"), None, None, "POST") => {
             let input = require_object(read_json(&body)?)?;
-            Ok((
-                StatusCode::CREATED,
-                rpc(
-                    state,
-                    "createTemplate",
-                    json!({ "userId": auth.user_id, "input": input }),
-                )
-                .await?,
-            ))
+            created(user_rpc!(state, auth, "createTemplate", "input": input).await?)
         }
         (Some("templates"), Some(template_id), Some("apply"), "POST") => {
             let mut input = require_object(read_json(&body)?)?;
@@ -578,67 +448,32 @@ async fn dispatch_api_request(
                 "templateId".to_string(),
                 Value::String(require_uuid(template_id)?),
             );
-            Ok((
-                StatusCode::CREATED,
-                rpc(
-                    state,
-                    "applyTemplateToDate",
-                    json!({ "userId": auth.user_id, "input": input }),
-                )
-                .await?,
-            ))
+            created(user_rpc!(state, auth, "applyTemplateToDate", "input": input).await?)
         }
         (Some("templates"), Some(template_id), None, "GET") => {
-            let template = rpc(
-                state,
-                "getTemplateById",
-                json!({ "userId": auth.user_id, "templateId": require_uuid(template_id)? }),
-            )
-            .await?;
-            if template.is_null() {
-                return Err(ApiFailure::new(
-                    StatusCode::NOT_FOUND,
-                    "not_found",
-                    "Template not found.",
-                ));
-            }
-            Ok((StatusCode::OK, template))
+            let template = require_found(
+                user_rpc!(state, auth, "getTemplateById", "templateId": require_uuid(template_id)?)
+                    .await?,
+                "Template not found.",
+            )?;
+            ok(template)
         }
         (Some("templates"), Some(template_id), None, "PATCH") => {
             let input = require_object(read_json(&body)?)?;
-            Ok((StatusCode::OK, rpc(state, "updateTemplate", json!({ "userId": auth.user_id, "templateId": require_uuid(template_id)?, "input": input })).await?))
-        }
-        (Some("templates"), Some(template_id), None, "DELETE") => {
-            let deleted = rpc(
-                state,
-                "deleteTemplate",
-                json!({ "userId": auth.user_id, "templateId": require_uuid(template_id)? }),
+            ok(
+                user_rpc!(state, auth, "updateTemplate", "templateId": require_uuid(template_id)?, "input": input)
+                    .await?,
             )
-            .await?;
-            if !deleted.as_bool().unwrap_or(false) {
-                return Err(ApiFailure::new(
-                    StatusCode::NOT_FOUND,
-                    "not_found",
-                    "Template not found.",
-                ));
-            }
-            Ok((StatusCode::OK, json!({ "deleted": true })))
         }
-        (Some("recipes"), None, None, "GET") => Ok((
-            StatusCode::OK,
-            rpc(state, "getRecipes", json!({ "userId": auth.user_id })).await?,
-        )),
+        (Some("templates"), Some(template_id), None, "DELETE") => require_deleted(
+            user_rpc!(state, auth, "deleteTemplate", "templateId": require_uuid(template_id)?)
+                .await?,
+            "Template not found.",
+        ),
+        (Some("recipes"), None, None, "GET") => ok(user_rpc!(state, auth, "getRecipes").await?),
         (Some("recipes"), None, None, "POST") => {
             let input = require_object(read_json(&body)?)?;
-            Ok((
-                StatusCode::CREATED,
-                rpc(
-                    state,
-                    "createRecipe",
-                    json!({ "userId": auth.user_id, "input": input }),
-                )
-                .await?,
-            ))
+            created(user_rpc!(state, auth, "createRecipe", "input": input).await?)
         }
         (Some("recipes"), Some(recipe_id), Some("log"), "POST") => {
             let input = build_recipe_log_input(
@@ -648,135 +483,69 @@ async fn dispatch_api_request(
                 read_json(&body)?,
             )
             .await?;
-            Ok((
-                StatusCode::CREATED,
-                rpc(
-                    state,
-                    "createMealEntry",
-                    json!({ "userId": auth.user_id, "input": input }),
-                )
-                .await?,
-            ))
+            created(user_rpc!(state, auth, "createMealEntry", "input": input).await?)
         }
         (Some("recipes"), Some(recipe_id), None, "GET") => {
-            let recipe = rpc(
-                state,
-                "getRecipeById",
-                json!({ "userId": auth.user_id, "recipeId": require_uuid(recipe_id)? }),
-            )
-            .await?;
-            if recipe.is_null() {
-                return Err(ApiFailure::new(
-                    StatusCode::NOT_FOUND,
-                    "not_found",
-                    "Recipe not found.",
-                ));
-            }
-            Ok((StatusCode::OK, recipe))
+            let recipe = require_found(
+                user_rpc!(state, auth, "getRecipeById", "recipeId": require_uuid(recipe_id)?)
+                    .await?,
+                "Recipe not found.",
+            )?;
+            ok(recipe)
         }
         (Some("recipes"), Some(recipe_id), None, "PATCH") => {
             let input = require_object(read_json(&body)?)?;
-            Ok((StatusCode::OK, rpc(state, "updateRecipe", json!({ "userId": auth.user_id, "recipeId": require_uuid(recipe_id)?, "input": input })).await?))
-        }
-        (Some("recipes"), Some(recipe_id), None, "DELETE") => {
-            let deleted = rpc(
-                state,
-                "deleteRecipe",
-                json!({ "userId": auth.user_id, "recipeId": require_uuid(recipe_id)? }),
+            ok(
+                user_rpc!(state, auth, "updateRecipe", "recipeId": require_uuid(recipe_id)?, "input": input)
+                    .await?,
             )
-            .await?;
-            if !deleted.as_bool().unwrap_or(false) {
-                return Err(ApiFailure::new(
-                    StatusCode::NOT_FOUND,
-                    "not_found",
-                    "Recipe not found.",
-                ));
-            }
-            Ok((StatusCode::OK, json!({ "deleted": true })))
         }
-        (Some("weight"), None, None, "GET") => Ok((
-            StatusCode::OK,
-            rpc(
-                state,
-                "getWeightPageData",
-                json!({ "userId": auth.user_id, "selectedDate": reference_date(uri)? }),
-            )
-            .await?,
-        )),
-        (Some("weight"), Some("entries"), None, "GET") => Ok((
-            StatusCode::OK,
-            rpc(state, "getWeightEntries", json!({ "userId": auth.user_id })).await?,
-        )),
+        (Some("recipes"), Some(recipe_id), None, "DELETE") => require_deleted(
+            user_rpc!(state, auth, "deleteRecipe", "recipeId": require_uuid(recipe_id)?).await?,
+            "Recipe not found.",
+        ),
+        (Some("weight"), None, None, "GET") => ok(
+            user_rpc!(state, auth, "getWeightPageData", "selectedDate": reference_date(uri)?)
+                .await?,
+        ),
+        (Some("weight"), Some("entries"), None, "GET") => {
+            ok(user_rpc!(state, auth, "getWeightEntries").await?)
+        }
         (Some("weight"), Some("entries"), None, "POST") => {
             let input = require_object(read_json(&body)?)?;
             let date = require_string_field(&input, "date", "Date must use YYYY-MM-DD.")?;
             require_date(&date)?;
-            let created = rpc(
-                state,
-                "createWeightEntryNoOverwrite",
-                json!({ "userId": auth.user_id, "input": input }),
-            )
-            .await?;
-            if created.is_null() {
+            let entry =
+                user_rpc!(state, auth, "createWeightEntryNoOverwrite", "input": input).await?;
+            if entry.is_null() {
                 return Err(weight_conflict());
             }
-            Ok((StatusCode::CREATED, created))
+            created(entry)
         }
         (Some("weight"), Some("entries"), Some(entry_id), "PATCH") => {
             let entry_id = require_uuid(entry_id)?;
             let patch = require_object(read_json(&body)?)?;
-            if let Some(date) = patch.get("date").and_then(Value::as_str) {
-                require_date(date)?;
-            } else if patch.contains_key("date") {
-                return Err(bad_request("Date must use YYYY-MM-DD."));
-            }
-            let existing = rpc(
-                state,
-                "getWeightEntryById",
-                json!({ "userId": auth.user_id, "entryId": entry_id }),
-            )
-            .await?;
-            if existing.is_null() {
-                return Err(ApiFailure::new(
-                    StatusCode::NOT_FOUND,
-                    "not_found",
-                    "Weight entry not found.",
-                ));
-            }
+            require_optional_date(&patch)?;
+            let existing = require_found(
+                user_rpc!(state, auth, "getWeightEntryById", "entryId": entry_id).await?,
+                "Weight entry not found.",
+            )?;
             let merged = apply_client_patch(require_object(existing)?, patch);
             let date = require_string_field(&merged, "date", "Date must use YYYY-MM-DD.")?;
             require_date(&date)?;
-            // The unique-violation is already translated into `weight_conflict()`
-            // by `api_failure_from_app_error`, so there is nothing to re-check
-            // here.
-            let value = rpc(
-                state,
-                "updateWeightEntry",
-                json!({ "userId": auth.user_id, "entryId": entry_id, "input": merged }),
+            // A unique violation already becomes `weight_conflict()` in `api_failure_from_app_error`.
+            ok(
+                user_rpc!(state, auth, "updateWeightEntry", "entryId": entry_id, "input": merged)
+                    .await?,
             )
-            .await?;
-            Ok((StatusCode::OK, value))
         }
-        (Some("weight"), Some("entries"), Some(entry_id), "DELETE") => {
-            let deleted = rpc(
-                state,
-                "deleteWeightEntry",
-                json!({ "userId": auth.user_id, "entryId": require_uuid(entry_id)? }),
-            )
-            .await?;
-            if !deleted.as_bool().unwrap_or(false) {
-                return Err(ApiFailure::new(
-                    StatusCode::NOT_FOUND,
-                    "not_found",
-                    "Weight entry not found.",
-                ));
-            }
-            Ok((StatusCode::OK, json!({ "deleted": true })))
+        (Some("weight"), Some("entries"), Some(entry_id), "DELETE") => require_deleted(
+            user_rpc!(state, auth, "deleteWeightEntry", "entryId": require_uuid(entry_id)?).await?,
+            "Weight entry not found.",
+        ),
+        (Some("weight"), Some("goal"), None, "GET") => {
+            ok(json!({ "goalWeightKg": user_rpc!(state, auth, "getWeightGoal").await? }))
         }
-        (Some("weight"), Some("goal"), None, "GET") => Ok((
-            StatusCode::OK,
-            json!({ "goalWeightKg": rpc(state, "getWeightGoal", json!({ "userId": auth.user_id })).await? }),
-        )),
         (Some("weight"), Some("goal"), None, "PATCH") => {
             let body = require_object(read_json(&body)?)?;
             let goal_weight_kg = body.get("goalWeightKg").cloned().ok_or_else(|| {
@@ -791,73 +560,34 @@ async fn dispatch_api_request(
                     "goalWeightKg must be null or a finite positive number.",
                 ));
             }
-            rpc(
-                state,
-                "saveWeightGoal",
-                json!({ "userId": auth.user_id, "goalWeightKg": goal_weight_kg }),
-            )
-            .await?;
-            Ok((
-                StatusCode::OK,
-                json!({ "goalWeightKg": rpc(state, "getWeightGoal", json!({ "userId": auth.user_id })).await? }),
-            ))
+            user_rpc!(state, auth, "saveWeightGoal", "goalWeightKg": goal_weight_kg).await?;
+            ok(json!({ "goalWeightKg": user_rpc!(state, auth, "getWeightGoal").await? }))
         }
-        (Some("stats"), None, None, "GET") => Ok((
-            StatusCode::OK,
-            rpc(
-                state,
-                "getStatsPageData",
-                json!({ "userId": auth.user_id, "today": reference_date(uri)? }),
-            )
-            .await?,
-        )),
+        (Some("stats"), None, None, "GET") => {
+            ok(user_rpc!(state, auth, "getStatsPageData", "today": reference_date(uri)?).await?)
+        }
         (Some("summary"), None, None, "GET") => {
             let date = reference_date(uri)?;
-            let daily_summary = rpc(
-                state,
-                "getDailySummary",
-                json!({ "userId": auth.user_id, "date": date }),
-            )
-            .await?;
-            let period_averages = rpc(
-                state,
-                "getPeriodAverages",
-                json!({ "userId": auth.user_id, "selectedDate": date }),
-            )
-            .await?;
-            let goals = rpc(state, "getUserGoals", json!({ "userId": auth.user_id })).await?;
-            let stats = rpc(
-                state,
-                "getStatsPageData",
-                json!({ "userId": auth.user_id, "today": date }),
-            )
-            .await?;
-            Ok((
-                StatusCode::OK,
+            let daily_summary = user_rpc!(state, auth, "getDailySummary", "date": date).await?;
+            let period_averages =
+                user_rpc!(state, auth, "getPeriodAverages", "selectedDate": date).await?;
+            let goals = user_rpc!(state, auth, "getUserGoals").await?;
+            let stats = user_rpc!(state, auth, "getStatsPageData", "today": date).await?;
+            ok(
                 json!({ "date": date, "dailySummary": daily_summary, "periodAverages": period_averages, "goals": goals, "stats": stats }),
-            ))
-        }
-        (Some("leaderboard"), None, None, "GET") => Ok((
-            StatusCode::OK,
-            rpc(
-                state,
-                "getLeaderboardStats",
-                json!({ "userId": auth.user_id, "referenceDate": reference_date(uri)? }),
             )
-            .await?,
-        )),
+        }
+        (Some("leaderboard"), None, None, "GET") => ok(
+            user_rpc!(state, auth, "getLeaderboardStats", "referenceDate": reference_date(uri)?)
+                .await?,
+        ),
         (Some("sync"), Some("healthkit"), None, "GET") => {
             let days = bounded_query_int(uri, "days", 7, 1, 30)?;
             let limit = bounded_query_int(uri, "limit", 100, 1, 200)?;
-            Ok((
-                StatusCode::OK,
-                rpc(
-                    state,
-                    "getHealthkitSyncEntries",
-                    json!({ "userId": auth.user_id, "days": days, "limit": limit }),
-                )
-                .await?,
-            ))
+            ok(
+                user_rpc!(state, auth, "getHealthkitSyncEntries", "days": days, "limit": limit)
+                    .await?,
+            )
         }
         (Some("sync"), Some("healthkit"), Some("ack"), "POST") => {
             let body = require_object(read_json(&body)?)?;
@@ -865,21 +595,9 @@ async fn dispatch_api_request(
                 .get("entryIds")
                 .cloned()
                 .ok_or_else(|| bad_request("entryIds must be an array of meal entry IDs."))?;
-            Ok((
-                StatusCode::OK,
-                rpc(
-                    state,
-                    "ackHealthkitSyncEntries",
-                    json!({ "userId": auth.user_id, "entryIds": entry_ids }),
-                )
-                .await?,
-            ))
+            ok(user_rpc!(state, auth, "ackHealthkitSyncEntries", "entryIds": entry_ids).await?)
         }
-        _ => Err(ApiFailure::new(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "API endpoint not found.",
-        )),
+        _ => Err(not_found("API endpoint not found.")),
     }
 }
 
@@ -889,9 +607,7 @@ async fn rpc(state: &AppState, op: &str, args: Value) -> ApiResult<Value> {
         .map_err(api_failure_from_app_error)
 }
 
-/// Every endpoint the public API serves, matched **in order**: a shape with a
-/// literal segment must precede the wildcard shape that would otherwise swallow
-/// it (`/foods/search` before `/foods/{id}`).
+/// Every endpoint the public API serves, matched **in order**: a literal shape must precede any wildcard it shadows.
 const API_V1_ENDPOINTS: &[Endpoint] = &[
     Endpoint {
         path: "/me",
@@ -1058,8 +774,7 @@ const API_V1_ENDPOINTS: &[Endpoint] = &[
         methods: &["POST"],
         scopes: &[("POST", &["write:daily"])],
     },
-    // Answered before authentication in `handle_api_v1`. The empty scope list
-    // is the contract published for it, not a routing default.
+    // Answered before authentication in `handle_api_v1`; the empty scope list is the published contract, not a default.
     Endpoint {
         path: "/openapi.json",
         methods: &["GET"],
@@ -1074,8 +789,7 @@ fn endpoint_for(path: &[String]) -> Option<Endpoint> {
         .copied()
 }
 
-/// A template segment in braces matches any single path segment; every other
-/// segment must match exactly, and the two lengths must agree.
+/// A `{brace}` template segment matches any single path segment; every other segment must match exactly.
 fn path_template_matches(template: &str, path: &[String]) -> bool {
     let mut matched = 0usize;
     for segment in template.split('/').filter(|segment| !segment.is_empty()) {
@@ -1090,13 +804,7 @@ fn path_template_matches(template: &str, path: &[String]) -> bool {
     matched == path.len()
 }
 
-/// Required scopes for `method` on `endpoint`, or `None` when the endpoint
-/// declares none for it.
-///
-/// API-01: this lookup used to end in `.unwrap_or(&[])`, so a method listed in
-/// `Endpoint::methods` but missing from `Endpoint::scopes` silently required no
-/// scope at all and any valid token could call it. The caller now refuses such
-/// a request, making the default deny.
+/// Required scopes for `method` on `endpoint`, or `None` when the endpoint declares none for it (API-01: default-deny).
 fn required_scopes(endpoint: &Endpoint, method: &str) -> Option<&'static [&'static str]> {
     endpoint
         .scopes
@@ -1160,16 +868,11 @@ fn require_string_field(
 }
 
 fn require_date(value: &str) -> ApiResult<()> {
-    // Same rule the internal RPC path enforces, so both entry points agree on
-    // what a date is.
+    // Same rule the internal RPC path enforces, so both entry points agree on what a date is.
     crate::db::ensure_date_string(value).map_err(|_| bad_request("Date must use YYYY-MM-DD."))
 }
 
-/// API-11: `/api/v1/barcodes/{barcode}` accepted anything while its
-/// session-authenticated twin in `legacy_api.rs` has always required 4–20
-/// characters. Not exploitable — the lookup is a parameterised equality — but
-/// two entry points to one capability should not disagree about what a barcode
-/// is, so both now read the same bounds.
+/// API-11: bounds match the session-authenticated twin in `legacy_api.rs`, so both entry points agree on a barcode.
 fn require_barcode(value: &str) -> ApiResult<()> {
     use crate::legacy_api::{MAX_BARCODE_LENGTH, MIN_BARCODE_LENGTH};
 
@@ -1191,21 +894,33 @@ fn has_non_null(record: &Map<String, Value>, key: &str) -> bool {
     record.get(key).is_some_and(|value| !value.is_null())
 }
 
-/// Prefix reserved for control flags that this module adds to an RPC `input`
-/// map. `db.rs` reads them back out of that same map, so they are part of the
-/// internal calling convention and must never be settable by a client.
+fn require_found(value: Value, message: impl Into<String>) -> ApiResult<Value> {
+    if value.is_null() {
+        return Err(not_found(message));
+    }
+    Ok(value)
+}
+
+fn require_deleted(deleted: Value, message: impl Into<String>) -> ApiResult<(StatusCode, Value)> {
+    if !deleted.as_bool().unwrap_or(false) {
+        return Err(not_found(message));
+    }
+    ok(json!({ "deleted": true }))
+}
+
+fn require_optional_date(patch: &Map<String, Value>) -> ApiResult<()> {
+    if let Some(date) = patch.get("date").and_then(Value::as_str) {
+        require_date(date)?;
+    } else if patch.contains_key("date") {
+        return Err(bad_request("Date must use YYYY-MM-DD."));
+    }
+    Ok(())
+}
+
+/// Reserved prefix for RPC `input` control flags that `db.rs` reads back; must never be settable by a client.
 const PRIVATE_INPUT_KEY_PREFIX: &str = "__";
 
-/// Copies a client patch onto a stored record, dropping every reserved key.
-///
-/// DATA-02: `PATCH` handlers merge the raw request body onto the row they just
-/// read and hand the result to the RPC layer as `input`. Copying every key
-/// meant a caller could inject `__recalculateProductMacros`, the private flag
-/// that decides whether a product-linked entry's macros are recomputed from the
-/// product row or taken verbatim from the request — i.e. the client could
-/// choose to have its own macro numbers stored against someone else's product
-/// snapshot. Reserved keys are stripped here; only the callers below may add
-/// one back.
+/// Copies a client patch onto a record, dropping reserved keys (DATA-02); only the callers below may add one back.
 fn apply_client_patch(
     mut record: Map<String, Value>,
     patch: Map<String, Value>,
@@ -1219,12 +934,7 @@ fn apply_client_patch(
     record
 }
 
-/// Merges a meal-entry patch and re-derives the product-snapshot flag.
-///
-/// The flag is set only when the entry is product-linked and the patch touches
-/// none of the fields the product snapshot is derived from — patching any of
-/// them means the caller wants the entry recalculated. It is computed from the
-/// stored row and the patch's *key set*, never from a client-supplied value.
+/// Merges a meal-entry patch and re-derives the product-snapshot flag from the stored row and the patch's key set only.
 fn merge_meal_entry_patch(
     existing: Map<String, Value>,
     patch: Map<String, Value>,
@@ -1259,18 +969,15 @@ fn merge_goals(current: Value, patch: Value) -> ApiResult<Value> {
             .or_else(|| current.get(key))
             .cloned()
             .unwrap_or(Value::Null);
+        let message = format!("{key} must be null or a finite non-negative number.");
         if !(value.is_null() || value.as_f64().is_some()) {
-            return Err(bad_request(format!(
-                "{key} must be null or a finite non-negative number."
-            )));
+            return Err(bad_request(message));
         }
         if value
             .as_f64()
             .is_some_and(|number| number < 0.0 || !number.is_finite())
         {
-            return Err(bad_request(format!(
-                "{key} must be null or a finite non-negative number."
-            )));
+            return Err(bad_request(message));
         }
         if key == "caloriesKcal" && value.as_f64().is_some_and(|number| number.fract() != 0.0) {
             return Err(bad_request("caloriesKcal must be an integer."));
@@ -1331,19 +1038,17 @@ fn map_account(user: Value) -> Value {
 }
 
 fn map_food_array(products: Value) -> Value {
-    Value::Array(
-        products
-            .as_array()
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .map(map_food_product)
-            .collect(),
-    )
+    match products {
+        Value::Array(products) => {
+            Value::Array(products.into_iter().map(map_food_product).collect())
+        }
+        // Preserve the established defensive response for an unexpected internal value.
+        _ => Value::Array(Vec::new()),
+    }
 }
 
 fn map_food_product(product: Value) -> Value {
-    let Some(mut object) = product.as_object().cloned() else {
+    let Value::Object(mut object) = product else {
         return product;
     };
     for key in [
@@ -1358,6 +1063,14 @@ fn map_food_product(product: Value) -> Value {
         object.remove(key);
     }
     Value::Object(object)
+}
+
+fn finite_or_nan(body: &Map<String, Value>, key: &str) -> Option<f64> {
+    match body.get(key) {
+        Some(Value::Number(number)) => Some(number.as_f64().unwrap_or(f64::NAN)),
+        Some(_) => Some(f64::NAN),
+        None => None,
+    }
 }
 
 async fn build_recipe_log_input(
@@ -1375,28 +1088,14 @@ async fn build_recipe_log_input(
         json!({ "userId": user_id, "recipeId": recipe_id }),
     )
     .await?;
-    if recipe.is_null() {
-        return Err(ApiFailure::new(
-            StatusCode::NOT_FOUND,
-            "not_found",
-            "Recipe not found.",
-        ));
-    }
-    let portion_count = match body.get("portionCount") {
-        Some(Value::Number(number)) => number.as_f64().unwrap_or(f64::NAN),
-        Some(_) => f64::NAN,
-        None => 1.0,
-    };
+    let recipe = require_found(recipe, "Recipe not found.")?;
+    let portion_count = finite_or_nan(&body, "portionCount").unwrap_or(1.0);
     if !portion_count.is_finite() || portion_count <= 0.0 {
         return Err(bad_request(
             "portionCount must be a finite positive number.",
         ));
     }
-    let grams_consumed = match body.get("gramsConsumed") {
-        Some(Value::Number(number)) => Some(number.as_f64().unwrap_or(f64::NAN)),
-        Some(_) => Some(f64::NAN),
-        None => None,
-    };
+    let grams_consumed = finite_or_nan(&body, "gramsConsumed");
     if grams_consumed.is_some_and(|value| !value.is_finite() || value <= 0.0) {
         return Err(bad_request(
             "gramsConsumed must be a finite positive number.",
@@ -1458,6 +1157,7 @@ async fn build_recipe_log_input(
             }
         )
     };
+    let scaled = |key: &str| per_portion.get(key).and_then(Value::as_f64).unwrap_or(0.0) * factor;
     Ok(Map::from_iter([
         ("date".to_string(), Value::String(date)),
         ("status".to_string(), Value::String(status)),
@@ -1477,46 +1177,12 @@ async fn build_recipe_log_input(
                 .to_string(),
             ),
         ),
-        (
-            "proteinG".to_string(),
-            json!(round1(
-                per_portion
-                    .get("proteinG")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0)
-                    * factor
-            )),
-        ),
-        (
-            "carbsG".to_string(),
-            json!(round1(
-                per_portion
-                    .get("carbsG")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0)
-                    * factor
-            )),
-        ),
-        (
-            "fatG".to_string(),
-            json!(round1(
-                per_portion
-                    .get("fatG")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0)
-                    * factor
-            )),
-        ),
+        ("proteinG".to_string(), json!(round1(scaled("proteinG")))),
+        ("carbsG".to_string(), json!(round1(scaled("carbsG")))),
+        ("fatG".to_string(), json!(round1(scaled("fatG")))),
         (
             "caloriesKcal".to_string(),
-            json!(
-                (per_portion
-                    .get("caloriesKcal")
-                    .and_then(Value::as_f64)
-                    .unwrap_or(0.0)
-                    * factor)
-                    .round() as i32
-            ),
+            json!(scaled("caloriesKcal").round() as i32),
         ),
     ]))
 }
@@ -1550,8 +1216,28 @@ fn bounded_query_int(uri: &Uri, name: &str, default: i64, min: i64, max: i64) ->
     }
 }
 
+fn ok(data: Value) -> ApiResult<(StatusCode, Value)> {
+    Ok((StatusCode::OK, data))
+}
+
+fn created(data: Value) -> ApiResult<(StatusCode, Value)> {
+    Ok((StatusCode::CREATED, data))
+}
+
 fn bad_request(message: impl Into<String>) -> ApiFailure {
     ApiFailure::new(StatusCode::BAD_REQUEST, "bad_request", message)
+}
+
+fn not_found(message: impl Into<String>) -> ApiFailure {
+    ApiFailure::new(StatusCode::NOT_FOUND, "not_found", message)
+}
+
+fn require_scope(auth: &ApiAuth, scope: &'static str) -> ApiResult<()> {
+    if auth.scopes.iter().any(|owned| owned == scope) {
+        Ok(())
+    } else {
+        Err(insufficient_scope(scope))
+    }
 }
 
 fn insufficient_scope(scope: &'static str) -> ApiFailure {
@@ -1582,21 +1268,14 @@ fn internal_error() -> ApiFailure {
 }
 
 fn api_failure_from_app_error(error: AppError) -> ApiFailure {
-    // Everything the backend already classifies is taken straight from
-    // `AppError`, so the status/code strings live in exactly one place. Only
-    // the two genuine API-surface divergences are spelled out.
+    // `AppError` is taken straight through; only the two API-surface divergences below are spelled out.
     match error {
-        // The public API authenticates with Bearer tokens, so an auth failure
-        // is reported as `invalid_token` rather than the internal
-        // `unauthorized`.
+        // Bearer-token auth, so a failure is reported as `invalid_token` rather than the internal `unauthorized`.
         AppError::Unauthorized(message) => {
             ApiFailure::new(StatusCode::UNAUTHORIZED, "invalid_token", message)
         }
-        // API-03: only the weight-date constraint used to be recognised, so
-        // every other unique violation — reusing a `clientMutationId`, say —
-        // surfaced as a 500 `internal_error`, telling the caller the server
-        // broke when in fact their request collided with an existing row. The
-        // constraint name is logged, never returned: it names internal schema.
+        // API-03: every unique violation maps to a conflict.
+        // The constraint name is logged, never returned (names internal schema).
         AppError::Sqlx(ref sqlx_error)
             if sqlx_error
                 .as_database_error()
@@ -1626,10 +1305,6 @@ fn api_failure_from_app_error(error: AppError) -> ApiFailure {
             ApiFailure::new(status, code, error.to_string())
         }
     }
-}
-
-fn json_response(status: StatusCode, body: Value, allow: Option<&str>) -> Response {
-    raw_json_response(status, body, allow)
 }
 
 fn raw_json_response(status: StatusCode, body: Value, allow: Option<&str>) -> Response {
@@ -1684,892 +1359,4 @@ pub(crate) fn cors_headers() -> HeaderMap {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::{body::Body, http::Request};
-    use http_body_util::BodyExt;
-    use sqlx::postgres::PgPoolOptions;
-    use tower::ServiceExt;
-
-    fn test_state() -> AppState {
-        AppState {
-            config: crate::config::test_config(),
-            db: PgPoolOptions::new()
-                .connect_lazy("postgres://postgres:***@127.0.0.1:5432/macro_tracker")
-                .expect("test pool should be created lazily"),
-            http: reqwest::Client::new(),
-        }
-    }
-
-    #[tokio::test]
-    async fn openapi_json_is_public_and_uses_cors_contract() {
-        let response = router()
-            .with_state(test_state())
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/openapi.json")
-                    .body(Body::empty())
-                    .expect("request should build"),
-            )
-            .await
-            .expect("request should complete");
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
-            Some(&CORS_ALLOW_ORIGIN.parse().unwrap())
-        );
-        let body = response
-            .into_body()
-            .collect()
-            .await
-            .expect("body should collect")
-            .to_bytes();
-        let payload: Value = serde_json::from_slice(&body).expect("body should be JSON");
-
-        assert_eq!(payload["openapi"], "3.1.0");
-        assert_eq!(payload["info"]["title"], "Macro Tracker API");
-        assert_eq!(payload["servers"], json!([{ "url": "/api/v1" }]));
-        assert_eq!(
-            payload["paths"]["/openapi.json"]["get"]["security"],
-            json!([])
-        );
-        assert!(payload["paths"].get("/goals").is_some());
-    }
-
-    // --- Router shape -------------------------------------------------------
-
-    async fn read_json_body(response: Response) -> Value {
-        let body = response
-            .into_body()
-            .collect()
-            .await
-            .expect("body should collect")
-            .to_bytes();
-        serde_json::from_slice(&body).expect("body should be JSON")
-    }
-
-    async fn call(method: &str, uri: &str, bearer: Option<&str>) -> Response {
-        let mut builder = Request::builder().method(method).uri(uri);
-        if let Some(bearer) = bearer {
-            builder = builder.header(header::AUTHORIZATION, bearer);
-        }
-
-        router()
-            .with_state(test_state())
-            .oneshot(builder.body(Body::empty()).expect("request should build"))
-            .await
-            .expect("request should complete")
-    }
-
-    #[tokio::test]
-    async fn unknown_routes_return_the_error_envelope() {
-        let response = call("GET", "/does-not-exist", None).await;
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        let payload = read_json_body(response).await;
-        assert_eq!(payload["ok"], json!(false));
-        assert_eq!(payload["error"]["code"], json!("not_found"));
-    }
-
-    #[tokio::test]
-    async fn known_routes_reject_unsupported_methods_before_authenticating() {
-        let response = call("DELETE", "/goals", None).await;
-
-        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
-        let allow = response
-            .headers()
-            .get(header::ALLOW)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default()
-            .to_string();
-        assert!(allow.contains("GET"), "unexpected Allow header: {allow}");
-        assert!(
-            allow.contains("OPTIONS"),
-            "unexpected Allow header: {allow}"
-        );
-
-        let payload = read_json_body(response).await;
-        assert_eq!(payload["error"]["code"], json!("method_not_allowed"));
-    }
-
-    #[tokio::test]
-    async fn an_oversized_body_keeps_the_error_envelope_and_the_cors_headers() {
-        // API-06: the `Bytes` extractor rejects before the handler, so this
-        // used to be a bare 413 with a plain-text body and no
-        // `Access-Control-Allow-Origin` — a browser saw a CORS failure rather
-        // than the documented error shape.
-        let response = router()
-            .with_state(test_state())
-            .oneshot(
-                Request::builder()
-                    .method("PATCH")
-                    .uri("/goals")
-                    .header(header::CONTENT_TYPE, "application/json")
-                    .body(Body::from(vec![b'x'; 3 * 1024 * 1024]))
-                    .expect("request should build"),
-            )
-            .await
-            .expect("request should complete");
-
-        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-        assert_eq!(
-            response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
-            Some(&CORS_ALLOW_ORIGIN.parse().unwrap())
-        );
-
-        let payload = read_json_body(response).await;
-        assert_eq!(payload["ok"], json!(false));
-        assert_eq!(payload["error"]["code"], json!("payload_too_large"));
-    }
-
-    #[tokio::test]
-    async fn the_public_spec_is_still_served_when_the_body_is_rejected() {
-        // A rejected body must not stop the unauthenticated document from
-        // being readable.
-        let response = router()
-            .with_state(test_state())
-            .oneshot(
-                Request::builder()
-                    .method("GET")
-                    .uri("/openapi.json")
-                    .body(Body::from(vec![b'x'; 3 * 1024 * 1024]))
-                    .expect("request should build"),
-            )
-            .await
-            .expect("request should complete");
-
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn preflight_succeeds_without_a_token() {
-        let response = call("OPTIONS", "/goals", None).await;
-
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        assert_eq!(
-            response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
-            Some(&CORS_ALLOW_ORIGIN.parse().unwrap())
-        );
-    }
-
-    #[tokio::test]
-    async fn missing_and_malformed_bearer_tokens_are_reported_distinctly() {
-        let missing = call("GET", "/goals", None).await;
-        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(
-            read_json_body(missing).await["error"]["code"],
-            json!("missing_token")
-        );
-
-        let malformed = call("GET", "/goals", Some("Token abc")).await;
-        assert_eq!(malformed.status(), StatusCode::UNAUTHORIZED);
-        assert_eq!(
-            read_json_body(malformed).await["error"]["code"],
-            json!("malformed_token")
-        );
-    }
-
-    #[test]
-    fn auth_error_maps_every_backend_reason() {
-        assert_eq!(auth_error("expired").0, "expired_token");
-        assert_eq!(auth_error("revoked").0, "revoked_token");
-        assert_eq!(auth_error("malformed").0, "malformed_token");
-        assert_eq!(auth_error("missing").0, "missing_token");
-        assert_eq!(auth_error("anything-else").0, "invalid_token");
-    }
-
-    // --- Validation ---------------------------------------------------------
-
-    #[test]
-    fn require_date_matches_the_internal_rpc_rule() {
-        assert!(require_date("2026-01-15").is_ok());
-        assert!(require_date("2024-02-29").is_ok());
-
-        for invalid in [
-            "",
-            "2026-1-5",
-            "26-01-15",
-            "2026-13-01",
-            "2026-02-30",
-            // Postgres would accept all three as `date` input.
-            "infinity",
-            "today",
-            "epoch",
-        ] {
-            assert!(
-                require_date(invalid).is_err(),
-                "expected {invalid:?} to be rejected"
-            );
-        }
-    }
-
-    #[test]
-    fn require_uuid_rejects_non_uuid_path_parameters() {
-        assert!(require_uuid("not-a-uuid").is_err());
-        let uuid = Uuid::new_v4().to_string();
-        assert_eq!(require_uuid(&uuid).expect("valid uuid"), uuid);
-    }
-
-    #[test]
-    fn merge_goals_keeps_omitted_fields_and_clears_explicit_nulls() {
-        let merged = merge_goals(
-            json!({ "caloriesKcal": 2200, "proteinG": 150, "carbsG": 250, "fatG": 70 }),
-            json!({ "proteinG": 180, "fatG": null }),
-        )
-        .expect("patch should merge");
-
-        assert_eq!(merged["caloriesKcal"], json!(2200));
-        assert_eq!(merged["proteinG"].as_f64(), Some(180.0));
-        assert_eq!(merged["carbsG"], json!(250));
-        assert_eq!(merged["fatG"], Value::Null);
-    }
-
-    #[test]
-    fn merge_goals_rejects_invalid_numbers() {
-        let current = json!({ "caloriesKcal": 2000, "proteinG": 150, "carbsG": 200, "fatG": 60 });
-
-        for patch in [
-            json!({ "proteinG": -1 }),
-            json!({ "proteinG": "150" }),
-            json!({ "caloriesKcal": 2000.5 }),
-        ] {
-            assert!(
-                merge_goals(current.clone(), patch.clone()).is_err(),
-                "expected {patch} to be rejected"
-            );
-        }
-    }
-
-    fn object(value: Value) -> Map<String, Value> {
-        value
-            .as_object()
-            .cloned()
-            .expect("value should be an object")
-    }
-
-    #[test]
-    fn meal_entry_patches_cannot_set_the_private_recalculation_flag() {
-        // DATA-02: the exploit body. `proteinG` is present, so the handler's own
-        // snapshot rule says "recalculate", but the caller tries to override it
-        // with `false` so its raw macro numbers are stored verbatim against the
-        // linked product.
-        let merged = merge_meal_entry_patch(
-            object(json!({
-                "id": "11111111-1111-4111-8111-111111111111",
-                "productId": "22222222-2222-4222-8222-222222222222",
-                "label": "Oats",
-                "quantity": 1.0,
-                "unit": "serving",
-                "proteinG": 10.0,
-                "carbsG": 20.0,
-                "fatG": 5.0,
-                "caloriesKcal": 165
-            })),
-            object(json!({
-                "proteinG": 1,
-                "caloriesKcal": -2_000_000_000i64,
-                "__recalculateProductMacros": false
-            })),
-        );
-
-        assert!(
-            !merged.contains_key("__recalculateProductMacros"),
-            "a client must not be able to control the recalculation flag: {merged:?}"
-        );
-        assert_eq!(merged["proteinG"], json!(1));
-    }
-
-    #[test]
-    fn meal_entry_patches_drop_every_reserved_key() {
-        let merged = merge_meal_entry_patch(
-            object(json!({ "label": "Oats" })),
-            object(json!({ "__anythingElse": "nope", "label": "Toast" })),
-        );
-
-        assert!(!merged.contains_key("__anythingElse"));
-        assert_eq!(merged["label"], json!("Toast"));
-    }
-
-    #[test]
-    fn product_linked_entries_keep_their_snapshot_when_no_macro_field_is_patched() {
-        // Regression guard for the behaviour the flag exists for: renaming a
-        // product-linked entry must not recompute its macros.
-        let merged = merge_meal_entry_patch(
-            object(json!({
-                "productId": "22222222-2222-4222-8222-222222222222",
-                "label": "Oats",
-                "proteinG": 10.0
-            })),
-            object(json!({ "label": "Breakfast oats" })),
-        );
-
-        assert_eq!(merged["__recalculateProductMacros"], json!(false));
-        assert_eq!(merged["label"], json!("Breakfast oats"));
-    }
-
-    #[test]
-    fn entries_without_a_product_never_carry_the_recalculation_flag() {
-        let merged = merge_meal_entry_patch(
-            object(json!({ "label": "Oats", "proteinG": 10.0 })),
-            object(json!({ "label": "Toast" })),
-        );
-
-        assert!(!merged.contains_key("__recalculateProductMacros"));
-    }
-
-    #[test]
-    fn weight_entry_patches_drop_reserved_keys_too() {
-        let merged = apply_client_patch(
-            object(json!({ "date": "2026-01-15", "weightKg": 80.0 })),
-            object(json!({ "weightKg": 79.0, "__recalculateProductMacros": false })),
-        );
-
-        assert!(!merged.contains_key("__recalculateProductMacros"));
-        assert_eq!(merged["weightKg"], json!(79.0));
-    }
-
-    #[test]
-    fn read_json_rejects_a_malformed_body() {
-        assert!(read_json(&Bytes::from_static(b"{ not json")).is_err());
-        assert!(read_json(&Bytes::from_static(b"{}")).is_ok());
-    }
-
-    #[test]
-    fn require_object_rejects_non_objects() {
-        assert!(require_object(json!([1, 2, 3])).is_err());
-        assert!(require_object(json!("string")).is_err());
-        assert!(require_object(json!({ "a": 1 })).is_ok());
-    }
-
-    // --- Error mapping ------------------------------------------------------
-
-    #[test]
-    fn app_errors_map_onto_the_public_status_and_code() {
-        let cases = [
-            (
-                AppError::BadRequest("nope".into()),
-                StatusCode::BAD_REQUEST,
-                "bad_request",
-            ),
-            (
-                AppError::Forbidden("nope".into()),
-                StatusCode::FORBIDDEN,
-                "forbidden",
-            ),
-            (
-                AppError::NotFound("nope".into()),
-                StatusCode::NOT_FOUND,
-                "not_found",
-            ),
-            (
-                AppError::Conflict("nope".into()),
-                StatusCode::CONFLICT,
-                "conflict",
-            ),
-            (
-                AppError::Upstream("nope".into()),
-                StatusCode::BAD_GATEWAY,
-                "upstream_error",
-            ),
-        ];
-
-        for (error, status, code) in cases {
-            let failure = api_failure_from_app_error(error);
-            assert_eq!(failure.status, status);
-            assert_eq!(failure.code, code);
-        }
-    }
-
-    /// Minimal `sqlx::error::DatabaseError` so the unique-violation mapping can
-    /// be tested without provoking a real constraint.
-    #[derive(Debug)]
-    struct FakeDatabaseError {
-        code: &'static str,
-        constraint: Option<&'static str>,
-    }
-
-    impl std::fmt::Display for FakeDatabaseError {
-        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(formatter, "duplicate key value violates unique constraint")
-        }
-    }
-
-    impl std::error::Error for FakeDatabaseError {}
-
-    impl sqlx::error::DatabaseError for FakeDatabaseError {
-        fn message(&self) -> &str {
-            "duplicate key value violates unique constraint"
-        }
-
-        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
-            Some(std::borrow::Cow::Borrowed(self.code))
-        }
-
-        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
-            self
-        }
-
-        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
-            self
-        }
-
-        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
-            self
-        }
-
-        fn constraint(&self) -> Option<&str> {
-            self.constraint
-        }
-
-        fn kind(&self) -> sqlx::error::ErrorKind {
-            if self.code == "23505" {
-                sqlx::error::ErrorKind::UniqueViolation
-            } else {
-                sqlx::error::ErrorKind::Other
-            }
-        }
-    }
-
-    fn database_error(code: &'static str, constraint: Option<&'static str>) -> AppError {
-        AppError::Sqlx(sqlx::Error::Database(Box::new(FakeDatabaseError {
-            code,
-            constraint,
-        })))
-    }
-
-    #[test]
-    fn any_unique_violation_is_a_conflict_not_an_internal_error() {
-        // API-03: only `weight_entries_user_date_key` was recognised, so
-        // reusing a `clientMutationId` reported a 500 for what is a collision
-        // with an existing row.
-        let failure = api_failure_from_app_error(database_error(
-            "23505",
-            Some("meal_entries_user_client_mutation_id_key"),
-        ));
-
-        assert_eq!(failure.status, StatusCode::CONFLICT);
-        assert_eq!(failure.code, "conflict");
-        assert!(
-            !failure.message.contains("meal_entries"),
-            "the constraint name must not be echoed: {}",
-            failure.message
-        );
-    }
-
-    #[test]
-    fn the_weight_date_conflict_keeps_its_specific_code() {
-        let failure =
-            api_failure_from_app_error(database_error("23505", Some(WEIGHT_ENTRY_DATE_CONSTRAINT)));
-
-        assert_eq!(failure.status, StatusCode::CONFLICT);
-        assert_eq!(failure.code, "weight_entry_date_conflict");
-    }
-
-    #[test]
-    fn a_non_unique_database_fault_is_still_an_internal_error() {
-        let failure = api_failure_from_app_error(database_error("08006", None));
-
-        assert_eq!(failure.status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(failure.code, "internal_error");
-    }
-
-    #[test]
-    fn barcodes_are_validated_the_same_way_on_both_entry_points() {
-        // API-11.
-        assert!(require_barcode("8712345678901").is_ok());
-        assert!(require_barcode("1234").is_ok());
-        assert!(require_barcode("123").is_err());
-        assert!(require_barcode("").is_err());
-        assert!(require_barcode(&"9".repeat(21)).is_err());
-        assert!(require_barcode(&"9".repeat(20)).is_ok());
-    }
-
-    #[test]
-    fn unauthorized_is_reported_as_invalid_token_on_the_public_api() {
-        let failure = api_failure_from_app_error(AppError::Unauthorized("nope".into()));
-        assert_eq!(failure.status, StatusCode::UNAUTHORIZED);
-        assert_eq!(failure.code, "invalid_token");
-    }
-
-    #[test]
-    fn internal_failures_never_leak_their_message() {
-        let failure = api_failure_from_app_error(AppError::Anyhow(anyhow::anyhow!(
-            "connection to postgres://user:secret@db.internal failed"
-        )));
-
-        assert_eq!(failure.status, StatusCode::INTERNAL_SERVER_ERROR);
-        assert_eq!(failure.code, "internal_error");
-        assert!(!failure.message.contains("postgres://"));
-    }
-
-    // --- Scope contract -----------------------------------------------------
-
-    /// Turns an OpenAPI path template into a concrete request path, so the
-    /// tests below exercise the same routing a client would hit.
-    fn sample_path(template: &str) -> Vec<String> {
-        template
-            .split('/')
-            .filter(|segment| !segment.is_empty())
-            .map(|segment| match segment {
-                "{date}" => "2026-01-15".to_string(),
-                "{barcode}" => "8712345678901".to_string(),
-                segment if segment.starts_with('{') => {
-                    "11111111-1111-4111-8111-111111111111".to_string()
-                }
-                segment => segment.to_string(),
-            })
-            .collect()
-    }
-
-    #[test]
-    fn every_shipped_endpoint_declares_scopes_for_each_method() {
-        // Derived from the routing table rather than a hand-kept list, so a new
-        // endpoint cannot be added without this test covering it (API-01).
-        for endpoint in API_V1_ENDPOINTS {
-            for method in endpoint.methods {
-                assert!(
-                    required_scopes(endpoint, method).is_some(),
-                    "{} {method} declares no scopes",
-                    endpoint.path
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn an_endpoint_with_no_scope_tuple_for_a_method_is_denied() {
-        // The structural hole API-01 describes: a method allowed by `methods`
-        // but absent from `scopes`. The lookup must not fall back to "no scopes
-        // required".
-        let endpoint = Endpoint {
-            path: "/example",
-            methods: &["GET", "DELETE"],
-            scopes: &[("GET", &["read:daily"])],
-        };
-
-        assert_eq!(required_scopes(&endpoint, "GET"), Some(&["read:daily"][..]));
-        assert_eq!(required_scopes(&endpoint, "DELETE"), None);
-    }
-
-    #[test]
-    fn every_table_entry_routes_back_to_itself() {
-        // Guards the match order: a shape with a literal segment must not be
-        // swallowed by an earlier wildcard shape.
-        for endpoint in API_V1_ENDPOINTS {
-            let path = sample_path(endpoint.path);
-            let resolved =
-                endpoint_for(&path).unwrap_or_else(|| panic!("{} does not route", endpoint.path));
-            assert_eq!(
-                resolved.path, endpoint.path,
-                "{:?} routed to {} instead of {}",
-                path, resolved.path, endpoint.path
-            );
-        }
-    }
-
-    #[test]
-    fn the_routing_table_and_the_published_contract_agree_on_scopes() {
-        // The spec is served verbatim from `API_V1_OPENAPI_JSON`, so a drift
-        // between what is enforced and what is documented is a silent contract
-        // break. Compared in both directions.
-        let spec: Value = serde_json::from_slice(API_V1_OPENAPI_JSON).expect("spec should be JSON");
-        let paths = spec["paths"].as_object().expect("spec should have paths");
-
-        let mut documented = paths
-            .iter()
-            .flat_map(|(path, operations)| {
-                operations
-                    .as_object()
-                    .expect("operations should be an object")
-                    .iter()
-                    .map(move |(method, operation)| {
-                        (
-                            format!("{} {path}", method.to_uppercase()),
-                            operation["x-required-scopes"]
-                                .as_array()
-                                .map(|scopes| {
-                                    scopes
-                                        .iter()
-                                        .filter_map(Value::as_str)
-                                        .map(str::to_string)
-                                        .collect::<Vec<_>>()
-                                })
-                                .unwrap_or_default(),
-                        )
-                    })
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
-
-        for endpoint in API_V1_ENDPOINTS {
-            for method in endpoint.methods {
-                let key = format!("{method} {}", endpoint.path);
-                let scopes = required_scopes(endpoint, method)
-                    .unwrap_or_else(|| panic!("{key} declares no scopes"));
-                let documented_scopes = documented
-                    .remove(&key)
-                    .unwrap_or_else(|| panic!("{key} is enforced but not documented"));
-                assert_eq!(
-                    documented_scopes,
-                    scopes
-                        .iter()
-                        .map(|scope| scope.to_string())
-                        .collect::<Vec<_>>(),
-                    "{key} enforces different scopes than the spec documents"
-                );
-            }
-        }
-
-        assert!(
-            documented.is_empty(),
-            "documented operations that no endpoint serves: {:?}",
-            documented.keys().collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    fn the_published_status_lists_match_what_the_handler_can_actually_return() {
-        // API-15: every operation used to list an identical
-        // 400/401/403/404/405/500 set, including for the public
-        // `GET /openapi.json`, while the 504 the deadline emits and the 413 an
-        // over-limit body emits were documented nowhere.
-        let spec: Value = serde_json::from_slice(API_V1_OPENAPI_JSON).expect("spec should be JSON");
-        let paths = spec["paths"].as_object().expect("spec should have paths");
-
-        for (path, operations) in paths {
-            for (method, operation) in operations.as_object().expect("operations object") {
-                let responses = operation["responses"]
-                    .as_object()
-                    .expect("operation should document responses");
-                let label = format!("{} {path}", method.to_uppercase());
-
-                if path == "/openapi.json" {
-                    // Answered from a compiled-in constant before
-                    // authentication, before the body is read and before the
-                    // deadline wrapper — but `main.rs` mounts the rate limiter
-                    // in front of the whole `/api/v1` router, so 429 is still
-                    // reachable.
-                    assert_eq!(
-                        responses.keys().collect::<Vec<_>>(),
-                        vec!["200", "429"],
-                        "{label}: the public document has only these outcomes"
-                    );
-                    continue;
-                }
-
-                // 405 is a property of the *path*, not of one operation — a
-                // documented method is by definition allowed — but every
-                // operation lists it because OpenAPI has nowhere else to put a
-                // path-level response.
-                for required in ["401", "403", "405", "429", "500", "504"] {
-                    assert!(
-                        responses.contains_key(required),
-                        "{label}: missing {required}"
-                    );
-                }
-                if operation.get("requestBody").is_some() {
-                    assert!(responses.contains_key("413"), "{label}: missing 413");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn every_success_response_describes_its_data_and_every_ref_resolves() {
-        // API-15: all 41 operations shipped `"data": {}` — an envelope with no
-        // statement about what is inside it. The document is hand-maintained,
-        // so a dangling `$ref` would be silent until a consumer tried to
-        // dereference it.
-        let spec: Value = serde_json::from_slice(API_V1_OPENAPI_JSON).expect("spec should be JSON");
-
-        fn collect_refs(node: &Value, into: &mut Vec<String>) {
-            match node {
-                Value::Object(map) => {
-                    for (key, value) in map {
-                        if key == "$ref" {
-                            if let Some(reference) = value.as_str() {
-                                into.push(reference.to_string());
-                            }
-                        } else {
-                            collect_refs(value, into);
-                        }
-                    }
-                }
-                Value::Array(items) => items.iter().for_each(|item| collect_refs(item, into)),
-                _ => {}
-            }
-        }
-
-        let mut refs = Vec::new();
-        collect_refs(&spec, &mut refs);
-        assert!(!refs.is_empty(), "the document should use components");
-        for reference in &refs {
-            let path = reference
-                .strip_prefix("#/")
-                .unwrap_or_else(|| panic!("{reference} is not a local reference"));
-            let mut node = &spec;
-            for segment in path.split('/') {
-                node = node
-                    .get(segment)
-                    .unwrap_or_else(|| panic!("{reference} does not resolve"));
-            }
-        }
-
-        let paths = spec["paths"].as_object().expect("spec should have paths");
-        for (path, operations) in paths {
-            for (method, operation) in operations.as_object().expect("operations object") {
-                let label = format!("{} {path}", method.to_uppercase());
-                let responses = operation["responses"].as_object().expect("responses");
-                let (_, success) = responses
-                    .iter()
-                    .find(|(status, _)| status.starts_with('2'))
-                    .unwrap_or_else(|| panic!("{label}: no success response"));
-                let schema = &success["content"]["application/json"]["schema"];
-
-                if path == "/openapi.json" {
-                    // This one operation answers with the document itself, not
-                    // with the `{ ok, data }` envelope.
-                    assert!(
-                        schema.get("properties").is_none(),
-                        "{label}: the spec endpoint does not use the envelope"
-                    );
-                    continue;
-                }
-
-                let data = &schema["properties"]["data"];
-                assert!(
-                    data.is_object() && !data.as_object().expect("object").is_empty(),
-                    "{label}: `data` is still undescribed"
-                );
-                assert_eq!(
-                    schema["properties"]["ok"],
-                    json!({ "const": true }),
-                    "{label}: success responses set ok=true"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn the_published_timeout_status_is_the_one_the_handler_emits() {
-        let spec: Value = serde_json::from_slice(API_V1_OPENAPI_JSON).expect("spec should be JSON");
-
-        assert!(
-            spec["paths"]["/goals"]["get"]["responses"]
-                .get(StatusCode::GATEWAY_TIMEOUT.as_str())
-                .is_some()
-        );
-        assert!(
-            spec["paths"]["/goals"]["patch"]["responses"]
-                .get(StatusCode::PAYLOAD_TOO_LARGE.as_str())
-                .is_some()
-        );
-    }
-
-    #[test]
-    fn the_published_quantity_units_are_the_ones_the_data_layer_accepts() {
-        // API-15: `unit` and `defaultServingUnit` were documented as free
-        // strings while `is_quantity_unit` accepts exactly four values.
-        let spec: Value = serde_json::from_slice(API_V1_OPENAPI_JSON).expect("spec should be JSON");
-        let unit = &spec["paths"]["/days/{date}/entries"]["post"]["requestBody"]["content"]["application/json"]
-            ["schema"]["properties"]["unit"];
-
-        let documented = unit["enum"]
-            .as_array()
-            .expect("unit should be an enum")
-            .iter()
-            .filter_map(Value::as_str)
-            .collect::<Vec<_>>();
-
-        // Mirrors `is_quantity_unit` in db.rs, which is private to that module;
-        // if it gains or loses a unit this assertion has to move with it.
-        assert_eq!(documented, vec!["g", "ml", "serving", "count"]);
-    }
-
-    #[test]
-    fn the_body_date_is_not_documented_where_the_path_wins() {
-        // API-15: `date` was documented in the body of
-        // `POST /days/{date}/entries` but `dispatch_api_request` overwrites it
-        // with the path segment before the RPC call.
-        let spec: Value = serde_json::from_slice(API_V1_OPENAPI_JSON).expect("spec should be JSON");
-        let properties = &spec["paths"]["/days/{date}/entries"]["post"]["requestBody"]["content"]["application/json"]
-            ["schema"]["properties"];
-
-        assert!(properties.get("date").is_none());
-    }
-
-    #[test]
-    fn portions_is_documented_as_optional_with_its_real_default() {
-        let spec: Value = serde_json::from_slice(API_V1_OPENAPI_JSON).expect("spec should be JSON");
-        let schema = &spec["paths"]["/recipes"]["post"]["requestBody"]["content"]["application/json"]
-            ["schema"];
-
-        let required = schema["required"]
-            .as_array()
-            .expect("required should be an array")
-            .iter()
-            .filter_map(Value::as_str)
-            .collect::<Vec<_>>();
-
-        assert!(!required.contains(&"portions"));
-        assert_eq!(schema["properties"]["portions"]["default"], json!(1));
-    }
-
-    #[tokio::test]
-    async fn a_timed_out_request_still_returns_the_json_envelope_and_cors_headers() {
-        // A tower TimeoutLayer would emit a bare 504 here, breaking the
-        // documented contract for direct clients and tripping CORS in browsers.
-        let response = json_response(
-            StatusCode::GATEWAY_TIMEOUT,
-            json!({
-                "ok": false,
-                "error": { "code": "timeout", "message": "The request took too long to complete." }
-            }),
-            None,
-        );
-
-        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
-        assert_eq!(
-            response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
-            Some(&CORS_ALLOW_ORIGIN.parse().unwrap())
-        );
-
-        let payload = read_json_body(response).await;
-        assert_eq!(payload["ok"], json!(false));
-        assert_eq!(payload["error"]["code"], json!("timeout"));
-    }
-
-    #[tokio::test]
-    async fn slow_requests_time_out_through_the_api_error_envelope() {
-        // Drives the real handler path with a deadline short enough to elapse,
-        // proving the timeout branch produces an envelope rather than an empty
-        // transport-level response.
-        let slow = async {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            Ok::<(StatusCode, Value), ApiFailure>((StatusCode::OK, json!({})))
-        };
-
-        let result = match tokio::time::timeout(std::time::Duration::from_millis(20), slow).await {
-            Ok(result) => result,
-            Err(_) => Err(ApiFailure::new(
-                StatusCode::GATEWAY_TIMEOUT,
-                "timeout",
-                "The request took too long to complete.",
-            )),
-        };
-
-        let failure = result.expect_err("the slow future must time out");
-        assert_eq!(failure.status, StatusCode::GATEWAY_TIMEOUT);
-        assert_eq!(failure.code, "timeout");
-    }
-
-    #[test]
-    fn unknown_paths_have_no_endpoint() {
-        assert!(endpoint_for(&["nope".to_string()]).is_none());
-        assert!(
-            endpoint_for(&["goals".to_string(), "extra".to_string()]).is_none(),
-            "trailing segments must not resolve"
-        );
-    }
-}
+mod tests;

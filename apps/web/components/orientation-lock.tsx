@@ -2,17 +2,12 @@
 
 import { useEffect } from "react";
 
-/**
- * Attempts to lock the screen orientation to portrait when the app is running
- * as an installed PWA (standalone/fullscreen). Has no effect in regular browser
- * tabs because the Screen Orientation API requires a fullscreen context there.
- */
-// `lock` is defined in the Screen Orientation API spec but is absent from
-// TypeScript's built-in ScreenOrientation type.
 type LockableOrientation = ScreenOrientation & {
+  // `lock` is in the Screen Orientation API spec but absent from TypeScript's built-in type.
   lock?: (orientation: string) => Promise<void>;
 };
 
+// Locks orientation to portrait only inside an installed PWA; the Screen Orientation API needs a fullscreen context.
 export function OrientationLock() {
   useEffect(() => {
     const orientation =

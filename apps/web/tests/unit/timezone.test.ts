@@ -1,5 +1,6 @@
 import {
   TIMEZONE_COOKIE_NAME,
+  createTimeZoneFormatterCache,
   dateStringInTimeZone,
   isValidTimeZone,
   normalizeTimeZone,
@@ -29,12 +30,48 @@ describe("isValidTimeZone", () => {
     expect(normalizeTimeZone("Europe/Amsterdam")).toBe("Europe/Amsterdam");
     expect(normalizeTimeZone("garbage")).toBeNull();
   });
+
+  it("normalizes equivalent zone aliases to one canonical cookie value", () => {
+    expect(normalizeTimeZone("Etc/UTC")).toBe("UTC");
+    expect(normalizeTimeZone("eTc/uTc")).toBe("UTC");
+    expect(
+      dateStringInTimeZone("ETC/utc", new Date("2026-03-05T12:00:00Z")),
+    ).toBe("2026-03-05");
+  });
+
+  it("allocates one formatter for equivalent case spellings", () => {
+    const createdFor: string[] = [];
+    const cache = createTimeZoneFormatterCache((timeZone) => {
+      createdFor.push(timeZone);
+      return {
+        resolvedOptions: () => ({ timeZone: "UTC" }),
+      } as Intl.DateTimeFormat;
+    });
+
+    expect(cache.getCanonicalTimeZone("Etc/UTC")).toBe("UTC");
+    expect(cache.getCanonicalTimeZone("eTc/uTc")).toBe("UTC");
+    expect(cache.getFormatter("ETC/utc")).toBe(cache.getFormatter("Etc/UTC"));
+    expect(createdFor).toEqual(["Etc/UTC"]);
+  });
+
+  it("reuses an alias formatter for its canonical spelling", () => {
+    const createdFor: string[] = [];
+    const cache = createTimeZoneFormatterCache((timeZone) => {
+      createdFor.push(timeZone);
+      return {
+        resolvedOptions: () => ({ timeZone: "America/Los_Angeles" }),
+      } as Intl.DateTimeFormat;
+    });
+
+    expect(cache.getCanonicalTimeZone("US/Pacific")).toBe("America/Los_Angeles");
+    expect(cache.getFormatter("America/Los_Angeles")).toBeDefined();
+    expect(createdFor).toEqual(["US/Pacific"]);
+  });
 });
 
 describe("dateStringInTimeZone", () => {
   it("resolves the calendar day in the user's zone, not UTC", () => {
-    // 02:30 UTC on the 16th is still 21:30 on the 15th in New York — the
-    // onboarding weigh-in bug.
+    // 02:30 UTC on the 16th is still 21:30 on the 15th in New York.
     const instant = new Date("2026-01-16T02:30:00Z");
 
     expect(dateStringInTimeZone("UTC", instant)).toBe("2026-01-16");
@@ -42,8 +79,7 @@ describe("dateStringInTimeZone", () => {
   });
 
   it("resolves a day ahead of UTC for zones east of the line", () => {
-    // 20:00 UTC on the 14th is already 09:00 on the 15th in Auckland — the
-    // planned-vs-eaten bug.
+    // 20:00 UTC on the 14th is already 09:00 on the 15th in Auckland.
     const instant = new Date("2026-01-14T20:00:00Z");
 
     expect(dateStringInTimeZone("UTC", instant)).toBe("2026-01-14");

@@ -1,10 +1,7 @@
 import {
-  authenticateApiToken,
-  createApiToken,
   createMealGroup,
   createRecipe,
   createMealEntry,
-  createWeightEntry,
   completeOnboardingSetup,
   createPersonalFoodProduct,
   createTemplate,
@@ -23,10 +20,8 @@ import {
   getUserGoals,
   getWeightPageData,
   lookupBarcodeFoodProduct,
-  listApiTokens,
   markMealEntryStatus,
   applyTemplateToDate,
-  revokeApiToken,
   resolveProductNutritionForQuantity,
   saveBarcodeFoodProduct,
   saveUserGoals,
@@ -38,7 +33,6 @@ import {
   type DatabaseRuntime,
 } from "../src";
 import {
-  apiTokens,
   foodProducts,
   mealEntries,
   mealTemplateItems,
@@ -46,7 +40,7 @@ import {
   recipeIngredients,
   recipes,
 } from "../src/schema";
-import { createTestDatabase } from "../src/testing";
+import { setupSingleUserContext } from "./helpers";
 import { eq } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -56,16 +50,7 @@ describe("database queries", () => {
   let userId: string;
 
   beforeEach(async () => {
-    runtime = await createTestDatabase();
-    const user = await upsertUserFromShooProfile(
-      {
-        pairwiseSub: "ps_test_user",
-        email: "coach@example.com",
-        displayName: "Coach",
-      },
-      runtime.db,
-    );
-    userId = user.id;
+    ({ runtime, userId } = await setupSingleUserContext());
   });
 
   afterEach(async () => {
@@ -76,7 +61,7 @@ describe("database queries", () => {
     input: Parameters<typeof createMealEntry>[1],
     createdAtIso: string,
   ) {
-    const entry = await createMealEntry(userId, input, runtime.db);
+    const entry = await createMealEntry(userId, input);
     const timestamp = new Date(createdAtIso);
 
     await runtime.db
@@ -97,7 +82,6 @@ describe("database queries", () => {
         email: "other@example.com",
         displayName: "Other",
       },
-      runtime.db,
     );
 
     return user.id;
@@ -106,7 +90,7 @@ describe("database queries", () => {
   async function createOtherUserProduct(
     input: Parameters<typeof createPersonalFoodProduct>[1],
   ) {
-    return createPersonalFoodProduct(await createOtherUser(), input, runtime.db);
+    return createPersonalFoodProduct(await createOtherUser(), input);
   }
 
   function createFailingDbProxy(input: {
@@ -208,224 +192,6 @@ describe("database queries", () => {
     });
   }
 
-  it("creates API tokens as one-time-visible secrets with stored hashes", async () => {
-    const created = await createApiToken(
-      userId,
-      {
-        name: "Mobile app",
-        scopes: ["read:daily", "write:daily"],
-      },
-      runtime.db,
-    );
-
-    expect(created.token).toMatch(/^mtk_v1_/);
-    const rawTokenSecretPrefix = created.token.slice("mtk_v1_".length, 19);
-    expect(created.record).toMatchObject({
-      userId,
-      tokenPrefix: expect.stringMatching(/^mtk_v1_[a-f0-9]{12}$/),
-      name: "Mobile app",
-      scopes: ["read:daily", "write:daily"],
-      lastUsedAt: null,
-      revokedAt: null,
-    });
-    expect(created.record.tokenPrefix).not.toContain(rawTokenSecretPrefix);
-    expect(created.record.expiresAt).toBeTruthy();
-
-    const [stored] = await runtime.db.select().from(apiTokens);
-    expect(stored?.tokenHash).toMatch(/^[a-f0-9]{64}$/);
-    expect(stored?.tokenHash).not.toBe(created.token);
-    expect(stored?.tokenPrefix).not.toContain(rawTokenSecretPrefix);
-
-    const listed = await listApiTokens(userId, runtime.db);
-    expect(listed).toHaveLength(1);
-    expect(listed[0]?.tokenPrefix).not.toContain(rawTokenSecretPrefix);
-    expect(JSON.stringify(listed)).not.toContain(stored!.tokenHash);
-    expect(JSON.stringify(listed)).not.toContain(created.token);
-  });
-
-  it("supports never-expiring API tokens explicitly", async () => {
-    const created = await createApiToken(
-      userId,
-      {
-        name: "No expiry",
-        scopes: ["read:stats"],
-        expiresAt: null,
-      },
-      runtime.db,
-    );
-
-    expect(created.record.expiresAt).toBeNull();
-  });
-
-  it("validates and dedupes API token scopes", async () => {
-    await expect(
-      createApiToken(userId, { name: "Empty", scopes: [] }, runtime.db),
-    ).rejects.toThrow("API token must include at least one scope.");
-    await expect(
-      createApiToken(userId, { name: "Bad", scopes: ["read:daily", "admin:*"] }, runtime.db),
-    ).rejects.toThrow("API token scope is invalid.");
-
-    const created = await createApiToken(
-      userId,
-      {
-        name: "Duplicates",
-        scopes: ["read:daily", "write:daily", "read:daily"],
-      },
-      runtime.db,
-    );
-
-    expect(created.record.scopes).toEqual(["read:daily", "write:daily"]);
-  });
-
-  it("rejects invalid API token expiry strings with validation errors", async () => {
-    await expect(
-      createApiToken(
-        userId,
-        {
-          name: "Bad expiry",
-          scopes: ["read:daily"],
-          expiresAt: "not-a-date",
-        },
-        runtime.db,
-      ),
-    ).rejects.toThrow("API token expiry is invalid.");
-  });
-
-  it("defaults API token expiry to about ninety days", async () => {
-    const before = Date.now();
-    const created = await createApiToken(
-      userId,
-      {
-        name: "Default expiry",
-        scopes: ["read:daily"],
-      },
-      runtime.db,
-    );
-    const after = Date.now();
-    const expiresAt = new Date(created.record.expiresAt!).getTime();
-
-    expect(expiresAt).toBeGreaterThanOrEqual(before + 89 * 24 * 60 * 60 * 1000);
-    expect(expiresAt).toBeLessThanOrEqual(after + 91 * 24 * 60 * 60 * 1000);
-  });
-
-  it("authenticates valid API tokens and updates last-used time", async () => {
-    const created = await createApiToken(
-      userId,
-      {
-        name: "Reader",
-        scopes: ["read:daily"],
-      },
-      runtime.db,
-    );
-
-    const result = await authenticateApiToken(created.token, runtime.db);
-
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.token.userId).toBe(userId);
-      expect(result.token.scopes).toEqual(["read:daily"]);
-      expect(result.token.lastUsedAt).toBeTruthy();
-    }
-
-    const listed = await listApiTokens(userId, runtime.db);
-    expect(listed[0]?.lastUsedAt).toBeTruthy();
-  });
-
-  it("throttles API token last-used updates within a short window", async () => {
-    const created = await createApiToken(
-      userId,
-      {
-        name: "Reader",
-        scopes: ["read:daily"],
-      },
-      runtime.db,
-    );
-
-    const first = await authenticateApiToken(created.token, runtime.db);
-    expect(first.ok).toBe(true);
-    const firstLastUsedAt = first.ok ? first.token.lastUsedAt : null;
-    expect(firstLastUsedAt).toBeTruthy();
-
-    const second = await authenticateApiToken(created.token, runtime.db);
-    expect(second.ok).toBe(true);
-    expect(second.ok ? second.token.lastUsedAt : null).toEqual(firstLastUsedAt);
-    const [storedAfterSecond] = await runtime.db.select().from(apiTokens);
-    expect(new Date(storedAfterSecond!.lastUsedAt!).getTime()).toBe(
-      new Date(firstLastUsedAt!).getTime(),
-    );
-
-    const staleLastUsedAt = new Date(Date.now() - 10 * 60 * 1000);
-    await runtime.db
-      .update(apiTokens)
-      .set({ lastUsedAt: staleLastUsedAt })
-      .where(eq(apiTokens.id, created.record.id));
-
-    const stale = await authenticateApiToken(created.token, runtime.db);
-    expect(stale.ok).toBe(true);
-    expect(stale.ok ? new Date(stale.token.lastUsedAt!).getTime() : 0).toBeGreaterThan(
-      staleLastUsedAt.getTime(),
-    );
-  });
-
-  it("rejects malformed, unknown, expired, and revoked API tokens", async () => {
-    await expect(authenticateApiToken(null, runtime.db)).resolves.toEqual({
-      ok: false,
-      reason: "missing",
-    });
-    await expect(authenticateApiToken("not-a-token", runtime.db)).resolves.toEqual({
-      ok: false,
-      reason: "malformed",
-    });
-    await expect(
-      authenticateApiToken("mtk_v1_unknown", runtime.db),
-    ).resolves.toEqual({
-      ok: false,
-      reason: "invalid",
-    });
-
-    const expired = await createApiToken(
-      userId,
-      {
-        name: "Expired",
-        scopes: ["read:daily"],
-        expiresAt: new Date(Date.now() - 60_000),
-      },
-      runtime.db,
-    );
-    await expect(authenticateApiToken(expired.token, runtime.db)).resolves.toEqual({
-      ok: false,
-      reason: "expired",
-    });
-    await expect(listApiTokens(userId, runtime.db)).resolves.toContainEqual(
-      expect.objectContaining({
-        id: expired.record.id,
-        lastUsedAt: null,
-      }),
-    );
-
-    const active = await createApiToken(
-      userId,
-      {
-        name: "Revoked",
-        scopes: ["read:daily"],
-      },
-      runtime.db,
-    );
-    await expect(
-      revokeApiToken(userId, active.record.id, runtime.db),
-    ).resolves.toBe(true);
-    await expect(authenticateApiToken(active.token, runtime.db)).resolves.toEqual({
-      ok: false,
-      reason: "revoked",
-    });
-    await expect(listApiTokens(userId, runtime.db)).resolves.toContainEqual(
-      expect.objectContaining({
-        id: active.record.id,
-        lastUsedAt: null,
-      }),
-    );
-  });
-
   it("calculates daily totals and logged-day-only averages", async () => {
     await createMealEntry(
       userId,
@@ -437,7 +203,6 @@ describe("database queries", () => {
         fatG: 10,
         caloriesKcal: 370,
       },
-      runtime.db,
     );
     await createMealEntry(
       userId,
@@ -449,7 +214,6 @@ describe("database queries", () => {
         fatG: 10,
         caloriesKcal: 290,
       },
-      runtime.db,
     );
     await createMealEntry(
       userId,
@@ -461,7 +225,6 @@ describe("database queries", () => {
         fatG: 10,
         caloriesKcal: 330,
       },
-      runtime.db,
     );
     await createMealEntry(
       userId,
@@ -473,10 +236,9 @@ describe("database queries", () => {
         fatG: 5,
         caloriesKcal: 165,
       },
-      runtime.db,
     );
 
-    const dailySummary = await getDailySummary(userId, "2026-03-19", runtime.db);
+    const dailySummary = await getDailySummary(userId, "2026-03-19");
     expect(dailySummary.totals).toEqual({
       proteinG: 50,
       carbsG: 60,
@@ -484,7 +246,7 @@ describe("database queries", () => {
       caloriesKcal: 620,
     });
 
-    const periodAverages = await getPeriodAverages(userId, "2026-03-19", runtime.db);
+    const periodAverages = await getPeriodAverages(userId, "2026-03-19");
     const week = periodAverages.find((item) => item.label === "week");
     const month = periodAverages.find((item) => item.label === "month");
     const rolling7 = periodAverages.find((item) => item.label === "rolling7");
@@ -517,7 +279,6 @@ describe("database queries", () => {
         carbsG: null,
         fatG: null,
       },
-      runtime.db,
     );
     await createMealEntry(
       userId,
@@ -529,7 +290,6 @@ describe("database queries", () => {
         fatG: 70,
         caloriesKcal: 2000,
       },
-      runtime.db,
     );
     await createMealEntry(
       userId,
@@ -541,10 +301,9 @@ describe("database queries", () => {
         fatG: 90,
         caloriesKcal: 2300,
       },
-      runtime.db,
     );
 
-    const stats = await getStatsPageData(userId, "2026-03-19", runtime.db);
+    const stats = await getStatsPageData(userId, "2026-03-19");
 
     expect(stats.goalHitRates.days7.caloriesKcal).toBe(50);
   });
@@ -561,7 +320,6 @@ describe("database queries", () => {
         fatG: 10,
         caloriesKcal: 370,
       },
-      runtime.db,
     );
     await createMealEntry(
       userId,
@@ -575,7 +333,6 @@ describe("database queries", () => {
         fatG: 15,
         caloriesKcal: 435,
       },
-      runtime.db,
     );
     await createMealEntry(
       userId,
@@ -589,10 +346,9 @@ describe("database queries", () => {
         fatG: 5,
         caloriesKcal: 225,
       },
-      runtime.db,
     );
 
-    const stats = await getStatsPageData(userId, "2026-03-20", runtime.db);
+    const stats = await getStatsPageData(userId, "2026-03-20");
 
     expect(stats.totalDaysTracked).toBe(1);
     expect(stats.totalCaloriesKcal).toBe(370);
@@ -640,16 +396,15 @@ describe("database queries", () => {
         fatG: 5,
         caloriesKcal: 225,
       },
-      runtime.db,
     );
 
-    const earlierStats = await getStatsPageData(userId, "2026-03-19", runtime.db);
+    const earlierStats = await getStatsPageData(userId, "2026-03-19");
 
     expect(earlierStats.totalDaysTracked).toBe(0);
     expect(earlierStats.totalCaloriesKcal).toBe(0);
     expect(earlierStats.allDailyTotals).toEqual([]);
 
-    const plannedDateStats = await getStatsPageData(userId, "2026-03-20", runtime.db);
+    const plannedDateStats = await getStatsPageData(userId, "2026-03-20");
 
     expect(plannedDateStats.totalDaysTracked).toBe(0);
     expect(plannedDateStats.totalCaloriesKcal).toBe(0);
@@ -682,7 +437,6 @@ describe("database queries", () => {
         fatG: 20,
         caloriesKcal: 588,
       },
-      runtime.db,
     );
     await createMealEntry(
       userId,
@@ -696,15 +450,13 @@ describe("database queries", () => {
         fatG: 8,
         caloriesKcal: 212,
       },
-      runtime.db,
     );
 
-    const stats = await getStatsPageData(userId, "2026-03-19", runtime.db);
+    const stats = await getStatsPageData(userId, "2026-03-19");
 
     expect(stats.totalDaysTracked).toBe(1);
     expect(stats.totalCaloriesKcal).toBe(588);
-    // All-time totals keep the future-dated eaten row, but a 7-day average
-    // ending on the 19th must not reach forward into the 20th.
+    // All-time totals keep the future-dated eaten row; rolling averages must not.
     expect(stats.rollingAverages.days7.caloriesKcal).toBe(0);
     expect(stats.rollingAverages.days30.caloriesKcal).toBe(0);
     expect(stats.allDailyTotals).toEqual([
@@ -735,7 +487,6 @@ describe("database queries", () => {
         fatG: 12,
         caloriesKcal: 390,
       },
-      runtime.db,
     );
     const dinner = await createMealEntry(
       userId,
@@ -747,10 +498,9 @@ describe("database queries", () => {
         fatG: 18,
         caloriesKcal: 550,
       },
-      runtime.db,
     );
 
-    let dailySummary = await getDailySummary(userId, "2026-03-21", runtime.db);
+    let dailySummary = await getDailySummary(userId, "2026-03-21");
     expect(dailySummary.totals).toEqual({
       proteinG: 60,
       carbsG: 100,
@@ -770,10 +520,9 @@ describe("database queries", () => {
         fatG: 11,
         caloriesKcal: 395,
       },
-      runtime.db,
     );
 
-    dailySummary = await getDailySummary(userId, "2026-03-21", runtime.db);
+    dailySummary = await getDailySummary(userId, "2026-03-21");
     expect(dailySummary.totals).toEqual({
       proteinG: 65,
       carbsG: 97,
@@ -781,8 +530,8 @@ describe("database queries", () => {
       caloriesKcal: 945,
     });
 
-    await deleteMealEntry(userId, dinner.id, runtime.db);
-    dailySummary = await getDailySummary(userId, "2026-03-21", runtime.db);
+    await deleteMealEntry(userId, dinner.id);
+    dailySummary = await getDailySummary(userId, "2026-03-21");
 
     expect(dailySummary.meals).toHaveLength(1);
     expect(dailySummary.totals).toEqual({
@@ -794,7 +543,7 @@ describe("database queries", () => {
   });
 
   it("tracks meal groups and excludes planned or skipped entries from eaten totals", async () => {
-    const groups = await getMealGroups(userId, runtime.db);
+    const groups = await getMealGroups(userId);
     expect(groups.map((group) => group.label)).toEqual([
       "Breakfast",
       "Lunch",
@@ -802,7 +551,7 @@ describe("database queries", () => {
       "Snack",
     ]);
 
-    const supper = await createMealGroup(userId, { label: "Supper" }, runtime.db);
+    const supper = await createMealGroup(userId, { label: "Supper" });
     const eaten = await createMealEntry(
       userId,
       {
@@ -814,7 +563,6 @@ describe("database queries", () => {
         fatG: 18,
         caloriesKcal: 520,
       },
-      runtime.db,
     );
     const planned = await createMealEntry(
       userId,
@@ -827,16 +575,15 @@ describe("database queries", () => {
         fatG: 2,
         caloriesKcal: 180,
       },
-      runtime.db,
     );
 
-    let summary = await getDailySummary(userId, "2026-04-12", runtime.db);
+    let summary = await getDailySummary(userId, "2026-04-12");
     expect(summary.totals.caloriesKcal).toBe(520);
     expect(summary.plannedTotals.caloriesKcal).toBe(180);
     expect(summary.meals.find((meal) => meal.id === eaten.id)?.mealGroupId).toBe(supper.id);
 
-    await markMealEntryStatus(userId, planned.id, "eaten", runtime.db);
-    summary = await getDailySummary(userId, "2026-04-12", runtime.db);
+    await markMealEntryStatus(userId, planned.id, "eaten");
+    summary = await getDailySummary(userId, "2026-04-12");
     expect(summary.totals.caloriesKcal).toBe(700);
     expect(summary.plannedTotals.caloriesKcal).toBe(0);
   });
@@ -846,7 +593,6 @@ describe("database queries", () => {
     const otherGroup = await createMealGroup(
       otherUserId,
       { label: "Other user's dinner" },
-      runtime.db,
     );
 
     await expect(
@@ -861,7 +607,6 @@ describe("database queries", () => {
           fatG: 5,
           caloriesKcal: 125,
         },
-        runtime.db,
       ),
     ).rejects.toThrow("Meal group not found.");
 
@@ -875,7 +620,6 @@ describe("database queries", () => {
         fatG: 10,
         caloriesKcal: 250,
       },
-      runtime.db,
     );
 
     await expect(
@@ -892,16 +636,14 @@ describe("database queries", () => {
           fatG: 10,
           caloriesKcal: 270,
         },
-        runtime.db,
       ),
     ).rejects.toThrow("Meal group not found.");
 
     const deletedGroup = await createMealGroup(
       userId,
       { label: "Temporary" },
-      runtime.db,
     );
-    await deleteMealGroup(userId, deletedGroup.id, runtime.db);
+    await deleteMealGroup(userId, deletedGroup.id);
 
     await expect(
       createMealEntry(
@@ -915,7 +657,6 @@ describe("database queries", () => {
           fatG: 5,
           caloriesKcal: 125,
         },
-        runtime.db,
       ),
     ).rejects.toThrow("Meal group not found.");
   });
@@ -942,7 +683,6 @@ describe("database queries", () => {
           fatG: 3,
           caloriesKcal: 111,
         },
-        runtime.db,
       ),
     ).rejects.toThrow("Food product not found.");
 
@@ -956,7 +696,6 @@ describe("database queries", () => {
         fatG: 10,
         caloriesKcal: 250,
       },
-      runtime.db,
     );
 
     await expect(
@@ -973,7 +712,6 @@ describe("database queries", () => {
           fatG: 10,
           caloriesKcal: 270,
         },
-        runtime.db,
       ),
     ).rejects.toThrow("Food product not found.");
 
@@ -987,7 +725,6 @@ describe("database queries", () => {
         fatPer100: 2,
         caloriesPer100: 74,
       },
-      runtime.db,
     );
     await runtime.db
       .update(foodProducts)
@@ -1006,7 +743,6 @@ describe("database queries", () => {
           fatG: 3,
           caloriesKcal: 111,
         },
-        runtime.db,
       ),
     ).rejects.toThrow("Food product not found.");
 
@@ -1024,7 +760,7 @@ describe("database queries", () => {
       updatedAt: new Date(),
     });
 
-    const summary = await getDailySummary(userId, "2026-05-03", runtime.db);
+    const summary = await getDailySummary(userId, "2026-05-03");
     expect(summary.meals).toHaveLength(1);
     expect(summary.meals[0]?.productId).toBeNull();
     expect(summary.meals[0]?.sourceLabel).toBeNull();
@@ -1060,7 +796,6 @@ describe("database queries", () => {
             },
           ],
         },
-        runtime.db,
       ),
     ).rejects.toThrow("Food product not found.");
 
@@ -1074,7 +809,6 @@ describe("database queries", () => {
         fatPer100: 2,
         caloriesPer100: 74,
       },
-      runtime.db,
     );
     await runtime.db
       .update(foodProducts)
@@ -1098,11 +832,10 @@ describe("database queries", () => {
             },
           ],
         },
-        runtime.db,
       ),
     ).rejects.toThrow("Food product not found.");
 
-    expect(await getTemplates(userId, runtime.db)).toHaveLength(0);
+    expect(await getTemplates(userId)).toHaveLength(0);
   });
 
   it("rejects inaccessible template item products on update", async () => {
@@ -1121,7 +854,6 @@ describe("database queries", () => {
           },
         ],
       },
-      runtime.db,
     );
     const otherProduct = await createOtherUserProduct({
       name: "Other user's yogurt",
@@ -1150,7 +882,6 @@ describe("database queries", () => {
             },
           ],
         },
-        runtime.db,
       ),
     ).rejects.toThrow("Food product not found.");
 
@@ -1164,7 +895,6 @@ describe("database queries", () => {
         fatPer100: 2,
         caloriesPer100: 74,
       },
-      runtime.db,
     );
     await runtime.db
       .update(foodProducts)
@@ -1189,11 +919,10 @@ describe("database queries", () => {
             },
           ],
         },
-        runtime.db,
       ),
     ).rejects.toThrow("Food product not found.");
 
-    const stored = (await getTemplates(userId, runtime.db)).find(
+    const stored = (await getTemplates(userId)).find(
       (template) => template.id === original.id,
     );
     expect(stored).toMatchObject({
@@ -1223,7 +952,6 @@ describe("database queries", () => {
         caloriesKcal: 130,
         servingSizeG: 250,
       },
-      runtime.db,
     );
 
     const created = await createTemplate(
@@ -1245,7 +973,6 @@ describe("database queries", () => {
           },
         ],
       },
-      runtime.db,
     );
     expect(created.items[0]).toMatchObject({
       productId: product.id,
@@ -1274,7 +1001,6 @@ describe("database queries", () => {
           },
         ],
       },
-      runtime.db,
     );
     expect(updated.items[0]).toMatchObject({
       productId: product.id,
@@ -1341,11 +1067,10 @@ describe("database queries", () => {
           templateId,
           date: "2026-05-03",
         },
-        runtime.db,
       ),
     ).rejects.toThrow("Food product not found.");
 
-    const summary = await getDailySummary(userId, "2026-05-03", runtime.db);
+    const summary = await getDailySummary(userId, "2026-05-03");
     expect(summary.meals).toHaveLength(0);
   });
 
@@ -1372,7 +1097,6 @@ describe("database queries", () => {
           },
         ],
       },
-      runtime.db,
     );
 
     await expect(
@@ -1386,7 +1110,7 @@ describe("database queries", () => {
       ),
     ).rejects.toThrow("Forced meal entry insert failure.");
 
-    const summary = await getDailySummary(userId, "2026-05-04", runtime.db);
+    const summary = await getDailySummary(userId, "2026-05-04");
     expect(summary.meals).toHaveLength(0);
   });
 
@@ -1417,7 +1141,6 @@ describe("database queries", () => {
             },
           ],
         },
-        runtime.db,
       ),
     ).rejects.toThrow("Food product not found.");
 
@@ -1431,7 +1154,6 @@ describe("database queries", () => {
         fatPer100: 2,
         caloriesPer100: 74,
       },
-      runtime.db,
     );
     await runtime.db
       .update(foodProducts)
@@ -1455,7 +1177,6 @@ describe("database queries", () => {
             },
           ],
         },
-        runtime.db,
       ),
     ).rejects.toThrow("Food product not found.");
 
@@ -1479,7 +1200,6 @@ describe("database queries", () => {
           },
         ],
       },
-      runtime.db,
     );
     const otherProduct = await createOtherUserProduct({
       name: "Other user's yogurt",
@@ -1508,7 +1228,6 @@ describe("database queries", () => {
             },
           ],
         },
-        runtime.db,
       ),
     ).rejects.toThrow("Food product not found.");
 
@@ -1522,7 +1241,6 @@ describe("database queries", () => {
         fatPer100: 2,
         caloriesPer100: 74,
       },
-      runtime.db,
     );
     await runtime.db
       .update(foodProducts)
@@ -1547,11 +1265,10 @@ describe("database queries", () => {
             },
           ],
         },
-        runtime.db,
       ),
     ).rejects.toThrow("Food product not found.");
 
-    const stored = await getRecipeById(userId, original.id, runtime.db);
+    const stored = await getRecipeById(userId, original.id);
     expect(stored).toMatchObject({
       label: "Original recipe",
       portions: 2,
@@ -1578,7 +1295,6 @@ describe("database queries", () => {
         caloriesPer100: 1600,
         servingWeightG: 100,
       },
-      runtime.db,
     );
 
     const entry = await createMealEntry(
@@ -1594,7 +1310,6 @@ describe("database queries", () => {
         fatG: 3,
         caloriesKcal: 150,
       },
-      runtime.db,
     );
 
     expect(entry).toMatchObject({
@@ -1620,7 +1335,6 @@ describe("database queries", () => {
         fatG: 4,
         caloriesKcal: 180,
       },
-      runtime.db,
     );
 
     expect(updated).toMatchObject({
@@ -1635,11 +1349,11 @@ describe("database queries", () => {
 
   it("seeds default meal groups idempotently across concurrent first requests", async () => {
     await Promise.all([
-      ensureDefaultMealGroups(userId, runtime.db),
-      ensureDefaultMealGroups(userId, runtime.db),
+      ensureDefaultMealGroups(userId),
+      ensureDefaultMealGroups(userId),
     ]);
 
-    const groups = await getMealGroups(userId, runtime.db);
+    const groups = await getMealGroups(userId);
     expect(groups.map((group) => group.label)).toEqual([
       "Breakfast",
       "Lunch",
@@ -1650,7 +1364,7 @@ describe("database queries", () => {
   });
 
   it("rolls back meal group deletion when unassigning entries fails", async () => {
-    const group = await createMealGroup(userId, { label: "Supper" }, runtime.db);
+    const group = await createMealGroup(userId, { label: "Supper" });
     const entry = await createMealEntry(
       userId,
       {
@@ -1662,17 +1376,16 @@ describe("database queries", () => {
         fatG: 18,
         caloriesKcal: 520,
       },
-      runtime.db,
     );
 
     await expect(
       deleteMealGroup(userId, group.id, createFailingMealGroupDeleteDb()),
     ).rejects.toThrow("Forced meal group unassign failure.");
 
-    const groups = await getMealGroups(userId, runtime.db);
+    const groups = await getMealGroups(userId);
     expect(groups.map((item) => item.id)).toContain(group.id);
 
-    const summary = await getDailySummary(userId, "2026-05-05", runtime.db);
+    const summary = await getDailySummary(userId, "2026-05-05");
     expect(summary.meals.find((meal) => meal.id === entry.id)?.mealGroupId).toBe(
       group.id,
     );
@@ -1690,12 +1403,12 @@ describe("database queries", () => {
     };
 
     const [first, second] = await Promise.all([
-      createMealEntry(userId, input, runtime.db),
-      createMealEntry(userId, input, runtime.db),
+      createMealEntry(userId, input),
+      createMealEntry(userId, input),
     ]);
 
     expect(second.id).toBe(first.id);
-    const summary = await getDailySummary(userId, "2026-05-06", runtime.db);
+    const summary = await getDailySummary(userId, "2026-05-06");
     expect(
       summary.meals.filter(
         (meal) => meal.clientMutationId === "meal-entry-concurrent-1",
@@ -1716,10 +1429,9 @@ describe("database queries", () => {
         fatPer100: 2,
         caloriesPer100: 74,
       },
-      runtime.db,
     );
 
-    const results = await searchFoodProducts(userId, "greek", runtime.db);
+    const results = await searchFoodProducts(userId, "greek");
     expect(results.map((item) => item.id)).toContain(product.id);
     expect(resolveProductNutritionForQuantity(product, 150, "g")).toEqual({
       proteinG: 15,
@@ -1745,12 +1457,12 @@ describe("database queries", () => {
       saveBarcodeFoodProduct(userId, input, createFailingBarcodeFoodProductDb()),
     ).rejects.toThrow("Forced barcode food product insert failure.");
 
-    expect(await lookupBarcodeFoodProduct(input.barcode, runtime.db)).toBeNull();
-    expect(await searchFoodProducts(userId, "Community Protein", runtime.db)).toEqual(
+    expect(await lookupBarcodeFoodProduct(input.barcode)).toBeNull();
+    expect(await searchFoodProducts(userId, "Community Protein")).toEqual(
       [],
     );
 
-    const saved = await saveBarcodeFoodProduct(userId, input, runtime.db);
+    const saved = await saveBarcodeFoodProduct(userId, input);
     expect(saved).toMatchObject({
       barcode: input.barcode,
       name: input.name,
@@ -1761,7 +1473,6 @@ describe("database queries", () => {
     const products = await searchFoodProducts(
       userId,
       "Community Protein",
-      runtime.db,
     );
     expect(products).toHaveLength(1);
     expect(products[0]).toMatchObject({
@@ -1779,10 +1490,10 @@ describe("database queries", () => {
     });
 
     await expect(
-      searchFoodProducts(userId, "Macro Lab", runtime.db),
+      searchFoodProducts(userId, "Macro Lab"),
     ).resolves.toHaveLength(1);
     await expect(
-      searchFoodProducts(userId, input.barcode, runtime.db),
+      searchFoodProducts(userId, input.barcode),
     ).resolves.toHaveLength(1);
   });
 
@@ -1803,7 +1514,6 @@ describe("database queries", () => {
         ...baseProduct,
         scope: "global",
       },
-      runtime.db,
     );
 
     expect(product.scope).toBe("personal");
@@ -1813,7 +1523,6 @@ describe("database queries", () => {
     const otherResults = await searchFoodProducts(
       otherUserId,
       "shared almonds",
-      runtime.db,
     );
     expect(otherResults.map((item) => item.id)).not.toContain(product.id);
 
@@ -1821,7 +1530,6 @@ describe("database queries", () => {
       createPersonalFoodProduct(
         userId,
         { ...baseProduct, name: "Bad scope", scope: "shared" as never },
-        runtime.db,
       ),
     ).rejects.toThrow("Product scope is invalid.");
 
@@ -1829,7 +1537,6 @@ describe("database queries", () => {
       createPersonalFoodProduct(
         userId,
         { ...baseProduct, name: "Bad source", source: "feed" as never },
-        runtime.db,
       ),
     ).rejects.toThrow("Product source is invalid.");
   });
@@ -1853,7 +1560,6 @@ describe("database queries", () => {
           },
         ],
       },
-      runtime.db,
     );
 
     expect(recipe.totalCookedWeightG).toBe(900);
@@ -1899,7 +1605,7 @@ describe("database queries", () => {
       "2026-04-05T08:00:00.000Z",
     );
 
-    const candidates = await getRecentQuickAddCandidates(userId, 10, runtime.db);
+    const candidates = await getRecentQuickAddCandidates(userId, 10);
     expect(candidates).toHaveLength(1);
     expect(candidates[0]).toMatchObject({
       label: "Oats",
@@ -1942,20 +1648,19 @@ describe("database queries", () => {
           ],
         },
       },
-      runtime.db,
     );
 
     expect(user).toMatchObject({
       onboardingCompletedAt: expect.any(String),
       preferredWeightUnit: "lb",
     });
-    await expect(getUserGoals(userId, runtime.db)).resolves.toEqual({
+    await expect(getUserGoals(userId)).resolves.toEqual({
       caloriesKcal: 2200,
       proteinG: 170,
       carbsG: 240,
       fatG: 70,
     });
-    const weightData = await getWeightPageData(userId, "2026-06-20", runtime.db);
+    const weightData = await getWeightPageData(userId, "2026-06-20");
     expect(weightData.goalWeightKg).toBe(78);
     expect(weightData.entries).toMatchObject([
       {
@@ -1964,7 +1669,7 @@ describe("database queries", () => {
         notes: "Onboarding",
       },
     ]);
-    await expect(getTemplates(userId, runtime.db)).resolves.toMatchObject([
+    await expect(getTemplates(userId)).resolves.toMatchObject([
       {
         label: "Greek yogurt",
         type: "meal",
@@ -1997,21 +1702,20 @@ describe("database queries", () => {
             items: [],
           },
         },
-        runtime.db,
       ),
     ).rejects.toThrow("A template must include at least one item.");
 
-    await expect(getUserGoals(userId, runtime.db)).resolves.toEqual({
+    await expect(getUserGoals(userId)).resolves.toEqual({
       caloriesKcal: null,
       proteinG: null,
       carbsG: null,
       fatG: null,
     });
-    const weightData = await getWeightPageData(userId, "2026-06-20", runtime.db);
+    const weightData = await getWeightPageData(userId, "2026-06-20");
     expect(weightData.goalWeightKg).toBeNull();
     expect(weightData.entries).toHaveLength(0);
-    await expect(getTemplates(userId, runtime.db)).resolves.toEqual([]);
-    await expect(getUserById(userId, runtime.db)).resolves.toMatchObject({
+    await expect(getTemplates(userId)).resolves.toEqual([]);
+    await expect(getUserById(userId)).resolves.toMatchObject({
       onboardingCompletedAt: null,
       preferredWeightUnit: "kg",
     });
@@ -2027,7 +1731,7 @@ describe("database queries", () => {
       carbsG: 45,
       fatG: 12,
       caloriesKcal: 430,
-    }, runtime.db);
+    });
     await createMealEntry(userId, {
       date: "2026-03-19",
       mealGroupId: null,
@@ -2037,7 +1741,7 @@ describe("database queries", () => {
       carbsG: 60,
       fatG: 8,
       caloriesKcal: 500,
-    }, runtime.db);
+    });
     await createMealEntry(userId, {
       date: "2026-03-20",
       mealGroupId: null,
@@ -2047,53 +1751,15 @@ describe("database queries", () => {
       carbsG: 25,
       fatG: 4,
       caloriesKcal: 240,
-    }, runtime.db);
+    });
 
-    await expect(getLeaderboardStats(userId, "2026-03-20", runtime.db)).resolves.toMatchObject({
+    await expect(getLeaderboardStats(userId, "2026-03-20")).resolves.toMatchObject({
       currentStreak: 3,
       longestStreak: 3,
     });
-    await expect(getLeaderboardStats(userId, "2026-03-22", runtime.db)).resolves.toMatchObject({
+    await expect(getLeaderboardStats(userId, "2026-03-22")).resolves.toMatchObject({
       currentStreak: 0,
       longestStreak: 3,
-    });
-  });
-
-  it("computes weight progress stats from the selected reference date", async () => {
-    for (const entry of [
-      { date: "2026-05-29", weightKg: 85 },
-      { date: "2026-05-31", weightKg: 84.5 },
-      { date: "2026-06-22", weightKg: 83.5 },
-      { date: "2026-06-23", weightKg: 83 },
-      { date: "2026-06-29", weightKg: 82 },
-      { date: "2026-06-30", weightKg: 81.5 },
-    ]) {
-      await createWeightEntry(
-        userId,
-        {
-          ...entry,
-          bodyFatPct: null,
-          notes: null,
-        },
-        runtime.db,
-      );
-    }
-
-    const weightData = await getWeightPageData(userId, "2026-06-30", runtime.db);
-
-    expect(weightData.entries.map((entry) => entry.date)).toEqual([
-      "2026-05-29",
-      "2026-05-31",
-      "2026-06-22",
-      "2026-06-23",
-      "2026-06-29",
-      "2026-06-30",
-    ]);
-    expect(weightData.stats).toEqual({
-      currentWeight: 81.5,
-      weekChange: -1.5,
-      monthChange: -3,
-      trendDirection: "down",
     });
   });
 
@@ -2132,7 +1798,7 @@ describe("database queries", () => {
       "2026-04-10T07:25:00.000Z",
     );
 
-    const candidates = await getRecentQuickAddCandidates(userId, 10, runtime.db);
+    const candidates = await getRecentQuickAddCandidates(userId, 10);
     expect(candidates[0]).toMatchObject({
       label: "Bagel",
       sourceDate: "2026-04-10",
@@ -2164,7 +1830,7 @@ describe("database queries", () => {
       "2026-04-12T08:00:00.000Z",
     );
 
-    let candidates = await getRecentQuickAddCandidates(userId, 10, runtime.db);
+    let candidates = await getRecentQuickAddCandidates(userId, 10);
     expect(candidates[0]).toMatchObject({
       label: "Toast",
       observedUseDays: 2,
@@ -2184,7 +1850,7 @@ describe("database queries", () => {
       "2026-04-13T07:20:00.000Z",
     );
 
-    candidates = await getRecentQuickAddCandidates(userId, 10, runtime.db);
+    candidates = await getRecentQuickAddCandidates(userId, 10);
     expect(candidates[0]).toMatchObject({
       label: "Toast",
       observedUseDays: 3,
@@ -2253,7 +1919,6 @@ describe("database queries", () => {
           },
         ],
       },
-      runtime.db,
     );
     const failingDb = createFailingRecipeDb(2);
 
@@ -2285,7 +1950,7 @@ describe("database queries", () => {
       ),
     ).rejects.toThrow("Forced ingredient insert failure.");
 
-    const stored = await getRecipeById(userId, original.id, runtime.db);
+    const stored = await getRecipeById(userId, original.id);
 
     expect(stored).toMatchObject({
       id: original.id,

@@ -3,12 +3,21 @@ use crate::{
     shared::{round1, round2},
     types::{AppUser, MacroGoals, ShooProfile},
 };
-use chrono::{DateTime, Duration, NaiveDate, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Row, postgres::PgRow};
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
+
+mod api_tokens;
+mod gym;
+mod healthkit;
+mod sql;
+mod weight;
+
+pub use api_tokens::authenticate_api_token;
+
+type PgQuery<'q> = sqlx::query::Query<'q, Postgres, sqlx::postgres::PgArguments>;
 
 #[derive(Clone, Debug)]
 struct AdminActor {
@@ -42,6 +51,33 @@ struct FoodProductValues {
     corrected_from_product_id: Option<Uuid>,
 }
 
+impl FoodProductValues {
+    fn bind_columns<'q>(&'q self, query: PgQuery<'q>) -> PgQuery<'q> {
+        query
+            .bind(&self.source)
+            .bind(self.barcode.as_deref())
+            .bind(&self.name)
+            .bind(&self.brand)
+            .bind(self.default_serving_quantity)
+            .bind(&self.default_serving_unit)
+            .bind(self.macros.protein)
+            .bind(self.macros.carbs)
+            .bind(self.macros.fat)
+            .bind(self.macros.calories)
+            .bind(self.serving_weight_g)
+            .bind(self.serving_volume_ml)
+    }
+
+    fn bind_provenance<'q>(&'q self, query: PgQuery<'q>, submitted_by: Uuid) -> PgQuery<'q> {
+        query
+            .bind(Some(submitted_by))
+            .bind(self.source_provider.as_deref())
+            .bind(self.source_confidence)
+            .bind(&self.source_metadata)
+            .bind(self.corrected_from_product_id)
+    }
+}
+
 #[derive(Clone, Debug)]
 struct MealFoodValues {
     product_id: Option<Uuid>,
@@ -52,328 +88,12 @@ struct MealFoodValues {
     macros: MacroValues,
 }
 
-#[derive(Clone, Debug)]
-struct WeightEntryValues {
-    date: String,
-    weight_kg: f64,
-    body_fat_pct: Option<f64>,
-    notes: Option<String>,
-}
-
-const API_SCOPE_VALUES: &[&str] = &[
-    "read:account",
-    "read:daily",
-    "write:daily",
-    "read:foods",
-    "write:foods",
-    "read:templates",
-    "write:templates",
-    "read:recipes",
-    "write:recipes",
-    "read:weight",
-    "write:weight",
-    "read:goals",
-    "write:goals",
-    "read:stats",
-];
-
-// CLEAN-03: this is NOT dead, and it is not merely a reference. `test_db()` runs
-// `sqlx::raw_sql(SCHEMA_SQL)` to build the schema for EVERY backend integration
-// test, so if it drifts from `packages/db/drizzle/*.sql` the whole suite silently
-// stops testing the schema production actually runs. Startup still relies on the
-// Drizzle migrations, never on this. `schema_sql_matches_the_drizzle_migrations`
-// below pins the two together - update both, or that test fails.
-#[cfg(test)]
-const SCHEMA_SQL: &str = r#"
-CREATE TABLE IF NOT EXISTS users (
-  id uuid PRIMARY KEY NOT NULL,
-  shoo_pairwise_sub text NOT NULL,
-  email text NOT NULL,
-  display_name text,
-  picture_url text,
-  role text DEFAULT 'user' NOT NULL,
-  created_at timestamptz DEFAULT now() NOT NULL,
-  last_login_at timestamptz DEFAULT now() NOT NULL,
-  goal_calories_kcal integer,
-  goal_protein_g numeric(6, 1),
-  goal_carbs_g numeric(6, 1),
-  goal_fat_g numeric(6, 1),
-  goal_weight_kg numeric(5, 2),
-  onboarding_completed_at timestamptz,
-  preferred_weight_unit text DEFAULT 'kg' NOT NULL,
-  friend_code text
-);
-CREATE UNIQUE INDEX IF NOT EXISTS users_shoo_pairwise_sub_key ON users USING btree (shoo_pairwise_sub);
-CREATE UNIQUE INDEX IF NOT EXISTS users_email_key ON users USING btree (email);
-CREATE UNIQUE INDEX IF NOT EXISTS users_friend_code_key ON users USING btree (friend_code) WHERE friend_code IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS api_tokens (
-  id uuid PRIMARY KEY NOT NULL,
-  user_id uuid NOT NULL REFERENCES users(id) ON DELETE cascade,
-  token_hash text NOT NULL,
-  token_prefix text NOT NULL,
-  name text NOT NULL,
-  scopes jsonb DEFAULT '[]'::jsonb NOT NULL,
-  created_at timestamptz DEFAULT now() NOT NULL,
-  last_used_at timestamptz,
-  expires_at timestamptz,
-  revoked_at timestamptz
-);
-CREATE UNIQUE INDEX IF NOT EXISTS api_tokens_token_hash_key ON api_tokens USING btree (token_hash);
-CREATE INDEX IF NOT EXISTS api_tokens_user_created_idx ON api_tokens USING btree (user_id, created_at);
-CREATE INDEX IF NOT EXISTS api_tokens_user_revoked_idx ON api_tokens USING btree (user_id, revoked_at);
-
-CREATE TABLE IF NOT EXISTS admin_audit_events (
-  id uuid PRIMARY KEY NOT NULL,
-  actor_user_id uuid REFERENCES users(id) ON DELETE SET NULL,
-  actor_role text NOT NULL,
-  action text NOT NULL,
-  target_type text NOT NULL,
-  target_id text NOT NULL,
-  details_json jsonb DEFAULT '{}'::jsonb NOT NULL,
-  created_at timestamptz DEFAULT now() NOT NULL
-);
-CREATE INDEX IF NOT EXISTS admin_audit_events_created_at_idx ON admin_audit_events USING btree (created_at);
-CREATE INDEX IF NOT EXISTS admin_audit_events_target_idx ON admin_audit_events USING btree (target_type, target_id);
-
-CREATE TABLE IF NOT EXISTS food_products (
-  id uuid PRIMARY KEY NOT NULL,
-  owner_user_id uuid REFERENCES users(id) ON DELETE cascade,
-  scope text DEFAULT 'personal' NOT NULL,
-  source text DEFAULT 'manual' NOT NULL,
-  barcode text,
-  name text NOT NULL,
-  brand text DEFAULT '' NOT NULL,
-  default_serving_quantity numeric(8, 2) DEFAULT '1' NOT NULL,
-  default_serving_unit text DEFAULT 'serving' NOT NULL,
-  protein_per_100 numeric(7, 2) NOT NULL,
-  carbs_per_100 numeric(7, 2) NOT NULL,
-  fat_per_100 numeric(7, 2) NOT NULL,
-  calories_per_100 integer NOT NULL,
-  serving_weight_g numeric(8, 2),
-  serving_volume_ml numeric(8, 2),
-  submitted_by_user_id uuid REFERENCES users(id) ON DELETE SET NULL,
-  deleted_by_user_id uuid REFERENCES users(id) ON DELETE SET NULL,
-  source_provider text,
-  source_confidence numeric(4, 2),
-  source_metadata jsonb DEFAULT '{}'::jsonb NOT NULL,
-  corrected_from_product_id uuid REFERENCES food_products(id) ON DELETE SET NULL,
-  created_at timestamptz DEFAULT now() NOT NULL,
-  updated_at timestamptz DEFAULT now() NOT NULL,
-  deleted_at timestamptz
-);
-CREATE INDEX IF NOT EXISTS food_products_owner_name_idx ON food_products USING btree (owner_user_id, name);
-CREATE INDEX IF NOT EXISTS food_products_barcode_idx ON food_products USING btree (barcode);
-CREATE UNIQUE INDEX IF NOT EXISTS food_products_active_global_barcode_key
-  ON food_products USING btree (barcode)
-  WHERE owner_user_id IS NULL AND source = 'barcode' AND deleted_at IS NULL AND barcode IS NOT NULL;
-CREATE INDEX IF NOT EXISTS food_products_scope_source_idx ON food_products USING btree (scope, source);
-CREATE INDEX IF NOT EXISTS food_products_deleted_at_idx ON food_products USING btree (deleted_at);
-CREATE INDEX IF NOT EXISTS food_products_submitted_by_idx ON food_products USING btree (submitted_by_user_id);
-CREATE INDEX IF NOT EXISTS food_products_corrected_from_idx ON food_products USING btree (corrected_from_product_id);
-
-CREATE TABLE IF NOT EXISTS food_product_revisions (
-  id uuid PRIMARY KEY NOT NULL,
-  product_id uuid NOT NULL REFERENCES food_products(id) ON DELETE cascade,
-  actor_user_id uuid REFERENCES users(id) ON DELETE SET NULL,
-  action text NOT NULL,
-  snapshot_json jsonb DEFAULT '{}'::jsonb NOT NULL,
-  created_at timestamptz DEFAULT now() NOT NULL
-);
-CREATE INDEX IF NOT EXISTS food_product_revisions_product_idx ON food_product_revisions USING btree (product_id);
-CREATE INDEX IF NOT EXISTS food_product_revisions_actor_idx ON food_product_revisions USING btree (actor_user_id);
-CREATE INDEX IF NOT EXISTS food_product_revisions_created_at_idx ON food_product_revisions USING btree (created_at);
-
-CREATE TABLE IF NOT EXISTS meal_groups (
-  id uuid PRIMARY KEY NOT NULL,
-  user_id uuid NOT NULL REFERENCES users(id) ON DELETE cascade,
-  label text NOT NULL,
-  sort_order integer NOT NULL,
-  is_default boolean DEFAULT false NOT NULL,
-  created_at timestamptz DEFAULT now() NOT NULL,
-  updated_at timestamptz DEFAULT now() NOT NULL,
-  deleted_at timestamptz
-);
-CREATE INDEX IF NOT EXISTS meal_groups_user_sort_idx ON meal_groups USING btree (user_id, sort_order);
-CREATE INDEX IF NOT EXISTS meal_groups_deleted_at_idx ON meal_groups USING btree (deleted_at);
-
-CREATE TABLE IF NOT EXISTS meal_entries (
-  id uuid PRIMARY KEY NOT NULL,
-  user_id uuid NOT NULL REFERENCES users(id) ON DELETE cascade,
-  entry_date date NOT NULL,
-  meal_group_id uuid REFERENCES meal_groups(id) ON DELETE SET NULL,
-  status text DEFAULT 'eaten' NOT NULL,
-  product_id uuid REFERENCES food_products(id) ON DELETE SET NULL,
-  label text NOT NULL,
-  sort_order integer NOT NULL,
-  quantity numeric(8, 2) DEFAULT '1' NOT NULL,
-  unit text DEFAULT 'serving' NOT NULL,
-  serving_multiplier numeric(8, 2) DEFAULT '1' NOT NULL,
-  protein_g numeric(6, 1) NOT NULL,
-  carbs_g numeric(6, 1) NOT NULL,
-  fat_g numeric(6, 1) NOT NULL,
-  calories_kcal integer NOT NULL,
-  client_mutation_id text,
-  healthkit_synced_at timestamptz,
-  created_at timestamptz DEFAULT now() NOT NULL,
-  updated_at timestamptz DEFAULT now() NOT NULL
-);
-CREATE INDEX IF NOT EXISTS meal_entries_user_date_idx ON meal_entries USING btree (user_id, entry_date);
-CREATE INDEX IF NOT EXISTS meal_entries_user_date_status_idx ON meal_entries USING btree (user_id, entry_date, status);
-CREATE INDEX IF NOT EXISTS meal_entries_meal_group_idx ON meal_entries USING btree (meal_group_id);
-CREATE INDEX IF NOT EXISTS meal_entries_product_idx ON meal_entries USING btree (product_id);
-CREATE UNIQUE INDEX IF NOT EXISTS meal_entries_user_client_mutation_key ON meal_entries USING btree (user_id, client_mutation_id);
-CREATE INDEX IF NOT EXISTS meal_entries_user_date_sort_idx ON meal_entries USING btree (user_id, entry_date, sort_order);
-CREATE INDEX IF NOT EXISTS meal_entries_healthkit_unsynced_idx ON meal_entries USING btree (user_id, entry_date) WHERE healthkit_synced_at IS NULL AND status = 'eaten';
-CREATE UNIQUE INDEX IF NOT EXISTS meal_groups_active_default_label_key ON meal_groups USING btree (user_id, label) WHERE deleted_at IS NULL AND is_default = true;
-
-CREATE TABLE IF NOT EXISTS weight_entries (
-  id uuid PRIMARY KEY NOT NULL,
-  user_id uuid NOT NULL REFERENCES users(id) ON DELETE cascade,
-  entry_date date NOT NULL,
-  weight_kg numeric(5, 2) NOT NULL,
-  body_fat_pct numeric(4, 1),
-  notes text,
-  created_at timestamptz DEFAULT now() NOT NULL,
-  updated_at timestamptz DEFAULT now() NOT NULL
-);
-CREATE UNIQUE INDEX IF NOT EXISTS weight_entries_user_date_key ON weight_entries USING btree (user_id, entry_date);
-CREATE INDEX IF NOT EXISTS weight_entries_user_date_idx ON weight_entries USING btree (user_id, entry_date);
-
-CREATE TABLE IF NOT EXISTS recipes (
-  id uuid PRIMARY KEY NOT NULL,
-  user_id uuid NOT NULL REFERENCES users(id) ON DELETE cascade,
-  label text NOT NULL,
-  portions integer DEFAULT 1 NOT NULL,
-  total_cooked_weight_g numeric(8, 2),
-  created_at timestamptz DEFAULT now() NOT NULL,
-  updated_at timestamptz DEFAULT now() NOT NULL
-);
-CREATE INDEX IF NOT EXISTS recipes_user_idx ON recipes USING btree (user_id);
-
-CREATE TABLE IF NOT EXISTS recipe_ingredients (
-  id uuid PRIMARY KEY NOT NULL,
-  recipe_id uuid NOT NULL REFERENCES recipes(id) ON DELETE cascade,
-  product_id uuid REFERENCES food_products(id) ON DELETE SET NULL,
-  sort_order integer NOT NULL,
-  label text NOT NULL,
-  quantity numeric(8, 2) DEFAULT '1' NOT NULL,
-  unit text DEFAULT 'serving' NOT NULL,
-  serving_multiplier numeric(8, 2) DEFAULT '1' NOT NULL,
-  protein_g numeric(6, 1) NOT NULL,
-  carbs_g numeric(6, 1) NOT NULL,
-  fat_g numeric(6, 1) NOT NULL,
-  calories_kcal integer NOT NULL,
-  created_at timestamptz DEFAULT now() NOT NULL
-);
-CREATE INDEX IF NOT EXISTS recipe_ingredients_recipe_idx ON recipe_ingredients USING btree (recipe_id);
-CREATE INDEX IF NOT EXISTS recipe_ingredients_product_idx ON recipe_ingredients USING btree (product_id);
-
-CREATE TABLE IF NOT EXISTS meal_templates (
-  id uuid PRIMARY KEY NOT NULL,
-  user_id uuid NOT NULL REFERENCES users(id) ON DELETE cascade,
-  type text DEFAULT 'meal' NOT NULL,
-  label text NOT NULL,
-  notes text,
-  created_at timestamptz DEFAULT now() NOT NULL,
-  updated_at timestamptz DEFAULT now() NOT NULL,
-  deleted_at timestamptz
-);
-CREATE INDEX IF NOT EXISTS meal_templates_user_type_idx ON meal_templates USING btree (user_id, type);
-CREATE INDEX IF NOT EXISTS meal_templates_deleted_at_idx ON meal_templates USING btree (deleted_at);
-
-CREATE TABLE IF NOT EXISTS meal_template_items (
-  id uuid PRIMARY KEY NOT NULL,
-  template_id uuid NOT NULL REFERENCES meal_templates(id) ON DELETE cascade,
-  product_id uuid REFERENCES food_products(id) ON DELETE SET NULL,
-  meal_group_label text,
-  sort_order integer NOT NULL,
-  label text NOT NULL,
-  quantity numeric(8, 2) DEFAULT '1' NOT NULL,
-  unit text DEFAULT 'serving' NOT NULL,
-  serving_multiplier numeric(8, 2) DEFAULT '1' NOT NULL,
-  protein_g numeric(6, 1) NOT NULL,
-  carbs_g numeric(6, 1) NOT NULL,
-  fat_g numeric(6, 1) NOT NULL,
-  calories_kcal integer NOT NULL,
-  created_at timestamptz DEFAULT now() NOT NULL
-);
-CREATE INDEX IF NOT EXISTS meal_template_items_template_idx ON meal_template_items USING btree (template_id);
-CREATE INDEX IF NOT EXISTS meal_template_items_product_idx ON meal_template_items USING btree (product_id);
-
-CREATE TABLE IF NOT EXISTS gym_slots (
-  id uuid PRIMARY KEY NOT NULL,
-  user_id uuid NOT NULL REFERENCES users(id) ON DELETE cascade,
-  title text NOT NULL,
-  description text,
-  recurrence text NOT NULL,
-  slot_date date,
-  weekday integer,
-  start_minute integer NOT NULL,
-  end_minute integer NOT NULL,
-  created_at timestamptz DEFAULT now() NOT NULL,
-  updated_at timestamptz DEFAULT now() NOT NULL,
-  CONSTRAINT gym_slots_recurrence_check
-    CHECK (recurrence IN ('once', 'weekly')),
-  CONSTRAINT gym_slots_recurrence_shape_check
-    CHECK (
-      (recurrence = 'once' AND slot_date IS NOT NULL AND weekday IS NULL)
-      OR (recurrence = 'weekly' AND weekday BETWEEN 1 AND 7 AND slot_date IS NULL)
-    ),
-  CONSTRAINT gym_slots_minutes_check
-    CHECK (start_minute >= 0 AND end_minute <= 1440 AND start_minute < end_minute)
-);
-CREATE INDEX IF NOT EXISTS gym_slots_user_date_idx ON gym_slots USING btree (user_id, slot_date);
-CREATE INDEX IF NOT EXISTS gym_slots_user_weekday_idx ON gym_slots USING btree (user_id, weekday);
-
-CREATE TABLE IF NOT EXISTS gym_slot_statuses (
-  id uuid PRIMARY KEY NOT NULL,
-  slot_id uuid NOT NULL REFERENCES gym_slots(id) ON DELETE cascade,
-  status_date date NOT NULL,
-  status text NOT NULL,
-  created_at timestamptz DEFAULT now() NOT NULL,
-  updated_at timestamptz DEFAULT now() NOT NULL,
-  CONSTRAINT gym_slot_statuses_status_check
-    CHECK (status IN ('going', 'maybe', 'skipped', 'done'))
-);
-CREATE UNIQUE INDEX IF NOT EXISTS gym_slot_statuses_slot_date_key ON gym_slot_statuses USING btree (slot_id, status_date);
-
-CREATE TABLE IF NOT EXISTS gym_buddies (
-  id uuid PRIMARY KEY NOT NULL,
-  requester_user_id uuid NOT NULL REFERENCES users(id) ON DELETE cascade,
-  addressee_user_id uuid NOT NULL REFERENCES users(id) ON DELETE cascade,
-  status text DEFAULT 'pending' NOT NULL,
-  invite_identifier text,
-  created_at timestamptz DEFAULT now() NOT NULL,
-  updated_at timestamptz DEFAULT now() NOT NULL,
-  CONSTRAINT gym_buddies_not_self_check
-    CHECK (requester_user_id <> addressee_user_id),
-  CONSTRAINT gym_buddies_status_check
-    CHECK (status IN ('pending', 'accepted', 'declined'))
-);
-CREATE UNIQUE INDEX IF NOT EXISTS gym_buddies_pair_key ON gym_buddies USING btree (LEAST(requester_user_id, addressee_user_id), GREATEST(requester_user_id, addressee_user_id));
-CREATE INDEX IF NOT EXISTS gym_buddies_addressee_idx ON gym_buddies USING btree (addressee_user_id, status);
-CREATE INDEX IF NOT EXISTS gym_buddies_requester_idx ON gym_buddies USING btree (requester_user_id, status);
-"#;
-
 const DRIZZLE_MIGRATION_JOURNAL: &str =
     include_str!("../../../packages/db/drizzle/meta/_journal.json");
 const DEFAULT_MEAL_GROUP_LABELS: [&str; 4] = ["Breakfast", "Lunch", "Dinner", "Snack"];
 
-/// The streak computation, shared verbatim by `stats_page_data_json` and
-/// `leaderboard_json`.
-///
-/// BUG-01: the Summary page hardcoded `'currentStreak', 0` while the real
-/// gaps-and-islands query lived only in the leaderboard, so every user's Summary
-/// permanently read `0🔥 / Best: 0 days` even though five tests asserted correct
-/// streaks — against the other consumer. Expanding one literal into both
-/// queries keeps them from drifting again; a `macro_rules!` rather than a
-/// `const` so each query stays a single compile-time string literal and the
-/// "no `format!` into SQL" invariant holds.
-///
-/// Contract: the caller supplies a preceding CTE named `streak_days` with one
-/// row per date the user logged an eaten entry, and binds `$2` to the reference
-/// date.
+/// SQL is only ever assembled from compile-time constants in `db/sql.rs`, never from runtime values.
+/// Contract: a preceding CTE named `streak_days` with one row per eaten-entry date, and `$2` bound to the reference date.
 macro_rules! streak_summary_ctes {
     () => {
         r#"
@@ -562,15 +282,7 @@ pub async fn get_user_by_id(pool: &PgPool, user_id: Uuid) -> AppResult<Option<Ap
     row.map(row_to_app_user).transpose()
 }
 
-pub async fn ensure_user_role(pool: &PgPool, user_id: Uuid, role: &str) -> AppResult<AppUser> {
-    ensure_user_role_with_executor(pool, user_id, role).await
-}
-
-async fn ensure_user_role_with_executor<'e, E>(
-    executor: E,
-    user_id: Uuid,
-    role: &str,
-) -> AppResult<AppUser>
+pub async fn ensure_user_role<'e, E>(executor: E, user_id: Uuid, role: &str) -> AppResult<AppUser>
 where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
@@ -601,27 +313,20 @@ where
     .bind(role)
     .fetch_optional(executor)
     .await?
-    // LOW-A3: an unknown user id used to surface as `RowNotFound` from
-    // `fetch_one`, i.e. a 500 for what is plainly a 404.
+    // An unknown user id is a 404, not `fetch_one`'s `RowNotFound` 500.
     .ok_or_else(|| AppError::NotFound("User not found.".to_string()))?;
 
     row_to_app_user(row)
 }
 
-/// The `email` claim in a Shoo ID token is not proof of address ownership —
-/// there is no `email_verified` claim to lean on. Refusing the login keeps a
-/// token minted for one subject from ever reaching another subject's row. The
-/// message deliberately does not echo the address back, so it cannot be used to
-/// probe which addresses are registered.
+/// Shoo tokens carry no `email_verified`, so an address held by another subject is refused without echoing it back.
 fn account_identity_conflict() -> AppError {
     AppError::Conflict(
         "This email address is already linked to a different sign-in identity. Sign in with the original identity instead.".to_string(),
     )
 }
 
-/// Turns a `23505` unique violation into a 409 with a caller-actionable
-/// message. Everything else keeps its original classification, so a genuine
-/// database fault is still logged and reported as a 500.
+/// A `23505` unique violation becomes a 409; every other error keeps its original classification.
 fn map_unique_violation(message: &'static str) -> impl Fn(sqlx::Error) -> AppError {
     move |error| {
         if let sqlx::Error::Database(db_error) = &error
@@ -633,10 +338,7 @@ fn map_unique_violation(message: &'static str) -> impl Fn(sqlx::Error) -> AppErr
     }
 }
 
-/// A `users_email_key` duplicate means another account already holds the
-/// address. That is the same conflict as the pre-check below, reached through a
-/// concurrent login rather than a stale read, so it gets the same 409 instead of
-/// a generic 500.
+/// A `users_email_key` duplicate is the pre-check's conflict reached concurrently, so it answers with the same 409.
 fn map_user_email_conflict(error: sqlx::Error) -> AppError {
     if let sqlx::Error::Database(db_error) = &error
         && db_error.code().as_deref() == Some("23505")
@@ -652,13 +354,7 @@ pub async fn upsert_user_from_shoo_profile(
     profile: &ShooProfile,
 ) -> AppResult<AppUser> {
     let user_id = Uuid::new_v4();
-    // SEC-03: match on `shoo_pairwise_sub` ONLY. The previous
-    // `shoo_pairwise_sub = $1 OR email = $2` also matched by address and then
-    // unconditionally overwrote `shoo_pairwise_sub`, so a token whose `email`
-    // claim named a victim rebound the victim's row — meals, weights, goals and
-    // `role` included — to the attacker's subject. Changing the address on an
-    // already-matched subject is still allowed; adopting somebody else's
-    // address never is.
+    // Match on `shoo_pairwise_sub` only: also matching by address would let a token rebind another subject's row.
     if let Some(existing) = sqlx::query("SELECT id FROM users WHERE shoo_pairwise_sub = $1 LIMIT 1")
         .bind(&profile.pairwise_sub)
         .fetch_optional(pool)
@@ -705,9 +401,7 @@ pub async fn upsert_user_from_shoo_profile(
         return row_to_app_user(row);
     }
 
-    // Unknown subject. If the address is already attached to some other
-    // subject, refuse rather than create a second account that would then fail
-    // the unique index anyway.
+    // An address already attached to another subject is refused rather than left to the unique index.
     if sqlx::query("SELECT 1 FROM users WHERE email = $1 LIMIT 1")
         .bind(&profile.email)
         .fetch_optional(pool)
@@ -792,9 +486,7 @@ pub async fn get_user_goals(pool: &PgPool, user_id: Uuid) -> AppResult<MacroGoal
     })
 }
 
-/// Goal macros land in `numeric(6, 1)` and the goal weight in `numeric(5, 2)`,
-/// so both need the column domain enforced before the UPDATE rather than after
-/// Postgres raises numeric-field-overflow.
+/// Enforces the `numeric(6, 1)` and `numeric(5, 2)` column domains before the UPDATE overflows.
 fn validate_macro_goals(goals: &MacroGoals) -> AppResult<()> {
     for (key, value) in [
         ("proteinG", goals.protein_g),
@@ -857,76 +549,8 @@ pub async fn save_user_goals(pool: &PgPool, user_id: Uuid, goals: MacroGoals) ->
     Ok(())
 }
 
-pub async fn authenticate_api_token(pool: &PgPool, token: &str) -> AppResult<Value> {
-    if !token.starts_with("mtk_v1_") {
-        return Ok(json!({ "ok": false, "reason": "malformed" }));
-    }
-    let token_hash = hash_token(token);
-    let row = sqlx::query(
-        r#"
-        SELECT
-          id,
-          user_id,
-          token_prefix,
-          name,
-          scopes,
-          created_at,
-          last_used_at,
-          expires_at,
-          revoked_at
-        FROM api_tokens
-        WHERE token_hash = $1
-        "#,
-    )
-    .bind(token_hash)
-    .fetch_optional(pool)
-    .await?;
-    let Some(row) = row else {
-        return Ok(json!({ "ok": false, "reason": "invalid" }));
-    };
-    let expires_at: Option<DateTime<Utc>> = row.try_get("expires_at")?;
-    let revoked_at: Option<DateTime<Utc>> = row.try_get("revoked_at")?;
-    if revoked_at.is_some() {
-        return Ok(json!({ "ok": false, "reason": "revoked" }));
-    }
-    if expires_at.is_some_and(|expires_at| expires_at <= Utc::now()) {
-        return Ok(json!({ "ok": false, "reason": "expired" }));
-    }
-    let id: Uuid = row.try_get("id")?;
-    // `RETURNING` instead of a follow-up SELECT. The throttle means the UPDATE
-    // matches no row most of the time, in which case the row already read
-    // above is current.
-    let refreshed = sqlx::query(
-        r#"
-        UPDATE api_tokens
-        SET last_used_at = now()
-        WHERE id = $1
-          AND (last_used_at IS NULL OR last_used_at < now() - interval '5 minutes')
-        RETURNING
-          id,
-          user_id,
-          token_prefix,
-          name,
-          scopes,
-          created_at,
-          last_used_at,
-          expires_at,
-          revoked_at
-        "#,
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
-    let record = api_token_row_json(refreshed.as_ref().unwrap_or(&row))?;
-    Ok(json!({ "ok": true, "token": record }))
-}
-
 pub async fn ensure_default_meal_groups(pool: &PgPool, user_id: Uuid) -> AppResult<()> {
-    // Read paths call this on every dashboard load to lazily backfill accounts
-    // that predate onboarding-time provisioning. Once all four deterministic
-    // groups exist and are active the provisioning statement is a guaranteed
-    // no-op -- the INSERT fully conflicts and the restore UPDATE requires
-    // `deleted_at IS NOT NULL` -- so probe first and skip the write entirely.
+    // Every dashboard load reaches this backfill, and the provisioning write is a guaranteed no-op once the groups are active.
     if default_meal_groups_are_active(pool, user_id).await? {
         return Ok(());
     }
@@ -1088,10 +712,7 @@ async fn complete_onboarding_setup_json(
             .ok_or_else(|| AppError::BadRequest("goals is required.".to_string()))?,
     )
     .map_err(invalid_payload("goals"))?;
-    // Onboarding writes the goal columns directly rather than through
-    // `save_user_goals`, so the domain check has to be applied here too —
-    // otherwise an oversized macro reaches `numeric(6, 1)` and rolls the whole
-    // onboarding transaction back with a 500.
+    // Onboarding writes the goal columns directly, so the column-domain check has to be repeated here.
     validate_macro_goals(&goals)?;
     let goal_weight_kg = match input.get("goalWeightKg") {
         None | Some(Value::Null) => None,
@@ -1099,12 +720,10 @@ async fn complete_onboarding_setup_json(
             AppError::BadRequest("goalWeightKg must be a non-negative number.".to_string())
         })?))?,
     };
-    // Normalized up front, with the same rules the standalone weight endpoint
-    // uses: a zero weight or a value that only overflows after rounding must
-    // fail as a bad request, not as a database error mid-transaction.
+    // Same rules as the standalone weight endpoint, applied up front so a bad value is a 400 and not a mid-transaction fault.
     let current_weight = match input.get("currentWeight") {
         None | Some(Value::Null) => None,
-        Some(Value::Object(weight)) => Some(normalize_weight_entry_input(weight)?),
+        Some(Value::Object(weight)) => Some(weight::normalize_weight_entry_input(weight)?),
         Some(_) => {
             return Err(AppError::BadRequest(
                 "currentWeight must be an object.".to_string(),
@@ -1191,10 +810,7 @@ async fn complete_onboarding_setup_json(
         )
         .bind(template_id)
         .bind(user_id)
-        // API-07: the onboarding starter template is the third write path into
-        // meal_templates.type and was the one that skipped validation. Migration
-        // 0016 adds a CHECK on this column, so an unvalidated value would now
-        // surface as a raw 23514 -> 500 instead of a 400.
+        // Migration 0016 puts a CHECK on `meal_templates.type`, so an unvalidated value would surface as a raw 23514.
         .bind(normalize_template_type(template)?)
         .bind(required_string(template, "label")?)
         .bind(template.get("notes").and_then(Value::as_str))
@@ -1323,24 +939,16 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
         "createApiToken" => {
             let user_id = uuid_arg(&args, "userId")?;
             let input = object_arg(&args, "input")?;
-            create_api_token_json(pool, user_id, input).await
+            api_tokens::create_api_token_json(pool, user_id, input).await
         }
         "listApiTokens" => {
             let user_id = uuid_arg(&args, "userId")?;
-            list_api_tokens_json(pool, user_id).await
+            api_tokens::list_api_tokens_json(pool, user_id).await
         }
         "revokeApiToken" => {
             let user_id = uuid_arg(&args, "userId")?;
             let token_id = uuid_arg(&args, "tokenId")?;
-            let revoked = sqlx::query(
-                "UPDATE api_tokens SET revoked_at = coalesce(revoked_at, now()) WHERE user_id = $1 AND id = $2 RETURNING id",
-            )
-            .bind(user_id)
-            .bind(token_id)
-            .fetch_optional(pool)
-            .await?
-            .is_some();
-            Ok(json!(revoked))
+            api_tokens::revoke_api_token_json(pool, user_id, token_id).await
         }
         "authenticateApiToken" => {
             let Some(token) = args.get("token").and_then(Value::as_str) else {
@@ -1488,8 +1096,7 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
                     "orderedIds must include each active meal group exactly once.".to_string(),
                 ));
             }
-            // One statement rather than one per group: a drag-to-reorder used
-            // to cost a round trip per row.
+            // One statement for the whole reorder rather than a round trip per row.
             let sort_orders: Vec<i32> = (0..ordered_ids.len() as i32).collect();
             sqlx::query(
                 r#"
@@ -1579,12 +1186,13 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
             let user_id = uuid_arg(&args, "userId")?;
             templates_json(pool, user_id).await
         }
+        "getTemplateSummaries" => {
+            let user_id = uuid_arg(&args, "userId")?;
+            template_summaries_json(pool, user_id).await
+        }
         "getTemplateById" => {
             let user_id = uuid_arg(&args, "userId")?;
             let template_id = uuid_arg(&args, "templateId")?;
-            // PERF-01: this used to load the account's whole template
-            // collection and linear-scan it. The indexed by-id helper already
-            // existed for exactly this.
             match template_by_id_json(pool, user_id, template_id).await {
                 Ok(template) => Ok(template),
                 Err(AppError::NotFound(_)) => Ok(Value::Null),
@@ -1630,6 +1238,15 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
             let user_id = uuid_arg(&args, "userId")?;
             recipes_json(pool, user_id).await
         }
+        "getRecipeSummaries" => {
+            let user_id = uuid_arg(&args, "userId")?;
+            recipe_summaries_json(pool, user_id).await
+        }
+        "getPlannedShoppingSummaries" => {
+            let user_id = uuid_arg(&args, "userId")?;
+            let dates = dates_arg(&args, "dates")?;
+            planned_shopping_summaries_json(pool, user_id, &dates).await
+        }
         "getRecipeCount" => {
             let user_id = uuid_arg(&args, "userId")?;
             let row = sqlx::query("SELECT count(*)::int AS count FROM recipes WHERE user_id = $1")
@@ -1642,8 +1259,6 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
         "getRecipeById" => {
             let user_id = uuid_arg(&args, "userId")?;
             let recipe_id = uuid_arg(&args, "recipeId")?;
-            // PERF-01: as above — the indexed helper replaces a full-collection
-            // load plus linear scan.
             match recipe_by_id_json(pool, user_id, recipe_id).await {
                 Ok(recipe) => Ok(recipe),
                 Err(AppError::NotFound(_)) => Ok(Value::Null),
@@ -1677,14 +1292,12 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
         }
         "getWeightEntries" => {
             let user_id = uuid_arg(&args, "userId")?;
-            weight_entries_json(pool, user_id).await
+            weight::weight_entries_json(pool, user_id).await
         }
-        // Fetches one row instead of the account's whole weight history, which
-        // the PATCH handler used to load and linear-scan.
         "getWeightEntryById" => {
             let user_id = uuid_arg(&args, "userId")?;
             let entry_id = uuid_arg(&args, "entryId")?;
-            weight_entry_by_id_json(pool, user_id, entry_id).await
+            weight::weight_entry_by_id_json(pool, user_id, entry_id).await
         }
         "getWeightGoal" => {
             let user_id = uuid_arg(&args, "userId")?;
@@ -1710,36 +1323,28 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
         "getWeightPageData" => {
             let user_id = uuid_arg(&args, "userId")?;
             let selected_date = date_arg(&args, "selectedDate")?;
-            weight_page_data_json(pool, user_id, &selected_date).await
+            weight::weight_page_data_json(pool, user_id, &selected_date).await
         }
         "createWeightEntry" => {
             let user_id = uuid_arg(&args, "userId")?;
             let input = object_arg(&args, "input")?;
-            create_weight_entry_json(pool, user_id, input, true).await
+            weight::create_weight_entry_json(pool, user_id, input, true).await
         }
         "createWeightEntryNoOverwrite" => {
             let user_id = uuid_arg(&args, "userId")?;
             let input = object_arg(&args, "input")?;
-            create_weight_entry_json(pool, user_id, input, false).await
+            weight::create_weight_entry_json(pool, user_id, input, false).await
         }
         "updateWeightEntry" => {
             let user_id = uuid_arg(&args, "userId")?;
             let entry_id = uuid_arg(&args, "entryId")?;
             let input = object_arg(&args, "input")?;
-            update_weight_entry_json(pool, user_id, entry_id, input).await
+            weight::update_weight_entry_json(pool, user_id, entry_id, input).await
         }
         "deleteWeightEntry" => {
             let user_id = uuid_arg(&args, "userId")?;
             let entry_id = uuid_arg(&args, "entryId")?;
-            let deleted = sqlx::query(
-                "DELETE FROM weight_entries WHERE user_id = $1 AND id = $2 RETURNING id",
-            )
-            .bind(user_id)
-            .bind(entry_id)
-            .fetch_optional(pool)
-            .await?
-            .is_some();
-            Ok(json!(deleted))
+            weight::delete_weight_entry_json(pool, user_id, entry_id).await
         }
         "getRecentQuickAddCandidates" => {
             let user_id = uuid_arg(&args, "userId")?;
@@ -1831,11 +1436,7 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
                 test_fault_arg(&args, "barcode_food_product_revision").cloned();
             save_barcode_food_product_json(pool, user_id, input, revision_test_fault.as_ref()).await
         }
-        // Admin reads take an actor and enforce the role here, in the data
-        // layer. Relying on the Next.js layout guard alone left a
-        // stale-privilege window: Partial Rendering does not re-run a layout on
-        // client navigation, so a just-demoted admin could still load every
-        // account's PII from an already-open tab.
+        // The role is enforced here because the Next.js layout guard leaves a stale-privilege window on client navigation.
         "getAdminDashboardData" => {
             require_admin_actor(pool, uuid_arg(&args, "actorUserId")?).await?;
             admin_dashboard_json(pool).await
@@ -1971,7 +1572,7 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
                 .and_then(Value::as_i64)
                 .unwrap_or(100)
                 .clamp(1, 200) as i32;
-            healthkit_sync_entries_json(pool, user_id, days, limit).await
+            healthkit::healthkit_sync_entries_json(pool, user_id, days, limit).await
         }
         "ackHealthkitSyncEntries" => {
             let user_id = uuid_arg(&args, "userId")?;
@@ -1999,39 +1600,37 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
                         })
                 })
                 .collect::<AppResult<Vec<_>>>()?;
-            ack_healthkit_sync_entries_json(pool, user_id, entry_ids).await
+            healthkit::ack_healthkit_sync_entries_json(pool, user_id, entry_ids).await
         }
         "createGymSlot" => {
             let user_id = uuid_arg(&args, "userId")?;
             let input = object_arg(&args, "input")?;
-            create_gym_slot_json(pool, user_id, input).await
+            gym::create_gym_slot_json(pool, user_id, input).await
         }
         "updateGymSlot" => {
             let user_id = uuid_arg(&args, "userId")?;
             let slot_id = uuid_arg(&args, "slotId")?;
             let input = object_arg(&args, "input")?;
-            update_gym_slot_json(pool, user_id, slot_id, input).await
+            gym::update_gym_slot_json(pool, user_id, slot_id, input).await
         }
         "deleteGymSlot" => {
             let user_id = uuid_arg(&args, "userId")?;
             let slot_id = uuid_arg(&args, "slotId")?;
-            delete_gym_slot_json(pool, user_id, slot_id).await
+            gym::delete_gym_slot_json(pool, user_id, slot_id).await
         }
         "setGymSlotStatus" => {
             let user_id = uuid_arg(&args, "userId")?;
             let slot_id = uuid_arg(&args, "slotId")?;
             let date = date_arg(&args, "date")?;
             let status = string_arg(&args, "status")?;
-            set_gym_slot_status_json(pool, user_id, slot_id, &date, &status).await
+            gym::set_gym_slot_status_json(pool, user_id, slot_id, &date, &status).await
         }
         "inviteGymBuddy" => {
             let user_id = uuid_arg(&args, "userId")?;
-            // `identifier` (email or friend code) with an `email` fallback so
-            // a not-yet-redeployed web service keeps working during the skew
-            // window between the two services' deploys.
+            // The `email` fallback keeps a not-yet-redeployed web service working during the deploy skew window.
             let identifier =
                 string_arg(&args, "identifier").or_else(|_| string_arg(&args, "email"))?;
-            invite_gym_buddy_json(pool, user_id, &identifier).await
+            gym::invite_gym_buddy_json(pool, user_id, &identifier).await
         }
         "respondGymBuddyInvite" => {
             let user_id = uuid_arg(&args, "userId")?;
@@ -2040,1118 +1639,27 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
                 .get("accept")
                 .and_then(Value::as_bool)
                 .ok_or_else(|| AppError::BadRequest("accept is required.".to_string()))?;
-            respond_gym_buddy_invite_json(pool, user_id, buddy_id, accept).await
+            gym::respond_gym_buddy_invite_json(pool, user_id, buddy_id, accept).await
         }
         "removeGymBuddy" => {
             let user_id = uuid_arg(&args, "userId")?;
             let buddy_id = uuid_arg(&args, "buddyId")?;
-            remove_gym_buddy_json(pool, user_id, buddy_id).await
+            gym::remove_gym_buddy_json(pool, user_id, buddy_id).await
         }
         "getGymPageData" => {
             let user_id = uuid_arg(&args, "userId")?;
             let date = date_arg(&args, "date")?;
-            get_gym_page_data_json(pool, user_id, &date).await
+            gym::get_gym_page_data_json(pool, user_id, &date).await
         }
         "getGymHomeSummary" => {
             let user_id = uuid_arg(&args, "userId")?;
             let date = date_arg(&args, "date")?;
-            get_gym_home_summary_json(pool, user_id, &date).await
+            gym::get_gym_home_summary_json(pool, user_id, &date).await
         }
         _ => Err(AppError::NotFound(format!(
             "Unknown backend operation: {op}"
         ))),
     }
-}
-
-// ---------------------------------------------------------------------------
-// Gym schedule sharing
-//
-// This is the app's first cross-user surface, so the authorization invariants
-// are load-bearing:
-//   * Buddy visibility is READ-ONLY - no op mutates another user's rows, and
-//     every write predicate carries the caller's ownership.
-//   * Every cross-user read goes through the accepted_buddies CTE below so the
-//     "is an accepted buddy" predicate cannot be forgotten in one op.
-//   * Lock-ordering contract (deadlock prevention): resolve the target user id
-//     FIRST, take the per-user advisory locks for all involved parties in
-//     ascending user-id order as the first lock-taking statements of the
-//     transaction, and only then take any FOR UPDATE / row write on
-//     gym_buddies. Never acquire an advisory lock while already holding a
-//     gym_buddies row lock.
-// ---------------------------------------------------------------------------
-
-const GYM_SLOT_STATUS_VALUES: &[&str] = &["going", "maybe", "skipped", "done"];
-const GYM_MAX_SLOTS_PER_USER: i64 = 50;
-const GYM_MAX_PENDING_OUTGOING_INVITES: i64 = 20;
-const GYM_MAX_ACCEPTED_BUDDIES: i64 = 100;
-/// Bounds how far from today a per-date status may be written; the format
-/// check alone would accept `9999-12-31` and allow unbounded row growth.
-const GYM_STATUS_DATE_WINDOW_DAYS: i64 = 400;
-const GYM_MAX_TITLE_LENGTH: usize = 100;
-const GYM_MAX_OVERLAP_BUDDIES: usize = 20;
-const GYM_MAX_OVERLAP_WINDOWS_PER_BUDDY: usize = 3;
-
-/// The one shared "who are my accepted buddies" predicate. `LIMIT 120` sits
-/// strictly ABOVE the enforced cap of 100 with a deterministic order, so a cap
-/// overshoot can never silently drop a different buddy per response.
-macro_rules! gym_accepted_buddies_cte {
-    () => {
-        r#"
-        accepted_buddies AS (
-          SELECT
-            b.id AS buddy_row_id,
-            CASE
-              WHEN b.requester_user_id = $1 THEN b.addressee_user_id
-              ELSE b.requester_user_id
-            END AS buddy_user_id
-          FROM gym_buddies b
-          WHERE b.status = 'accepted'
-            AND (b.requester_user_id = $1 OR b.addressee_user_id = $1)
-          ORDER BY b.created_at, b.id
-          LIMIT 120
-        )
-        "#
-    };
-}
-
-/// Resolves which slots occur on `$2::date` for the caller ($1) and their
-/// accepted buddies, with the effective per-date status (`'going'` when no
-/// gym_slot_statuses row exists). Requires the accepted_buddies CTE first.
-macro_rules! gym_resolved_slots_cte {
-    () => {
-        r#"
-        resolved_slots AS (
-          SELECT
-            s.id,
-            s.user_id,
-            s.title,
-            s.description,
-            s.recurrence,
-            s.start_minute,
-            s.end_minute,
-            coalesce(st.status, 'going') AS status
-          FROM gym_slots s
-          LEFT JOIN gym_slot_statuses st
-            ON st.slot_id = s.id AND st.status_date = $2::date
-          WHERE (
-              s.user_id = $1
-              OR s.user_id IN (SELECT buddy_user_id FROM accepted_buddies)
-            )
-            AND (
-              (s.recurrence = 'once' AND s.slot_date = $2::date)
-              OR (s.recurrence = 'weekly' AND s.weekday = EXTRACT(ISODOW FROM $2::date)::int)
-            )
-        )
-        "#
-    };
-}
-
-/// Raw pairwise overlap rows (>= 30 shared minutes) between the caller's and
-/// each buddy's resolved slots; merged into per-buddy windows in Rust by
-/// `gym_merge_overlaps`. Buddy projection deliberately excludes `description`.
-macro_rules! gym_overlap_rows_sql {
-    () => {
-        concat!(
-            "WITH ",
-            gym_accepted_buddies_cte!(),
-            ", ",
-            gym_resolved_slots_cte!(),
-            r#"
-            , own AS (
-              SELECT * FROM resolved_slots
-              WHERE user_id = $1 AND status IN ('going', 'done', 'maybe')
-            ),
-            buddy AS (
-              SELECT rs.*, coalesce(u.display_name, u.email) AS buddy_name
-              FROM resolved_slots rs
-              JOIN users u ON u.id = rs.user_id
-              WHERE rs.user_id <> $1 AND rs.status IN ('going', 'done', 'maybe')
-            )
-            SELECT coalesce(jsonb_agg(
-              jsonb_build_object(
-                'buddyId', b.user_id,
-                'buddyName', b.buddy_name,
-                'startMinute', GREATEST(o.start_minute, b.start_minute),
-                'endMinute', LEAST(o.end_minute, b.end_minute),
-                'tentative', (o.status = 'maybe' OR b.status = 'maybe')
-              )
-              ORDER BY GREATEST(o.start_minute, b.start_minute), b.user_id, b.id, o.id
-            ), '[]'::jsonb) AS data
-            FROM own o
-            JOIN buddy b
-              ON GREATEST(o.start_minute, b.start_minute) + 30 <= LEAST(o.end_minute, b.end_minute)
-            "#
-        )
-    };
-}
-
-#[derive(Clone, Debug, PartialEq)]
-struct GymSlotValues {
-    title: String,
-    description: Option<String>,
-    recurrence: String,
-    slot_date: Option<String>,
-    weekday: Option<i32>,
-    start_minute: i32,
-    end_minute: i32,
-}
-
-fn ensure_gym_status(value: &str) -> AppResult<()> {
-    if GYM_SLOT_STATUS_VALUES.contains(&value) {
-        Ok(())
-    } else {
-        Err(AppError::BadRequest(
-            "Status must be one of going, maybe, skipped or done.".to_string(),
-        ))
-    }
-}
-
-/// No 0/O, 1/I/L: friend codes are read aloud and typed back, so every
-/// character must be unambiguous. 31^8 ≈ 8.5e11 codes — unguessable enough
-/// that the code path (unlike the email path) is not an account oracle.
-const GYM_FRIEND_CODE_ALPHABET: &[u8] = b"23456789ABCDEFGHJKMNPQRSTUVWXYZ";
-const GYM_FRIEND_CODE_LENGTH: usize = 8;
-
-/// UUIDv4 as the entropy source — the same idiom `create_api_token_json`
-/// uses, so no new dependency. The modulo bias (~3% per char) is irrelevant
-/// for a shareable identifier whose only property is non-guessability.
-fn generate_gym_friend_code() -> String {
-    Uuid::new_v4()
-        .as_bytes()
-        .iter()
-        .take(GYM_FRIEND_CODE_LENGTH)
-        .map(|byte| {
-            GYM_FRIEND_CODE_ALPHABET[*byte as usize % GYM_FRIEND_CODE_ALPHABET.len()] as char
-        })
-        .collect()
-}
-
-enum GymInviteIdentifier {
-    Email(String),
-    FriendCode(String),
-}
-
-/// An '@' anywhere means email (lowercased); otherwise the input is treated
-/// as a friend code — uppercased with separators stripped, so "ab23-cd45",
-/// "AB23 CD45" and "ab23cd45" all resolve to the same stored code.
-fn classify_gym_invite_identifier(raw: &str) -> AppResult<GymInviteIdentifier> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(AppError::BadRequest(
-            "Enter an email address or friend code.".to_string(),
-        ));
-    }
-    ensure_text_length(trimmed, MAX_TEXT_FIELD_LENGTH, "Identifier")?;
-    if trimmed.contains('@') {
-        return Ok(GymInviteIdentifier::Email(trimmed.to_lowercase()));
-    }
-    let code: String = trimmed
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric())
-        .map(|character| character.to_ascii_uppercase())
-        .collect();
-    if code.is_empty() {
-        return Err(AppError::BadRequest(
-            "Enter an email address or friend code.".to_string(),
-        ));
-    }
-    Ok(GymInviteIdentifier::FriendCode(code))
-}
-
-/// Returns the user's static friend code, generating it on first use. The
-/// guarded UPDATE (`WHERE friend_code IS NULL`) makes concurrent generation
-/// settle on one winner, and the partial unique index turns the astronomically
-/// unlikely cross-user collision into a retry.
-async fn ensure_gym_friend_code(pool: &PgPool, user_id: Uuid) -> AppResult<String> {
-    let existing: Option<Option<String>> =
-        sqlx::query_scalar("SELECT friend_code FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(pool)
-            .await?;
-    let Some(existing) = existing else {
-        return Err(AppError::NotFound("User not found.".to_string()));
-    };
-    if let Some(code) = existing {
-        return Ok(code);
-    }
-
-    for _ in 0..5 {
-        let candidate = generate_gym_friend_code();
-        let updated = sqlx::query_scalar::<_, String>(
-            "UPDATE users SET friend_code = $2 WHERE id = $1 AND friend_code IS NULL RETURNING friend_code",
-        )
-        .bind(user_id)
-        .bind(&candidate)
-        .fetch_optional(pool)
-        .await;
-        match updated {
-            Ok(Some(code)) => return Ok(code),
-            Ok(None) => {
-                // A concurrent request won the race; read its code.
-                let code: Option<String> =
-                    sqlx::query_scalar("SELECT friend_code FROM users WHERE id = $1")
-                        .bind(user_id)
-                        .fetch_one(pool)
-                        .await?;
-                if let Some(code) = code {
-                    return Ok(code);
-                }
-            }
-            Err(sqlx::Error::Database(database_error))
-                if database_error.code().as_deref() == Some("23505") => {}
-            Err(error) => return Err(AppError::Sqlx(error)),
-        }
-    }
-    Err(AppError::Anyhow(anyhow::anyhow!(
-        "could not allocate a unique friend code after 5 attempts"
-    )))
-}
-
-fn gym_minute(
-    input: &serde_json::Map<String, Value>,
-    key: &str,
-    field_name: &str,
-) -> AppResult<i32> {
-    let value = input
-        .get(key)
-        .and_then(Value::as_i64)
-        .ok_or_else(|| AppError::BadRequest(format!("{field_name} is required.")))?;
-    // 1440 is a valid END ("until midnight"); start < end rules it out as a start.
-    if !(0..=1440).contains(&value) {
-        return Err(AppError::BadRequest(format!(
-            "{field_name} must be between 0 and 1440 minutes."
-        )));
-    }
-    Ok(value as i32)
-}
-
-fn gym_slot_values(input: &serde_json::Map<String, Value>) -> AppResult<GymSlotValues> {
-    let title = input
-        .get("title")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("Gym")
-        .to_string();
-    ensure_text_length(&title, GYM_MAX_TITLE_LENGTH, "Title")?;
-
-    let description = input
-        .get("description")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    if let Some(description) = &description {
-        ensure_text_length(description, MAX_TEXT_FIELD_LENGTH, "Description")?;
-    }
-
-    let recurrence = input
-        .get("recurrence")
-        .and_then(Value::as_str)
-        .unwrap_or("once")
-        .to_string();
-    if !matches!(recurrence.as_str(), "once" | "weekly") {
-        return Err(AppError::BadRequest(
-            "Recurrence must be 'once' or 'weekly'.".to_string(),
-        ));
-    }
-
-    let start_minute = gym_minute(input, "startMinute", "Start time")?;
-    let end_minute = gym_minute(input, "endMinute", "End time")?;
-    if start_minute >= end_minute {
-        return Err(AppError::BadRequest(
-            "A slot must start before it ends; overnight slots are not supported.".to_string(),
-        ));
-    }
-
-    let (slot_date, weekday) = if recurrence == "once" {
-        let date = input
-            .get("slotDate")
-            .and_then(Value::as_str)
-            .ok_or_else(|| AppError::BadRequest("A one-off slot needs a date.".to_string()))?;
-        ensure_date_string(date)?;
-        (Some(date.to_string()), None)
-    } else {
-        let weekday = input
-            .get("weekday")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| AppError::BadRequest("A weekly slot needs a weekday.".to_string()))?;
-        if !(1..=7).contains(&weekday) {
-            return Err(AppError::BadRequest(
-                "Weekday must be between 1 (Monday) and 7 (Sunday).".to_string(),
-            ));
-        }
-        (None, Some(weekday as i32))
-    };
-
-    Ok(GymSlotValues {
-        title,
-        description,
-        recurrence,
-        slot_date,
-        weekday,
-        start_minute,
-        end_minute,
-    })
-}
-
-/// Per-user advisory locks serializing the count-guarded cap checks (a
-/// count-guard alone is not race-free under READ COMMITTED). Locks are always
-/// taken in ascending user-id order, before any gym_buddies row lock.
-async fn gym_advisory_lock(
-    tx: &mut sqlx::Transaction<'_, Postgres>,
-    mut user_ids: Vec<Uuid>,
-) -> AppResult<()> {
-    user_ids.sort();
-    user_ids.dedup();
-    for user_id in user_ids {
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('gym_user:' || $1::text))")
-            .bind(user_id)
-            .execute(&mut **tx)
-            .await?;
-    }
-    Ok(())
-}
-
-/// Backstop for the pair-unique index: without this a concurrent duplicate
-/// invite would surface as a 500 `internal_error` instead of a Conflict.
-fn gym_conflict_on_unique_violation(error: sqlx::Error, message: &str) -> AppError {
-    if let sqlx::Error::Database(database_error) = &error {
-        if database_error.code().as_deref() == Some("23505") {
-            return AppError::Conflict(message.to_string());
-        }
-    }
-    AppError::Sqlx(error)
-}
-
-async fn gym_ensure_accepted_capacity(
-    tx: &mut sqlx::Transaction<'_, Postgres>,
-    user_id: Uuid,
-) -> AppResult<()> {
-    let accepted: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM gym_buddies WHERE status = 'accepted' AND (requester_user_id = $1 OR addressee_user_id = $1)",
-    )
-    .bind(user_id)
-    .fetch_one(&mut **tx)
-    .await?;
-    if accepted >= GYM_MAX_ACCEPTED_BUDDIES {
-        return Err(AppError::Conflict(
-            "The gym buddy limit has been reached.".to_string(),
-        ));
-    }
-    Ok(())
-}
-
-async fn create_gym_slot_json(
-    pool: &PgPool,
-    user_id: Uuid,
-    input: &serde_json::Map<String, Value>,
-) -> AppResult<Value> {
-    let values = gym_slot_values(input)?;
-    let mut tx = pool.begin().await?;
-    gym_advisory_lock(&mut tx, vec![user_id]).await?;
-    let row = sqlx::query(
-        r#"
-        INSERT INTO gym_slots (
-          id, user_id, title, description, recurrence, slot_date, weekday, start_minute, end_minute
-        )
-        SELECT $2, $1, $3, $4, $5, $6::date, $7, $8, $9
-        WHERE (SELECT count(*) FROM gym_slots WHERE user_id = $1) < $10
-        RETURNING jsonb_build_object(
-          'id', id,
-          'title', title,
-          'description', description,
-          'recurrence', recurrence,
-          'slotDate', slot_date,
-          'weekday', weekday,
-          'startMinute', start_minute,
-          'endMinute', end_minute
-        ) AS data
-        "#,
-    )
-    .bind(user_id)
-    .bind(Uuid::new_v4())
-    .bind(&values.title)
-    .bind(&values.description)
-    .bind(&values.recurrence)
-    .bind(&values.slot_date)
-    .bind(values.weekday)
-    .bind(values.start_minute)
-    .bind(values.end_minute)
-    .bind(GYM_MAX_SLOTS_PER_USER)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let Some(row) = row else {
-        return Err(AppError::Conflict(format!(
-            "You can have at most {GYM_MAX_SLOTS_PER_USER} gym slots; delete one first."
-        )));
-    };
-    let data: Value = row.try_get("data")?;
-    tx.commit().await?;
-    Ok(data)
-}
-
-async fn update_gym_slot_json(
-    pool: &PgPool,
-    user_id: Uuid,
-    slot_id: Uuid,
-    input: &serde_json::Map<String, Value>,
-) -> AppResult<Value> {
-    let values = gym_slot_values(input)?;
-    let mut tx = pool.begin().await?;
-    let existing = sqlx::query(
-        r#"
-        SELECT recurrence, slot_date::text AS slot_date, weekday
-        FROM gym_slots
-        WHERE id = $2 AND user_id = $1
-        FOR UPDATE
-        "#,
-    )
-    .bind(user_id)
-    .bind(slot_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let Some(existing) = existing else {
-        return Err(AppError::NotFound("Gym slot not found.".to_string()));
-    };
-    let existing_recurrence: String = existing.try_get("recurrence")?;
-    if existing_recurrence != values.recurrence {
-        return Err(AppError::BadRequest(
-            "A slot's repeat kind can't be changed; delete it and create a new one.".to_string(),
-        ));
-    }
-    let existing_date: Option<String> = existing.try_get("slot_date")?;
-    let existing_weekday: Option<i32> = existing.try_get("weekday")?;
-
-    let row = sqlx::query(
-        r#"
-        UPDATE gym_slots
-        SET title = $3,
-            description = $4,
-            slot_date = $5::date,
-            weekday = $6,
-            start_minute = $7,
-            end_minute = $8,
-            updated_at = now()
-        WHERE id = $2 AND user_id = $1
-        RETURNING jsonb_build_object(
-          'id', id,
-          'title', title,
-          'description', description,
-          'recurrence', recurrence,
-          'slotDate', slot_date,
-          'weekday', weekday,
-          'startMinute', start_minute,
-          'endMinute', end_minute
-        ) AS data
-        "#,
-    )
-    .bind(user_id)
-    .bind(slot_id)
-    .bind(&values.title)
-    .bind(&values.description)
-    .bind(&values.slot_date)
-    .bind(values.weekday)
-    .bind(values.start_minute)
-    .bind(values.end_minute)
-    .fetch_one(&mut *tx)
-    .await?;
-    let data: Value = row.try_get("data")?;
-
-    // Statuses are keyed to concrete dates. When the slot moves to another
-    // day they would match no occurrence - and silently resurrect as current
-    // truth if the slot ever moved back - so they must not survive the move.
-    if existing_date != values.slot_date || existing_weekday != values.weekday {
-        sqlx::query("DELETE FROM gym_slot_statuses WHERE slot_id = $1")
-            .bind(slot_id)
-            .execute(&mut *tx)
-            .await?;
-    }
-    tx.commit().await?;
-    Ok(data)
-}
-
-async fn delete_gym_slot_json(pool: &PgPool, user_id: Uuid, slot_id: Uuid) -> AppResult<Value> {
-    let deleted = sqlx::query("DELETE FROM gym_slots WHERE id = $2 AND user_id = $1 RETURNING id")
-        .bind(user_id)
-        .bind(slot_id)
-        .fetch_optional(pool)
-        .await?
-        .is_some();
-    if !deleted {
-        return Err(AppError::NotFound("Gym slot not found.".to_string()));
-    }
-    Ok(json!({ "deleted": true }))
-}
-
-async fn set_gym_slot_status_json(
-    pool: &PgPool,
-    user_id: Uuid,
-    slot_id: Uuid,
-    date: &str,
-    status: &str,
-) -> AppResult<Value> {
-    ensure_gym_status(status)?;
-    let parsed = NaiveDate::parse_from_str(date, "%Y-%m-%d")
-        .map_err(|_| AppError::BadRequest("Date must use YYYY-MM-DD.".to_string()))?;
-    let today = Utc::now().date_naive();
-    if (parsed - today).num_days().abs() > GYM_STATUS_DATE_WINDOW_DAYS {
-        return Err(AppError::BadRequest(
-            "That date is too far away to set a gym status.".to_string(),
-        ));
-    }
-
-    // Ownership and occurrence checks live INSIDE the insert-from-select: the
-    // slot ids of buddies' slots are handed to every client, so a bare upsert
-    // keyed only on slot_id would be a cross-user write primitive.
-    let row = sqlx::query(
-        r#"
-        INSERT INTO gym_slot_statuses (id, slot_id, status_date, status)
-        SELECT $1, s.id, $2::date, $3
-        FROM gym_slots s
-        WHERE s.id = $4 AND s.user_id = $5
-          AND (
-            (s.recurrence = 'once' AND s.slot_date = $2::date)
-            OR (s.recurrence = 'weekly' AND s.weekday = EXTRACT(ISODOW FROM $2::date)::int)
-          )
-        ON CONFLICT (slot_id, status_date)
-        DO UPDATE SET status = EXCLUDED.status, updated_at = now()
-        RETURNING jsonb_build_object(
-          'slotId', slot_id,
-          'date', status_date,
-          'status', status
-        ) AS data
-        "#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(date)
-    .bind(status)
-    .bind(slot_id)
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?;
-    let Some(row) = row else {
-        return Err(AppError::NotFound(
-            "Gym slot not found for that date.".to_string(),
-        ));
-    };
-    Ok(row.try_get("data")?)
-}
-
-async fn invite_gym_buddy_json(pool: &PgPool, user_id: Uuid, identifier: &str) -> AppResult<Value> {
-    let identifier = classify_gym_invite_identifier(identifier)?;
-    // The email path is a clear miss/hit answer and therefore an
-    // account-existence oracle — accepted risk (documented in the feature
-    // plan) at this app's scale. The friend-code path is NOT: codes are
-    // 31^8 random, so a miss reveals nothing enumerable.
-    let (stored_identifier, target_id): (String, Option<Uuid>) = match &identifier {
-        GymInviteIdentifier::Email(email) => (
-            email.clone(),
-            sqlx::query_scalar("SELECT id FROM users WHERE email = $1")
-                .bind(email)
-                .fetch_optional(pool)
-                .await?,
-        ),
-        GymInviteIdentifier::FriendCode(code) => (
-            code.clone(),
-            sqlx::query_scalar("SELECT id FROM users WHERE friend_code = $1")
-                .bind(code)
-                .fetch_optional(pool)
-                .await?,
-        ),
-    };
-    let Some(target_id) = target_id else {
-        return Err(AppError::NotFound(match identifier {
-            GymInviteIdentifier::Email(_) => {
-                "No user with that email is on Macro Tracker.".to_string()
-            }
-            GymInviteIdentifier::FriendCode(_) => "No user with that friend code.".to_string(),
-        }));
-    };
-    if target_id == user_id {
-        return Err(AppError::BadRequest(
-            "You can't invite yourself.".to_string(),
-        ));
-    }
-
-    let mut tx = pool.begin().await?;
-    gym_advisory_lock(&mut tx, vec![user_id, target_id]).await?;
-    let existing = sqlx::query(
-        r#"
-        SELECT id, requester_user_id, status
-        FROM gym_buddies
-        WHERE LEAST(requester_user_id, addressee_user_id) = LEAST($1, $2)
-          AND GREATEST(requester_user_id, addressee_user_id) = GREATEST($1, $2)
-        FOR UPDATE
-        "#,
-    )
-    .bind(user_id)
-    .bind(target_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-
-    match existing {
-        None => {
-            let pending_outgoing: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM gym_buddies WHERE requester_user_id = $1 AND status = 'pending'",
-            )
-            .bind(user_id)
-            .fetch_one(&mut *tx)
-            .await?;
-            if pending_outgoing >= GYM_MAX_PENDING_OUTGOING_INVITES {
-                return Err(AppError::Conflict(
-                    "You have too many pending invites; cancel one first.".to_string(),
-                ));
-            }
-            let row = sqlx::query(
-                r#"
-                INSERT INTO gym_buddies (id, requester_user_id, addressee_user_id, invite_identifier)
-                VALUES ($1, $2, $3, $4)
-                RETURNING jsonb_build_object('id', id, 'result', 'invited') AS data
-                "#,
-            )
-            .bind(Uuid::new_v4())
-            .bind(user_id)
-            .bind(target_id)
-            .bind(&stored_identifier)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|error| {
-                gym_conflict_on_unique_violation(
-                    error,
-                    "You already have an invite with this user.",
-                )
-            })?;
-            let data: Value = row.try_get("data")?;
-            tx.commit().await?;
-            Ok(data)
-        }
-        Some(row) => {
-            let buddy_row_id: Uuid = row.try_get("id")?;
-            let requester_user_id: Uuid = row.try_get("requester_user_id")?;
-            let status: String = row.try_get("status")?;
-            match status.as_str() {
-                "pending" if requester_user_id == user_id => Err(AppError::Conflict(
-                    "You already invited this user.".to_string(),
-                )),
-                // The other user already invited us: two people trying to pair
-                // up should not get a confusing conflict, so this accepts.
-                "pending" => {
-                    gym_ensure_accepted_capacity(&mut tx, user_id).await?;
-                    gym_ensure_accepted_capacity(&mut tx, target_id).await?;
-                    sqlx::query(
-                        "UPDATE gym_buddies SET status = 'accepted', updated_at = now() WHERE id = $1 AND status = 'pending'",
-                    )
-                    .bind(buddy_row_id)
-                    .execute(&mut *tx)
-                    .await?;
-                    tx.commit().await?;
-                    Ok(json!({ "id": buddy_row_id, "result": "accepted" }))
-                }
-                "accepted" => Err(AppError::Conflict(
-                    "You're already gym buddies with this user.".to_string(),
-                )),
-                // Neutral on purpose: a declined row is a block, and the copy
-                // must not reveal that (or who) declined.
-                _ => Err(AppError::Conflict(
-                    "You can't invite this user right now.".to_string(),
-                )),
-            }
-        }
-    }
-}
-
-async fn respond_gym_buddy_invite_json(
-    pool: &PgPool,
-    user_id: Uuid,
-    buddy_id: Uuid,
-    accept: bool,
-) -> AppResult<Value> {
-    if !accept {
-        // Decline keeps the row as a durable block; only the decliner can
-        // remove it later (see remove_gym_buddy_json).
-        let declined = sqlx::query(
-            "UPDATE gym_buddies SET status = 'declined', updated_at = now() WHERE id = $2 AND addressee_user_id = $1 AND status = 'pending' RETURNING id",
-        )
-        .bind(user_id)
-        .bind(buddy_id)
-        .fetch_optional(pool)
-        .await?
-        .is_some();
-        if !declined {
-            return Err(AppError::NotFound(
-                "This invite is no longer available.".to_string(),
-            ));
-        }
-        return Ok(json!({ "status": "declined" }));
-    }
-
-    let mut tx = pool.begin().await?;
-    // Plain read (no FOR UPDATE) just to learn both party ids - they are
-    // immutable once a row exists, and the advisory locks must come before
-    // any row lock per the lock-ordering contract.
-    let row = sqlx::query(
-        "SELECT requester_user_id, addressee_user_id FROM gym_buddies WHERE id = $2 AND addressee_user_id = $1 AND status = 'pending'",
-    )
-    .bind(user_id)
-    .bind(buddy_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-    let Some(row) = row else {
-        return Err(AppError::NotFound(
-            "This invite is no longer available.".to_string(),
-        ));
-    };
-    let requester_user_id: Uuid = row.try_get("requester_user_id")?;
-    gym_advisory_lock(&mut tx, vec![user_id, requester_user_id]).await?;
-    gym_ensure_accepted_capacity(&mut tx, user_id).await?;
-    gym_ensure_accepted_capacity(&mut tx, requester_user_id).await?;
-    // The guarded UPDATE re-checks ownership and state under the locks, so a
-    // concurrent cancel/decline lands on 0 rows instead of a lost update.
-    let accepted = sqlx::query(
-        "UPDATE gym_buddies SET status = 'accepted', updated_at = now() WHERE id = $2 AND addressee_user_id = $1 AND status = 'pending' RETURNING id",
-    )
-    .bind(user_id)
-    .bind(buddy_id)
-    .fetch_optional(&mut *tx)
-    .await?
-    .is_some();
-    if !accepted {
-        return Err(AppError::NotFound(
-            "This invite is no longer available.".to_string(),
-        ));
-    }
-    tx.commit().await?;
-    Ok(json!({ "status": "accepted" }))
-}
-
-async fn remove_gym_buddy_json(pool: &PgPool, user_id: Uuid, buddy_id: Uuid) -> AppResult<Value> {
-    // Split by status - a symmetric predicate would let the BLOCKED requester
-    // delete the declined row (e.g. via a stale "Cancel") and defeat the
-    // block. The NotFound below is also a "don't reveal the block" surface:
-    // a blocked requester's stale cancel lands here, so the copy stays
-    // neutral about why the row is gone.
-    let removed = sqlx::query(
-        r#"
-        DELETE FROM gym_buddies
-        WHERE id = $2
-          AND (
-            (status = 'pending' AND requester_user_id = $1)
-            OR (status = 'accepted' AND (requester_user_id = $1 OR addressee_user_id = $1))
-            OR (status = 'declined' AND addressee_user_id = $1)
-          )
-        RETURNING id
-        "#,
-    )
-    .bind(user_id)
-    .bind(buddy_id)
-    .fetch_optional(pool)
-    .await?
-    .is_some();
-    if !removed {
-        return Err(AppError::NotFound(
-            "This invite is no longer available.".to_string(),
-        ));
-    }
-    Ok(json!({ "removed": true }))
-}
-
-/// Merges the raw pairwise overlap rows into at most one entry per buddy:
-/// confirmed and tentative windows merge independently (never across styles),
-/// each buddy shows at most 3 windows, buddies are ordered by their earliest
-/// window and capped at 20, and a buddy is tentative only when they have no
-/// confirmed window at all.
-fn gym_merge_overlaps(rows: &[Value]) -> Value {
-    fn merge_windows(mut windows: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
-        windows.sort_unstable();
-        let mut merged: Vec<(i64, i64)> = Vec::new();
-        for (start, end) in windows {
-            match merged.last_mut() {
-                Some(last) if start <= last.1 => last.1 = last.1.max(end),
-                _ => merged.push((start, end)),
-            }
-        }
-        merged
-    }
-
-    struct BuddyOverlaps {
-        name: String,
-        confirmed: Vec<(i64, i64)>,
-        tentative: Vec<(i64, i64)>,
-    }
-
-    let mut order: Vec<String> = Vec::new();
-    let mut buddies: HashMap<String, BuddyOverlaps> = HashMap::new();
-    for row in rows {
-        let Some(buddy_id) = row.get("buddyId").and_then(Value::as_str) else {
-            continue;
-        };
-        let (Some(start), Some(end)) = (
-            row.get("startMinute").and_then(Value::as_i64),
-            row.get("endMinute").and_then(Value::as_i64),
-        ) else {
-            continue;
-        };
-        let tentative = row
-            .get("tentative")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let entry = buddies.entry(buddy_id.to_string()).or_insert_with(|| {
-            order.push(buddy_id.to_string());
-            BuddyOverlaps {
-                name: row
-                    .get("buddyName")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_string(),
-                confirmed: Vec::new(),
-                tentative: Vec::new(),
-            }
-        });
-        if tentative {
-            entry.tentative.push((start, end));
-        } else {
-            entry.confirmed.push((start, end));
-        }
-    }
-
-    let mut entries: Vec<Value> = Vec::new();
-    for buddy_id in order {
-        let Some(buddy) = buddies.remove(&buddy_id) else {
-            continue;
-        };
-        let confirmed = merge_windows(buddy.confirmed);
-        let tentative = merge_windows(buddy.tentative);
-        let mut windows: Vec<Value> = confirmed
-            .iter()
-            .map(|(start, end)| json!({ "startMinute": start, "endMinute": end, "tentative": false }))
-            .chain(
-                tentative
-                    .iter()
-                    .map(|(start, end)| json!({ "startMinute": start, "endMinute": end, "tentative": true })),
-            )
-            .collect();
-        windows.sort_by_key(|window| {
-            window
-                .get("startMinute")
-                .and_then(Value::as_i64)
-                .unwrap_or(0)
-        });
-        windows.truncate(GYM_MAX_OVERLAP_WINDOWS_PER_BUDDY);
-        if windows.is_empty() {
-            continue;
-        }
-        entries.push(json!({
-            "buddy": { "id": buddy_id, "name": buddy.name },
-            "windows": windows,
-            "tentative": confirmed.is_empty(),
-        }));
-    }
-    // Raw rows arrive ordered by overlap start, so `order` (first appearance)
-    // already ranks buddies by their earliest window.
-    entries.truncate(GYM_MAX_OVERLAP_BUDDIES);
-    Value::Array(entries)
-}
-
-async fn gym_overlap_entries(pool: &PgPool, user_id: Uuid, date: &str) -> AppResult<Value> {
-    let row = sqlx::query(gym_overlap_rows_sql!())
-        .bind(user_id)
-        .bind(date)
-        .fetch_one(pool)
-        .await?;
-    let raw: Value = row.try_get("data")?;
-    let rows = raw.as_array().cloned().unwrap_or_default();
-    Ok(gym_merge_overlaps(&rows))
-}
-
-async fn get_gym_page_data_json(pool: &PgPool, user_id: Uuid, date: &str) -> AppResult<Value> {
-    let friend_code = ensure_gym_friend_code(pool, user_id).await?;
-    let day_row = sqlx::query(concat!(
-        "WITH ",
-        gym_accepted_buddies_cte!(),
-        ", ",
-        gym_resolved_slots_cte!(),
-        r#"
-        SELECT jsonb_build_object(
-          'slots', coalesce((
-            SELECT jsonb_agg(
-              jsonb_build_object(
-                'id', s.id,
-                'title', s.title,
-                'description', s.description,
-                'recurrence', s.recurrence,
-                'slotDate', s.slot_date,
-                'weekday', s.weekday,
-                'startMinute', s.start_minute,
-                'endMinute', s.end_minute
-              )
-              ORDER BY (s.recurrence = 'weekly') DESC, s.weekday, s.slot_date DESC, s.start_minute, s.id
-            )
-            FROM gym_slots s
-            WHERE s.user_id = $1
-          ), '[]'::jsonb),
-          'own', coalesce((
-            SELECT jsonb_agg(
-              jsonb_build_object(
-                'id', rs.id,
-                'title', rs.title,
-                'description', rs.description,
-                'recurrence', rs.recurrence,
-                'startMinute', rs.start_minute,
-                'endMinute', rs.end_minute,
-                'status', rs.status
-              )
-              ORDER BY rs.start_minute, rs.id
-            )
-            FROM resolved_slots rs
-            WHERE rs.user_id = $1
-          ), '[]'::jsonb),
-          'buddies', coalesce((
-            SELECT jsonb_agg(grouped.entry ORDER BY grouped.name, grouped.buddy_user_id)
-            FROM (
-              SELECT
-                coalesce(u.display_name, u.email) AS name,
-                ab.buddy_user_id,
-                jsonb_build_object(
-                  'user', jsonb_build_object('id', u.id, 'name', coalesce(u.display_name, u.email)),
-                  'slots', coalesce(jsonb_agg(
-                    jsonb_build_object(
-                      'id', rs.id,
-                      'title', rs.title,
-                      'recurrence', rs.recurrence,
-                      'startMinute', rs.start_minute,
-                      'endMinute', rs.end_minute,
-                      'status', rs.status
-                    )
-                    ORDER BY rs.start_minute, rs.id
-                  ) FILTER (WHERE rs.id IS NOT NULL), '[]'::jsonb)
-                ) AS entry
-              FROM accepted_buddies ab
-              JOIN users u ON u.id = ab.buddy_user_id
-              LEFT JOIN resolved_slots rs ON rs.user_id = ab.buddy_user_id
-              GROUP BY u.id, u.display_name, u.email, ab.buddy_user_id
-            ) grouped
-          ), '[]'::jsonb)
-        ) AS data
-        "#
-    ))
-    .bind(user_id)
-    .bind(date)
-    .fetch_one(pool)
-    .await?;
-    let day: Value = day_row.try_get("data")?;
-
-    let buddies_row = sqlx::query(concat!(
-        "WITH ",
-        gym_accepted_buddies_cte!(),
-        r#"
-        SELECT jsonb_build_object(
-          'accepted', coalesce((
-            SELECT jsonb_agg(entry.value ORDER BY entry.created_at, entry.id)
-            FROM (
-              SELECT b.created_at, b.id, jsonb_build_object(
-                'id', b.id,
-                'user', jsonb_build_object('id', u.id, 'name', coalesce(u.display_name, u.email))
-              ) AS value
-              FROM accepted_buddies ab
-              JOIN gym_buddies b ON b.id = ab.buddy_row_id
-              JOIN users u ON u.id = ab.buddy_user_id
-            ) entry
-          ), '[]'::jsonb),
-          'pendingIncoming', coalesce((
-            SELECT jsonb_agg(entry.value ORDER BY entry.created_at, entry.id)
-            FROM (
-              SELECT b.created_at, b.id, jsonb_build_object(
-                'id', b.id,
-                'user', jsonb_build_object('id', u.id, 'name', coalesce(u.display_name, u.email))
-              ) AS value
-              FROM gym_buddies b
-              JOIN users u ON u.id = b.requester_user_id
-              WHERE b.addressee_user_id = $1 AND b.status = 'pending'
-              ORDER BY b.created_at, b.id
-              LIMIT 50
-            ) entry
-          ), '[]'::jsonb),
-          'pendingOutgoing', coalesce((
-            SELECT jsonb_agg(entry.value ORDER BY entry.created_at, entry.id)
-            FROM (
-              SELECT b.created_at, b.id, jsonb_build_object(
-                'id', b.id,
-                'identifier', coalesce(b.invite_identifier, u.email)
-              ) AS value
-              FROM gym_buddies b
-              JOIN users u ON u.id = b.addressee_user_id
-              WHERE b.requester_user_id = $1 AND b.status = 'pending'
-              ORDER BY b.created_at, b.id
-              LIMIT 50
-            ) entry
-          ), '[]'::jsonb),
-          'declined', coalesce((
-            SELECT jsonb_agg(entry.value ORDER BY entry.created_at, entry.id)
-            FROM (
-              SELECT b.created_at, b.id, jsonb_build_object(
-                'id', b.id,
-                'user', jsonb_build_object('id', u.id, 'name', coalesce(u.display_name, u.email))
-              ) AS value
-              FROM gym_buddies b
-              JOIN users u ON u.id = b.requester_user_id
-              WHERE b.addressee_user_id = $1 AND b.status = 'declined'
-              ORDER BY b.created_at, b.id
-              LIMIT 50
-            ) entry
-          ), '[]'::jsonb)
-        ) AS data
-        "#
-    ))
-    .bind(user_id)
-    .fetch_one(pool)
-    .await?;
-    let buddies: Value = buddies_row.try_get("data")?;
-
-    let overlaps = gym_overlap_entries(pool, user_id, date).await?;
-
-    Ok(json!({
-        "date": date,
-        "friendCode": friend_code,
-        "slots": day.get("slots").cloned().unwrap_or_else(|| json!([])),
-        "day": {
-            "own": day.get("own").cloned().unwrap_or_else(|| json!([])),
-            "buddies": day.get("buddies").cloned().unwrap_or_else(|| json!([])),
-        },
-        "buddies": buddies,
-        "overlaps": overlaps,
-    }))
-}
-
-async fn get_gym_home_summary_json(pool: &PgPool, user_id: Uuid, date: &str) -> AppResult<Value> {
-    // One cheap probe; `/` fires several RPCs against a small pool, and the
-    // common case (no buddies) must stay near-free.
-    let probe = sqlx::query(
-        r#"
-        SELECT
-          EXISTS(
-            SELECT 1 FROM gym_buddies
-            WHERE status = 'accepted' AND (requester_user_id = $1 OR addressee_user_id = $1)
-          ) AS has_buddies,
-          (
-            SELECT count(*) FROM gym_buddies
-            WHERE addressee_user_id = $1 AND status = 'pending'
-          ) AS pending_count
-        "#,
-    )
-    .bind(user_id)
-    .fetch_one(pool)
-    .await?;
-    let has_buddies: bool = probe.try_get("has_buddies")?;
-    let pending_count: i64 = probe.try_get("pending_count")?;
-    let pending_count = pending_count.min(99);
-
-    if !has_buddies {
-        return Ok(json!({ "overlaps": [], "pendingInviteCount": pending_count }));
-    }
-
-    let overlaps = gym_overlap_entries(pool, user_id, date).await?;
-    Ok(json!({ "overlaps": overlaps, "pendingInviteCount": pending_count }))
 }
 
 enum JsonBind {
@@ -3277,123 +1785,63 @@ async fn daily_summary_json(pool: &PgPool, user_id: Uuid, date: &str) -> AppResu
     Ok(row.try_get("data")?)
 }
 
-/// PERF-03: collection reads had no ceiling at all. `getAdminUserDetail`
-/// loaded a user's entire recipe/template/weight history and then kept ten of
-/// each in Rust, and `ensure_date_string` permits years 0001-9999, so one
-/// account can hold millions of weight rows. Limits now live in SQL: the
-/// database sorts and stops, instead of shipping the whole history over the
-/// wire so Rust can throw it away.
+/// The limits live in SQL so an unbounded history is never shipped over the wire.
 const MAX_COLLECTION_ROWS: i64 = 5_000;
 const ADMIN_DETAIL_ROWS: i64 = 10;
-
-/// Eaten meal entries not yet mirrored into Apple Health, oldest first. The
-/// day window and row limit keep a first-ever sync (or a long backlog) from
-/// flooding the on-device consumer; `pendingTotal` counts everything in the
-/// window so the caller knows another pass is needed when it exceeds the
-/// returned page.
-///
-/// An acked entry never re-enters the queue, even after edits or status
-/// flips: the consumer cannot retract HealthKit samples, so re-queueing
-/// would double-count the meal. The sample-time clamp is anchored to the
-/// UTC day: backfilled entries land at 18:00 UTC, which stays on the same
-/// local day for timezones west of UTC+6 (all of Europe included). Zones
-/// at UTC+6 and beyond would need a per-user timezone to place backfilled
-/// samples on the right local day.
-async fn healthkit_sync_entries_json(
-    pool: &PgPool,
-    user_id: Uuid,
-    days: i32,
-    limit: i32,
-) -> AppResult<Value> {
-    let row = sqlx::query(
-        r#"
-        WITH pending AS (
-          SELECT
-            id,
-            entry_date,
-            label,
-            protein_g,
-            carbs_g,
-            fat_g,
-            calories_kcal,
-            created_at,
-            -- Clamp the sample timestamp into the entry's own calendar day so
-            -- backfilled and pre-logged entries land on the date the food was
-            -- eaten, while LEAST(updated_at, ...) keeps it from ever sitting
-            -- in the future — HealthKit rejects future-dated samples.
-            GREATEST(
-              LEAST(
-                updated_at,
-                (entry_date::timestamp + interval '18 hours') AT TIME ZONE 'UTC'
-              ),
-              entry_date::timestamp AT TIME ZONE 'UTC'
-            ) AS sample_time,
-            count(*) OVER () AS pending_total
-          FROM meal_entries
-          WHERE user_id = $1
-            AND status = 'eaten'
-            AND healthkit_synced_at IS NULL
-            AND entry_date <= (now() AT TIME ZONE 'UTC')::date
-            AND entry_date >= (now() AT TIME ZONE 'UTC')::date - $2
-          ORDER BY entry_date, created_at, id
-          LIMIT $3
-        )
-        SELECT jsonb_build_object(
-          'entries', coalesce(jsonb_agg(
-            jsonb_build_object(
-              'id', id,
-              'date', entry_date,
-              'label', label,
-              'proteinG', round(protein_g::numeric, 1)::float8,
-              'carbsG', round(carbs_g::numeric, 1)::float8,
-              'fatG', round(fat_g::numeric, 1)::float8,
-              'caloriesKcal', calories_kcal,
-              'sampleTime', to_char(sample_time AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
-            )
-            ORDER BY entry_date, created_at, id
-          ), '[]'::jsonb),
-          'pendingTotal', coalesce(max(pending_total), 0)
-        ) AS data
-        FROM pending
-        "#,
-    )
-    .bind(user_id)
-    .bind(days)
-    .bind(limit)
-    .fetch_one(pool)
-    .await?;
-    Ok(row.try_get("data")?)
-}
-
-async fn ack_healthkit_sync_entries_json(
-    pool: &PgPool,
-    user_id: Uuid,
-    entry_ids: Vec<Uuid>,
-) -> AppResult<Value> {
-    if entry_ids.is_empty() {
-        return Ok(json!({ "acked": 0 }));
-    }
-    let result = sqlx::query(
-        r#"
-        UPDATE meal_entries
-        SET healthkit_synced_at = now()
-        WHERE user_id = $1 AND id = ANY($2) AND healthkit_synced_at IS NULL
-        "#,
-    )
-    .bind(user_id)
-    .bind(&entry_ids)
-    .execute(pool)
-    .await?;
-    Ok(json!({ "acked": result.rows_affected() }))
-}
 
 async fn templates_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
     templates_json_filtered(pool, user_id, None, MAX_COLLECTION_ROWS).await
 }
 
-/// Shared shape for the template list and single-template reads. Passing a
-/// `template_id` narrows both the outer select and the item aggregation to one
-/// row, so by-id lookups stay indexed instead of building the whole collection.
+async fn template_summaries_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
+    let row = sqlx::query(
+        r#"
+        WITH visible_templates AS (
+          SELECT id, type, label, created_at, updated_at
+          FROM meal_templates
+          WHERE user_id = $1 AND deleted_at IS NULL
+          ORDER BY updated_at DESC, created_at DESC
+          LIMIT $2
+        ),
+        item_totals AS (
+          SELECT
+            template_id,
+            count(*)::int AS item_count,
+            coalesce(sum(protein_g), 0)::float8 AS protein_g,
+            coalesce(sum(carbs_g), 0)::float8 AS carbs_g,
+            coalesce(sum(fat_g), 0)::float8 AS fat_g,
+            coalesce(sum(calories_kcal), 0)::bigint AS calories_kcal
+          FROM meal_template_items
+          WHERE template_id IN (SELECT id FROM visible_templates)
+          GROUP BY template_id
+        )
+        SELECT coalesce(jsonb_agg(
+          jsonb_build_object(
+            'id', mt.id,
+            'type', mt.type,
+            'label', mt.label,
+            'itemCount', coalesce(it.item_count, 0),
+            'totalMacros', jsonb_build_object(
+              'proteinG', coalesce(it.protein_g, 0),
+              'carbsG', coalesce(it.carbs_g, 0),
+              'fatG', coalesce(it.fat_g, 0),
+              'caloriesKcal', coalesce(it.calories_kcal, 0)
+            )
+          )
+          ORDER BY mt.updated_at DESC, mt.created_at DESC
+        ), '[]'::jsonb) AS data
+        FROM visible_templates mt
+        LEFT JOIN item_totals it ON it.template_id = mt.id
+        "#,
+    )
+    .bind(user_id)
+    .bind(MAX_COLLECTION_ROWS)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.try_get("data")?)
+}
+
+/// A `template_id` narrows both the outer select and the item aggregation, so by-id reads stay indexed.
 async fn templates_json_filtered(
     pool: &PgPool,
     user_id: Uuid,
@@ -3467,8 +1915,103 @@ async fn recipes_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
     recipes_json_filtered(pool, user_id, None, MAX_COLLECTION_ROWS).await
 }
 
-/// Shared shape for the recipe list and single-recipe reads. See
-/// [`templates_json_filtered`] for why the id filter lives in SQL.
+async fn recipe_summaries_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
+    let row = sqlx::query(
+        r#"
+        WITH visible_recipes AS (
+          SELECT id, label, portions, created_at, updated_at
+          FROM recipes
+          WHERE user_id = $1
+          ORDER BY updated_at DESC, created_at DESC
+          LIMIT $2
+        ),
+        ingredient_totals AS (
+          SELECT
+            recipe_id,
+            coalesce(sum(protein_g), 0)::float8 AS protein_g,
+            coalesce(sum(carbs_g), 0)::float8 AS carbs_g,
+            coalesce(sum(fat_g), 0)::float8 AS fat_g,
+            coalesce(sum(calories_kcal), 0)::bigint AS calories_kcal
+          FROM recipe_ingredients
+          WHERE recipe_id IN (SELECT id FROM visible_recipes)
+          GROUP BY recipe_id
+        )
+        SELECT coalesce(jsonb_agg(
+          jsonb_build_object(
+            'id', r.id,
+            'label', r.label,
+            'portions', r.portions,
+            'perPortionMacros', jsonb_build_object(
+              'proteinG', round((coalesce(it.protein_g, 0) / greatest(r.portions, 1))::numeric, 1)::float8,
+              'carbsG', round((coalesce(it.carbs_g, 0) / greatest(r.portions, 1))::numeric, 1)::float8,
+              'fatG', round((coalesce(it.fat_g, 0) / greatest(r.portions, 1))::numeric, 1)::float8,
+              'caloriesKcal', round(coalesce(it.calories_kcal, 0)::numeric / greatest(r.portions, 1))::int
+            )
+          )
+          ORDER BY r.updated_at DESC, r.created_at DESC
+        ), '[]'::jsonb) AS data
+        FROM visible_recipes r
+        LEFT JOIN ingredient_totals it ON it.recipe_id = r.id
+        "#,
+    )
+    .bind(user_id)
+    .bind(MAX_COLLECTION_ROWS)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.try_get("data")?)
+}
+
+async fn planned_shopping_summaries_json(
+    pool: &PgPool,
+    user_id: Uuid,
+    dates: &[String],
+) -> AppResult<Value> {
+    let row = sqlx::query(
+        r#"
+        WITH requested_dates AS (
+          SELECT value::date AS entry_date, ordinality
+          FROM unnest($2::text[]) WITH ORDINALITY AS requested(value, ordinality)
+        ),
+        daily AS (
+          SELECT
+            requested_dates.entry_date,
+            requested_dates.ordinality,
+            count(me.id)::int AS entry_count,
+            coalesce(sum(me.calories_kcal) FILTER (WHERE me.status = 'planned'), 0)::bigint AS planned_calories_kcal,
+            coalesce(jsonb_agg(
+              jsonb_build_object(
+                'label', me.label,
+                'quantity', round(me.quantity::numeric, 2)::float8,
+                'unit', me.unit
+              )
+              ORDER BY coalesce(mg.sort_order, 999), me.sort_order, me.created_at, me.id
+            ) FILTER (WHERE me.status = 'planned'), '[]'::jsonb) AS meals
+          FROM requested_dates
+          LEFT JOIN meal_entries me
+            ON me.user_id = $1 AND me.entry_date = requested_dates.entry_date
+          LEFT JOIN meal_groups mg ON mg.id = me.meal_group_id
+          GROUP BY requested_dates.entry_date, requested_dates.ordinality
+        )
+        SELECT coalesce(jsonb_agg(
+          jsonb_build_object(
+            'date', entry_date::text,
+            'entryCount', entry_count,
+            'plannedCaloriesKcal', planned_calories_kcal,
+            'meals', meals
+          )
+          ORDER BY ordinality
+        ), '[]'::jsonb) AS data
+        FROM daily
+        "#,
+    )
+    .bind(user_id)
+    .bind(dates)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.try_get("data")?)
+}
+
+/// See [`templates_json_filtered`] for why the id filter lives in SQL.
 async fn recipes_json_filtered(
     pool: &PgPool,
     user_id: Uuid,
@@ -3549,39 +2092,14 @@ async fn recipes_json_filtered(
 }
 
 async fn search_food_products_json(pool: &PgPool, user_id: Uuid, query: &str) -> AppResult<Value> {
-    validate_search_query(query)?;
-    let patterns = search_like_patterns(query);
-    if patterns.is_empty() {
+    let Some(patterns) = accepted_search_patterns(query)? else {
         return Ok(Value::Array(Vec::new()));
-    }
-    let row = sqlx::query(
+    };
+    let sql = format!(
         r#"
         SELECT coalesce(jsonb_agg(
           jsonb_build_object(
-            'id', id,
-            'ownerUserId', owner_user_id,
-            'scope', scope,
-            'source', source,
-            'barcode', barcode,
-            'name', name,
-            'brand', brand,
-            'defaultServingQuantity', default_serving_quantity::float8,
-            'defaultServingUnit', default_serving_unit,
-            'proteinPer100', protein_per_100::float8,
-            'carbsPer100', carbs_per_100::float8,
-            'fatPer100', fat_per_100::float8,
-            'caloriesPer100', calories_per_100,
-            'servingWeightG', serving_weight_g::float8,
-            'servingVolumeMl', serving_volume_ml::float8,
-            'submittedByUserId', submitted_by_user_id,
-            'deletedByUserId', deleted_by_user_id,
-            'sourceProvider', source_provider,
-            'sourceConfidence', source_confidence::float8,
-            'sourceMetadata', source_metadata,
-            'correctedFromProductId', corrected_from_product_id,
-            'createdAt', created_at,
-            'updatedAt', updated_at,
-            'deletedAt', deleted_at
+          {fields}
           )
           ORDER BY
             CASE
@@ -3628,18 +2146,18 @@ async fn search_food_products_json(pool: &PgPool, user_id: Uuid, query: &str) ->
           LIMIT 50
         ) products
         "#,
-    )
-    .bind(user_id)
-    .bind(&patterns)
-    .bind(&patterns[0])
-    .fetch_one(pool)
-    .await?;
+        fields = sql::food_product_fields("")
+    );
+    let row = sqlx::query(&sql)
+        .bind(user_id)
+        .bind(&patterns)
+        .bind(&patterns[0])
+        .fetch_one(pool)
+        .await?;
     Ok(row.try_get("data")?)
 }
 
-/// Longest search string accepted. The SQL runs three ILIKEs per pattern per
-/// candidate row, so an uncapped query makes the scan cost quadratic in
-/// attacker-controlled input.
+/// The SQL runs three ILIKEs per pattern per row, so an uncapped query is quadratic in attacker-controlled input.
 pub(crate) const MAX_SEARCH_QUERY_LENGTH: usize = 128;
 /// Most whitespace-separated terms accepted from one query.
 pub(crate) const MAX_SEARCH_TERMS: usize = 8;
@@ -3664,6 +2182,13 @@ fn search_like_patterns(query: &str) -> Vec<String> {
         .take(MAX_SEARCH_TERMS)
         .map(|word| format!("%{}%", escape_like_pattern(word)))
         .collect()
+}
+
+/// `None` means no usable terms, which both searches answer with an empty array instead of a round trip.
+fn accepted_search_patterns(query: &str) -> AppResult<Option<Vec<String>>> {
+    validate_search_query(query)?;
+    let patterns = search_like_patterns(query);
+    Ok((!patterns.is_empty()).then_some(patterns))
 }
 
 fn escape_like_pattern(value: &str) -> String {
@@ -3696,15 +2221,7 @@ async fn assert_meal_group_access(
     }
 }
 
-async fn food_product_json_by_id(
-    pool: &PgPool,
-    user_id: Uuid,
-    product_id: Uuid,
-) -> AppResult<Option<Value>> {
-    food_product_json_by_id_with_executor(pool, user_id, product_id).await
-}
-
-async fn food_product_json_by_id_with_executor<'e, E>(
+async fn food_product_json_by_id<'e, E>(
     executor: E,
     user_id: Uuid,
     product_id: Uuid,
@@ -3712,44 +2229,23 @@ async fn food_product_json_by_id_with_executor<'e, E>(
 where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
-    let row = sqlx::query(
+    let sql = format!(
         r#"
         SELECT jsonb_build_object(
-          'id', id,
-          'ownerUserId', owner_user_id,
-          'scope', scope,
-          'source', source,
-          'barcode', barcode,
-          'name', name,
-          'brand', brand,
-          'defaultServingQuantity', default_serving_quantity::float8,
-          'defaultServingUnit', default_serving_unit,
-          'proteinPer100', protein_per_100::float8,
-          'carbsPer100', carbs_per_100::float8,
-          'fatPer100', fat_per_100::float8,
-          'caloriesPer100', calories_per_100,
-          'servingWeightG', serving_weight_g::float8,
-          'servingVolumeMl', serving_volume_ml::float8,
-          'submittedByUserId', submitted_by_user_id,
-          'deletedByUserId', deleted_by_user_id,
-          'sourceProvider', source_provider,
-          'sourceConfidence', source_confidence::float8,
-          'sourceMetadata', source_metadata,
-          'correctedFromProductId', corrected_from_product_id,
-          'createdAt', created_at,
-          'updatedAt', updated_at,
-          'deletedAt', deleted_at
+          {fields}
         ) AS data
         FROM food_products
         WHERE id = $2
           AND deleted_at IS NULL
           AND (owner_user_id = $1 OR owner_user_id IS NULL)
         "#,
-    )
-    .bind(user_id)
-    .bind(product_id)
-    .fetch_optional(executor)
-    .await?;
+        fields = sql::food_product_fields("")
+    );
+    let row = sqlx::query(&sql)
+        .bind(user_id)
+        .bind(product_id)
+        .fetch_optional(executor)
+        .await?;
 
     row.map(|row| row.try_get("data"))
         .transpose()
@@ -3869,9 +2365,7 @@ fn nutrition_for_product(
     )
 }
 
-/// A meal entry after validation, ready to be written. Previously returned as a
-/// fourteen-element tuple whose `String`, `f64`, and `Option<Uuid>` fields were
-/// distinguished only by position.
+/// A meal entry after validation, ready to be written.
 struct NormalizedMealEntry {
     date: String,
     meal_group_id: Option<Uuid>,
@@ -3886,18 +2380,32 @@ struct NormalizedMealEntry {
     client_mutation_id: Option<String>,
 }
 
-/// PERF-02: everything `normalize_meal_input` would otherwise fetch once *per
-/// entry*. `applyTemplateToDate` normalizes a whole template in a loop, so a
-/// 30-item template cost ~95 round trips — one meal-group check and one product
-/// fetch per item, both for ids it had already resolved and access-checked in
-/// bulk moments earlier. A caller that has done that work up front passes it in
-/// here; callers that have not use `Default` and behave exactly as before.
+impl NormalizedMealEntry {
+    fn bind_columns<'q>(&'q self, query: PgQuery<'q>) -> PgQuery<'q> {
+        query
+            .bind(&self.date)
+            .bind(self.meal_group_id)
+            .bind(&self.status)
+            .bind(self.product_id)
+            .bind(&self.label)
+            .bind(self.sort_order)
+            .bind(self.quantity)
+            .bind(&self.unit)
+            .bind(self.serving_multiplier)
+            .bind(self.macros.protein)
+            .bind(self.macros.carbs)
+            .bind(self.macros.fat)
+            .bind(self.macros.calories)
+            .bind(self.client_mutation_id.as_deref())
+    }
+}
+
+/// Lookups a batching caller has already resolved; `Default` falls back to fetching them once per entry.
 #[derive(Default)]
 struct MealInputContext {
     /// Meal-group ids already proven to belong to `user_id`.
     trusted_meal_group_ids: HashSet<Uuid>,
-    /// Products already loaded through the same visibility predicate that
-    /// `food_product_json_by_id` applies.
+    /// Products already loaded through `food_product_json_by_id`'s visibility predicate.
     products: HashMap<Uuid, Value>,
 }
 
@@ -3953,11 +2461,17 @@ async fn normalize_meal_input_with_context(
         .map(str::to_string);
 
     if let Some(product_id) = product_id {
+        // Prefetched products are immutable request context. Borrow them instead of cloning
+        // their JSON payload for each template item.
+        let fetched_product;
         let product = match context.products.get(&product_id) {
-            Some(product) => product.clone(),
-            None => food_product_json_by_id(pool, user_id, product_id)
-                .await?
-                .ok_or_else(|| AppError::NotFound("Food product not found.".to_string()))?,
+            Some(product) => product,
+            None => {
+                fetched_product = food_product_json_by_id(pool, user_id, product_id)
+                    .await?
+                    .ok_or_else(|| AppError::NotFound("Food product not found.".to_string()))?;
+                &fetched_product
+            }
         };
         let (product_label, quantity, unit, serving_multiplier, protein, carbs, fat, calories) =
             nutrition_for_product(&product, input, recalculate_product_macros);
@@ -4032,38 +2546,10 @@ async fn create_meal_entry_json(
     let entry = normalize_meal_input(pool, user_id, input, next_sort_order, true).await?;
 
     let id = Uuid::new_v4();
-    let inserted = sqlx::query(
-        r#"
-        INSERT INTO meal_entries (
-          id, user_id, entry_date, meal_group_id, status, product_id, label,
-          sort_order, quantity, unit, serving_multiplier, protein_g, carbs_g,
-          fat_g, calories_kcal, client_mutation_id
-        )
-        VALUES (
-          $1, $2, $3::date, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
-        )
-        ON CONFLICT (user_id, client_mutation_id) DO NOTHING
-        RETURNING id
-        "#,
-    )
-    .bind(id)
-    .bind(user_id)
-    .bind(&entry.date)
-    .bind(entry.meal_group_id)
-    .bind(&entry.status)
-    .bind(entry.product_id)
-    .bind(&entry.label)
-    .bind(entry.sort_order)
-    .bind(entry.quantity)
-    .bind(&entry.unit)
-    .bind(entry.serving_multiplier)
-    .bind(entry.macros.protein)
-    .bind(entry.macros.carbs)
-    .bind(entry.macros.fat)
-    .bind(entry.macros.calories)
-    .bind(entry.client_mutation_id.as_deref())
-    .fetch_optional(pool)
-    .await?;
+    let inserted = entry
+        .bind_columns(sqlx::query(sql::INSERT_MEAL_ENTRY).bind(id).bind(user_id))
+        .fetch_optional(pool)
+        .await?;
 
     if let Some(row) = inserted {
         let created_id: Uuid = row.try_get("id")?;
@@ -4136,7 +2622,7 @@ async fn update_meal_entry_json(
     let entry =
         normalize_meal_input(pool, user_id, merged_obj, 0, recalculate_product_macros).await?;
 
-    sqlx::query(
+    let update = sqlx::query(
         r#"
         UPDATE meal_entries
         SET
@@ -4159,54 +2645,24 @@ async fn update_meal_entry_json(
         "#,
     )
     .bind(user_id)
-    .bind(entry_id)
-    .bind(&entry.date)
-    .bind(entry.meal_group_id)
-    .bind(&entry.status)
-    .bind(entry.product_id)
-    .bind(&entry.label)
-    .bind(entry.sort_order)
-    .bind(entry.quantity)
-    .bind(&entry.unit)
-    .bind(entry.serving_multiplier)
-    .bind(entry.macros.protein)
-    .bind(entry.macros.carbs)
-    .bind(entry.macros.fat)
-    .bind(entry.macros.calories)
-    .bind(entry.client_mutation_id.as_deref())
-    .execute(pool)
-    .await
-    // LOW-B1: reusing a `clientMutationId` that another entry already holds is
-    // a client-visible collision, not an internal fault. The create path
-    // resolves it with `ON CONFLICT`; the update path turned it into a 500.
-    .map_err(map_unique_violation(
-        "That clientMutationId is already used by another meal entry.",
-    ))?;
+    .bind(entry_id);
+    entry
+        .bind_columns(update)
+        .execute(pool)
+        .await
+        // LOW-B1: a duplicate clientMutationId is a client-visible collision, not a fault.
+        .map_err(map_unique_violation(
+            "That clientMutationId is already used by another meal entry.",
+        ))?;
 
     meal_entry_json(pool, user_id, entry_id).await
 }
 
 async fn meal_entry_json(pool: &PgPool, user_id: Uuid, entry_id: Uuid) -> AppResult<Value> {
-    let row = sqlx::query(
+    let sql = format!(
         r#"
         SELECT jsonb_build_object(
-          'id', me.id,
-          'userId', me.user_id,
-          'date', me.entry_date,
-          'mealGroupId', me.meal_group_id,
-          'status', me.status,
-          'productId', CASE WHEN fp.id IS NULL THEN NULL ELSE me.product_id END,
-          'label', me.label,
-          'sortOrder', me.sort_order,
-          'quantity', me.quantity::float8,
-          'unit', me.unit,
-          'servingMultiplier', me.serving_multiplier::float8,
-          'proteinG', me.protein_g::float8,
-          'carbsG', me.carbs_g::float8,
-          'fatG', me.fat_g::float8,
-          'caloriesKcal', me.calories_kcal,
-          'clientMutationId', me.client_mutation_id,
-          'sourceLabel', fp.name
+          {fields}
         ) AS data
         FROM meal_entries me
         LEFT JOIN food_products fp
@@ -4215,18 +2671,19 @@ async fn meal_entry_json(pool: &PgPool, user_id: Uuid, entry_id: Uuid) -> AppRes
           AND (fp.owner_user_id = me.user_id OR fp.owner_user_id IS NULL)
         WHERE me.user_id = $1 AND me.id = $2
         "#,
-    )
-    .bind(user_id)
-    .bind(entry_id)
-    .fetch_optional(pool)
-    .await?;
+        fields = sql::meal_entry_fields("me.")
+    );
+    let row = sqlx::query(&sql)
+        .bind(user_id)
+        .bind(entry_id)
+        .fetch_optional(pool)
+        .await?;
     Ok(row
         .ok_or_else(|| AppError::NotFound("Meal entry not found.".to_string()))?
         .try_get("data")?)
 }
 
-/// Read back a batch of freshly written entries in one round trip, preserving
-/// the caller's id order via `WITH ORDINALITY`.
+/// `WITH ORDINALITY` preserves the caller's id order across the batch read.
 async fn meal_entries_json_by_ids(
     pool: &PgPool,
     user_id: Uuid,
@@ -4236,27 +2693,11 @@ async fn meal_entries_json_by_ids(
         return Ok(Value::Array(Vec::new()));
     }
 
-    let row = sqlx::query(
+    let sql = format!(
         r#"
         SELECT coalesce(jsonb_agg(
           jsonb_build_object(
-            'id', me.id,
-            'userId', me.user_id,
-            'date', me.entry_date,
-            'mealGroupId', me.meal_group_id,
-            'status', me.status,
-            'productId', CASE WHEN fp.id IS NULL THEN NULL ELSE me.product_id END,
-            'label', me.label,
-            'sortOrder', me.sort_order,
-            'quantity', me.quantity::float8,
-            'unit', me.unit,
-            'servingMultiplier', me.serving_multiplier::float8,
-            'proteinG', me.protein_g::float8,
-            'carbsG', me.carbs_g::float8,
-            'fatG', me.fat_g::float8,
-            'caloriesKcal', me.calories_kcal,
-            'clientMutationId', me.client_mutation_id,
-            'sourceLabel', fp.name
+          {fields}
           )
           ORDER BY requested.ordinality
         ), '[]'::jsonb) AS data
@@ -4267,19 +2708,18 @@ async fn meal_entries_json_by_ids(
           AND fp.deleted_at IS NULL
           AND (fp.owner_user_id = me.user_id OR fp.owner_user_id IS NULL)
         "#,
-    )
-    .bind(user_id)
-    .bind(entry_ids)
-    .fetch_one(pool)
-    .await?;
+        fields = sql::meal_entry_fields("me.")
+    );
+    let row = sqlx::query(&sql)
+        .bind(user_id)
+        .bind(entry_ids)
+        .fetch_one(pool)
+        .await?;
 
     Ok(row.try_get("data")?)
 }
 
-/// API-07: the OpenAPI spec documents `template.type` as `["meal", "day"]`, but
-/// the handler only did `required_string` and the column is bare `text` with no
-/// CHECK — so `{"type": "anything"}` was stored and returned, breaking every
-/// consumer that switches on it.
+/// The column is bare `text`, so the documented `["meal", "day"]` domain is enforced here.
 fn normalize_template_type(input: &serde_json::Map<String, Value>) -> AppResult<String> {
     let template_type = required_string(input, "type")?;
     if !matches!(template_type.as_str(), "meal" | "day") {
@@ -4386,7 +2826,7 @@ async fn insert_template_items(
         );
     }
 
-    sqlx::query(
+    let query = sqlx::query(
         r#"
         INSERT INTO meal_template_items (
           id, template_id, product_id, meal_group_label, sort_order, label,
@@ -4404,29 +2844,16 @@ async fn insert_template_items(
           quantity, unit, serving_multiplier, protein_g, carbs_g, fat_g, calories_kcal
         )
         "#,
-    )
-    .bind(template_id)
-    .bind(&rows.ids)
-    .bind(&rows.product_ids)
-    .bind(&rows.meal_group_labels)
-    .bind(&rows.sort_orders)
-    .bind(&rows.labels)
-    .bind(&rows.quantities)
-    .bind(&rows.units)
-    .bind(&rows.serving_multipliers)
-    .bind(&rows.proteins)
-    .bind(&rows.carbs)
-    .bind(&rows.fats)
-    .bind(&rows.calories)
-    .execute(&mut **tx)
-    .await?;
+    );
+    let query = rows
+        .bind_ids(query.bind(template_id))
+        .bind(&rows.meal_group_labels);
+    rows.bind_values(query).execute(&mut **tx).await?;
 
     Ok(())
 }
 
-/// Column-major staging buffer for a multi-row `unnest` insert. Template items
-/// and recipe ingredients share every column except `meal_group_label`, which
-/// recipe rows leave empty.
+/// Column-major staging buffer for a multi-row `unnest` insert.
 #[derive(Default)]
 struct TemplateItemColumns {
     ids: Vec<Uuid>,
@@ -4475,11 +2902,27 @@ impl TemplateItemColumns {
         self.fats.push(values.macros.fat);
         self.calories.push(values.macros.calories);
     }
+
+    /// Split so insert_template_items can bind meal_group_label between ids and values; recipe rows have none.
+    fn bind_ids<'q>(&'q self, query: PgQuery<'q>) -> PgQuery<'q> {
+        query.bind(&self.ids).bind(&self.product_ids)
+    }
+
+    fn bind_values<'q>(&'q self, query: PgQuery<'q>) -> PgQuery<'q> {
+        query
+            .bind(&self.sort_orders)
+            .bind(&self.labels)
+            .bind(&self.quantities)
+            .bind(&self.units)
+            .bind(&self.serving_multipliers)
+            .bind(&self.proteins)
+            .bind(&self.carbs)
+            .bind(&self.fats)
+            .bind(&self.calories)
+    }
 }
 
-/// Loads every product a template's items reference in one round trip, using
-/// the same visibility predicate as `food_product_json_by_id` so a prefetched
-/// product is indistinguishable from an individually fetched one (PERF-02).
+/// PERF-02: prefetches a template's products under `food_product_json_by_id`'s visibility rule.
 async fn food_products_json_by_ids(
     pool: &PgPool,
     user_id: Uuid,
@@ -4488,46 +2931,25 @@ async fn food_products_json_by_ids(
     if product_ids.is_empty() {
         return Ok(HashMap::new());
     }
-    let rows = sqlx::query(
+    let sql = format!(
         r#"
         SELECT
           id,
           jsonb_build_object(
-            'id', id,
-            'ownerUserId', owner_user_id,
-            'scope', scope,
-            'source', source,
-            'barcode', barcode,
-            'name', name,
-            'brand', brand,
-            'defaultServingQuantity', default_serving_quantity::float8,
-            'defaultServingUnit', default_serving_unit,
-            'proteinPer100', protein_per_100::float8,
-            'carbsPer100', carbs_per_100::float8,
-            'fatPer100', fat_per_100::float8,
-            'caloriesPer100', calories_per_100,
-            'servingWeightG', serving_weight_g::float8,
-            'servingVolumeMl', serving_volume_ml::float8,
-            'submittedByUserId', submitted_by_user_id,
-            'deletedByUserId', deleted_by_user_id,
-            'sourceProvider', source_provider,
-            'sourceConfidence', source_confidence::float8,
-            'sourceMetadata', source_metadata,
-            'correctedFromProductId', corrected_from_product_id,
-            'createdAt', created_at,
-            'updatedAt', updated_at,
-            'deletedAt', deleted_at
+          {fields}
           ) AS data
         FROM food_products
         WHERE id = ANY($2::uuid[])
           AND deleted_at IS NULL
           AND (owner_user_id = $1 OR owner_user_id IS NULL)
         "#,
-    )
-    .bind(user_id)
-    .bind(product_ids)
-    .fetch_all(pool)
-    .await?;
+        fields = sql::food_product_fields("")
+    );
+    let rows = sqlx::query(&sql)
+        .bind(user_id)
+        .bind(product_ids)
+        .fetch_all(pool)
+        .await?;
 
     let mut products = HashMap::with_capacity(rows.len());
     for row in rows {
@@ -4557,9 +2979,7 @@ async fn validate_item_product_access(
     assert_food_products_accessible(pool, user_id, &product_ids).await
 }
 
-/// Resolve access for a whole item list in one round trip. The per-item variant
-/// issued a query each, which made template and recipe writes scale their
-/// latency with item count.
+/// Resolves access for a whole item list in one round trip instead of one query per item.
 async fn assert_food_products_accessible(
     pool: &PgPool,
     user_id: Uuid,
@@ -4609,9 +3029,7 @@ fn first_json_item(value: Value) -> Option<Value> {
     }
 }
 
-/// Maps a template's `mealGroupLabel` onto the user's live meal groups. An
-/// exact match wins when it is unambiguous; otherwise a unique
-/// case-insensitive match is accepted. Ambiguous labels stay ungrouped.
+/// An unambiguous exact label match wins, else a unique case-insensitive one; ambiguous labels stay ungrouped.
 struct MealGroupLabelIndex {
     exact: HashMap<String, (Uuid, usize)>,
     case_insensitive: HashMap<String, (Uuid, usize)>,
@@ -4661,8 +3079,7 @@ impl MealGroupLabelIndex {
         }
     }
 
-    /// Every id `resolve` can hand back. All of them came from a query filtered
-    /// on `user_id`, so they need no further access check (PERF-02).
+    /// Every id came from a `user_id`-filtered query, so callers need no further access check.
     fn resolvable_ids(&self) -> HashSet<Uuid> {
         self.exact
             .values()
@@ -4703,13 +3120,7 @@ async fn apply_template_json(
     .await?;
     let next_sort_order: i32 = row.try_get("sort_order")?;
 
-    // PERF-02: resolve the per-item lookups once instead of once per item.
-    // `meal_groups` was loaded with `WHERE user_id = $1 AND deleted_at IS NULL`,
-    // so every id it can return is already proven to belong to this user — the
-    // per-item `assert_meal_group_access` was a provably redundant round trip.
-    // The products were already access-checked in bulk by
-    // `validate_item_product_access` just above, so one batched read replaces
-    // the per-item fetch.
+    // The group ids and the products above are already access-checked in bulk, so per-item lookups would be redundant.
     let mut product_ids = Vec::new();
     for item in items {
         let item = item
@@ -4757,38 +3168,10 @@ async fn apply_template_json(
     for (index, entry) in normalized.into_iter().enumerate() {
         maybe_trigger_test_fault(test_fault, index + 1)?;
         let id = Uuid::new_v4();
-        let inserted = sqlx::query(
-            r#"
-            INSERT INTO meal_entries (
-              id, user_id, entry_date, meal_group_id, status, product_id, label,
-              sort_order, quantity, unit, serving_multiplier, protein_g, carbs_g,
-              fat_g, calories_kcal, client_mutation_id
-            )
-            VALUES (
-              $1, $2, $3::date, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16
-            )
-            ON CONFLICT (user_id, client_mutation_id) DO NOTHING
-            RETURNING id
-            "#,
-        )
-        .bind(id)
-        .bind(user_id)
-        .bind(&entry.date)
-        .bind(entry.meal_group_id)
-        .bind(&entry.status)
-        .bind(entry.product_id)
-        .bind(&entry.label)
-        .bind(entry.sort_order)
-        .bind(entry.quantity)
-        .bind(&entry.unit)
-        .bind(entry.serving_multiplier)
-        .bind(entry.macros.protein)
-        .bind(entry.macros.carbs)
-        .bind(entry.macros.fat)
-        .bind(entry.macros.calories)
-        .bind(entry.client_mutation_id.as_deref())
-        .fetch_optional(&mut *tx)
-        .await?;
+        let inserted = entry
+            .bind_columns(sqlx::query(sql::INSERT_MEAL_ENTRY).bind(id).bind(user_id))
+            .fetch_optional(&mut *tx)
+            .await?;
 
         if let Some(row) = inserted {
             created_ids.push(row.try_get::<Uuid, _>("id")?);
@@ -4824,7 +3207,7 @@ async fn create_template_from_date_json(
     let groups = summary
         .get("mealGroups")
         .and_then(Value::as_array)
-        .cloned()
+        .map(Vec::as_slice)
         .unwrap_or_default();
     let group_label_by_id = groups
         .iter()
@@ -4838,9 +3221,9 @@ async fn create_template_from_date_json(
     let items = summary
         .get("meals")
         .and_then(Value::as_array)
-        .cloned()
+        .map(Vec::as_slice)
         .unwrap_or_default()
-        .into_iter()
+        .iter()
         .filter(|meal| meal.get("status").and_then(Value::as_str) != Some("skipped"))
         .map(|meal| {
             let mut item = serde_json::Map::new();
@@ -4893,57 +3276,31 @@ async fn create_food_product_json(
             "That barcode already exists.".to_string(),
         ));
     }
-    sqlx::query(
-        r#"
-        INSERT INTO food_products (
-          id, owner_user_id, scope, source, barcode, name, brand,
-          default_serving_quantity, default_serving_unit, protein_per_100,
-          carbs_per_100, fat_per_100, calories_per_100, serving_weight_g,
-          serving_volume_ml, submitted_by_user_id, source_provider,
-          source_confidence, source_metadata, corrected_from_product_id,
-          updated_at
-        )
+    let insert = format!(
+        r#"{columns}
         VALUES (
           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
           $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, now()
         )
         "#,
-    )
-    .bind(product_id)
-    .bind(if personal { Some(user_id) } else { None })
-    .bind(normalized.scope)
-    .bind(normalized.source)
-    .bind(normalized.barcode.as_deref())
-    .bind(normalized.name)
-    .bind(normalized.brand)
-    .bind(normalized.default_serving_quantity)
-    .bind(normalized.default_serving_unit)
-    .bind(normalized.macros.protein)
-    .bind(normalized.macros.carbs)
-    .bind(normalized.macros.fat)
-    .bind(normalized.macros.calories)
-    .bind(normalized.serving_weight_g)
-    .bind(normalized.serving_volume_ml)
-    .bind(Some(user_id))
-    .bind(normalized.source_provider.as_deref())
-    .bind(normalized.source_confidence)
-    .bind(normalized.source_metadata)
-    .bind(normalized.corrected_from_product_id)
-    .execute(pool)
-    .await
-    .map_err(map_active_barcode_conflict)?;
+        columns = sql::INSERT_FOOD_PRODUCT_COLUMNS
+    );
+    let query = sqlx::query(&insert)
+        .bind(product_id)
+        .bind(if personal { Some(user_id) } else { None })
+        .bind(&normalized.scope);
+    normalized
+        .bind_provenance(normalized.bind_columns(query), user_id)
+        .execute(pool)
+        .await
+        .map_err(map_active_barcode_conflict)?;
     let product = food_product_json_by_id(pool, user_id, product_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Food product not found.".to_string()))?;
     Ok(product)
 }
 
-/// DATA-07: `active_global_barcode_exists` is a check-then-insert. Under READ
-/// COMMITTED two concurrent submissions both see no row, and
-/// `food_products_active_global_barcode_key` rejects the loser with `23505` —
-/// which reached the caller as a 500 rather than the 400 the pre-check already
-/// produces for the sequential case. Same message either way, so the two
-/// outcomes are indistinguishable to the client.
+/// The barcode pre-check is check-then-insert, so a lost race must answer with the same 400 as the sequential case.
 fn map_active_barcode_conflict(error: sqlx::Error) -> AppError {
     if let sqlx::Error::Database(db_error) = &error
         && db_error.code().as_deref() == Some("23505")
@@ -4954,15 +3311,7 @@ fn map_active_barcode_conflict(error: sqlx::Error) -> AppError {
     AppError::Sqlx(error)
 }
 
-async fn active_global_barcode_exists(
-    pool: &PgPool,
-    barcode: &str,
-    exclude_product_id: Option<Uuid>,
-) -> AppResult<bool> {
-    active_global_barcode_exists_with_executor(pool, barcode, exclude_product_id).await
-}
-
-async fn active_global_barcode_exists_with_executor<'e, E>(
+async fn active_global_barcode_exists<'e, E>(
     executor: E,
     barcode: &str,
     exclude_product_id: Option<Uuid>,
@@ -4994,33 +3343,10 @@ async fn lookup_barcode_food_product_json(
     pool: &PgPool,
     barcode: &str,
 ) -> AppResult<Option<Value>> {
-    let row = sqlx::query(
+    let sql = format!(
         r#"
         SELECT jsonb_build_object(
-          'id', id,
-          'ownerUserId', owner_user_id,
-          'scope', scope,
-          'source', source,
-          'barcode', barcode,
-          'name', name,
-          'brand', brand,
-          'defaultServingQuantity', default_serving_quantity::float8,
-          'defaultServingUnit', default_serving_unit,
-          'proteinPer100', protein_per_100::float8,
-          'carbsPer100', carbs_per_100::float8,
-          'fatPer100', fat_per_100::float8,
-          'caloriesPer100', calories_per_100,
-          'servingWeightG', serving_weight_g::float8,
-          'servingVolumeMl', serving_volume_ml::float8,
-          'submittedByUserId', submitted_by_user_id,
-          'deletedByUserId', deleted_by_user_id,
-          'sourceProvider', source_provider,
-          'sourceConfidence', source_confidence::float8,
-          'sourceMetadata', source_metadata,
-          'correctedFromProductId', corrected_from_product_id,
-          'createdAt', created_at,
-          'updatedAt', updated_at,
-          'deletedAt', deleted_at
+          {fields}
         ) AS data
         FROM food_products
         WHERE owner_user_id IS NULL
@@ -5030,10 +3356,12 @@ async fn lookup_barcode_food_product_json(
         ORDER BY updated_at DESC
         LIMIT 1
         "#,
-    )
-    .bind(barcode.trim())
-    .fetch_optional(pool)
-    .await?;
+        fields = sql::food_product_fields("")
+    );
+    let row = sqlx::query(&sql)
+        .bind(barcode.trim())
+        .fetch_optional(pool)
+        .await?;
 
     row.map(|row| row.try_get("data"))
         .transpose()
@@ -5110,13 +3438,12 @@ async fn save_barcode_food_product_json(
     test_fault: Option<&serde_json::Map<String, Value>>,
 ) -> AppResult<Value> {
     let mut tx = pool.begin().await?;
-    let (_, product) =
-        save_barcode_food_product_with_executor(&mut tx, user_id, input, test_fault).await?;
+    let (_, product) = save_barcode_food_product(&mut tx, user_id, input, test_fault).await?;
     tx.commit().await?;
     Ok(product)
 }
 
-async fn save_barcode_food_product_with_executor(
+async fn save_barcode_food_product(
     executor: &mut sqlx::PgConnection,
     user_id: Uuid,
     input: &serde_json::Map<String, Value>,
@@ -5129,57 +3456,36 @@ async fn save_barcode_food_product_with_executor(
 
     if normalized.source == "barcode"
         && let Some(barcode) = normalized.barcode.as_deref()
-        && active_global_barcode_exists_with_executor(&mut *executor, barcode, None).await?
+        && active_global_barcode_exists(&mut *executor, barcode, None).await?
     {
         return Err(AppError::BadRequest(
             "That barcode already exists.".to_string(),
         ));
     }
 
-    sqlx::query(
-        r#"
-        INSERT INTO food_products (
-          id, owner_user_id, scope, source, barcode, name, brand,
-          default_serving_quantity, default_serving_unit, protein_per_100,
-          carbs_per_100, fat_per_100, calories_per_100, serving_weight_g,
-          serving_volume_ml, submitted_by_user_id, source_provider,
-          source_confidence, source_metadata, corrected_from_product_id,
-          updated_at
-        )
+    let insert = format!(
+        r#"{columns}
         VALUES (
           $1, NULL, $2, $3, $4, $5, $6, $7, $8, $9,
           $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, now()
         )
         "#,
-    )
-    .bind(product_id)
-    .bind(normalized.scope)
-    .bind(normalized.source)
-    .bind(normalized.barcode.as_deref())
-    .bind(normalized.name)
-    .bind(normalized.brand)
-    .bind(normalized.default_serving_quantity)
-    .bind(normalized.default_serving_unit)
-    .bind(normalized.macros.protein)
-    .bind(normalized.macros.carbs)
-    .bind(normalized.macros.fat)
-    .bind(normalized.macros.calories)
-    .bind(normalized.serving_weight_g)
-    .bind(normalized.serving_volume_ml)
-    .bind(Some(user_id))
-    .bind(normalized.source_provider.as_deref())
-    .bind(normalized.source_confidence)
-    .bind(normalized.source_metadata)
-    .bind(normalized.corrected_from_product_id)
-    .execute(&mut *executor)
-    .await
-    .map_err(map_active_barcode_conflict)?;
+        columns = sql::INSERT_FOOD_PRODUCT_COLUMNS
+    );
+    let query = sqlx::query(&insert)
+        .bind(product_id)
+        .bind(&normalized.scope);
+    normalized
+        .bind_provenance(normalized.bind_columns(query), user_id)
+        .execute(&mut *executor)
+        .await
+        .map_err(map_active_barcode_conflict)?;
 
-    let product = food_product_json_by_id_with_executor(&mut *executor, user_id, product_id)
+    let product = food_product_json_by_id(&mut *executor, user_id, product_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Food product not found.".to_string()))?;
     maybe_trigger_test_fault(test_fault, 1)?;
-    insert_food_product_revision_with_executor(
+    insert_food_product_revision(
         &mut *executor,
         product_id,
         Some(user_id),
@@ -5215,28 +3521,55 @@ async fn admin_dashboard_json(pool: &PgPool) -> AppResult<Value> {
     )
     .fetch_one(pool)
     .await?;
-    let recent_barcode_additions =
-        admin_food_products_json(pool, 1, 5, false, &AdminBarcodeFilters::empty()).await?["items"]
-            .clone();
-    let recent_audit_events = list_admin_audit_events_json(
-        pool,
-        &serde_json::Map::from_iter([("pageSize".to_string(), json!(5))]),
-    )
-    .await?["items"]
-        .clone();
+    let recent_barcode_additions = take_object_field(
+        admin_food_products_json(pool, 1, 5, false, &AdminBarcodeFilters::empty()).await?,
+        "items",
+    );
+    let recent_audit_events = take_object_field(
+        list_admin_audit_events_json(
+            pool,
+            &serde_json::Map::from_iter([("pageSize".to_string(), json!(5))]),
+        )
+        .await?,
+        "items",
+    );
     let health = admin_user_health_summary_json(pool).await?;
-    Ok(json!({
-        "totalUsers": counts.try_get::<i32, _>("total_users")?,
-        "ownerCount": counts.try_get::<i32, _>("owner_count")?,
-        "adminCount": counts.try_get::<i32, _>("admin_count")?,
-        "newUsersLast7Days": counts.try_get::<i32, _>("new_users_last_7_days")?,
-        "activeUsersLast7Days": counts.try_get::<i32, _>("active_users_last_7_days")?,
-        "activeBarcodeCount": barcode_counts.try_get::<i32, _>("active_barcode_count")?,
-        "deletedBarcodeCount": barcode_counts.try_get::<i32, _>("deleted_barcode_count")?,
-        "recentBarcodeAdditions": recent_barcode_additions,
-        "recentAuditEvents": recent_audit_events,
-        "health": health
-    }))
+    let mut response = serde_json::Map::with_capacity(10);
+    response.insert(
+        "totalUsers".to_string(),
+        json!(counts.try_get::<i32, _>("total_users")?),
+    );
+    response.insert(
+        "ownerCount".to_string(),
+        json!(counts.try_get::<i32, _>("owner_count")?),
+    );
+    response.insert(
+        "adminCount".to_string(),
+        json!(counts.try_get::<i32, _>("admin_count")?),
+    );
+    response.insert(
+        "newUsersLast7Days".to_string(),
+        json!(counts.try_get::<i32, _>("new_users_last_7_days")?),
+    );
+    response.insert(
+        "activeUsersLast7Days".to_string(),
+        json!(counts.try_get::<i32, _>("active_users_last_7_days")?),
+    );
+    response.insert(
+        "activeBarcodeCount".to_string(),
+        json!(barcode_counts.try_get::<i32, _>("active_barcode_count")?),
+    );
+    response.insert(
+        "deletedBarcodeCount".to_string(),
+        json!(barcode_counts.try_get::<i32, _>("deleted_barcode_count")?),
+    );
+    response.insert(
+        "recentBarcodeAdditions".to_string(),
+        recent_barcode_additions,
+    );
+    response.insert("recentAuditEvents".to_string(), recent_audit_events);
+    response.insert("health".to_string(), health);
+    Ok(Value::Object(response))
 }
 
 async fn admin_user_health_summary_json(pool: &PgPool) -> AppResult<Value> {
@@ -5294,9 +3627,7 @@ async fn list_admin_users_json(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        // DATA-05: this used to be a hand-rolled copy that escaped `%` and `_`
-        // but not the backslash, while the SQL still declares `ESCAPE '\'` — so
-        // searching for `100\%` produced a trailing wildcard and wrong results.
+        // The SQL declares `ESCAPE '\'`, so the backslash itself has to be escaped too.
         .map(|value| format!("%{}%", escape_like_pattern(value)));
     let role = input
         .get("role")
@@ -5426,36 +3757,55 @@ async fn get_admin_user_detail_json(pool: &PgPool, user_id: Uuid) -> AppResult<V
     .bind(user_id)
     .fetch_one(pool)
     .await?;
-    // Independent reads, so total latency should be their max rather than
-    // their sum.
+    // Independent reads, joined so latency is their max rather than their sum.
     let (recent_recipes, recent_templates, recent_weights, goals, recent_meals, recent_barcodes) =
         tokio::try_join!(
             recipes_json_filtered(pool, user_id, None, ADMIN_DETAIL_ROWS),
             templates_json_filtered(pool, user_id, None, ADMIN_DETAIL_ROWS),
-            weight_entries_json_limited(pool, user_id, ADMIN_DETAIL_ROWS),
+            weight::weight_entries_json_limited(pool, user_id, ADMIN_DETAIL_ROWS),
             get_user_goals(pool, user_id),
             list_recent_meal_entries_json(pool, user_id, 10, false),
             recent_barcode_submissions_json(pool, user_id, 10),
         )?;
-    Ok(json!({
-        "user": user,
-        "goals": goals,
-        "counts": {
-            "mealEntries": counts.try_get::<i32, _>("meal_entries")?,
-            "weightEntries": counts.try_get::<i32, _>("weight_entries")?,
-            "recipes": counts.try_get::<i32, _>("recipes")?,
-            "templates": counts.try_get::<i32, _>("templates")?,
-            "barcodeSubmissions": counts.try_get::<i32, _>("barcode_submissions")?
-        },
-        "recentMeals": recent_meals,
-        // PERF-03: the limit is applied in SQL now; `rev()` still stands
-        // because `recentWeights` is contracted as newest-first while the
-        // series itself is stored ascending.
-        "recentWeights": recent_weights.as_array().cloned().unwrap_or_default().into_iter().rev().collect::<Vec<_>>(),
-        "recentRecipes": recent_recipes,
-        "recentTemplates": recent_templates,
-        "recentBarcodeSubmissions": recent_barcodes
-    }))
+    let recent_weights = match recent_weights {
+        Value::Array(mut weights) => {
+            weights.reverse();
+            Value::Array(weights)
+        }
+        // Keep the prior fallback when an internal query unexpectedly returns a non-array.
+        _ => Value::Array(Vec::new()),
+    };
+    let mut counts_json = serde_json::Map::with_capacity(5);
+    counts_json.insert(
+        "mealEntries".to_string(),
+        json!(counts.try_get::<i32, _>("meal_entries")?),
+    );
+    counts_json.insert(
+        "weightEntries".to_string(),
+        json!(counts.try_get::<i32, _>("weight_entries")?),
+    );
+    counts_json.insert(
+        "recipes".to_string(),
+        json!(counts.try_get::<i32, _>("recipes")?),
+    );
+    counts_json.insert(
+        "templates".to_string(),
+        json!(counts.try_get::<i32, _>("templates")?),
+    );
+    counts_json.insert(
+        "barcodeSubmissions".to_string(),
+        json!(counts.try_get::<i32, _>("barcode_submissions")?),
+    );
+    let mut response = serde_json::Map::with_capacity(8);
+    response.insert("user".to_string(), serde_json::to_value(user)?);
+    response.insert("goals".to_string(), serde_json::to_value(goals)?);
+    response.insert("counts".to_string(), Value::Object(counts_json));
+    response.insert("recentMeals".to_string(), recent_meals);
+    response.insert("recentWeights".to_string(), recent_weights);
+    response.insert("recentRecipes".to_string(), recent_recipes);
+    response.insert("recentTemplates".to_string(), recent_templates);
+    response.insert("recentBarcodeSubmissions".to_string(), recent_barcodes);
+    Ok(Value::Object(response))
 }
 
 async fn recent_barcode_submissions_json(
@@ -5463,34 +3813,11 @@ async fn recent_barcode_submissions_json(
     user_id: Uuid,
     limit: i32,
 ) -> AppResult<Value> {
-    let row = sqlx::query(
+    let sql = format!(
         r#"
         SELECT coalesce(jsonb_agg(
           jsonb_build_object(
-            'id', id,
-            'ownerUserId', owner_user_id,
-            'scope', scope,
-            'source', source,
-            'barcode', barcode,
-            'name', name,
-            'brand', brand,
-            'defaultServingQuantity', default_serving_quantity::float8,
-            'defaultServingUnit', default_serving_unit,
-            'proteinPer100', protein_per_100::float8,
-            'carbsPer100', carbs_per_100::float8,
-            'fatPer100', fat_per_100::float8,
-            'caloriesPer100', calories_per_100,
-            'servingWeightG', serving_weight_g::float8,
-            'servingVolumeMl', serving_volume_ml::float8,
-            'submittedByUserId', submitted_by_user_id,
-            'deletedByUserId', deleted_by_user_id,
-            'sourceProvider', source_provider,
-            'sourceConfidence', source_confidence::float8,
-            'sourceMetadata', source_metadata,
-            'correctedFromProductId', corrected_from_product_id,
-            'createdAt', created_at,
-            'updatedAt', updated_at,
-            'deletedAt', deleted_at
+          {fields}
           )
           ORDER BY created_at DESC, id
         ), '[]'::jsonb) AS data
@@ -5502,11 +3829,13 @@ async fn recent_barcode_submissions_json(
           LIMIT $2
         ) recent
         "#,
-    )
-    .bind(user_id)
-    .bind(limit)
-    .fetch_one(pool)
-    .await?;
+        fields = sql::food_product_fields("")
+    );
+    let row = sqlx::query(&sql)
+        .bind(user_id)
+        .bind(limit)
+        .fetch_one(pool)
+        .await?;
     Ok(row.try_get("data")?)
 }
 
@@ -5601,9 +3930,9 @@ async fn set_user_role_json(
         }
     }
 
-    let user = ensure_user_role_with_executor(&mut *tx, target_user_id, next_role).await?;
+    let user = ensure_user_role(&mut *tx, target_user_id, next_role).await?;
     maybe_trigger_test_fault(audit_test_fault, 1)?;
-    insert_admin_audit_event_with_executor(
+    insert_admin_audit_event(
         &mut *tx,
         actor_user_id,
         &actor.role,
@@ -5676,9 +4005,12 @@ async fn admin_food_products_json(
     review_queue: bool,
     filters: &AdminBarcodeFilters,
 ) -> AppResult<Value> {
+    if !review_queue {
+        return admin_food_products_page_json(pool, page, page_size, filters).await;
+    }
     // Second offset computation (DATA-06); shares the clamp with `pagination`.
     let offset = page_offset(page, page_size);
-    let rows = sqlx::query(
+    let sql = format!(
         r#"
         WITH barcode_products AS (
           SELECT
@@ -5744,30 +4076,7 @@ async fn admin_food_products_json(
           LEFT JOIN recently_restored rr ON rr.target_id = bp.id::text
         )
         SELECT jsonb_build_object(
-          'id', fp.id,
-          'ownerUserId', fp.owner_user_id,
-          'scope', fp.scope,
-          'source', fp.source,
-          'barcode', fp.barcode,
-          'name', fp.name,
-          'brand', fp.brand,
-          'defaultServingQuantity', fp.default_serving_quantity::float8,
-          'defaultServingUnit', fp.default_serving_unit,
-          'proteinPer100', fp.protein_per_100::float8,
-          'carbsPer100', fp.carbs_per_100::float8,
-          'fatPer100', fp.fat_per_100::float8,
-          'caloriesPer100', fp.calories_per_100,
-          'servingWeightG', fp.serving_weight_g::float8,
-          'servingVolumeMl', fp.serving_volume_ml::float8,
-          'submittedByUserId', fp.submitted_by_user_id,
-          'deletedByUserId', fp.deleted_by_user_id,
-          'sourceProvider', fp.source_provider,
-          'sourceConfidence', fp.source_confidence::float8,
-          'sourceMetadata', fp.source_metadata,
-          'correctedFromProductId', fp.corrected_from_product_id,
-          'createdAt', fp.created_at,
-          'updatedAt', fp.updated_at,
-          'deletedAt', fp.deleted_at,
+          {fields},
           'reviewReasons', CASE WHEN $3 THEN
             (CASE WHEN fp.source_confidence IS NOT NULL AND fp.source_confidence < 0.75 THEN jsonb_build_array('low_confidence') ELSE '[]'::jsonb END)
             || (CASE WHEN fp.serving_weight_g IS NULL AND fp.serving_volume_ml IS NULL THEN jsonb_build_array('missing_serving_size') ELSE '[]'::jsonb END)
@@ -5794,22 +4103,18 @@ async fn admin_food_products_json(
         ORDER BY fp.updated_at DESC, fp.created_at DESC
         LIMIT $1 OFFSET $2
         "#,
-    )
-    .bind(page_size)
-    .bind(offset)
-    .bind(review_queue)
-    .bind(filters.q_pattern.as_deref())
-    .bind(filters.status.as_str())
-    .bind(filters.submitter_pattern.as_deref())
-    .fetch_all(pool)
-    .await?;
-    // PERF-04: outside the review queue the outer predicate below is
-    // `NOT false`, i.e. always true — so the whole review-metadata chain
-    // (`regexp_replace` over every catalogue row, the duplicate-name GROUP BY,
-    // the revision and audit rollups and three LEFT JOINs) was computed and
-    // then discarded. Every ordinary admin page view paid for it, and
-    // `admin_dashboard_json` paid for it again to render five rows. The count
-    // is the same either way; only the review queue actually needs the rollups.
+        fields = sql::food_product_fields("fp.")
+    );
+    let rows = sqlx::query(&sql)
+        .bind(page_size)
+        .bind(offset)
+        .bind(review_queue)
+        .bind(filters.q_pattern.as_deref())
+        .bind(filters.status.as_str())
+        .bind(filters.submitter_pattern.as_deref())
+        .fetch_all(pool)
+        .await?;
+    // PERF-04: only the review queue needs the rollups; the count is the same either way.
     let total_row = if review_queue {
         sqlx::query(
         r#"
@@ -5924,55 +4229,148 @@ async fn admin_food_products_json(
     ))
 }
 
-async fn admin_food_product_by_id_json(
+async fn admin_food_products_page_json(
     pool: &PgPool,
-    product_id: Uuid,
-) -> AppResult<Option<Value>> {
-    admin_food_product_by_id_json_with_executor(pool, product_id).await
+    page: i64,
+    page_size: i64,
+    filters: &AdminBarcodeFilters,
+) -> AppResult<Value> {
+    let offset = page_offset(page, page_size);
+    let sql = format!(
+        r#"
+        WITH filtered_catalogue AS MATERIALIZED (
+          SELECT
+            fp.id,
+            fp.updated_at,
+            fp.created_at,
+            nullif(regexp_replace(lower(trim(fp.name)), '\s+', ' ', 'g'), '') AS review_name
+          FROM food_products fp
+          LEFT JOIN users submitter ON submitter.id = fp.submitted_by_user_id
+          WHERE fp.owner_user_id IS NULL
+            AND fp.source = 'barcode'
+            AND (
+              $3::text IS NULL
+              OR fp.barcode ILIKE $3 ESCAPE '\'
+              OR fp.name ILIKE $3 ESCAPE '\'
+              OR fp.brand ILIKE $3 ESCAPE '\'
+            )
+            AND (
+              $4 = 'all'
+              OR ($4 = 'active' AND fp.deleted_at IS NULL)
+              OR ($4 = 'deleted' AND fp.deleted_at IS NOT NULL)
+            )
+            AND ($5::text IS NULL OR submitter.email ILIKE $5 ESCAPE '\')
+        ),
+        visible_page AS (
+          SELECT id, review_name
+          FROM filtered_catalogue
+          ORDER BY updated_at DESC, created_at DESC
+          LIMIT $1 OFFSET $2
+        ),
+        duplicate_names AS (
+          SELECT review_name, count(*)::int AS duplicate_name_count
+          FROM filtered_catalogue
+          WHERE review_name IS NOT NULL
+          GROUP BY review_name
+        ),
+        revision_counts AS (
+          SELECT product_id, count(*)::int AS revision_count_30_days
+          FROM food_product_revisions
+          WHERE product_id IN (SELECT id FROM visible_page)
+            AND created_at >= now() - interval '30 days'
+          GROUP BY product_id
+        ),
+        latest_audit AS (
+          SELECT DISTINCT ON (target_id) target_id, action, created_at
+          FROM admin_audit_events
+          WHERE target_type = 'food_product'
+            AND target_id IN (SELECT id::text FROM visible_page)
+            AND created_at >= now() - interval '30 days'
+          ORDER BY target_id, created_at DESC
+        )
+        SELECT jsonb_build_object(
+          {fields},
+          'reviewReasons', '[]'::jsonb,
+          'revisionCount30Days', coalesce(rc.revision_count_30_days, 0),
+          'duplicateNameCount', coalesce(dn.duplicate_name_count, 0),
+          'latestAuditAction', la.action,
+          'latestAuditAt', la.created_at
+        ) AS data
+        FROM visible_page vp
+        JOIN food_products fp ON fp.id = vp.id
+        LEFT JOIN duplicate_names dn ON dn.review_name = vp.review_name
+        LEFT JOIN revision_counts rc ON rc.product_id = fp.id
+        LEFT JOIN latest_audit la ON la.target_id = fp.id::text
+        ORDER BY fp.updated_at DESC, fp.created_at DESC
+        "#,
+        fields = sql::food_product_fields("fp.")
+    );
+    let rows = sqlx::query(&sql)
+        .bind(page_size)
+        .bind(offset)
+        .bind(filters.q_pattern.as_deref())
+        .bind(filters.status.as_str())
+        .bind(filters.submitter_pattern.as_deref())
+        .fetch_all(pool)
+        .await?;
+    let total_row = sqlx::query(
+        r#"
+        SELECT count(*)::int AS total
+        FROM food_products fp
+        LEFT JOIN users submitter ON submitter.id = fp.submitted_by_user_id
+        WHERE fp.owner_user_id IS NULL
+          AND fp.source = 'barcode'
+          AND (
+            $1::text IS NULL
+            OR fp.barcode ILIKE $1 ESCAPE '\'
+            OR fp.name ILIKE $1 ESCAPE '\'
+            OR fp.brand ILIKE $1 ESCAPE '\'
+          )
+          AND (
+            $2 = 'all'
+            OR ($2 = 'active' AND fp.deleted_at IS NULL)
+            OR ($2 = 'deleted' AND fp.deleted_at IS NOT NULL)
+          )
+          AND ($3::text IS NULL OR submitter.email ILIKE $3 ESCAPE '\')
+        "#,
+    )
+    .bind(filters.q_pattern.as_deref())
+    .bind(filters.status.as_str())
+    .bind(filters.submitter_pattern.as_deref())
+    .fetch_one(pool)
+    .await?;
+    let total: i32 = total_row.try_get("total")?;
+    Ok(page_json(
+        rows.into_iter()
+            .map(|row| row.try_get("data"))
+            .collect::<Result<Vec<Value>, _>>()?,
+        page,
+        page_size,
+        total,
+    ))
 }
 
-async fn admin_food_product_by_id_json_with_executor<'e, E>(
+async fn admin_food_product_by_id_json<'e, E>(
     executor: E,
     product_id: Uuid,
 ) -> AppResult<Option<Value>>
 where
     E: sqlx::Executor<'e, Database = Postgres>,
 {
-    let row = sqlx::query(
+    let sql = format!(
         r#"
         SELECT jsonb_build_object(
-          'id', id,
-          'ownerUserId', owner_user_id,
-          'scope', scope,
-          'source', source,
-          'barcode', barcode,
-          'name', name,
-          'brand', brand,
-          'defaultServingQuantity', default_serving_quantity::float8,
-          'defaultServingUnit', default_serving_unit,
-          'proteinPer100', protein_per_100::float8,
-          'carbsPer100', carbs_per_100::float8,
-          'fatPer100', fat_per_100::float8,
-          'caloriesPer100', calories_per_100,
-          'servingWeightG', serving_weight_g::float8,
-          'servingVolumeMl', serving_volume_ml::float8,
-          'submittedByUserId', submitted_by_user_id,
-          'deletedByUserId', deleted_by_user_id,
-          'sourceProvider', source_provider,
-          'sourceConfidence', source_confidence::float8,
-          'sourceMetadata', source_metadata,
-          'correctedFromProductId', corrected_from_product_id,
-          'createdAt', created_at,
-          'updatedAt', updated_at,
-          'deletedAt', deleted_at
+          {fields}
         ) AS data
         FROM food_products
         WHERE id = $1 AND owner_user_id IS NULL AND source = 'barcode'
         "#,
-    )
-    .bind(product_id)
-    .fetch_optional(executor)
-    .await?;
+        fields = sql::food_product_fields("")
+    );
+    let row = sqlx::query(&sql)
+        .bind(product_id)
+        .fetch_optional(executor)
+        .await?;
     row.map(|row| row.try_get("data"))
         .transpose()
         .map_err(Into::into)
@@ -6006,10 +4404,9 @@ async fn create_admin_barcode_product_json(
 ) -> AppResult<Value> {
     let actor = require_admin_actor(pool, actor_user_id).await?;
     let mut tx = pool.begin().await?;
-    let (product_id, product) =
-        save_barcode_food_product_with_executor(&mut tx, actor.id, input, None).await?;
+    let (product_id, product) = save_barcode_food_product(&mut tx, actor.id, input, None).await?;
     maybe_trigger_test_fault(audit_test_fault, 1)?;
-    insert_admin_audit_event_with_executor(
+    insert_admin_audit_event(
         &mut *tx,
         actor.id,
         &actor.role,
@@ -6043,10 +4440,10 @@ async fn update_admin_barcode_product_json(
         .ok_or_else(|| AppError::BadRequest("Barcode is required.".to_string()))?;
 
     let mut tx = pool.begin().await?;
-    let before = admin_food_product_by_id_json_with_executor(&mut *tx, product_id)
+    let before = admin_food_product_by_id_json(&mut *tx, product_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Barcode product not found.".to_string()))?;
-    if active_global_barcode_exists_with_executor(&mut *tx, barcode, Some(product_id)).await? {
+    if active_global_barcode_exists(&mut *tx, barcode, Some(product_id)).await? {
         return Err(AppError::BadRequest(
             "That barcode already exists.".to_string(),
         ));
@@ -6093,11 +4490,11 @@ async fn update_admin_barcode_product_json(
     if !updated {
         return Err(AppError::NotFound("Barcode product not found.".to_string()));
     }
-    let product = admin_food_product_by_id_json_with_executor(&mut *tx, product_id)
+    let product = admin_food_product_by_id_json(&mut *tx, product_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Barcode product not found.".to_string()))?;
     maybe_trigger_test_fault(revision_test_fault, 1)?;
-    insert_food_product_revision_with_executor(
+    insert_food_product_revision(
         &mut *tx,
         product_id,
         Some(actor.id),
@@ -6106,7 +4503,7 @@ async fn update_admin_barcode_product_json(
     )
     .await?;
     maybe_trigger_test_fault(audit_test_fault, 1)?;
-    insert_admin_audit_event_with_executor(
+    insert_admin_audit_event(
         &mut *tx,
         actor.id,
         &actor.role,
@@ -6135,7 +4532,7 @@ async fn set_admin_barcode_deleted_json(
 ) -> AppResult<Value> {
     let actor = require_admin_actor(pool, actor_user_id).await?;
     let mut tx = pool.begin().await?;
-    let existing = admin_food_product_by_id_json_with_executor(&mut *tx, product_id)
+    let existing = admin_food_product_by_id_json(&mut *tx, product_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Barcode product not found.".to_string()))?;
     let already_deleted = existing
@@ -6149,7 +4546,7 @@ async fn set_admin_barcode_deleted_json(
     }
     if !deleted
         && let Some(barcode) = existing.get("barcode").and_then(Value::as_str)
-        && active_global_barcode_exists_with_executor(&mut *tx, barcode, Some(product_id)).await?
+        && active_global_barcode_exists(&mut *tx, barcode, Some(product_id)).await?
     {
         return Err(AppError::BadRequest(
             "That barcode already exists.".to_string(),
@@ -6174,11 +4571,11 @@ async fn set_admin_barcode_deleted_json(
     if row.is_none() {
         return Err(AppError::NotFound("Barcode product not found.".to_string()));
     }
-    let product = admin_food_product_by_id_json_with_executor(&mut *tx, product_id)
+    let product = admin_food_product_by_id_json(&mut *tx, product_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Barcode product not found.".to_string()))?;
     maybe_trigger_test_fault(revision_test_fault, 1)?;
-    insert_food_product_revision_with_executor(
+    insert_food_product_revision(
         &mut *tx,
         product_id,
         Some(actor.id),
@@ -6187,7 +4584,7 @@ async fn set_admin_barcode_deleted_json(
     )
     .await?;
     maybe_trigger_test_fault(audit_test_fault, 1)?;
-    insert_admin_audit_event_with_executor(
+    insert_admin_audit_event(
         &mut *tx,
         actor.id,
         &actor.role,
@@ -6210,7 +4607,7 @@ async fn set_admin_barcode_deleted_json(
         .ok_or_else(|| AppError::NotFound("Barcode product not found.".to_string()))
 }
 
-async fn insert_food_product_revision_with_executor<'e, E>(
+async fn insert_food_product_revision<'e, E>(
     executor: E,
     product_id: Uuid,
     actor_user_id: Option<Uuid>,
@@ -6238,7 +4635,7 @@ where
     Ok(())
 }
 
-async fn insert_admin_audit_event_with_executor<'e, E>(
+async fn insert_admin_audit_event<'e, E>(
     executor: E,
     actor_user_id: Uuid,
     actor_role: &str,
@@ -6277,19 +4674,10 @@ async fn list_admin_audit_events_json(
     let (page, page_size, offset) = pagination(input);
     let target_type = input.get("targetType").and_then(Value::as_str);
     let target_id = input.get("targetId").and_then(Value::as_str);
-    let rows = sqlx::query(
+    let sql = format!(
         r#"
         SELECT jsonb_build_object(
-          'id', ae.id,
-          'actorUserId', ae.actor_user_id,
-          'actorEmail', u.email,
-          'actorDisplayName', u.display_name,
-          'actorRole', ae.actor_role,
-          'action', ae.action,
-          'targetType', ae.target_type,
-          'targetId', ae.target_id,
-          'details', ae.details_json,
-          'createdAt', ae.created_at
+          {fields}
         ) AS data
         FROM admin_audit_events ae
         LEFT JOIN users u ON u.id = ae.actor_user_id
@@ -6298,13 +4686,15 @@ async fn list_admin_audit_events_json(
         ORDER BY ae.created_at DESC
         LIMIT $1 OFFSET $2
         "#,
-    )
-    .bind(page_size)
-    .bind(offset)
-    .bind(target_type)
-    .bind(target_id)
-    .fetch_all(pool)
-    .await?;
+        fields = sql::admin_audit_event_fields()
+    );
+    let rows = sqlx::query(&sql)
+        .bind(page_size)
+        .bind(offset)
+        .bind(target_type)
+        .bind(target_id)
+        .fetch_all(pool)
+        .await?;
     let total_row = sqlx::query(
         r#"
         SELECT count(*)::int AS total
@@ -6329,181 +4719,25 @@ async fn list_admin_audit_events_json(
 }
 
 async fn get_admin_audit_event_json(pool: &PgPool, event_id: Uuid) -> AppResult<Value> {
-    let row = sqlx::query(
+    let sql = format!(
         r#"
         SELECT jsonb_build_object(
-          'id', ae.id,
-          'actorUserId', ae.actor_user_id,
-          'actorEmail', u.email,
-          'actorDisplayName', u.display_name,
-          'actorRole', ae.actor_role,
-          'action', ae.action,
-          'targetType', ae.target_type,
-          'targetId', ae.target_id,
-          'details', ae.details_json,
-          'createdAt', ae.created_at
+          {fields}
         ) AS data
         FROM admin_audit_events ae
         LEFT JOIN users u ON u.id = ae.actor_user_id
         WHERE ae.id = $1
         "#,
-    )
-    .bind(event_id)
-    .fetch_optional(pool)
-    .await?;
+        fields = sql::admin_audit_event_fields()
+    );
+    let row = sqlx::query(&sql)
+        .bind(event_id)
+        .fetch_optional(pool)
+        .await?;
     Ok(row
         .map(|row| row.try_get("data"))
         .transpose()?
         .unwrap_or(Value::Null))
-}
-
-async fn create_api_token_json(
-    pool: &PgPool,
-    user_id: Uuid,
-    input: &serde_json::Map<String, Value>,
-) -> AppResult<Value> {
-    let name = required_string(input, "name")?;
-    let scopes = normalize_api_token_scopes(input.get("scopes"))?;
-    let token_secret = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
-    let token = format!("mtk_v1_{token_secret}");
-    let token_hash = hash_token(&token);
-    let token_prefix = format!("mtk_v1_{}", &token_hash[..12]);
-    let expires_at = normalize_api_token_expiry(input.get("expiresAt"))?;
-    let row = sqlx::query(
-        r#"
-        INSERT INTO api_tokens (
-          id, user_id, token_hash, token_prefix, name, scopes, expires_at
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7::timestamptz)
-        RETURNING
-          id,
-          user_id,
-          token_prefix,
-          name,
-          scopes,
-          created_at,
-          last_used_at,
-          expires_at,
-          revoked_at
-        "#,
-    )
-    .bind(Uuid::new_v4())
-    .bind(user_id)
-    .bind(token_hash)
-    .bind(token_prefix)
-    .bind(name)
-    .bind(Value::Array(
-        scopes.into_iter().map(Value::String).collect(),
-    ))
-    .bind(expires_at)
-    .fetch_one(pool)
-    .await?;
-    Ok(json!({
-        "token": token,
-        "record": api_token_row_json(&row)?
-    }))
-}
-
-fn normalize_api_token_scopes(scopes: Option<&Value>) -> AppResult<Vec<String>> {
-    let scopes = scopes
-        .and_then(Value::as_array)
-        .ok_or_else(|| AppError::BadRequest("API token scopes are required.".to_string()))?;
-    if scopes.is_empty() {
-        return Err(AppError::BadRequest(
-            "API token must include at least one scope.".to_string(),
-        ));
-    }
-
-    let allowed = API_SCOPE_VALUES.iter().copied().collect::<HashSet<_>>();
-    let mut seen = HashSet::new();
-    let mut normalized = Vec::new();
-    for scope in scopes {
-        let Some(scope) = scope.as_str() else {
-            return Err(AppError::BadRequest(
-                "API token scope is invalid.".to_string(),
-            ));
-        };
-        if !allowed.contains(scope) {
-            return Err(AppError::BadRequest(
-                "API token scope is invalid.".to_string(),
-            ));
-        }
-        if seen.insert(scope.to_string()) {
-            normalized.push(scope.to_string());
-        }
-    }
-
-    Ok(normalized)
-}
-
-fn normalize_api_token_expiry(expires_at: Option<&Value>) -> AppResult<Option<DateTime<Utc>>> {
-    match expires_at {
-        Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) => DateTime::parse_from_rfc3339(value)
-            .map(|date| Some(date.with_timezone(&Utc)))
-            .map_err(|_| AppError::BadRequest("API token expiry is invalid.".to_string())),
-        None => Ok(Some(Utc::now() + Duration::days(90))),
-        Some(_) => Err(AppError::BadRequest(
-            "API token expiry is invalid.".to_string(),
-        )),
-    }
-}
-
-async fn list_api_tokens_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
-    let rows = sqlx::query(
-        r#"
-        SELECT
-          id,
-          user_id,
-          token_prefix,
-          name,
-          scopes,
-          created_at,
-          last_used_at,
-          expires_at,
-          revoked_at
-        FROM api_tokens
-        WHERE user_id = $1
-        ORDER BY created_at DESC
-        LIMIT $2
-        "#,
-    )
-    .bind(user_id)
-    .bind(MAX_COLLECTION_ROWS)
-    .fetch_all(pool)
-    .await?;
-    let records = rows
-        .iter()
-        .map(api_token_row_json)
-        .collect::<AppResult<Vec<_>>>()?;
-    Ok(Value::Array(records))
-}
-
-fn api_token_row_json(row: &PgRow) -> AppResult<Value> {
-    let id: Uuid = row.try_get("id")?;
-    let user_id: Uuid = row.try_get("user_id")?;
-    let scopes: Value = row.try_get("scopes")?;
-    let created_at: DateTime<Utc> = row.try_get("created_at")?;
-    let last_used_at: Option<DateTime<Utc>> = row.try_get("last_used_at")?;
-    let expires_at: Option<DateTime<Utc>> = row.try_get("expires_at")?;
-    let revoked_at: Option<DateTime<Utc>> = row.try_get("revoked_at")?;
-    Ok(json!({
-        "id": id,
-        "userId": user_id,
-        "tokenPrefix": row.try_get::<String, _>("token_prefix")?,
-        "name": row.try_get::<String, _>("name")?,
-        "scopes": scopes,
-        "createdAt": created_at,
-        "lastUsedAt": last_used_at,
-        "expiresAt": expires_at,
-        "revokedAt": revoked_at
-    }))
-}
-
-fn hash_token(token: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(token.as_bytes());
-    format!("{:x}", hasher.finalize())
 }
 
 async fn update_food_product_json(
@@ -6514,7 +4748,7 @@ async fn update_food_product_json(
 ) -> AppResult<Value> {
     let mut normalized = normalize_food_product_input(input, "personal")?;
     normalized.scope = "personal".to_string();
-    let updated = sqlx::query(
+    let update = sqlx::query(
         r#"
         UPDATE food_products
         SET
@@ -6540,22 +4774,12 @@ async fn update_food_product_json(
         "#,
     )
     .bind(user_id)
-    .bind(product_id)
-    .bind(normalized.source)
-    .bind(normalized.barcode.as_deref())
-    .bind(normalized.name)
-    .bind(normalized.brand)
-    .bind(normalized.default_serving_quantity)
-    .bind(normalized.default_serving_unit)
-    .bind(normalized.macros.protein)
-    .bind(normalized.macros.carbs)
-    .bind(normalized.macros.fat)
-    .bind(normalized.macros.calories)
-    .bind(normalized.serving_weight_g)
-    .bind(normalized.serving_volume_ml)
-    .fetch_optional(pool)
-    .await?
-    .is_some();
+    .bind(product_id);
+    let updated = normalized
+        .bind_columns(update)
+        .fetch_optional(pool)
+        .await?
+        .is_some();
     if !updated {
         return Err(AppError::NotFound("Food product not found.".to_string()));
     }
@@ -6671,8 +4895,7 @@ async fn insert_recipe_ingredients(
 
     let mut rows = TemplateItemColumns::with_capacity(ingredients.len());
     for (index, ingredient) in ingredients.iter().enumerate() {
-        // Kept per item so injected faults still abort at the same ingredient;
-        // the surrounding transaction rolls back either way.
+        // Per item so an injected fault aborts at the same ingredient it would in production.
         maybe_trigger_test_fault(test_fault, index + 1)?;
         let ingredient = ingredient.as_object().ok_or_else(|| {
             AppError::BadRequest("Recipe ingredient must be an object.".to_string())
@@ -6685,7 +4908,7 @@ async fn insert_recipe_ingredients(
         rows.push(index as i32, None, values);
     }
 
-    sqlx::query(
+    let query = sqlx::query(
         r#"
         INSERT INTO recipe_ingredients (
           id, recipe_id, product_id, sort_order, label, quantity, unit,
@@ -6703,21 +4926,9 @@ async fn insert_recipe_ingredients(
           serving_multiplier, protein_g, carbs_g, fat_g, calories_kcal
         )
         "#,
-    )
-    .bind(recipe_id)
-    .bind(&rows.ids)
-    .bind(&rows.product_ids)
-    .bind(&rows.sort_orders)
-    .bind(&rows.labels)
-    .bind(&rows.quantities)
-    .bind(&rows.units)
-    .bind(&rows.serving_multipliers)
-    .bind(&rows.proteins)
-    .bind(&rows.carbs)
-    .bind(&rows.fats)
-    .bind(&rows.calories)
-    .execute(&mut **tx)
-    .await?;
+    );
+    let query = rows.bind_ids(query.bind(recipe_id));
+    rows.bind_values(query).execute(&mut **tx).await?;
 
     Ok(())
 }
@@ -6725,246 +4936,6 @@ async fn insert_recipe_ingredients(
 async fn recipe_by_id_json(pool: &PgPool, user_id: Uuid, recipe_id: Uuid) -> AppResult<Value> {
     first_json_item(recipes_json_filtered(pool, user_id, Some(recipe_id), 1).await?)
         .ok_or_else(|| AppError::NotFound("Recipe not found.".to_string()))
-}
-
-async fn weight_entries_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
-    weight_entries_json_limited(pool, user_id, MAX_COLLECTION_ROWS).await
-}
-
-/// PERF-03: the row set is selected most-recent-first so a limit keeps the
-/// newest entries, then re-sorted ascending because every consumer charts the
-/// series forwards in time.
-async fn weight_entries_json_limited(pool: &PgPool, user_id: Uuid, limit: i64) -> AppResult<Value> {
-    let row = sqlx::query(
-        r#"
-        SELECT coalesce(jsonb_agg(
-          jsonb_build_object(
-            'id', id,
-            'userId', user_id,
-            'date', entry_date,
-            'weightKg', weight_kg::float8,
-            'bodyFatPct', body_fat_pct::float8,
-            'notes', notes
-          )
-          ORDER BY entry_date ASC
-        ), '[]'::jsonb) AS data
-        FROM (
-          SELECT id, user_id, entry_date, weight_kg, body_fat_pct, notes
-          FROM weight_entries
-          WHERE user_id = $1
-          ORDER BY entry_date DESC
-          LIMIT $2
-        ) recent
-        "#,
-    )
-    .bind(user_id)
-    .bind(limit)
-    .fetch_one(pool)
-    .await?;
-    Ok(row.try_get("data")?)
-}
-
-#[derive(Clone, Copy)]
-struct WeightStatEntry {
-    date: NaiveDate,
-    weight_kg: f64,
-}
-
-fn weight_stat_entry(entry: &Value) -> AppResult<WeightStatEntry> {
-    let date = entry
-        .get("date")
-        .and_then(Value::as_str)
-        .ok_or_else(|| AppError::BadRequest("weight entry date is required.".to_string()))
-        .and_then(|value| {
-            NaiveDate::parse_from_str(value, "%Y-%m-%d")
-                .map_err(|_| AppError::BadRequest("weight entry date is invalid.".to_string()))
-        })?;
-    let weight_kg = entry
-        .get("weightKg")
-        .and_then(Value::as_f64)
-        .ok_or_else(|| AppError::BadRequest("weight entry weightKg is required.".to_string()))?;
-    Ok(WeightStatEntry { date, weight_kg })
-}
-
-fn closest_weight_on_or_before(
-    entries: &[WeightStatEntry],
-    target_date: NaiveDate,
-) -> Option<WeightStatEntry> {
-    entries
-        .iter()
-        .copied()
-        .filter(|entry| entry.date <= target_date)
-        .min_by_key(|entry| {
-            entry
-                .date
-                .signed_duration_since(target_date)
-                .num_days()
-                .abs()
-        })
-}
-
-fn trend_direction_from_diff(diff: f64) -> &'static str {
-    if diff > 0.1 {
-        "up"
-    } else if diff < -0.1 {
-        "down"
-    } else {
-        "stable"
-    }
-}
-
-async fn weight_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppResult<Value> {
-    let entries = weight_entries_json(pool, user_id).await?;
-    let row =
-        sqlx::query("SELECT goal_weight_kg::float8 AS goal_weight_kg FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_one(pool)
-            .await?;
-    let goal_weight_kg: Option<f64> = row.try_get("goal_weight_kg")?;
-    let entry_array = entries.as_array().cloned().unwrap_or_default();
-    let stat_entries = entry_array
-        .iter()
-        .map(weight_stat_entry)
-        .collect::<AppResult<Vec<_>>>()?;
-    let today_date = NaiveDate::parse_from_str(today, "%Y-%m-%d")
-        .map_err(|_| AppError::BadRequest("selectedDate must be YYYY-MM-DD.".to_string()))?;
-    let latest = stat_entries.last().copied();
-    let current_weight = latest.map(|entry| entry.weight_kg);
-    let week_change = latest.and_then(|latest| {
-        closest_weight_on_or_before(&stat_entries, today_date - Duration::days(7))
-            .map(|entry| round2(latest.weight_kg - entry.weight_kg))
-    });
-    let month_change = latest.and_then(|latest| {
-        closest_weight_on_or_before(&stat_entries, today_date - Duration::days(30))
-            .map(|entry| round2(latest.weight_kg - entry.weight_kg))
-    });
-    let trend_direction = match stat_entries.len() {
-        0 | 1 => None,
-        2 => {
-            let diff = stat_entries[1].weight_kg - stat_entries[0].weight_kg;
-            Some(trend_direction_from_diff(diff))
-        }
-        len => {
-            let last3 = &stat_entries[len - 3..];
-            let first_diff = last3[1].weight_kg - last3[0].weight_kg;
-            let second_diff = last3[2].weight_kg - last3[1].weight_kg;
-            Some(trend_direction_from_diff((first_diff + second_diff) / 2.0))
-        }
-    };
-    Ok(json!({
-        "entries": entries,
-        "goalWeightKg": goal_weight_kg,
-        "stats": {
-            "currentWeight": current_weight,
-            "weekChange": week_change,
-            "monthChange": month_change,
-            "trendDirection": trend_direction
-        }
-    }))
-}
-
-async fn create_weight_entry_json(
-    pool: &PgPool,
-    user_id: Uuid,
-    input: &serde_json::Map<String, Value>,
-    overwrite: bool,
-) -> AppResult<Value> {
-    let id = Uuid::new_v4();
-    let values = normalize_weight_entry_input(input)?;
-    let row = if overwrite {
-        sqlx::query(
-            r#"
-            INSERT INTO weight_entries (id, user_id, entry_date, weight_kg, body_fat_pct, notes, updated_at)
-            VALUES ($1, $2, $3::date, $4, $5, $6, now())
-            ON CONFLICT (user_id, entry_date)
-            DO UPDATE SET weight_kg = EXCLUDED.weight_kg, body_fat_pct = EXCLUDED.body_fat_pct, notes = EXCLUDED.notes, updated_at = now()
-            RETURNING id
-            "#,
-        )
-        .bind(id)
-        .bind(user_id)
-        .bind(&values.date)
-        .bind(values.weight_kg)
-        .bind(values.body_fat_pct)
-        .bind(values.notes.as_deref())
-        .fetch_optional(pool)
-        .await?
-    } else {
-        sqlx::query(
-            r#"
-            INSERT INTO weight_entries (id, user_id, entry_date, weight_kg, body_fat_pct, notes, updated_at)
-            VALUES ($1, $2, $3::date, $4, $5, $6, now())
-            ON CONFLICT (user_id, entry_date) DO NOTHING
-            RETURNING id
-            "#,
-        )
-        .bind(id)
-        .bind(user_id)
-        .bind(&values.date)
-        .bind(values.weight_kg)
-        .bind(values.body_fat_pct)
-        .bind(values.notes.as_deref())
-        .fetch_optional(pool)
-        .await?
-    };
-    let Some(row) = row else {
-        return Ok(Value::Null);
-    };
-    weight_entry_by_id_json(pool, user_id, row.try_get("id")?).await
-}
-
-async fn update_weight_entry_json(
-    pool: &PgPool,
-    user_id: Uuid,
-    entry_id: Uuid,
-    input: &serde_json::Map<String, Value>,
-) -> AppResult<Value> {
-    let values = normalize_weight_entry_input(input)?;
-    let updated = sqlx::query(
-        r#"
-        UPDATE weight_entries
-        SET entry_date = $3::date, weight_kg = $4, body_fat_pct = $5, notes = $6, updated_at = now()
-        WHERE user_id = $1 AND id = $2
-        RETURNING id
-        "#,
-    )
-    .bind(user_id)
-    .bind(entry_id)
-    .bind(values.date)
-    .bind(values.weight_kg)
-    .bind(values.body_fat_pct)
-    .bind(values.notes.as_deref())
-    .fetch_optional(pool)
-    .await?
-    .is_some();
-    if !updated {
-        return Err(AppError::NotFound("Weight entry not found.".to_string()));
-    }
-    weight_entry_by_id_json(pool, user_id, entry_id).await
-}
-
-async fn weight_entry_by_id_json(pool: &PgPool, user_id: Uuid, entry_id: Uuid) -> AppResult<Value> {
-    let row = sqlx::query(
-        r#"
-        SELECT jsonb_build_object(
-          'id', id,
-          'userId', user_id,
-          'date', entry_date,
-          'weightKg', weight_kg::float8,
-          'bodyFatPct', body_fat_pct::float8,
-          'notes', notes
-        ) AS data
-        FROM weight_entries
-        WHERE user_id = $1 AND id = $2
-        "#,
-    )
-    .bind(user_id)
-    .bind(entry_id)
-    .fetch_optional(pool)
-    .await?;
-    Ok(row
-        .ok_or_else(|| AppError::NotFound("Weight entry not found.".to_string()))?
-        .try_get("data")?)
 }
 
 async fn recent_quick_add_json(pool: &PgPool, user_id: Uuid, limit: i32) -> AppResult<Value> {
@@ -7135,32 +5106,14 @@ async fn dashboard_quick_add_json(
 }
 
 async fn search_meal_entries_json(pool: &PgPool, user_id: Uuid, query: &str) -> AppResult<Value> {
-    validate_search_query(query)?;
-    let patterns = search_like_patterns(query);
-    if patterns.is_empty() {
+    let Some(patterns) = accepted_search_patterns(query)? else {
         return Ok(Value::Array(Vec::new()));
-    }
-    let row = sqlx::query(
+    };
+    let sql = format!(
         r#"
         SELECT coalesce(jsonb_agg(
           jsonb_build_object(
-            'id', matches.id,
-            'userId', matches.user_id,
-            'date', matches.entry_date,
-            'mealGroupId', matches.meal_group_id,
-            'status', matches.status,
-            'productId', CASE WHEN fp.id IS NULL THEN NULL ELSE matches.product_id END,
-            'label', matches.label,
-            'sortOrder', matches.sort_order,
-            'quantity', matches.quantity::float8,
-            'unit', matches.unit,
-            'servingMultiplier', matches.serving_multiplier::float8,
-            'proteinG', matches.protein_g::float8,
-            'carbsG', matches.carbs_g::float8,
-            'fatG', matches.fat_g::float8,
-            'caloriesKcal', matches.calories_kcal,
-            'clientMutationId', matches.client_mutation_id,
-            'sourceLabel', fp.name
+          {fields}
           )
           ORDER BY matches.entry_date DESC, matches.sort_order ASC
         ), '[]'::jsonb) AS data
@@ -7192,11 +5145,13 @@ async fn search_meal_entries_json(pool: &PgPool, user_id: Uuid, query: &str) -> 
           AND fp.deleted_at IS NULL
           AND (fp.owner_user_id = $1 OR fp.owner_user_id IS NULL)
         "#,
-    )
-    .bind(user_id)
-    .bind(patterns)
-    .fetch_one(pool)
-    .await?;
+        fields = sql::meal_entry_fields("matches.")
+    );
+    let row = sqlx::query(&sql)
+        .bind(user_id)
+        .bind(patterns)
+        .fetch_one(pool)
+        .await?;
     Ok(row.try_get("data")?)
 }
 
@@ -7206,7 +5161,7 @@ async fn list_recent_meal_entries_json(
     limit: i32,
     eaten_only: bool,
 ) -> AppResult<Value> {
-    let row = sqlx::query(
+    let sql = format!(
         r#"
         -- DATA-08: this was the one meal-JSON shape that did not mask
         -- soft-deleted products. It handed clients a `productId` that 404s on
@@ -7214,23 +5169,7 @@ async fn list_recent_meal_entries_json(
         -- blocks join exactly like this.
         SELECT coalesce(jsonb_agg(
           jsonb_build_object(
-            'id', recent.id,
-            'userId', recent.user_id,
-            'date', recent.entry_date,
-            'mealGroupId', recent.meal_group_id,
-            'status', recent.status,
-            'productId', CASE WHEN fp.id IS NULL THEN NULL ELSE recent.product_id END,
-            'label', recent.label,
-            'sortOrder', recent.sort_order,
-            'quantity', recent.quantity::float8,
-            'unit', recent.unit,
-            'servingMultiplier', recent.serving_multiplier::float8,
-            'proteinG', recent.protein_g::float8,
-            'carbsG', recent.carbs_g::float8,
-            'fatG', recent.fat_g::float8,
-            'caloriesKcal', recent.calories_kcal,
-            'clientMutationId', recent.client_mutation_id,
-            'sourceLabel', fp.name
+          {fields}
           )
           ORDER BY recent.entry_date DESC, recent.sort_order ASC, recent.created_at DESC, recent.id
         ), '[]'::jsonb) AS data
@@ -7246,12 +5185,14 @@ async fn list_recent_meal_entries_json(
           AND fp.deleted_at IS NULL
           AND (fp.owner_user_id = recent.user_id OR fp.owner_user_id IS NULL)
         "#,
-    )
-    .bind(user_id)
-    .bind(limit)
-    .bind(eaten_only)
-    .fetch_one(pool)
-    .await?;
+        fields = sql::meal_entry_fields("recent.")
+    );
+    let row = sqlx::query(&sql)
+        .bind(user_id)
+        .bind(limit)
+        .bind(eaten_only)
+        .fetch_one(pool)
+        .await?;
     Ok(row.try_get("data")?)
 }
 
@@ -7730,8 +5671,7 @@ fn uuid_arg(args: &Value, key: &str) -> AppResult<Uuid> {
         })
 }
 
-/// Rejects a malformed payload without echoing serde's message, which names
-/// struct fields and byte offsets.
+/// Never echoes serde's message, which names struct fields and byte offsets.
 fn invalid_payload(field: &'static str) -> impl Fn(serde_json::Error) -> AppError {
     move |error| {
         tracing::debug!(error = ?error, field, "rejected malformed rpc payload");
@@ -7746,11 +5686,7 @@ fn string_arg(args: &Value, key: &str) -> AppResult<String> {
         .ok_or_else(|| AppError::BadRequest(format!("{key} is required.")))
 }
 
-/// Rejects anything that is not a literal `YYYY-MM-DD` calendar date.
-///
-/// Postgres accepts `infinity`, `today` and `epoch` as `date` input, so an
-/// unvalidated string can be stored and then fail to re-parse on every
-/// subsequent read — permanently breaking the page that reads it.
+/// Postgres accepts `infinity`, `today` and `epoch` as `date` input, which would store a value that never re-parses.
 pub(crate) fn ensure_date_string(value: &str) -> AppResult<()> {
     let bytes = value.as_bytes();
     let well_formed = bytes.len() == 10
@@ -7777,6 +5713,24 @@ fn date_arg(args: &Value, key: &str) -> AppResult<String> {
     Ok(value)
 }
 
+fn dates_arg(args: &Value, key: &str) -> AppResult<Vec<String>> {
+    let values = args
+        .get(key)
+        .and_then(Value::as_array)
+        .ok_or_else(|| AppError::BadRequest(format!("{key} is required.")))?;
+    ensure_collection_size(values, key)?;
+    values
+        .iter()
+        .map(|value| {
+            let date = value
+                .as_str()
+                .ok_or_else(|| AppError::BadRequest(format!("{key} must contain dates.")))?;
+            ensure_date_string(date)?;
+            Ok(date.to_string())
+        })
+        .collect()
+}
+
 fn object_arg<'a>(args: &'a Value, key: &str) -> AppResult<&'a serde_json::Map<String, Value>> {
     args.get(key)
         .and_then(Value::as_object)
@@ -7790,11 +5744,7 @@ fn optional_object_arg<'a>(args: &'a Value, key: &str) -> &'a serde_json::Map<St
         .unwrap_or_else(|| EMPTY.get_or_init(serde_json::Map::new))
 }
 
-/// Forced-failure injection for rollback tests.
-///
-/// Gated on an explicit cargo feature rather than `debug_assertions`: a
-/// debug-profile deploy would otherwise expose fault injection to anyone
-/// holding the internal secret.
+/// Gated on a cargo feature rather than `debug_assertions`, so a debug-profile deploy cannot expose fault injection.
 fn test_fault_arg<'a>(args: &'a Value, kind: &str) -> Option<&'a serde_json::Map<String, Value>> {
     if !cfg!(any(test, feature = "test-faults")) {
         return None;
@@ -7825,10 +5775,7 @@ fn maybe_trigger_test_fault(
     Ok(())
 }
 
-/// DATA-06: `page` comes straight from the request. Unclamped,
-/// `(page - 1) * page_size` overflowed `i64` — a panic in debug, and in release
-/// a negative value that Postgres rejects with `OFFSET must not be negative`,
-/// i.e. a 500. A page this deep is meaningless for every paginated view here.
+/// `page` comes straight from the request; unclamped, `(page - 1) * page_size` overflows `i64`.
 const MAX_PAGE: i64 = 100_000;
 
 fn page_offset(page: i64, page_size: i64) -> i64 {
@@ -7853,35 +5800,44 @@ fn pagination(input: &serde_json::Map<String, Value>) -> (i64, i64, i64) {
 
 fn page_json(items: Vec<Value>, page: i64, page_size: i64, total_items: i32) -> Value {
     let total_items = i64::from(total_items);
-    json!({
-        "items": items,
-        "pagination": {
-            "page": page,
-            "pageSize": page_size,
-            "totalItems": total_items,
-            "totalPages": if total_items == 0 { 0 } else { (total_items + page_size - 1) / page_size }
-        }
-    })
+    let mut pagination = serde_json::Map::with_capacity(4);
+    pagination.insert("page".to_string(), json!(page));
+    pagination.insert("pageSize".to_string(), json!(page_size));
+    pagination.insert("totalItems".to_string(), json!(total_items));
+    pagination.insert(
+        "totalPages".to_string(),
+        json!(if total_items == 0 {
+            0
+        } else {
+            (total_items + page_size - 1) / page_size
+        }),
+    );
+    let mut response = serde_json::Map::with_capacity(2);
+    response.insert("items".to_string(), Value::Array(items));
+    response.insert("pagination".to_string(), Value::Object(pagination));
+    Value::Object(response)
+}
+
+/// Moves an owned JSON field into the response without cloning potentially large page results.
+/// The old indexed access yielded `null` for a non-object or absent field, which this preserves.
+fn take_object_field(value: Value, key: &str) -> Value {
+    match value {
+        Value::Object(mut object) => object.remove(key).unwrap_or(Value::Null),
+        _ => Value::Null,
+    }
 }
 
 fn is_quantity_unit(value: &str) -> bool {
     matches!(value, "g" | "ml" | "serving" | "count")
 }
 
-/// API-10: nothing capped the length of any string reaching a `text` column, so
-/// a `write:daily` token could store a ~2 MB `label` on every meal entry and a
-/// ~2 MB `notes` on every template — bounded only by the HTTP body limit.
-/// Names, labels and codes are never prose, so they get the tighter cap;
-/// free-text fields get the looser one.
+/// Caps every string reaching a `text` column: names, labels and codes are never prose, free text gets the looser bound.
 const MAX_TEXT_FIELD_LENGTH: usize = 500;
 const MAX_FREE_TEXT_LENGTH: usize = 2_000;
-/// `items` / `ingredients` were only checked for non-emptiness, so one request
-/// could ask for thousands of rows.
+/// Bounds how many rows one `items` / `ingredients` request can ask for.
 const MAX_COLLECTION_ITEMS: usize = 200;
 
-/// Counted in `char`s rather than bytes: the columns are `text`, so the limit
-/// users care about is characters, and a byte limit would silently reject
-/// shorter non-ASCII input.
+/// Counted in `char`s rather than bytes, so non-ASCII input is not rejected early.
 fn ensure_text_length(value: &str, max: usize, field_name: &str) -> AppResult<()> {
     if value.chars().count() > max {
         return Err(AppError::BadRequest(format!(
@@ -7924,10 +5880,7 @@ fn trim_optional_string(input: &serde_json::Map<String, Value>, key: &str) -> Op
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        // Truncation rather than rejection: several callers use this for
-        // optional filter/search arguments where a hard error would be worse
-        // than a clamp, and the persisted callers (`brand`, `barcode`,
-        // `sourceProvider`) are all short by nature.
+        // Truncation rather than rejection: the callers are optional filter arguments or naturally short fields.
         .map(|value| value.chars().take(MAX_TEXT_FIELD_LENGTH).collect())
 }
 
@@ -8000,9 +5953,7 @@ fn normalize_macros(
         protein: round1(required_f64_bounded(input, protein_key, MAX_MACRO_GRAMS)?),
         carbs: round1(required_f64_bounded(input, carbs_key, MAX_MACRO_GRAMS)?),
         fat: round1(required_f64_bounded(input, fat_key, MAX_MACRO_GRAMS)?),
-        // DATA-03: calories used to be the one unbounded macro, which let a
-        // day's `sum(calories_kcal)` overflow the aggregate cast and 500 every
-        // summary/stats/leaderboard read for that account.
+        // An unbounded calories value lets a day's `sum(calories_kcal)` overflow the aggregate cast.
         calories: required_i32_bounded(input, calories_key, MAX_CALORIES_KCAL)?,
     })
 }
@@ -8016,16 +5967,7 @@ fn require_any_nutrition(macros: &MacroValues) -> AppResult<()> {
     ))
 }
 
-/// The single enforcement point for every value that reaches a `meal_entries` /
-/// `meal_template_items` / `recipe_ingredients` numeric column.
-///
-/// DATA-01: the manual path bounded its inputs on the way in
-/// (`normalize_positive_number`, `required_f64_bounded`), but the product-linked
-/// path built its values from the product row and the raw request and only
-/// checked finite/positive here — so `quantity: 1e12` reached the INSERT and
-/// came back as a Postgres `22003`, i.e. a 500 for what is a client error. The
-/// bounds live here rather than being copied into the product path so the two
-/// cannot drift apart again.
+/// The single bounds check for every numeric reaching a meal, template-item or recipe-ingredient column, so the manual and product-linked paths cannot drift apart.
 fn validate_meal_components(
     label: &str,
     sort_order: i32,
@@ -8127,12 +6069,7 @@ fn normalize_meal_food_values(
     Ok(values)
 }
 
-/// DATA-09: `sourceMetadata` was taken verbatim from the request and stored as
-/// `jsonb` with no shape or size validation — the barcode path builds it
-/// server-side, but `createPersonalFoodProduct` let a caller persist an
-/// arbitrarily large and deeply nested document per product, bounded only by the
-/// HTTP body limit. Only a flat object of scalars is accepted, which is all any
-/// producer in this codebase writes.
+/// `sourceMetadata` is caller-controlled `jsonb`, so only a flat object of scalars is accepted.
 const MAX_SOURCE_METADATA_KEYS: usize = 32;
 
 fn normalize_source_metadata(input: &serde_json::Map<String, Value>) -> AppResult<Value> {
@@ -8231,37 +6168,6 @@ fn normalize_food_product_input(
     })
 }
 
-fn normalize_weight_entry_input(
-    input: &serde_json::Map<String, Value>,
-) -> AppResult<WeightEntryValues> {
-    // Rounded before the bound check: `weight_kg` lands in a `numeric(5, 2)`
-    // column, so a value that only overflows *after* rounding (999.995) has to
-    // be rejected too.
-    let weight_kg = optional_f64(input, "weightKg")
-        .map(round2)
-        .filter(|value| value.is_finite() && *value > 0.0)
-        .ok_or_else(|| AppError::BadRequest("Weight must be a positive number.".to_string()))?;
-    if weight_kg >= 1000.0 {
-        return Err(AppError::BadRequest(
-            "Weight must be less than 1000 kg.".to_string(),
-        ));
-    }
-    let body_fat_pct = optional_f64(input, "bodyFatPct");
-    if let Some(value) = body_fat_pct
-        && (!value.is_finite() || !(0.0..=100.0).contains(&value))
-    {
-        return Err(AppError::BadRequest(
-            "Body fat percentage must be between 0 and 100.".to_string(),
-        ));
-    }
-    Ok(WeightEntryValues {
-        date: required_date(input, "date")?,
-        weight_kg: round2(weight_kg),
-        body_fat_pct: body_fat_pct.map(round1),
-        notes: trim_optional_string(input, "notes"),
-    })
-}
-
 fn required_string(input: &serde_json::Map<String, Value>, key: &str) -> AppResult<String> {
     let value = input
         .get(key)
@@ -8295,8 +6201,7 @@ fn optional_f64(input: &serde_json::Map<String, Value>, key: &str) -> Option<f64
         .get(key)
         .and_then(|value| match value {
             Value::Number(number) => number.as_f64(),
-            // `"inf"`/`"NaN"`/`"-inf"` all parse successfully into f64, so the
-            // finiteness check below is what keeps them out.
+            // `"inf"`/`"NaN"`/`"-inf"` all parse into f64, so the finiteness check below is what rejects them.
             Value::String(value) => value.parse().ok(),
             _ => None,
         })
@@ -8311,17 +6216,11 @@ fn optional_i32(input: &serde_json::Map<String, Value>, key: &str) -> Option<i32
     })
 }
 
-/// Widest value a `numeric(6, 1)` column accepts. Anything larger reaches the
-/// INSERT and comes back as a Postgres numeric-field-overflow — a 500 for what
-/// is really a client input error.
+/// Widest value a `numeric(6, 1)` column accepts; anything larger is a numeric-field-overflow at INSERT.
 pub(crate) const MAX_MACRO_GRAMS: f64 = 99_999.9;
 /// Widest value a `numeric(8, 2)` column accepts.
 pub(crate) const MAX_QUANTITY: f64 = 999_999.99;
-/// Calories land in an `integer` column, so a single row cannot overflow — but
-/// `sum(calories_kcal)` across a day could, and the shared barcode catalogue
-/// publishes `calories_per_100` to every account. Capping a single value at the
-/// same order of magnitude as [`MAX_MACRO_GRAMS`] keeps both honest; no real
-/// food comes close.
+/// A single row cannot overflow the `integer` column, but a day's `sum(calories_kcal)` can.
 pub(crate) const MAX_CALORIES_KCAL: i32 = 99_999;
 
 fn required_f64(input: &serde_json::Map<String, Value>, key: &str) -> AppResult<f64> {
@@ -8373,2868 +6272,4 @@ fn required_i32_lossy(input: &serde_json::Map<String, Value>, key: &str) -> i32 
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use sqlx::postgres::PgPoolOptions;
-    use std::{collections::HashSet, env, fs, path::PathBuf};
-
-    fn bad_request_message(result: AppResult<impl Sized>) -> String {
-        match result {
-            Err(AppError::BadRequest(message)) => message,
-            Err(error) => panic!("expected bad request, got {error:?}"),
-            Ok(_) => panic!("expected bad request, got ok"),
-        }
-    }
-
-    fn meal_payload(overrides: &[(&str, Value)]) -> serde_json::Map<String, Value> {
-        let mut payload = serde_json::Map::from_iter([
-            ("label".to_string(), json!("Oats")),
-            ("quantity".to_string(), json!(1.0)),
-            ("unit".to_string(), json!("serving")),
-            ("servingMultiplier".to_string(), json!(1.0)),
-            ("proteinG".to_string(), json!(10.0)),
-            ("carbsG".to_string(), json!(20.0)),
-            ("fatG".to_string(), json!(5.0)),
-            ("caloriesKcal".to_string(), json!(165)),
-        ]);
-        for (key, value) in overrides {
-            payload.insert((*key).to_string(), value.clone());
-        }
-        payload
-    }
-
-    fn food_payload(overrides: &[(&str, Value)]) -> serde_json::Map<String, Value> {
-        let mut payload = serde_json::Map::from_iter([
-            ("scope".to_string(), json!("personal")),
-            ("source".to_string(), json!("manual")),
-            ("name".to_string(), json!("Oats")),
-            ("defaultServingQuantity".to_string(), json!(1.0)),
-            ("defaultServingUnit".to_string(), json!("serving")),
-            ("proteinPer100".to_string(), json!(10.0)),
-            ("carbsPer100".to_string(), json!(20.0)),
-            ("fatPer100".to_string(), json!(5.0)),
-            ("caloriesPer100".to_string(), json!(165)),
-        ]);
-        for (key, value) in overrides {
-            payload.insert((*key).to_string(), value.clone());
-        }
-        payload
-    }
-
-    fn barcode_payload(barcode: &str) -> serde_json::Map<String, Value> {
-        serde_json::Map::from_iter([
-            ("barcode".to_string(), json!(barcode)),
-            ("name".to_string(), json!("Community Bar")),
-            ("brands".to_string(), json!("Macro Test")),
-            ("servingSizeG".to_string(), json!(42.0)),
-            ("proteinG".to_string(), json!(10.0)),
-            ("carbsG".to_string(), json!(20.0)),
-            ("fatG".to_string(), json!(5.0)),
-            ("caloriesKcal".to_string(), json!(165)),
-        ])
-    }
-
-    struct TestDb {
-        pool: PgPool,
-        schema: String,
-    }
-
-    impl TestDb {
-        async fn cleanup(&self) {
-            let _ = sqlx::query(&format!(
-                r#"DROP SCHEMA IF EXISTS "{}" CASCADE"#,
-                self.schema
-            ))
-            .execute(&self.pool)
-            .await;
-        }
-    }
-
-    async fn test_db() -> TestDb {
-        test_db_with_connections(1).await
-    }
-
-    /// Builds a throwaway schema for one integration test.
-    ///
-    /// Every failure here panics rather than being swallowed. Callers are gated
-    /// by `#[cfg_attr(not(has_test_database), ignore = ...)]`, so reaching this
-    /// function at all means a database URL was configured at build time — a
-    /// missing or unreachable database is then a real failure, not a reason to
-    /// report a test as passed (TEST-01).
-    async fn test_db_with_connections(max_connections: u32) -> TestDb {
-        let database_url = env::var("TEST_DATABASE_URL")
-            .or_else(|_| env::var("DATABASE_URL"))
-            .expect(
-                "TEST_DATABASE_URL or DATABASE_URL must be set for PostgreSQL integration tests",
-            );
-        let schema = format!("backend_test_{}", Uuid::new_v4().simple());
-        let setup_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&database_url)
-            .await
-            .expect("test database should accept a connection");
-        sqlx::query(&format!(r#"CREATE SCHEMA "{}""#, schema))
-            .execute(&setup_pool)
-            .await
-            .expect("test schema should be created");
-        setup_pool.close().await;
-
-        let search_path_sql = format!(r#"SET search_path TO "{}""#, schema);
-        let pool = PgPoolOptions::new()
-            .max_connections(max_connections)
-            .after_connect(move |connection, _metadata| {
-                let search_path_sql = search_path_sql.clone();
-                Box::pin(async move {
-                    sqlx::query(&search_path_sql).execute(connection).await?;
-                    Ok(())
-                })
-            })
-            .connect(&database_url)
-            .await
-            .expect("test database pool should connect");
-        sqlx::raw_sql(SCHEMA_SQL)
-            .execute(&pool)
-            .await
-            .expect("test schema should be created from SCHEMA_SQL");
-        TestDb { pool, schema }
-    }
-
-    /// Rollback-injection tests (`save_barcode_food_product_rolls_back_*`)
-    /// assert that a forced mid-transaction failure left neither the
-    /// product row nor any revision row behind. Both fault points check the
-    /// same postcondition, so it lives here once.
-    async fn assert_no_barcode_product_or_revision_rows(pool: &PgPool, barcode: &str) {
-        let product_count: i64 =
-            sqlx::query("SELECT count(*)::bigint AS count FROM food_products WHERE barcode = $1")
-                .bind(barcode)
-                .fetch_one(pool)
-                .await
-                .expect("product count should query")
-                .try_get("count")
-                .unwrap();
-        let revision_count: i64 =
-            sqlx::query("SELECT count(*)::bigint AS count FROM food_product_revisions")
-                .fetch_one(pool)
-                .await
-                .expect("revision count should query")
-                .try_get("count")
-                .unwrap();
-        assert_eq!(product_count, 0);
-        assert_eq!(revision_count, 0);
-    }
-
-    /// Pulls the `id` field out of every element of a `*_json` search
-    /// result array, in order. Several search tests assert on nothing but
-    /// this ordered id list.
-    fn search_result_ids(results: &Value) -> Vec<&str> {
-        results
-            .as_array()
-            .expect("result should be array")
-            .iter()
-            .map(|item| item.get("id").and_then(Value::as_str).unwrap())
-            .collect::<Vec<_>>()
-    }
-
-    async fn insert_test_user(pool: &PgPool) -> Uuid {
-        let user_id = Uuid::new_v4();
-        sqlx::query(
-            r#"
-            INSERT INTO users (id, shoo_pairwise_sub, email, display_name)
-            VALUES ($1, $2, $3, 'Test User')
-            "#,
-        )
-        .bind(user_id)
-        .bind(format!("test-sub-{user_id}"))
-        .bind(format!("{user_id}@example.test"))
-        .execute(pool)
-        .await
-        .expect("test user should insert");
-        user_id
-    }
-
-    async fn insert_test_user_with_email(pool: &PgPool, email: &str) -> Uuid {
-        let user_id = Uuid::new_v4();
-        sqlx::query(
-            r#"
-            INSERT INTO users (id, shoo_pairwise_sub, email, display_name)
-            VALUES ($1, $2, $3, 'Test User')
-            "#,
-        )
-        .bind(user_id)
-        .bind(format!("test-sub-{user_id}"))
-        .bind(email)
-        .execute(pool)
-        .await
-        .expect("test user should insert");
-        user_id
-    }
-
-    async fn insert_test_admin_barcode_product(
-        pool: &PgPool,
-        barcode: &str,
-        name: &str,
-        brand: &str,
-        submitted_by_user_id: Option<Uuid>,
-        deleted: bool,
-    ) -> Uuid {
-        let product_id = Uuid::new_v4();
-        sqlx::query(
-            r#"
-            INSERT INTO food_products (
-              id, owner_user_id, scope, source, barcode, name, brand,
-              default_serving_quantity, default_serving_unit,
-              protein_per_100, carbs_per_100, fat_per_100, calories_per_100,
-              submitted_by_user_id, deleted_at
-            )
-            VALUES (
-              $1, NULL, 'global', 'barcode', $2, $3, $4,
-              100, 'g', 10, 20, 5, 165,
-              $5, CASE WHEN $6 THEN now() ELSE NULL END
-            )
-            "#,
-        )
-        .bind(product_id)
-        .bind(barcode)
-        .bind(name)
-        .bind(brand)
-        .bind(submitted_by_user_id)
-        .bind(deleted)
-        .execute(pool)
-        .await
-        .expect("test barcode product should insert");
-        product_id
-    }
-
-    async fn insert_test_food_product(
-        pool: &PgPool,
-        user_id: Option<Uuid>,
-        name: &str,
-        brand: &str,
-        corrected_from_product_id: Option<Uuid>,
-    ) -> Uuid {
-        let product_id = Uuid::new_v4();
-        sqlx::query(
-            r#"
-            INSERT INTO food_products (
-              id, owner_user_id, scope, source, name, brand,
-              default_serving_quantity, default_serving_unit,
-              protein_per_100, carbs_per_100, fat_per_100, calories_per_100,
-              corrected_from_product_id
-            )
-            VALUES (
-              $1, $2, CASE WHEN $2::uuid IS NULL THEN 'global' ELSE 'personal' END, 'manual', $3, $4,
-              100, 'g', 10, 20, 5, 165, $5
-            )
-            "#,
-        )
-        .bind(product_id)
-        .bind(user_id)
-        .bind(name)
-        .bind(brand)
-        .bind(corrected_from_product_id)
-        .execute(pool)
-        .await
-        .expect("test food product should insert");
-        product_id
-    }
-
-    async fn insert_test_meal_entry(
-        pool: &PgPool,
-        user_id: Uuid,
-        entry_date: &str,
-        status: &str,
-        label: &str,
-        sort_order: i32,
-        macros: (f64, f64, f64, i32),
-    ) -> Uuid {
-        let entry_id = Uuid::new_v4();
-        sqlx::query(
-            r#"
-            INSERT INTO meal_entries (
-              id, user_id, entry_date, status, label, sort_order,
-              quantity, unit, serving_multiplier,
-              protein_g, carbs_g, fat_g, calories_kcal
-            )
-            VALUES ($1, $2, $3::date, $4, $5, $6, 1, 'serving', 1, $7, $8, $9, $10)
-            "#,
-        )
-        .bind(entry_id)
-        .bind(user_id)
-        .bind(entry_date)
-        .bind(status)
-        .bind(label)
-        .bind(sort_order)
-        .bind(macros.0)
-        .bind(macros.1)
-        .bind(macros.2)
-        .bind(macros.3)
-        .execute(pool)
-        .await
-        .expect("test meal entry should insert");
-        entry_id
-    }
-
-    /// API-07: `completeOnboardingSetup` is the third write path into
-    /// `meal_templates.type` and the one that skipped `normalize_template_type`.
-    /// Migration 0016 adds a CHECK on that column, so an unvalidated value would
-    /// come back as a raw 23514 -> 500 rather than a 400, and nothing else
-    /// covered this path.
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    #[tokio::test]
-    async fn onboarding_starter_template_rejects_an_out_of_union_type() {
-        let test_db = test_db().await;
-        let user_id = insert_test_user(&test_db.pool).await;
-
-        let error = rpc_json(
-            &test_db.pool,
-            "completeOnboardingSetup",
-            serde_json::json!({
-                "userId": user_id,
-                "input": {
-                    "goals": {
-                        "proteinG": 150,
-                        "carbsG": 200,
-                        "fatG": 70,
-                        "caloriesKcal": 2030
-                    },
-                    "starterTemplate": {
-                        "type": "not-a-real-type",
-                        "label": "Starter",
-                        "items": [{
-                            "label": "Oats",
-                            "quantity": 100,
-                            "unit": "g",
-                            "proteinG": 10,
-                            "carbsG": 60,
-                            "fatG": 7,
-                            "caloriesKcal": 380
-                        }]
-                    }
-                }
-            }),
-        )
-        .await
-        .expect_err("an out-of-union template type must be rejected");
-
-        assert!(
-            matches!(error, AppError::BadRequest(_)),
-            "expected a 400-shaped BadRequest, got {error:?}"
-        );
-
-        let templates: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM meal_templates WHERE user_id = $1")
-                .bind(user_id)
-                .fetch_one(&test_db.pool)
-                .await
-                .expect("template count should query");
-        assert_eq!(templates, 0, "the rejected template must not be persisted");
-    }
-
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    #[tokio::test]
-    async fn ensure_default_meal_groups_creates_all_groups_idempotently() {
-        let test_db = test_db().await;
-        let user_id = insert_test_user(&test_db.pool).await;
-        let legacy_breakfast_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO meal_groups (id, user_id, label, sort_order, is_default) VALUES ($1, $2, 'Breakfast', 0, true)",
-        )
-        .bind(legacy_breakfast_id)
-        .bind(user_id)
-        .execute(&test_db.pool)
-        .await
-        .expect("legacy default meal group should insert");
-
-        ensure_default_meal_groups(&test_db.pool, user_id)
-            .await
-            .expect("default meal groups should be created");
-        ensure_default_meal_groups(&test_db.pool, user_id)
-            .await
-            .expect("default meal group creation should be idempotent");
-
-        let groups = sqlx::query(
-            r#"
-            SELECT label, sort_order, is_default
-            FROM meal_groups
-            WHERE user_id = $1
-            ORDER BY sort_order
-            "#,
-        )
-        .bind(user_id)
-        .fetch_all(&test_db.pool)
-        .await
-        .expect("default meal groups should load");
-        let actual = groups
-            .iter()
-            .map(|row| {
-                (
-                    row.try_get::<String, _>("label").unwrap(),
-                    row.try_get::<i32, _>("sort_order").unwrap(),
-                    row.try_get::<bool, _>("is_default").unwrap(),
-                )
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            actual,
-            vec![
-                ("Breakfast".to_string(), 0, true),
-                ("Lunch".to_string(), 1, true),
-                ("Dinner".to_string(), 2, true),
-                ("Snack".to_string(), 3, true),
-            ]
-        );
-        let breakfast_id: Uuid = sqlx::query_scalar(
-            "SELECT id FROM meal_groups WHERE user_id = $1 AND label = 'Breakfast' AND deleted_at IS NULL",
-        )
-        .bind(user_id)
-        .fetch_one(&test_db.pool)
-        .await
-        .expect("breakfast group should load");
-        assert_eq!(breakfast_id, legacy_breakfast_id);
-
-        let deterministic_breakfast_id = Uuid::new_v5(
-            &Uuid::NAMESPACE_URL,
-            format!("macro-tracker:meal-group:{user_id}:Breakfast").as_bytes(),
-        );
-        sqlx::query(
-            "INSERT INTO meal_groups (id, user_id, label, sort_order, is_default, deleted_at) VALUES ($1, $2, 'Breakfast', 0, true, now())",
-        )
-        .bind(deterministic_breakfast_id)
-        .bind(user_id)
-        .execute(&test_db.pool)
-        .await
-        .expect("soft-deleted deterministic breakfast should insert");
-        ensure_default_meal_groups(&test_db.pool, user_id)
-            .await
-            .expect("the active legacy default should remain preferred");
-        let active_breakfast_id: Uuid = sqlx::query_scalar(
-            "SELECT id FROM meal_groups WHERE user_id = $1 AND label = 'Breakfast' AND deleted_at IS NULL AND is_default = true",
-        )
-        .bind(user_id)
-        .fetch_one(&test_db.pool)
-        .await
-        .expect("active breakfast group should load");
-        assert_eq!(active_breakfast_id, legacy_breakfast_id);
-        let deterministic_deleted_at: Option<DateTime<Utc>> =
-            sqlx::query_scalar("SELECT deleted_at FROM meal_groups WHERE id = $1")
-                .bind(deterministic_breakfast_id)
-                .fetch_one(&test_db.pool)
-                .await
-                .expect("deterministic breakfast group should load");
-        assert!(deterministic_deleted_at.is_some());
-        test_db.cleanup().await;
-    }
-
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    #[tokio::test]
-    async fn ensure_default_meal_groups_reactivates_a_soft_deleted_default() {
-        let test_db = test_db().await;
-        let user_id = insert_test_user(&test_db.pool).await;
-        ensure_default_meal_groups(&test_db.pool, user_id)
-            .await
-            .expect("default meal groups should be created");
-        let lunch_id = Uuid::new_v5(
-            &Uuid::NAMESPACE_URL,
-            format!("macro-tracker:meal-group:{user_id}:Lunch").as_bytes(),
-        );
-        sqlx::query("UPDATE meal_groups SET deleted_at = now() WHERE id = $1")
-            .bind(lunch_id)
-            .execute(&test_db.pool)
-            .await
-            .expect("default meal group should be soft-deleted");
-
-        ensure_default_meal_groups(&test_db.pool, user_id)
-            .await
-            .expect("soft-deleted default meal group should be restored");
-
-        let active_groups: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM meal_groups WHERE user_id = $1 AND deleted_at IS NULL AND is_default = true",
-        )
-        .bind(user_id)
-        .fetch_one(&test_db.pool)
-        .await
-        .expect("active default meal groups should be counted");
-        assert_eq!(active_groups, 4);
-        let restored_lunch_id: Uuid = sqlx::query_scalar(
-            "SELECT id FROM meal_groups WHERE user_id = $1 AND label = 'Lunch' AND deleted_at IS NULL AND is_default = true",
-        )
-        .bind(user_id)
-        .fetch_one(&test_db.pool)
-        .await
-        .expect("restored lunch group should load");
-        assert_eq!(restored_lunch_id, lunch_id);
-        test_db.cleanup().await;
-    }
-
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    #[tokio::test]
-    async fn apply_day_template_resolves_exact_and_unambiguous_meal_group_labels() {
-        let test_db = test_db().await;
-        let user_id = insert_test_user(&test_db.pool).await;
-        ensure_default_meal_groups(&test_db.pool, user_id)
-            .await
-            .expect("default meal groups should exist");
-        let lowercase_dinner_id = Uuid::new_v4();
-        sqlx::query(
-            "INSERT INTO meal_groups (id, user_id, label, sort_order) VALUES ($1, $2, 'dinner', 4)",
-        )
-        .bind(lowercase_dinner_id)
-        .bind(user_id)
-        .execute(&test_db.pool)
-        .await
-        .expect("case-colliding meal group should insert");
-        let group_rows = sqlx::query(
-            "SELECT id, label FROM meal_groups WHERE user_id = $1 AND label IN ('Breakfast', 'Dinner')",
-        )
-        .bind(user_id)
-        .fetch_all(&test_db.pool)
-        .await
-        .expect("meal groups should load");
-        let group_ids = group_rows
-            .into_iter()
-            .map(|row| {
-                (
-                    row.try_get::<String, _>("label").unwrap(),
-                    row.try_get::<Uuid, _>("id").unwrap(),
-                )
-            })
-            .collect::<std::collections::HashMap<_, _>>();
-
-        let mut breakfast = meal_payload(&[("label", json!("Oats"))]);
-        breakfast.insert("mealGroupLabel".to_string(), json!("breakfast"));
-        let mut dinner = meal_payload(&[("label", json!("Pasta"))]);
-        dinner.insert("mealGroupLabel".to_string(), json!("Dinner"));
-        let mut lowercase_dinner = meal_payload(&[("label", json!("Soup"))]);
-        lowercase_dinner.insert("mealGroupLabel".to_string(), json!("dinner"));
-        let mut ambiguous_dinner = meal_payload(&[("label", json!("Salad"))]);
-        ambiguous_dinner.insert("mealGroupLabel".to_string(), json!("DINNER"));
-        let template = create_template_json(
-            &test_db.pool,
-            user_id,
-            &serde_json::Map::from_iter([
-                ("type".to_string(), json!("day")),
-                ("label".to_string(), json!("Grouped day")),
-                (
-                    "items".to_string(),
-                    Value::Array(vec![
-                        Value::Object(breakfast),
-                        Value::Object(dinner),
-                        Value::Object(lowercase_dinner),
-                        Value::Object(ambiguous_dinner),
-                    ]),
-                ),
-            ]),
-        )
-        .await
-        .expect("day template should be created");
-        let template_id = Uuid::parse_str(template["id"].as_str().unwrap()).unwrap();
-
-        let created = apply_template_json(
-            &test_db.pool,
-            user_id,
-            &serde_json::Map::from_iter([
-                ("templateId".to_string(), json!(template_id)),
-                ("date".to_string(), json!("2026-07-12")),
-            ]),
-            None,
-        )
-        .await
-        .expect("day template should apply");
-        let entries = created
-            .as_array()
-            .expect("created entries should be an array");
-
-        assert_eq!(entries.len(), 4);
-        assert_eq!(entries[0]["mealGroupId"], json!(group_ids["Breakfast"]));
-        assert_eq!(entries[1]["mealGroupId"], json!(group_ids["Dinner"]));
-        assert_eq!(entries[2]["mealGroupId"], json!(lowercase_dinner_id));
-        assert_eq!(entries[3]["mealGroupId"], Value::Null);
-        test_db.cleanup().await;
-    }
-
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    #[tokio::test]
-    async fn list_admin_barcode_products_applies_catalogue_filters_to_items_and_totals() {
-        let test_db = test_db().await;
-        let alice_id =
-            insert_test_user_with_email(&test_db.pool, "alice.submitter@example.test").await;
-        let bob_id = insert_test_user_with_email(&test_db.pool, "bob.submitter@example.test").await;
-        let barcode_match_id = insert_test_admin_barcode_product(
-            &test_db.pool,
-            "991-filter-barcode",
-            "Barcode Match",
-            "Macro Labs",
-            Some(alice_id),
-            false,
-        )
-        .await;
-        let name_match_id = insert_test_admin_barcode_product(
-            &test_db.pool,
-            "992-filter-name",
-            "Needle Crunch",
-            "Other Brand",
-            Some(alice_id),
-            true,
-        )
-        .await;
-        let brand_match_id = insert_test_admin_barcode_product(
-            &test_db.pool,
-            "993-filter-brand",
-            "Plain Bar",
-            "Needle Brand",
-            Some(bob_id),
-            false,
-        )
-        .await;
-        insert_test_admin_barcode_product(
-            &test_db.pool,
-            "994-filter-other",
-            "Plain Cereal",
-            "Other Brand",
-            None,
-            false,
-        )
-        .await;
-
-        let barcode_result = list_admin_barcode_products_json(
-            &test_db.pool,
-            &serde_json::Map::from_iter([
-                ("q".to_string(), json!("991-filter-barcode")),
-                ("pageSize".to_string(), json!(1)),
-            ]),
-            false,
-        )
-        .await
-        .expect("barcode query should filter");
-        assert_eq!(barcode_result["pagination"]["totalItems"], json!(1));
-        assert_eq!(barcode_result["items"][0]["id"], json!(barcode_match_id));
-
-        let name_result = list_admin_barcode_products_json(
-            &test_db.pool,
-            &serde_json::Map::from_iter([("q".to_string(), json!("Needle Crunch"))]),
-            false,
-        )
-        .await
-        .expect("name query should filter");
-        assert_eq!(name_result["pagination"]["totalItems"], json!(1));
-        assert_eq!(name_result["items"][0]["id"], json!(name_match_id));
-
-        let brand_result = list_admin_barcode_products_json(
-            &test_db.pool,
-            &serde_json::Map::from_iter([("q".to_string(), json!("Needle Brand"))]),
-            false,
-        )
-        .await
-        .expect("brand query should filter");
-        assert_eq!(brand_result["pagination"]["totalItems"], json!(1));
-        assert_eq!(brand_result["items"][0]["id"], json!(brand_match_id));
-
-        let active_result = list_admin_barcode_products_json(
-            &test_db.pool,
-            &serde_json::Map::from_iter([
-                ("status".to_string(), json!("active")),
-                ("pageSize".to_string(), json!(1)),
-            ]),
-            false,
-        )
-        .await
-        .expect("active status should filter");
-        assert_eq!(active_result["pagination"]["totalItems"], json!(3));
-        assert_eq!(active_result["pagination"]["totalPages"], json!(3));
-
-        let deleted_result = list_admin_barcode_products_json(
-            &test_db.pool,
-            &serde_json::Map::from_iter([("status".to_string(), json!("deleted"))]),
-            false,
-        )
-        .await
-        .expect("deleted status should filter");
-        assert_eq!(deleted_result["pagination"]["totalItems"], json!(1));
-        assert_eq!(deleted_result["items"][0]["id"], json!(name_match_id));
-
-        let submitter_result = list_admin_barcode_products_json(
-            &test_db.pool,
-            &serde_json::Map::from_iter([
-                ("submitter".to_string(), json!("alice.submitter")),
-                ("pageSize".to_string(), json!(1)),
-            ]),
-            false,
-        )
-        .await
-        .expect("submitter should filter");
-        assert_eq!(submitter_result["pagination"]["totalItems"], json!(2));
-        assert_eq!(submitter_result["pagination"]["totalPages"], json!(2));
-
-        test_db.cleanup().await;
-    }
-
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    #[tokio::test]
-    async fn search_food_products_blank_query_returns_empty_array() {
-        let test_db = test_db().await;
-        let user_id = insert_test_user(&test_db.pool).await;
-        insert_test_food_product(
-            &test_db.pool,
-            Some(user_id),
-            "Blank Match",
-            "Macro Test",
-            None,
-        )
-        .await;
-
-        let results = search_food_products_json(&test_db.pool, user_id, "   ")
-            .await
-            .expect("product search should succeed");
-
-        assert!(
-            results
-                .as_array()
-                .expect("search result should be array")
-                .is_empty()
-        );
-        test_db.cleanup().await;
-    }
-
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    #[tokio::test]
-    async fn search_food_products_matches_each_word_independently() {
-        let test_db = test_db().await;
-        let user_id = insert_test_user(&test_db.pool).await;
-        let product_id = insert_test_food_product(
-            &test_db.pool,
-            Some(user_id),
-            "Plain Yogurt",
-            "Greek House",
-            None,
-        )
-        .await;
-        let unrelated_id =
-            insert_test_food_product(&test_db.pool, Some(user_id), "Apple", "", None).await;
-
-        let results = search_food_products_json(&test_db.pool, user_id, "greek yogurt")
-            .await
-            .expect("product search should succeed");
-        let product_id_value = product_id.to_string();
-        let ids = results
-            .as_array()
-            .expect("search result should be array")
-            .iter()
-            .filter_map(|item| item.get("id").and_then(Value::as_str))
-            .collect::<Vec<_>>();
-
-        assert!(ids.contains(&product_id_value.as_str()));
-        assert!(!ids.contains(&unrelated_id.to_string().as_str()));
-        test_db.cleanup().await;
-    }
-
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    #[tokio::test]
-    async fn search_food_products_prioritizes_corrected_and_personal_products() {
-        let test_db = test_db().await;
-        let user_id = insert_test_user(&test_db.pool).await;
-        let global_id =
-            insert_test_food_product(&test_db.pool, None, "Alpha Yogurt", "Macro", None).await;
-        let personal_id =
-            insert_test_food_product(&test_db.pool, Some(user_id), "Beta Yogurt", "Macro", None)
-                .await;
-        let corrected_id = insert_test_food_product(
-            &test_db.pool,
-            Some(user_id),
-            "Gamma Yogurt",
-            "Macro",
-            Some(global_id),
-        )
-        .await;
-
-        let results = search_food_products_json(&test_db.pool, user_id, "yogurt")
-            .await
-            .expect("product search should succeed");
-        let ids = results
-            .as_array()
-            .expect("search result should be array")
-            .iter()
-            .map(|item| {
-                Uuid::parse_str(item.get("id").and_then(Value::as_str).unwrap())
-                    .expect("result id should be uuid")
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(&ids[..3], &[corrected_id, personal_id, global_id]);
-        test_db.cleanup().await;
-    }
-
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    #[tokio::test]
-    async fn admin_user_detail_preserves_recent_activity_contracts() {
-        let test_db = test_db().await;
-        let user_id = insert_test_user(&test_db.pool).await;
-        let last_meal_id = insert_test_meal_entry(
-            &test_db.pool,
-            user_id,
-            "2026-07-10",
-            "planned",
-            "Tomorrow's lunch",
-            2,
-            (20.0, 30.0, 10.0, 290),
-        )
-        .await;
-        let first_meal_id = insert_test_meal_entry(
-            &test_db.pool,
-            user_id,
-            "2026-07-10",
-            "eaten",
-            "Breakfast",
-            0,
-            (25.0, 40.0, 12.0, 368),
-        )
-        .await;
-        let second_meal_id = insert_test_meal_entry(
-            &test_db.pool,
-            user_id,
-            "2026-07-10",
-            "eaten",
-            "Lunch",
-            1,
-            (30.0, 45.0, 15.0, 435),
-        )
-        .await;
-        sqlx::query(
-            r#"
-            UPDATE meal_entries
-            SET created_at = CASE id
-              WHEN $1 THEN '2026-07-10 08:00:00+00'::timestamptz
-              WHEN $2 THEN '2026-07-10 09:00:00+00'::timestamptz
-              WHEN $3 THEN '2026-07-10 10:00:00+00'::timestamptz
-            END
-            WHERE id IN ($1, $2, $3)
-            "#,
-        )
-        .bind(last_meal_id)
-        .bind(first_meal_id)
-        .bind(second_meal_id)
-        .execute(&test_db.pool)
-        .await
-        .expect("test meal creation order should update");
-        for day in 1..=11 {
-            sqlx::query(
-                r#"
-                INSERT INTO weight_entries (id, user_id, entry_date, weight_kg)
-                VALUES ($1, $2, $3::date, $4)
-                "#,
-            )
-            .bind(Uuid::new_v4())
-            .bind(user_id)
-            .bind(format!("2026-06-{day:02}"))
-            .bind(80.0 + f64::from(day) / 10.0)
-            .execute(&test_db.pool)
-            .await
-            .expect("test weight should insert");
-        }
-        let manual_id =
-            insert_test_food_product(&test_db.pool, Some(user_id), "Manual food", "", None).await;
-        let barcode_id = insert_test_food_product(
-            &test_db.pool,
-            None,
-            "Submitted barcode food",
-            "Test brand",
-            None,
-        )
-        .await;
-        sqlx::query(
-            "UPDATE food_products SET source = 'barcode', barcode = $2, submitted_by_user_id = $1 WHERE id = $3",
-        )
-        .bind(user_id)
-        .bind("8712345678901")
-        .bind(barcode_id)
-        .execute(&test_db.pool)
-        .await
-        .expect("test barcode product should update");
-
-        let detail = get_admin_user_detail_json(&test_db.pool, user_id)
-            .await
-            .expect("admin user detail should load");
-        let recent_meal_ids = detail["recentMeals"]
-            .as_array()
-            .expect("recent meals should be an array")
-            .iter()
-            .filter_map(|item| item["id"].as_str())
-            .collect::<Vec<_>>();
-        let recent_barcode_ids = detail["recentBarcodeSubmissions"]
-            .as_array()
-            .expect("recent barcode submissions should be an array")
-            .iter()
-            .filter_map(|item| item["id"].as_str())
-            .collect::<Vec<_>>();
-        let recent_weight_dates = detail["recentWeights"]
-            .as_array()
-            .expect("recent weights should be an array")
-            .iter()
-            .filter_map(|item| item["date"].as_str())
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            recent_meal_ids,
-            vec![
-                first_meal_id.to_string(),
-                second_meal_id.to_string(),
-                last_meal_id.to_string(),
-            ]
-        );
-        assert_eq!(recent_weight_dates.len(), 10);
-        assert_eq!(recent_weight_dates.first(), Some(&"2026-06-11"));
-        assert_eq!(recent_weight_dates.last(), Some(&"2026-06-02"));
-        assert!(!recent_weight_dates.contains(&"2026-06-01"));
-        assert_eq!(recent_barcode_ids, vec![barcode_id.to_string()]);
-        assert!(!recent_barcode_ids.contains(&manual_id.to_string().as_str()));
-        test_db.cleanup().await;
-    }
-
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    #[tokio::test]
-    async fn search_meal_entries_excludes_planned_and_skipped_entries() {
-        let test_db = test_db().await;
-        let user_id = insert_test_user(&test_db.pool).await;
-        let eaten_id = insert_test_meal_entry(
-            &test_db.pool,
-            user_id,
-            "2026-07-03",
-            "eaten",
-            "Protein Bowl",
-            1,
-            (30.0, 40.0, 10.0, 370),
-        )
-        .await;
-        insert_test_meal_entry(
-            &test_db.pool,
-            user_id,
-            "2026-07-04",
-            "planned",
-            "Protein Bowl Planned",
-            0,
-            (30.0, 40.0, 10.0, 370),
-        )
-        .await;
-        insert_test_meal_entry(
-            &test_db.pool,
-            user_id,
-            "2026-07-05",
-            "skipped",
-            "Protein Bowl Skipped",
-            0,
-            (30.0, 40.0, 10.0, 370),
-        )
-        .await;
-
-        let results = search_meal_entries_json(&test_db.pool, user_id, "protein bowl")
-            .await
-            .expect("meal search should succeed");
-        let ids = search_result_ids(&results);
-
-        assert_eq!(ids, vec![eaten_id.to_string()]);
-        test_db.cleanup().await;
-    }
-
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    #[tokio::test]
-    async fn search_meal_entries_deduplicates_equivalent_historical_foods() {
-        let test_db = test_db().await;
-        let user_id = insert_test_user(&test_db.pool).await;
-        let newest_id = insert_test_meal_entry(
-            &test_db.pool,
-            user_id,
-            "2026-07-06",
-            "eaten",
-            "Turkey Chili",
-            2,
-            (35.0, 45.0, 12.0, 428),
-        )
-        .await;
-        insert_test_meal_entry(
-            &test_db.pool,
-            user_id,
-            "2026-07-01",
-            "eaten",
-            "turkey chili",
-            0,
-            (35.0, 45.0, 12.0, 428),
-        )
-        .await;
-        let distinct_id = insert_test_meal_entry(
-            &test_db.pool,
-            user_id,
-            "2026-07-02",
-            "eaten",
-            "Turkey Chili",
-            1,
-            (36.0, 45.0, 12.0, 432),
-        )
-        .await;
-
-        let results = search_meal_entries_json(&test_db.pool, user_id, "turkey chili")
-            .await
-            .expect("meal search should succeed");
-        let ids = search_result_ids(&results);
-
-        assert_eq!(ids, vec![newest_id.to_string(), distinct_id.to_string()]);
-        test_db.cleanup().await;
-    }
-
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    #[tokio::test]
-    async fn search_meal_entries_hides_soft_deleted_product_id_but_keeps_macro_snapshot() {
-        let test_db = test_db().await;
-        let user_id = insert_test_user(&test_db.pool).await;
-        let product_id =
-            insert_test_food_product(&test_db.pool, Some(user_id), "Deleted Protein", "", None)
-                .await;
-        let entry_id = insert_test_meal_entry(
-            &test_db.pool,
-            user_id,
-            "2026-07-07",
-            "eaten",
-            "Deleted Protein Bowl",
-            0,
-            (44.0, 22.0, 11.0, 363),
-        )
-        .await;
-        sqlx::query("UPDATE meal_entries SET product_id = $1 WHERE id = $2")
-            .bind(product_id)
-            .bind(entry_id)
-            .execute(&test_db.pool)
-            .await
-            .expect("meal product link should update");
-
-        let visible_results = search_meal_entries_json(&test_db.pool, user_id, "deleted protein")
-            .await
-            .expect("meal search should succeed");
-        assert_eq!(visible_results[0]["productId"], json!(product_id));
-        assert_eq!(visible_results[0]["sourceLabel"], json!("Deleted Protein"));
-
-        sqlx::query("UPDATE food_products SET deleted_at = now() WHERE id = $1")
-            .bind(product_id)
-            .execute(&test_db.pool)
-            .await
-            .expect("product should soft-delete");
-
-        let deleted_results = search_meal_entries_json(&test_db.pool, user_id, "deleted protein")
-            .await
-            .expect("meal search should still succeed");
-        assert_eq!(deleted_results[0]["id"], json!(entry_id));
-        assert_eq!(deleted_results[0]["productId"], Value::Null);
-        assert_eq!(deleted_results[0]["sourceLabel"], Value::Null);
-        assert_eq!(deleted_results[0]["proteinG"].as_f64(), Some(44.0));
-        assert_eq!(deleted_results[0]["carbsG"].as_f64(), Some(22.0));
-        assert_eq!(deleted_results[0]["fatG"].as_f64(), Some(11.0));
-        assert_eq!(deleted_results[0]["caloriesKcal"], json!(363));
-        test_db.cleanup().await;
-    }
-
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    #[tokio::test]
-    async fn get_recent_quick_add_candidates_defaults_to_thirty_when_limit_is_omitted() {
-        let test_db = test_db().await;
-        let user_id = insert_test_user(&test_db.pool).await;
-        for index in 0..31 {
-            insert_test_meal_entry(
-                &test_db.pool,
-                user_id,
-                &format!("2026-07-{:02}", index + 1),
-                "eaten",
-                &format!("Quick Add Candidate {index}"),
-                index,
-                (10.0 + f64::from(index), 20.0, 5.0, 165 + index),
-            )
-            .await;
-        }
-
-        let results = rpc_json(
-            &test_db.pool,
-            "getRecentQuickAddCandidates",
-            json!({ "userId": user_id }),
-        )
-        .await
-        .expect("quick-add candidates should load");
-
-        assert_eq!(
-            results
-                .as_array()
-                .expect("quick-add result should be array")
-                .len(),
-            30
-        );
-
-        sqlx::query(
-            r#"
-            WITH inserted_templates AS (
-              INSERT INTO meal_templates (id, user_id, type, label, updated_at)
-              SELECT
-                md5('quick-template-' || gs::text || $1::text)::uuid,
-                $1,
-                'meal',
-                'Quick template ' || gs,
-                now() - (gs || ' seconds')::interval
-              FROM generate_series(1, 31) AS gs
-              RETURNING id, label
-            )
-            INSERT INTO meal_template_items (
-              id, template_id, sort_order, label, quantity, unit, serving_multiplier,
-              protein_g, carbs_g, fat_g, calories_kcal
-            )
-            SELECT
-              md5('quick-item-' || id::text)::uuid,
-              id,
-              0,
-              label,
-              1,
-              'serving',
-              1,
-              10,
-              20,
-              5,
-              165
-            FROM inserted_templates
-            "#,
-        )
-        .bind(user_id)
-        .execute(&test_db.pool)
-        .await
-        .expect("quick-add templates should insert");
-
-        let dashboard_results = rpc_json(
-            &test_db.pool,
-            "getDashboardQuickAddCandidates",
-            json!({ "userId": user_id }),
-        )
-        .await
-        .expect("dashboard quick-add candidates should load");
-        let dashboard_results = dashboard_results
-            .as_array()
-            .expect("dashboard quick-add result should be array");
-        assert_eq!(dashboard_results.len(), 60);
-        assert_eq!(
-            dashboard_results
-                .iter()
-                .filter(|candidate| candidate["source"] == "preset")
-                .count(),
-            30
-        );
-        assert_eq!(
-            dashboard_results
-                .iter()
-                .filter(|candidate| candidate["source"] == "recent")
-                .count(),
-            30
-        );
-        test_db.cleanup().await;
-    }
-
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    #[tokio::test]
-    async fn leaderboard_handles_empty_grace_gaps_ties_and_large_history() {
-        let test_db = test_db().await;
-
-        let empty_user = insert_test_user(&test_db.pool).await;
-        let empty = leaderboard_json(&test_db.pool, empty_user, "2026-07-06")
-            .await
-            .expect("empty leaderboard should load");
-        assert_eq!(empty["currentStreak"], 0);
-        assert_eq!(empty["longestStreak"], 0);
-        assert_eq!(empty["totalDaysTracked"], 0);
-        assert_eq!(empty["bestCalorieDay"], Value::Null);
-
-        let streak_user = insert_test_user(&test_db.pool).await;
-        for (index, date) in ["2026-07-01", "2026-07-02", "2026-07-04", "2026-07-05"]
-            .iter()
-            .enumerate()
-        {
-            insert_test_meal_entry(
-                &test_db.pool,
-                streak_user,
-                date,
-                "eaten",
-                "Tied day",
-                index as i32,
-                (10.0, 20.0, 5.0, 165),
-            )
-            .await;
-        }
-        let yesterday = leaderboard_json(&test_db.pool, streak_user, "2026-07-06")
-            .await
-            .expect("yesterday grace leaderboard should load");
-        assert_eq!(yesterday["currentStreak"], 2);
-        assert_eq!(yesterday["longestStreak"], 2);
-        assert_eq!(yesterday["totalDaysTracked"], 4);
-        assert_eq!(yesterday["bestCalorieDay"]["date"], "2026-07-01");
-        assert_eq!(yesterday["bestProteinDay"]["date"], "2026-07-01");
-
-        insert_test_meal_entry(
-            &test_db.pool,
-            streak_user,
-            "2026-07-06",
-            "eaten",
-            "Today",
-            0,
-            (10.0, 20.0, 5.0, 165),
-        )
-        .await;
-        let today = leaderboard_json(&test_db.pool, streak_user, "2026-07-06")
-            .await
-            .expect("today leaderboard should load");
-        assert_eq!(today["currentStreak"], 3);
-        assert_eq!(today["longestStreak"], 3);
-
-        insert_test_meal_entry(
-            &test_db.pool,
-            streak_user,
-            "2026-07-07",
-            "eaten",
-            "Future",
-            0,
-            (10.0, 20.0, 5.0, 165),
-        )
-        .await;
-        let future = leaderboard_json(&test_db.pool, streak_user, "2026-07-06")
-            .await
-            .expect("leaderboard with a future consecutive entry should load");
-        assert_eq!(future["currentStreak"], 3);
-        assert_eq!(future["longestStreak"], 4);
-
-        let large_user = insert_test_user(&test_db.pool).await;
-        sqlx::query(
-            r#"
-            INSERT INTO meal_entries (
-              id, user_id, entry_date, status, label, sort_order,
-              quantity, unit, serving_multiplier,
-              protein_g, carbs_g, fat_g, calories_kcal
-            )
-            SELECT
-              md5(gs::text || $1::text)::uuid,
-              $1,
-              DATE '2000-01-01' + gs,
-              'eaten',
-              'Synthetic history',
-              0,
-              1,
-              'serving',
-              1,
-              10,
-              20,
-              5,
-              165
-            FROM generate_series(0, 4999) AS gs
-            "#,
-        )
-        .bind(large_user)
-        .execute(&test_db.pool)
-        .await
-        .expect("large synthetic history should insert");
-        let last_date =
-            (NaiveDate::from_ymd_opt(2000, 1, 1).unwrap() + Duration::days(4999)).to_string();
-        let large = leaderboard_json(&test_db.pool, large_user, &last_date)
-            .await
-            .expect("large leaderboard should load");
-        assert_eq!(large["currentStreak"], 5000);
-        assert_eq!(large["longestStreak"], 5000);
-        assert_eq!(large["totalDaysTracked"], 5000);
-
-        test_db.cleanup().await;
-    }
-
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    #[tokio::test]
-    async fn list_recent_meal_entries_excludes_planned_and_skipped_entries() {
-        let test_db = test_db().await;
-        let user_id = insert_test_user(&test_db.pool).await;
-        let eaten_id = insert_test_meal_entry(
-            &test_db.pool,
-            user_id,
-            "2026-07-03",
-            "eaten",
-            "Recent Eaten",
-            0,
-            (20.0, 30.0, 8.0, 272),
-        )
-        .await;
-        insert_test_meal_entry(
-            &test_db.pool,
-            user_id,
-            "2026-07-04",
-            "planned",
-            "Recent Planned",
-            0,
-            (20.0, 30.0, 8.0, 272),
-        )
-        .await;
-        insert_test_meal_entry(
-            &test_db.pool,
-            user_id,
-            "2026-07-05",
-            "skipped",
-            "Recent Skipped",
-            0,
-            (20.0, 30.0, 8.0, 272),
-        )
-        .await;
-
-        let results = list_recent_meal_entries_json(&test_db.pool, user_id, 10, true)
-            .await
-            .expect("recent meals should list");
-        let ids = search_result_ids(&results);
-
-        assert_eq!(ids, vec![eaten_id.to_string()]);
-        test_db.cleanup().await;
-    }
-
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    #[tokio::test]
-    async fn concurrent_owner_demotions_cannot_remove_last_owner() {
-        let test_db = test_db_with_connections(4).await;
-        let actor_id = insert_test_user_with_email(&test_db.pool, "owner-a@example.test").await;
-        let other_owner_id =
-            insert_test_user_with_email(&test_db.pool, "owner-b@example.test").await;
-        ensure_user_role(&test_db.pool, actor_id, "owner")
-            .await
-            .expect("actor should become owner");
-        ensure_user_role(&test_db.pool, other_owner_id, "owner")
-            .await
-            .expect("other user should become owner");
-
-        let demote_actor = rpc_json(
-            &test_db.pool,
-            "setUserRole",
-            json!({
-                "actorUserId": actor_id,
-                "targetUserId": actor_id,
-                "nextRole": "user"
-            }),
-        );
-        let demote_other_owner = rpc_json(
-            &test_db.pool,
-            "setUserRole",
-            json!({
-                "actorUserId": actor_id,
-                "targetUserId": other_owner_id,
-                "nextRole": "user"
-            }),
-        );
-        let (actor_result, other_owner_result) = tokio::join!(demote_actor, demote_other_owner);
-
-        let successful_demotions = [actor_result.as_ref(), other_owner_result.as_ref()]
-            .into_iter()
-            .filter(|result| result.is_ok())
-            .count();
-        assert_eq!(successful_demotions, 1);
-        let owner_count: i64 =
-            sqlx::query("SELECT count(*)::bigint AS count FROM users WHERE role = 'owner'")
-                .fetch_one(&test_db.pool)
-                .await
-                .expect("owner count should query")
-                .try_get("count")
-                .unwrap();
-        assert_eq!(owner_count, 1);
-
-        test_db.cleanup().await;
-    }
-
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    #[tokio::test]
-    async fn set_user_role_rolls_back_role_when_audit_insert_fails() {
-        let test_db = test_db().await;
-        let actor_id = insert_test_user_with_email(&test_db.pool, "owner@example.test").await;
-        let target_id = insert_test_user_with_email(&test_db.pool, "target@example.test").await;
-        ensure_user_role(&test_db.pool, actor_id, "owner")
-            .await
-            .expect("actor should become owner");
-
-        let result = rpc_json(
-            &test_db.pool,
-            "setUserRole",
-            json!({
-                "actorUserId": actor_id,
-                "targetUserId": target_id,
-                "nextRole": "admin",
-                "testFault": {
-                    "kind": "admin_audit_event",
-                    "message": "forced audit failure"
-                }
-            }),
-        )
-        .await;
-
-        assert_eq!(bad_request_message(result), "forced audit failure");
-        let role: String = sqlx::query("SELECT role FROM users WHERE id = $1")
-            .bind(target_id)
-            .fetch_one(&test_db.pool)
-            .await
-            .expect("target role should query")
-            .try_get("role")
-            .unwrap();
-        let audit_count: i64 =
-            sqlx::query("SELECT count(*)::bigint AS count FROM admin_audit_events")
-                .fetch_one(&test_db.pool)
-                .await
-                .expect("audit count should query")
-                .try_get("count")
-                .unwrap();
-        assert_eq!(role, "user");
-        assert_eq!(audit_count, 0);
-
-        test_db.cleanup().await;
-    }
-
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    #[tokio::test]
-    async fn create_admin_barcode_product_rolls_back_product_and_revision_when_audit_fails() {
-        let test_db = test_db().await;
-        let actor_id = insert_test_user_with_email(&test_db.pool, "admin@example.test").await;
-        ensure_user_role(&test_db.pool, actor_id, "admin")
-            .await
-            .expect("actor should become admin");
-        let barcode = format!("admin-create-{}", Uuid::new_v4());
-
-        let result = rpc_json(
-            &test_db.pool,
-            "createAdminBarcodeProduct",
-            json!({
-                "actorUserId": actor_id,
-                "input": barcode_payload(&barcode),
-                "testFault": {
-                    "kind": "admin_audit_event",
-                    "message": "forced audit failure"
-                }
-            }),
-        )
-        .await;
-
-        assert_eq!(bad_request_message(result), "forced audit failure");
-        assert_no_barcode_product_or_revision_rows(&test_db.pool, &barcode).await;
-
-        test_db.cleanup().await;
-    }
-
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    #[tokio::test]
-    async fn update_admin_barcode_product_rolls_back_product_when_revision_fails() {
-        let test_db = test_db().await;
-        let actor_id =
-            insert_test_user_with_email(&test_db.pool, "admin-update@example.test").await;
-        ensure_user_role(&test_db.pool, actor_id, "admin")
-            .await
-            .expect("actor should become admin");
-        let product_id = insert_test_admin_barcode_product(
-            &test_db.pool,
-            "admin-update-original",
-            "Original Bar",
-            "Original Brand",
-            Some(actor_id),
-            false,
-        )
-        .await;
-
-        let result = rpc_json(
-            &test_db.pool,
-            "updateAdminBarcodeProduct",
-            json!({
-                "actorUserId": actor_id,
-                "barcodeProductId": product_id,
-                "input": barcode_payload("admin-update-next"),
-                "testFault": {
-                    "kind": "food_product_revision",
-                    "message": "forced revision failure"
-                }
-            }),
-        )
-        .await;
-
-        assert_eq!(bad_request_message(result), "forced revision failure");
-        let row = sqlx::query("SELECT barcode, name FROM food_products WHERE id = $1")
-            .bind(product_id)
-            .fetch_one(&test_db.pool)
-            .await
-            .expect("product should query");
-        assert_eq!(
-            row.try_get::<String, _>("barcode").unwrap(),
-            "admin-update-original"
-        );
-        assert_eq!(row.try_get::<String, _>("name").unwrap(), "Original Bar");
-
-        test_db.cleanup().await;
-    }
-
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    #[tokio::test]
-    async fn delete_admin_barcode_product_rolls_back_product_when_audit_fails() {
-        let test_db = test_db().await;
-        let actor_id =
-            insert_test_user_with_email(&test_db.pool, "admin-delete@example.test").await;
-        ensure_user_role(&test_db.pool, actor_id, "admin")
-            .await
-            .expect("actor should become admin");
-        let product_id = insert_test_admin_barcode_product(
-            &test_db.pool,
-            "admin-delete-original",
-            "Delete Bar",
-            "Delete Brand",
-            Some(actor_id),
-            false,
-        )
-        .await;
-
-        let result = rpc_json(
-            &test_db.pool,
-            "softDeleteAdminBarcodeProduct",
-            json!({
-                "actorUserId": actor_id,
-                "barcodeProductId": product_id,
-                "testFault": {
-                    "kind": "admin_audit_event",
-                    "message": "forced audit failure"
-                }
-            }),
-        )
-        .await;
-
-        assert_eq!(bad_request_message(result), "forced audit failure");
-        let deleted_at: Option<DateTime<Utc>> =
-            sqlx::query("SELECT deleted_at FROM food_products WHERE id = $1")
-                .bind(product_id)
-                .fetch_one(&test_db.pool)
-                .await
-                .expect("product should query")
-                .try_get("deleted_at")
-                .unwrap();
-        let revision_count: i64 =
-            sqlx::query("SELECT count(*)::bigint AS count FROM food_product_revisions")
-                .fetch_one(&test_db.pool)
-                .await
-                .expect("revision count should query")
-                .try_get("count")
-                .unwrap();
-        assert!(deleted_at.is_none());
-        assert_eq!(revision_count, 0);
-
-        test_db.cleanup().await;
-    }
-
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    #[tokio::test]
-    async fn save_barcode_food_product_rpc_creates_created_revision() {
-        let test_db = test_db().await;
-        let user_id = insert_test_user(&test_db.pool).await;
-        let barcode = format!("test-{}", Uuid::new_v4());
-
-        let product = rpc_json(
-            &test_db.pool,
-            "saveBarcodeFoodProduct",
-            json!({
-                "userId": user_id,
-                "input": barcode_payload(&barcode)
-            }),
-        )
-        .await
-        .expect("barcode product should save");
-        let product_id = Uuid::parse_str(product.get("id").and_then(Value::as_str).unwrap())
-            .expect("product id should be a uuid");
-
-        let revision = sqlx::query(
-            r#"
-            SELECT actor_user_id, action, snapshot_json
-            FROM food_product_revisions
-            WHERE product_id = $1
-            "#,
-        )
-        .bind(product_id)
-        .fetch_one(&test_db.pool)
-        .await
-        .expect("created revision should exist");
-
-        assert_eq!(
-            revision.try_get::<Uuid, _>("actor_user_id").unwrap(),
-            user_id
-        );
-        assert_eq!(revision.try_get::<String, _>("action").unwrap(), "created");
-        let snapshot: Value = revision.try_get("snapshot_json").unwrap();
-        assert_eq!(snapshot.get("id"), product.get("id"));
-        assert_eq!(snapshot.get("barcode"), product.get("barcode"));
-
-        test_db.cleanup().await;
-    }
-
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    #[tokio::test]
-    async fn save_barcode_food_product_rolls_back_product_when_created_revision_fails() {
-        let test_db = test_db().await;
-        let user_id = insert_test_user(&test_db.pool).await;
-        let barcode = format!("test-{}", Uuid::new_v4());
-
-        let result = rpc_json(
-            &test_db.pool,
-            "saveBarcodeFoodProduct",
-            json!({
-                "userId": user_id,
-                "input": barcode_payload(&barcode),
-                "testFault": {
-                    "kind": "barcode_food_product_revision",
-                    "message": "forced revision failure"
-                }
-            }),
-        )
-        .await;
-
-        assert_eq!(bad_request_message(result), "forced revision failure");
-        assert_no_barcode_product_or_revision_rows(&test_db.pool, &barcode).await;
-
-        test_db.cleanup().await;
-    }
-
-    #[test]
-    fn macro_goals_are_bounded_to_the_column_domain() {
-        assert!(
-            validate_macro_goals(&MacroGoals {
-                protein_g: Some(150.0),
-                carbs_g: Some(250.0),
-                fat_g: Some(70.0),
-                calories_kcal: Some(2200),
-            })
-            .is_ok()
-        );
-
-        // numeric(6, 1) overflows past 99_999.9. Onboarding writes these
-        // columns directly, so the check has to reject before the UPDATE.
-        assert!(
-            validate_macro_goals(&MacroGoals {
-                protein_g: Some(1e30),
-                carbs_g: None,
-                fat_g: None,
-                calories_kcal: None,
-            })
-            .is_err()
-        );
-        assert!(
-            validate_macro_goals(&MacroGoals {
-                protein_g: Some(-1.0),
-                carbs_g: None,
-                fat_g: None,
-                calories_kcal: None,
-            })
-            .is_err()
-        );
-        assert!(
-            validate_macro_goals(&MacroGoals {
-                protein_g: None,
-                carbs_g: None,
-                fat_g: None,
-                calories_kcal: Some(-5),
-            })
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn onboarding_weight_normalization_rejects_zero_and_post_rounding_overflow() {
-        let weight = |value: Value| {
-            serde_json::Map::from_iter([
-                ("date".to_string(), json!("2026-01-15")),
-                ("weightKg".to_string(), value),
-            ])
-        };
-
-        assert!(normalize_weight_entry_input(&weight(json!(72.5))).is_ok());
-        assert!(normalize_weight_entry_input(&weight(json!(0))).is_err());
-        assert!(normalize_weight_entry_input(&weight(json!(-1))).is_err());
-        assert!(normalize_weight_entry_input(&weight(json!(1e30))).is_err());
-        // Rounds up into overflow for numeric(5, 2).
-        assert!(normalize_weight_entry_input(&weight(json!(999.995))).is_err());
-        // The date is validated on this path too.
-        let mut infinity_date = weight(json!(72.5));
-        infinity_date.insert("date".to_string(), json!("infinity"));
-        assert!(normalize_weight_entry_input(&infinity_date).is_err());
-    }
-
-    #[test]
-    fn ensure_date_string_rejects_postgres_special_dates() {
-        assert!(ensure_date_string("2026-01-15").is_ok());
-        assert!(ensure_date_string("2024-02-29").is_ok());
-
-        for invalid in [
-            "",
-            "2026-1-5",
-            "26-01-15",
-            "2026-13-01",
-            "2026-02-30",
-            "2026-01-15T00:00:00Z",
-            // Postgres accepts all of these as `date` input, stores them, and
-            // then fails to re-parse on read — permanently breaking the page.
-            "infinity",
-            "-infinity",
-            "today",
-            "yesterday",
-            "epoch",
-            "now",
-        ] {
-            assert!(
-                ensure_date_string(invalid).is_err(),
-                "expected {invalid:?} to be rejected"
-            );
-        }
-    }
-
-    fn gym_input(pairs: &[(&str, Value)]) -> serde_json::Map<String, Value> {
-        pairs
-            .iter()
-            .map(|(key, value)| (key.to_string(), value.clone()))
-            .collect()
-    }
-
-    #[test]
-    fn gym_slot_values_validates_shape_and_minutes() {
-        // Weekly slot, title defaulted, midnight end (1440) allowed.
-        let values = gym_slot_values(&gym_input(&[
-            ("recurrence", json!("weekly")),
-            ("weekday", json!(1)),
-            ("startMinute", json!(1380)),
-            ("endMinute", json!(1440)),
-        ]))
-        .expect("weekly slot ending at midnight should validate");
-        assert_eq!(values.title, "Gym");
-        assert_eq!(values.weekday, Some(1));
-        assert_eq!(values.slot_date, None);
-        assert_eq!(values.end_minute, 1440);
-
-        // One-off slot needs a well-formed date.
-        let values = gym_slot_values(&gym_input(&[
-            ("title", json!("  Push day  ")),
-            ("recurrence", json!("once")),
-            ("slotDate", json!("2026-09-01")),
-            ("startMinute", json!(1020)),
-            ("endMinute", json!(1110)),
-        ]))
-        .expect("one-off slot should validate");
-        assert_eq!(values.title, "Push day");
-        assert_eq!(values.slot_date.as_deref(), Some("2026-09-01"));
-        assert_eq!(values.weekday, None);
-
-        // Overnight (start >= end) is rejected.
-        assert!(
-            gym_slot_values(&gym_input(&[
-                ("recurrence", json!("weekly")),
-                ("weekday", json!(2)),
-                ("startMinute", json!(1320)),
-                ("endMinute", json!(120)),
-            ]))
-            .is_err()
-        );
-        // Weekday outside ISO 1-7 is rejected.
-        assert!(
-            gym_slot_values(&gym_input(&[
-                ("recurrence", json!("weekly")),
-                ("weekday", json!(0)),
-                ("startMinute", json!(600)),
-                ("endMinute", json!(660)),
-            ]))
-            .is_err()
-        );
-        // A one-off slot without a date is rejected, as is a special date.
-        assert!(
-            gym_slot_values(&gym_input(&[
-                ("recurrence", json!("once")),
-                ("startMinute", json!(600)),
-                ("endMinute", json!(660)),
-            ]))
-            .is_err()
-        );
-        assert!(
-            gym_slot_values(&gym_input(&[
-                ("recurrence", json!("once")),
-                ("slotDate", json!("today")),
-                ("startMinute", json!(600)),
-                ("endMinute", json!(660)),
-            ]))
-            .is_err()
-        );
-        // Unknown recurrence is rejected.
-        assert!(
-            gym_slot_values(&gym_input(&[
-                ("recurrence", json!("biweekly")),
-                ("weekday", json!(3)),
-                ("startMinute", json!(600)),
-                ("endMinute", json!(660)),
-            ]))
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn gym_friend_codes_use_the_unambiguous_alphabet() {
-        for _ in 0..50 {
-            let code = generate_gym_friend_code();
-            assert_eq!(code.len(), GYM_FRIEND_CODE_LENGTH);
-            for character in code.bytes() {
-                assert!(
-                    GYM_FRIEND_CODE_ALPHABET.contains(&character),
-                    "unexpected friend-code character {character:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn gym_invite_identifiers_classify_and_normalize() {
-        // '@' anywhere → email, lowercased.
-        match classify_gym_invite_identifier("  BOB@Example.com ").unwrap() {
-            GymInviteIdentifier::Email(email) => assert_eq!(email, "bob@example.com"),
-            GymInviteIdentifier::FriendCode(_) => panic!("expected email"),
-        }
-        // No '@' → friend code, uppercased with separators stripped so
-        // "ab23-cd45", "AB23 CD45" and "ab23cd45" all resolve identically.
-        for raw in ["ab23-cd45", "AB23 CD45", "ab23cd45"] {
-            match classify_gym_invite_identifier(raw).unwrap() {
-                GymInviteIdentifier::FriendCode(code) => assert_eq!(code, "AB23CD45"),
-                GymInviteIdentifier::Email(_) => panic!("expected friend code for {raw:?}"),
-            }
-        }
-        // Empty and separator-only inputs are rejected.
-        assert!(classify_gym_invite_identifier("   ").is_err());
-        assert!(classify_gym_invite_identifier("---").is_err());
-    }
-
-    #[test]
-    fn gym_status_vocabulary_is_closed() {
-        for status in ["going", "maybe", "skipped", "done"] {
-            assert!(ensure_gym_status(status).is_ok());
-        }
-        for status in ["", "planned", "eaten", "Going", "skipping"] {
-            assert!(
-                ensure_gym_status(status).is_err(),
-                "expected {status:?} to be rejected"
-            );
-        }
-    }
-
-    #[test]
-    fn gym_merge_overlaps_merges_per_style_and_classifies_tentative() {
-        let buddy = "11111111-1111-4111-8111-111111111111";
-        let other = "22222222-2222-4222-8222-222222222222";
-        let rows = vec![
-            // Two touching confirmed windows for the same buddy merge into one.
-            json!({ "buddyId": buddy, "buddyName": "Alex", "startMinute": 600, "endMinute": 660, "tentative": false }),
-            json!({ "buddyId": buddy, "buddyName": "Alex", "startMinute": 630, "endMinute": 700, "tentative": false }),
-            // A tentative window never merges into a confirmed one.
-            json!({ "buddyId": buddy, "buddyName": "Alex", "startMinute": 650, "endMinute": 720, "tentative": true }),
-            // A buddy with only tentative windows is tentative overall.
-            json!({ "buddyId": other, "buddyName": "Sam", "startMinute": 800, "endMinute": 860, "tentative": true }),
-        ];
-        let merged = gym_merge_overlaps(&rows);
-        let entries = merged.as_array().expect("merged overlaps are an array");
-        assert_eq!(entries.len(), 2);
-
-        let alex = &entries[0];
-        assert_eq!(alex["buddy"]["name"], json!("Alex"));
-        assert_eq!(alex["tentative"], json!(false));
-        let windows = alex["windows"].as_array().unwrap();
-        assert_eq!(windows.len(), 2);
-        assert_eq!(windows[0]["startMinute"], json!(600));
-        assert_eq!(windows[0]["endMinute"], json!(700));
-        assert_eq!(windows[0]["tentative"], json!(false));
-        assert_eq!(windows[1]["tentative"], json!(true));
-
-        let sam = &entries[1];
-        assert_eq!(sam["tentative"], json!(true));
-
-        assert_eq!(gym_merge_overlaps(&[]), json!([]));
-    }
-
-    #[test]
-    fn required_date_rejects_special_dates_on_the_rpc_path() {
-        let payload = serde_json::Map::from_iter([("date".to_string(), json!("infinity"))]);
-        assert!(required_date(&payload, "date").is_err());
-
-        let payload = serde_json::Map::from_iter([("date".to_string(), json!("2026-01-15"))]);
-        assert_eq!(
-            required_date(&payload, "date").expect("valid date"),
-            "2026-01-15"
-        );
-    }
-
-    #[test]
-    fn optional_f64_rejects_non_finite_strings() {
-        for raw in ["inf", "-inf", "NaN", "infinity"] {
-            let payload = serde_json::Map::from_iter([("weightKg".to_string(), json!(raw))]);
-            assert_eq!(
-                optional_f64(&payload, "weightKg"),
-                None,
-                "expected {raw:?} to be rejected"
-            );
-        }
-
-        let payload = serde_json::Map::from_iter([("weightKg".to_string(), json!("72.5"))]);
-        assert_eq!(optional_f64(&payload, "weightKg"), Some(72.5));
-    }
-
-    #[test]
-    fn macros_are_bounded_to_the_column_domain() {
-        // numeric(6, 1) overflows past 99_999.9; without this bound the INSERT
-        // raises numeric-field-overflow and the caller gets a 500.
-        let payload = meal_payload(&[("proteinG", json!(1e30))]);
-        assert!(normalize_meal_food_values(&payload, 0, "Meal name is required.").is_err());
-
-        let payload = meal_payload(&[("proteinG", json!(MAX_MACRO_GRAMS))]);
-        assert!(normalize_meal_food_values(&payload, 0, "Meal name is required.").is_ok());
-    }
-
-    #[test]
-    fn quantities_are_bounded_to_the_column_domain() {
-        let payload = meal_payload(&[("quantity", json!(1e12))]);
-        assert!(normalize_meal_food_values(&payload, 0, "Meal name is required.").is_err());
-    }
-
-    #[test]
-    fn goal_weight_is_bounded_after_rounding() {
-        assert_eq!(
-            validate_goal_weight_kg(None).expect("none is allowed"),
-            None
-        );
-        assert_eq!(
-            validate_goal_weight_kg(Some(72.456)).expect("valid"),
-            Some(72.46)
-        );
-        assert!(validate_goal_weight_kg(Some(-1.0)).is_err());
-        assert!(validate_goal_weight_kg(Some(1e30)).is_err());
-        // Rounds up into overflow for numeric(5, 2), so it must be rejected.
-        assert!(validate_goal_weight_kg(Some(999.995)).is_err());
-    }
-
-    #[test]
-    fn search_queries_are_capped() {
-        assert!(validate_search_query("chicken breast").is_ok());
-        assert!(validate_search_query(&"a".repeat(MAX_SEARCH_QUERY_LENGTH)).is_ok());
-        assert!(validate_search_query(&"a".repeat(MAX_SEARCH_QUERY_LENGTH + 1)).is_err());
-
-        let too_many_terms = ["term"; MAX_SEARCH_TERMS + 1].join(" ");
-        assert!(validate_search_query(&too_many_terms).is_err());
-    }
-
-    #[test]
-    fn search_like_patterns_never_exceed_the_term_cap() {
-        let query = vec!["term"; 100].join(" ");
-        assert_eq!(search_like_patterns(&query).len(), MAX_SEARCH_TERMS);
-    }
-
-    #[test]
-    fn meal_template_and_recipe_item_validation_rejects_invalid_payloads() {
-        assert_eq!(
-            bad_request_message(normalize_meal_food_values(
-                &meal_payload(&[("label", json!("   "))]),
-                0,
-                "Meal name is required.",
-            )),
-            "Meal name is required."
-        );
-        assert_eq!(
-            bad_request_message(normalize_meal_food_values(
-                &meal_payload(&[("quantity", json!(0))]),
-                0,
-                "Meal name is required.",
-            )),
-            "Quantity must be a positive number."
-        );
-        assert_eq!(
-            bad_request_message(normalize_meal_food_values(
-                &meal_payload(&[("unit", json!("oz"))]),
-                0,
-                "Meal name is required.",
-            )),
-            "Quantity unit is invalid."
-        );
-        assert_eq!(
-            bad_request_message(normalize_meal_food_values(
-                &meal_payload(&[("servingMultiplier", json!(0))]),
-                0,
-                "Meal name is required.",
-            )),
-            "Serving multiplier must be a positive number."
-        );
-        assert_eq!(
-            bad_request_message(normalize_meal_food_values(
-                &meal_payload(&[
-                    ("proteinG", json!(0)),
-                    ("carbsG", json!(0)),
-                    ("fatG", json!(0)),
-                    ("caloriesKcal", json!(0)),
-                ]),
-                0,
-                "Meal name is required.",
-            )),
-            "At least one macro or calorie value must be greater than zero."
-        );
-    }
-
-    #[test]
-    fn meal_validation_rejects_overflowing_integer_fields() {
-        assert_eq!(
-            bad_request_message(normalize_meal_food_values(
-                &meal_payload(&[("caloriesKcal", json!(4_294_967_296_u64))]),
-                0,
-                "Meal name is required.",
-            )),
-            "caloriesKcal must be a non-negative integer."
-        );
-    }
-
-    #[test]
-    fn food_and_barcode_validation_rejects_invalid_payloads() {
-        assert_eq!(
-            bad_request_message(normalize_food_product_input(
-                &food_payload(&[("name", json!(" "))]),
-                "personal",
-            )),
-            "Product name is required."
-        );
-        assert_eq!(
-            bad_request_message(normalize_food_product_input(
-                &food_payload(&[("defaultServingQuantity", json!(0))]),
-                "personal",
-            )),
-            "Default serving quantity must be a positive number."
-        );
-        assert_eq!(
-            bad_request_message(normalize_food_product_input(
-                &food_payload(&[("sourceConfidence", json!(1.1))]),
-                "personal",
-            )),
-            "Source confidence must be between 0 and 1."
-        );
-        assert_eq!(
-            bad_request_message(normalize_barcode_food_product_input(
-                &serde_json::Map::from_iter([
-                    ("barcode".to_string(), json!("123")),
-                    ("name".to_string(), json!("Bar")),
-                    ("servingSizeG".to_string(), json!(0)),
-                    ("proteinG".to_string(), json!(1)),
-                    ("carbsG".to_string(), json!(1)),
-                    ("fatG".to_string(), json!(1)),
-                    ("caloriesKcal".to_string(), json!(10)),
-                ])
-            )),
-            "Serving weight must be a positive number."
-        );
-    }
-
-    #[test]
-    fn weight_validation_rejects_invalid_values_and_trims_notes() {
-        let base = serde_json::Map::from_iter([
-            ("date".to_string(), json!("2026-07-09")),
-            ("weightKg".to_string(), json!(80.0)),
-            ("bodyFatPct".to_string(), json!(20.0)),
-            ("notes".to_string(), json!("  hello  ")),
-        ]);
-        let values = normalize_weight_entry_input(&base).expect("valid weight entry");
-        assert_eq!(values.notes.as_deref(), Some("hello"));
-
-        let mut zero = base.clone();
-        zero.insert("weightKg".to_string(), json!(0));
-        assert_eq!(
-            bad_request_message(normalize_weight_entry_input(&zero)),
-            "Weight must be a positive number."
-        );
-
-        let mut huge = base.clone();
-        huge.insert("weightKg".to_string(), json!(1000));
-        assert_eq!(
-            bad_request_message(normalize_weight_entry_input(&huge)),
-            "Weight must be less than 1000 kg."
-        );
-
-        let mut bad_body_fat = base;
-        bad_body_fat.insert("bodyFatPct".to_string(), json!(101));
-        assert_eq!(
-            bad_request_message(normalize_weight_entry_input(&bad_body_fat)),
-            "Body fat percentage must be between 0 and 100."
-        );
-    }
-
-    #[test]
-    fn only_admin_and_owner_roles_are_admin_actors() {
-        assert!(is_admin_actor_role("admin"));
-        assert!(is_admin_actor_role("owner"));
-        assert!(!is_admin_actor_role("user"));
-        assert!(!is_admin_actor_role(""));
-    }
-
-    #[test]
-    fn api_token_scope_validation_rejects_empty_unknown_and_non_string_scopes() {
-        assert_eq!(
-            bad_request_message(normalize_api_token_scopes(Some(&json!([])))),
-            "API token must include at least one scope."
-        );
-        assert_eq!(
-            bad_request_message(normalize_api_token_scopes(Some(&json!([
-                "read:daily",
-                "admin:*"
-            ])))),
-            "API token scope is invalid."
-        );
-        assert_eq!(
-            bad_request_message(normalize_api_token_scopes(Some(&json!(["read:daily", 42])))),
-            "API token scope is invalid."
-        );
-    }
-
-    #[test]
-    fn api_token_scope_validation_dedupes_valid_scopes_in_order() {
-        let scopes =
-            normalize_api_token_scopes(Some(&json!(["read:daily", "write:daily", "read:daily"])))
-                .expect("valid scopes should normalize");
-
-        assert_eq!(scopes, vec!["read:daily", "write:daily"]);
-    }
-
-    #[test]
-    fn api_token_expiry_validation_preserves_defaults_and_nulls() {
-        let default = normalize_api_token_expiry(None)
-            .expect("missing expiry should default")
-            .expect("default expiry should be set");
-        let days = default.signed_duration_since(Utc::now()).num_days();
-        assert!((89..=90).contains(&days));
-
-        assert!(
-            normalize_api_token_expiry(Some(&Value::Null))
-                .expect("null expiry should be accepted")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn api_token_expiry_validation_rejects_invalid_strings() {
-        assert_eq!(
-            bad_request_message(normalize_api_token_expiry(Some(&json!("not-a-date")))),
-            "API token expiry is invalid."
-        );
-    }
-
-    /// Applies every Drizzle migration into one scratch schema and `SCHEMA_SQL`
-    /// into another, then compares the resulting catalogs. This is what stops
-    /// the integration-test schema from drifting away from the migrations that
-    /// production actually runs - the CLEAN-03 hazard.
-    ///
-    /// Migrations schema-qualify some references as `"public"."x"`, which would
-    /// escape the scratch schema, so that qualifier is stripped before applying.
-    /// That is the only rewrite performed.
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    #[tokio::test]
-    async fn schema_sql_matches_the_drizzle_migrations() {
-        async fn columns_of(
-            conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
-            schema: &str,
-        ) -> Vec<(String, String, String, String)> {
-            sqlx::query_as::<_, (String, String, String, String)>(
-                r#"
-                SELECT table_name::text, column_name::text, data_type::text, is_nullable::text
-                FROM information_schema.columns
-                WHERE table_schema = $1
-                ORDER BY table_name, column_name
-                "#,
-            )
-            .bind(schema)
-            .fetch_all(&mut **conn)
-            .await
-            .expect("catalog query should succeed")
-        }
-
-        let database_url = std::env::var("TEST_DATABASE_URL")
-            .or_else(|_| std::env::var("DATABASE_URL"))
-            .expect("TEST_DATABASE_URL or DATABASE_URL must be set");
-        let pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&database_url)
-            .await
-            .expect("parity pool should connect");
-
-        let migrated = format!("parity_migrated_{}", Uuid::new_v4().simple());
-        let declared = format!("parity_declared_{}", Uuid::new_v4().simple());
-
-        let mut conn = pool
-            .acquire()
-            .await
-            .expect("parity connection should acquire");
-        for schema in [&migrated, &declared] {
-            sqlx::query(&format!(r#"CREATE SCHEMA "{schema}""#))
-                .execute(&mut *conn)
-                .await
-                .expect("scratch schema should be created");
-        }
-
-        // 0014 creates pg_trgm opportunistically. Two things bite here: left to
-        // itself the extension lands in whatever schema is first on search_path
-        // (a scratch one), and if a previous run already installed it elsewhere
-        // then `IF NOT EXISTS` silently no-ops rather than relocating it - so
-        // `gin_trgm_ops` fails to resolve either way. Install it if missing, then
-        // resolve wherever it actually lives and put that on the search_path.
-        sqlx::query("CREATE EXTENSION IF NOT EXISTS pg_trgm SCHEMA public")
-            .execute(&mut *conn)
-            .await
-            .expect("pg_trgm should be installable for the parity check");
-        let trgm_schema: String = sqlx::query_scalar(
-            "SELECT n.nspname::text FROM pg_extension e
-             JOIN pg_namespace n ON n.oid = e.extnamespace
-             WHERE e.extname = 'pg_trgm'",
-        )
-        .fetch_one(&mut *conn)
-        .await
-        .expect("pg_trgm should be present after creation");
-
-        // Apply the migrations, in journal order, into the first scratch schema.
-        let drizzle_dir =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/db/drizzle");
-        sqlx::query(&format!(
-            r#"SET search_path TO "{migrated}", "{trgm_schema}", public"#
-        ))
-        .execute(&mut *conn)
-        .await
-        .expect("search_path should be set");
-        for (tag, _) in expected_drizzle_migrations().expect("journal should parse") {
-            let sql = fs::read_to_string(drizzle_dir.join(format!("{tag}.sql")))
-                .unwrap_or_else(|error| panic!("migration {tag} should be readable: {error}"));
-            let sql = sql.replace("\"public\".", "");
-            for statement in sql.split("--> statement-breakpoint") {
-                if statement.trim().is_empty() {
-                    continue;
-                }
-                sqlx::raw_sql(statement)
-                    .execute(&mut *conn)
-                    .await
-                    .unwrap_or_else(|error| panic!("migration {tag} should apply: {error}"));
-            }
-        }
-
-        // Apply SCHEMA_SQL into the second.
-        sqlx::query(&format!(
-            r#"SET search_path TO "{declared}", "{trgm_schema}", public"#
-        ))
-        .execute(&mut *conn)
-        .await
-        .expect("search_path should be set");
-        sqlx::raw_sql(SCHEMA_SQL)
-            .execute(&mut *conn)
-            .await
-            .expect("SCHEMA_SQL should apply");
-
-        let migrated_columns = columns_of(&mut conn, &migrated).await;
-        let declared_columns = columns_of(&mut conn, &declared).await;
-
-        for schema in [&migrated, &declared] {
-            sqlx::query(&format!(r#"DROP SCHEMA "{schema}" CASCADE"#))
-                .execute(&mut *conn)
-                .await
-                .expect("scratch schema should drop");
-        }
-
-        let only_in_migrations = migrated_columns
-            .iter()
-            .filter(|column| !declared_columns.contains(column))
-            .collect::<Vec<_>>();
-        let only_in_schema_sql = declared_columns
-            .iter()
-            .filter(|column| !migrated_columns.contains(column))
-            .collect::<Vec<_>>();
-
-        assert!(
-            only_in_migrations.is_empty() && only_in_schema_sql.is_empty(),
-            "SCHEMA_SQL has drifted from the Drizzle migrations.\n\
-             Present in the migrations but missing/different in SCHEMA_SQL: {only_in_migrations:#?}\n\
-             Present in SCHEMA_SQL but missing/different in the migrations: {only_in_schema_sql:#?}"
-        );
-    }
-
-    #[test]
-    fn expected_drizzle_migrations_match_repo_sql_files() {
-        let expected = expected_drizzle_migrations().expect("journal should parse");
-        let expected_tags = expected
-            .iter()
-            .map(|(tag, _)| tag.as_str())
-            .collect::<HashSet<_>>();
-        let drizzle_dir =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packages/db/drizzle");
-        let sql_tags = fs::read_dir(&drizzle_dir)
-            .expect("drizzle migrations dir should exist")
-            .filter_map(|entry| {
-                let entry = entry.expect("migration dir entry should be readable");
-                let path = entry.path();
-                (path.extension().and_then(|ext| ext.to_str()) == Some("sql"))
-                    .then(|| path.file_stem().unwrap().to_string_lossy().into_owned())
-            })
-            .collect::<HashSet<_>>();
-
-        assert_eq!(expected_tags.len(), sql_tags.len());
-        for tag in &sql_tags {
-            assert!(
-                expected_tags.contains(tag.as_str()),
-                "migration journal is missing SQL migration {tag}"
-            );
-        }
-        let latest = expected.last().expect("at least one migration is expected");
-        assert!(
-            sql_tags.contains(latest.0.as_str()),
-            "latest expected migration must have a SQL file"
-        );
-    }
-
-    fn shoo_profile(sub: &str, email: &str) -> ShooProfile {
-        ShooProfile {
-            pairwise_sub: sub.to_string(),
-            email: email.to_string(),
-            display_name: Some("Test User".to_string()),
-            picture_url: None,
-        }
-    }
-
-    #[tokio::test]
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    async fn shoo_login_refuses_to_rebind_an_existing_email_to_a_new_subject() {
-        let test_db = test_db().await;
-        let victim_id = insert_test_user_with_email(&test_db.pool, "victim@example.test").await;
-        let original_sub: String = sqlx::query("SELECT shoo_pairwise_sub FROM users WHERE id = $1")
-            .bind(victim_id)
-            .fetch_one(&test_db.pool)
-            .await
-            .expect("victim should exist")
-            .try_get("shoo_pairwise_sub")
-            .expect("sub should read");
-
-        let result = upsert_user_from_shoo_profile(
-            &test_db.pool,
-            &shoo_profile("attacker-sub", "victim@example.test"),
-        )
-        .await;
-
-        match result {
-            Err(AppError::Conflict(message)) => {
-                assert!(
-                    !message.contains("victim@example.test"),
-                    "conflict message must not echo the address back: {message}"
-                );
-            }
-            Err(error) => panic!("expected a conflict, got {error:?}"),
-            Ok(_) => panic!("expected a conflict, got a successful login"),
-        }
-
-        let stored_sub: String = sqlx::query("SELECT shoo_pairwise_sub FROM users WHERE id = $1")
-            .bind(victim_id)
-            .fetch_one(&test_db.pool)
-            .await
-            .expect("victim should still exist")
-            .try_get("shoo_pairwise_sub")
-            .expect("sub should read");
-        assert_eq!(
-            stored_sub, original_sub,
-            "the victim row must keep its original subject"
-        );
-        let user_count: i64 = sqlx::query("SELECT count(*) AS total FROM users")
-            .fetch_one(&test_db.pool)
-            .await
-            .expect("count should run")
-            .try_get("total")
-            .expect("count should read");
-        assert_eq!(user_count, 1, "no shadow account may be created either");
-
-        test_db.cleanup().await;
-    }
-
-    #[tokio::test]
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    async fn shoo_login_updates_the_email_of_a_known_subject() {
-        let test_db = test_db().await;
-        let created = upsert_user_from_shoo_profile(
-            &test_db.pool,
-            &shoo_profile("stable-sub", "before@example.test"),
-        )
-        .await
-        .expect("first login should create the account");
-
-        let updated = upsert_user_from_shoo_profile(
-            &test_db.pool,
-            &shoo_profile("stable-sub", "after@example.test"),
-        )
-        .await
-        .expect("a known subject may change its email");
-
-        assert_eq!(updated.id, created.id, "row identity must be preserved");
-        assert_eq!(updated.email, "after@example.test");
-        assert_eq!(updated.shoo_pairwise_sub, "stable-sub");
-
-        test_db.cleanup().await;
-    }
-
-    #[tokio::test]
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    async fn shoo_login_refuses_to_move_a_known_subject_onto_a_taken_email() {
-        let test_db = test_db().await;
-        let victim = upsert_user_from_shoo_profile(
-            &test_db.pool,
-            &shoo_profile("victim-sub", "victim@example.test"),
-        )
-        .await
-        .expect("victim account should be created");
-        upsert_user_from_shoo_profile(
-            &test_db.pool,
-            &shoo_profile("attacker-sub", "attacker@example.test"),
-        )
-        .await
-        .expect("attacker account should be created");
-
-        // The subject matches an existing row, so the update path runs and the
-        // `users_email_key` violation must surface as a conflict, not a 500.
-        let result = upsert_user_from_shoo_profile(
-            &test_db.pool,
-            &shoo_profile("attacker-sub", "victim@example.test"),
-        )
-        .await;
-        assert!(
-            matches!(result, Err(AppError::Conflict(_))),
-            "expected a conflict, got {result:?}"
-        );
-
-        let victim_email: String = sqlx::query("SELECT email FROM users WHERE id = $1")
-            .bind(victim.id)
-            .fetch_one(&test_db.pool)
-            .await
-            .expect("victim should still exist")
-            .try_get("email")
-            .expect("email should read");
-        assert_eq!(victim_email, "victim@example.test");
-
-        test_db.cleanup().await;
-    }
-
-    #[tokio::test]
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    async fn shoo_login_creates_a_user_for_an_unused_subject_and_email() {
-        let test_db = test_db().await;
-        let created = upsert_user_from_shoo_profile(
-            &test_db.pool,
-            &shoo_profile("fresh-sub", "fresh@example.test"),
-        )
-        .await
-        .expect("a brand-new subject should create an account");
-        assert_eq!(created.shoo_pairwise_sub, "fresh-sub");
-        assert_eq!(created.email, "fresh@example.test");
-
-        test_db.cleanup().await;
-    }
-
-    #[tokio::test]
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    async fn product_linked_meal_writes_are_bounded_like_the_manual_path() {
-        let test_db = test_db().await;
-        let user_id = insert_test_user(&test_db.pool).await;
-        let product_id =
-            insert_test_food_product(&test_db.pool, Some(user_id), "Oats", "Brand", None).await;
-
-        // DATA-01: the product path never applied MAX_QUANTITY, so this reached
-        // the INSERT and came back as a numeric-overflow 500.
-        let result = rpc_json(
-            &test_db.pool,
-            "createMealEntry",
-            json!({
-                "userId": user_id,
-                "input": {
-                    "date": "2026-01-01",
-                    "productId": product_id,
-                    "unit": "g",
-                    "quantity": 1e12,
-                }
-            }),
-        )
-        .await;
-        assert!(
-            matches!(result, Err(AppError::BadRequest(_))),
-            "expected a 400 for an out-of-range quantity, got {result:?}"
-        );
-
-        // Same for the macro columns. Creates always recalculate from the
-        // product, so the overflow arrives as `per-100 value x quantity` rather
-        // than as a client-supplied macro.
-        let dense_product_id = Uuid::new_v4();
-        sqlx::query(
-            r#"
-            INSERT INTO food_products (
-              id, owner_user_id, scope, source, name, brand,
-              default_serving_quantity, default_serving_unit,
-              protein_per_100, carbs_per_100, fat_per_100, calories_per_100
-            )
-            VALUES ($1, $2, 'personal', 'manual', 'Dense', '', 100, 'g', 9999.99, 1, 1, 900)
-            "#,
-        )
-        .bind(dense_product_id)
-        .bind(user_id)
-        .execute(&test_db.pool)
-        .await
-        .expect("dense product should insert");
-
-        let result = rpc_json(
-            &test_db.pool,
-            "createMealEntry",
-            json!({
-                "userId": user_id,
-                "input": {
-                    "date": "2026-01-01",
-                    "productId": dense_product_id,
-                    "unit": "g",
-                    "quantity": 500_000,
-                }
-            }),
-        )
-        .await;
-        assert!(
-            matches!(result, Err(AppError::BadRequest(_))),
-            "expected a 400 for out-of-range macros, got {result:?}"
-        );
-
-        let stored: i64 = sqlx::query("SELECT count(*) AS total FROM meal_entries")
-            .fetch_one(&test_db.pool)
-            .await
-            .expect("count should run")
-            .try_get("total")
-            .expect("count should read");
-        assert_eq!(stored, 0, "no out-of-range row may reach the table");
-
-        test_db.cleanup().await;
-    }
-
-    #[tokio::test]
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    async fn preserved_product_snapshots_cannot_write_negative_macros() {
-        let test_db = test_db().await;
-        let user_id = insert_test_user(&test_db.pool).await;
-        let product_id =
-            insert_test_food_product(&test_db.pool, Some(user_id), "Oats", "Brand", None).await;
-        let created = rpc_json(
-            &test_db.pool,
-            "createMealEntry",
-            json!({
-                "userId": user_id,
-                "input": {
-                    "date": "2026-01-01",
-                    "productId": product_id,
-                    "unit": "serving",
-                    "quantity": 1,
-                }
-            }),
-        )
-        .await
-        .expect("baseline product-linked entry should be created");
-        let entry_id = created
-            .get("id")
-            .and_then(Value::as_str)
-            .expect("created entry should carry an id")
-            .to_string();
-        let before: i32 = sqlx::query("SELECT calories_kcal FROM meal_entries WHERE id = $1::uuid")
-            .bind(&entry_id)
-            .fetch_one(&test_db.pool)
-            .await
-            .expect("entry should exist")
-            .try_get("calories_kcal")
-            .expect("calories should read");
-
-        let result = rpc_json(
-            &test_db.pool,
-            "updateMealEntry",
-            json!({
-                "userId": user_id,
-                "entryId": entry_id,
-                "input": {
-                    "date": "2026-01-01",
-                    "productId": product_id,
-                    "unit": "serving",
-                    "quantity": 1,
-                    "proteinG": 1.0,
-                    "carbsG": 1.0,
-                    "fatG": 1.0,
-                    "caloriesKcal": -2000000000,
-                    "__recalculateProductMacros": false,
-                }
-            }),
-        )
-        .await;
-        assert!(
-            matches!(result, Err(AppError::BadRequest(_))),
-            "expected a 400 for negative calories, got {result:?}"
-        );
-
-        // The same preserved-snapshot path must also respect the upper bounds.
-        let result = rpc_json(
-            &test_db.pool,
-            "updateMealEntry",
-            json!({
-                "userId": user_id,
-                "entryId": entry_id,
-                "input": {
-                    "date": "2026-01-01",
-                    "productId": product_id,
-                    "unit": "serving",
-                    "quantity": 1,
-                    "proteinG": 1.0e9,
-                    "carbsG": 1.0,
-                    "fatG": 1.0,
-                    "caloriesKcal": 100,
-                    "__recalculateProductMacros": false,
-                }
-            }),
-        )
-        .await;
-        assert!(
-            matches!(result, Err(AppError::BadRequest(_))),
-            "expected a 400 for out-of-range macros, got {result:?}"
-        );
-
-        let after: i32 = sqlx::query("SELECT calories_kcal FROM meal_entries WHERE id = $1::uuid")
-            .bind(&entry_id)
-            .fetch_one(&test_db.pool)
-            .await
-            .expect("entry should still exist")
-            .try_get("calories_kcal")
-            .expect("calories should read");
-        assert_eq!(after, before, "the stored row must be unchanged");
-
-        test_db.cleanup().await;
-    }
-
-    #[tokio::test]
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    async fn calories_are_bounded_to_the_column_domain() {
-        let test_db = test_db().await;
-        let user_id = insert_test_user(&test_db.pool).await;
-
-        let result = rpc_json(
-            &test_db.pool,
-            "createMealEntry",
-            json!({
-                "userId": user_id,
-                "input": meal_payload(&[("caloriesKcal", json!(2_000_000_000i64))]),
-            }),
-        )
-        .await;
-        assert!(
-            matches!(result, Err(AppError::BadRequest(_))),
-            "expected a 400 for an absurd caloriesKcal, got {result:?}"
-        );
-
-        // The same unbounded helper fed `caloriesPer100`, which lands in the
-        // shared catalogue every other account searches.
-        let result = rpc_json(
-            &test_db.pool,
-            "createPersonalFoodProduct",
-            json!({
-                "userId": user_id,
-                "input": food_payload(&[("caloriesPer100", json!(2_000_000_000i64))]),
-            }),
-        )
-        .await;
-        assert!(
-            matches!(result, Err(AppError::BadRequest(_))),
-            "expected a 400 for an absurd caloriesPer100, got {result:?}"
-        );
-
-        test_db.cleanup().await;
-    }
-
-    #[tokio::test]
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    async fn calorie_aggregates_survive_rows_that_predate_the_bound() {
-        let test_db = test_db().await;
-        let user_id = insert_test_user(&test_db.pool).await;
-        // Written straight to the table: these are the rows the old unbounded
-        // path could already have stored. Every aggregate must still answer.
-        for sort_order in 0..2 {
-            insert_test_meal_entry(
-                &test_db.pool,
-                user_id,
-                "2026-01-01",
-                "eaten",
-                "Legacy",
-                sort_order,
-                (1.0, 1.0, 1.0, 2_000_000_000),
-            )
-            .await;
-        }
-
-        for op in [
-            "getDailySummary",
-            "getDashboardData",
-            "getRecentDailyOverviews",
-            "getStatsPageData",
-            "getLeaderboardStats",
-        ] {
-            let result = rpc_json(
-                &test_db.pool,
-                op,
-                json!({
-                    "userId": user_id,
-                    "date": "2026-01-01",
-                    "selectedDate": "2026-01-01",
-                    "today": "2026-01-01",
-                    "referenceDate": "2026-01-01",
-                }),
-            )
-            .await;
-            assert!(result.is_ok(), "{op} must not overflow: {result:?}");
-        }
-
-        test_db.cleanup().await;
-    }
-
-    #[tokio::test]
-    #[cfg_attr(
-        not(has_test_database),
-        ignore = "requires TEST_DATABASE_URL or DATABASE_URL"
-    )]
-    async fn stats_page_reports_the_same_streaks_as_the_leaderboard() {
-        let test_db = test_db().await;
-        let user_id = insert_test_user(&test_db.pool).await;
-        // A closed 3-day streak, a gap, then a 4-day streak ending yesterday —
-        // so `currentStreak` uses the one-day grace the leaderboard allows.
-        for (index, date) in [
-            "2026-01-01",
-            "2026-01-02",
-            "2026-01-03",
-            "2026-01-08",
-            "2026-01-09",
-            "2026-01-10",
-            "2026-01-11",
-        ]
-        .iter()
-        .enumerate()
-        {
-            insert_test_meal_entry(
-                &test_db.pool,
-                user_id,
-                date,
-                "eaten",
-                "Oats",
-                index as i32,
-                (10.0, 20.0, 5.0, 165),
-            )
-            .await;
-        }
-
-        let stats = rpc_json(
-            &test_db.pool,
-            "getStatsPageData",
-            json!({ "userId": user_id, "today": "2026-01-12" }),
-        )
-        .await
-        .expect("stats page data should load");
-        let leaderboard = rpc_json(
-            &test_db.pool,
-            "getLeaderboardStats",
-            json!({ "userId": user_id, "referenceDate": "2026-01-12" }),
-        )
-        .await
-        .expect("leaderboard should load");
-
-        assert_eq!(
-            stats.get("currentStreak"),
-            leaderboard.get("currentStreak"),
-            "the Summary page must not report a different streak from the leaderboard"
-        );
-        assert_eq!(stats.get("longestStreak"), leaderboard.get("longestStreak"));
-        assert_eq!(stats.get("currentStreak").and_then(Value::as_i64), Some(4));
-        assert_eq!(stats.get("longestStreak").and_then(Value::as_i64), Some(4));
-
-        test_db.cleanup().await;
-    }
-}
+mod tests;

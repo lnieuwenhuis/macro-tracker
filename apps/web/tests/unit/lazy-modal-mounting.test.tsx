@@ -1,19 +1,5 @@
-/**
- * @vitest-environment jsdom
- *
- * TEST-04: this used to read `dashboard-shell.tsx` / `recipe-builder-shell.tsx`
- * as raw source text and assert on substrings (`source.indexOf("<BarcodeCaptureModals")`,
- * `.toContain('{showPresetsModal && (')`). That verifies the source text survives,
- * not that the guard actually withholds mounting at runtime -- renaming the guard
- * variable, moving the conditional into a helper, or flipping `&&`/`||` in the
- * boolean all still pass as long as the literal substring is present somewhere.
- *
- * These tests render the real shells with React Testing Library and assert on
- * the DOM: the lazy chunk's content (a "Close scanner" button from the real,
- * dynamically-imported `BarcodeScanner`, or a `role="dialog"` from the real
- * `PresetModal`) must be absent before the flow starts, present once it starts,
- * and absent again once it is dismissed.
- */
+/** @vitest-environment jsdom */
+// Assert rendered DOM absence/presence across lazy chunk mount and dismiss.
 import type { DailySummary, MacroGoals, MealEntryRecord, MealGroup } from "@macro-tracker/db";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -25,7 +11,7 @@ const mocked = vi.hoisted(() => ({
   createMealGroupAction: vi.fn(),
   updateMealGroupAction: vi.fn(),
   deleteMealGroupAction: vi.fn(),
-  loadRecipesAction: vi.fn(),
+  loadRecipeSummariesAction: vi.fn(),
   loadTemplatesAction: vi.fn(),
   applyTemplateAction: vi.fn(),
   saveTemplateAction: vi.fn(),
@@ -53,7 +39,7 @@ vi.mock("@/lib/actions", () => ({
   createMealGroupAction: mocked.createMealGroupAction,
   updateMealGroupAction: mocked.updateMealGroupAction,
   deleteMealGroupAction: mocked.deleteMealGroupAction,
-  loadRecipesAction: mocked.loadRecipesAction,
+  loadRecipeSummariesAction: mocked.loadRecipeSummariesAction,
   loadTemplatesAction: mocked.loadTemplatesAction,
   applyTemplateAction: mocked.applyTemplateAction,
   saveTemplateAction: mocked.saveTemplateAction,
@@ -111,8 +97,7 @@ function buildDailySummary(): DailySummary {
   };
 }
 
-// The "From template" button that opens the preset modal only renders in the
-// "no food items logged yet" empty state, so this variant has no meals.
+// The "From template" opener only renders in the empty state, so this variant has no meals.
 function buildEmptyDailySummary(): DailySummary {
   return {
     date: "2026-08-18",
@@ -126,7 +111,7 @@ function buildEmptyDailySummary(): DailySummary {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocked.loadRecipesAction.mockResolvedValue({ ok: true, recipes: [] });
+  mocked.loadRecipeSummariesAction.mockResolvedValue({ ok: true, recipes: [] });
   mocked.loadTemplatesAction.mockResolvedValue({ ok: true, templates: [] });
 });
 
@@ -145,9 +130,7 @@ describe("dashboard shell lazy modal mounting", () => {
       />,
     );
 
-    // `initialComposeAction="scan"` is the same prop `app/page.tsx` derives
-    // from `?compose=scan`, so this drives the real `showScanner` state path
-    // rather than reaching into internals.
+    // `initialComposeAction="scan"` is the same prop `app/page.tsx` derives from `?compose=scan`.
     const closeScannerButton = await screen.findByRole("button", {
       name: "Close scanner",
     });

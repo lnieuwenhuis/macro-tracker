@@ -9,8 +9,7 @@ type QuickAddRailProps = {
   emptyState?: React.ReactNode;
 };
 
-// Memoized to match MealCard: a parent re-render (a quantity edit, say)
-// otherwise re-renders every card in the rail.
+// Memoized to match MealCard: a parent re-render (a quantity edit, say) otherwise re-renders every card in the rail.
 const QuickAddCard = memo(function QuickAddCard({
   candidate,
   onAdd,
@@ -25,18 +24,15 @@ const QuickAddCard = memo(function QuickAddCard({
       className="flex w-40 shrink-0 flex-col gap-2 rounded-2xl border border-[var(--color-border)] bg-[var(--color-card-subtle)] p-3.5 text-left shadow-[0_4px_16px_rgba(74,45,28,0.05)] transition hover:-translate-y-0.5 hover:border-[var(--color-accent)] active:translate-y-0"
       aria-label={`Quick add ${candidate.label}`}
     >
-      {/* Label */}
       <span className="line-clamp-2 text-[13px] font-semibold leading-tight text-[var(--color-ink)]">
         {candidate.label}
       </span>
 
-      {/* Calories */}
       <span className="text-base font-bold tabular-nums text-[var(--color-ink)]">
         {candidate.caloriesKcal}
         <span className="ml-0.5 text-[11px] font-semibold text-[var(--color-muted)]">kcal</span>
       </span>
 
-      {/* Compact single-line macros — never wrap */}
       <div className="flex items-center gap-2 text-[11px] font-semibold tabular-nums">
         <span className="text-[var(--color-bar-protein)]">P {candidate.proteinG}g</span>
         <span className="text-[var(--color-bar-carbs)]">C {candidate.carbsG}g</span>

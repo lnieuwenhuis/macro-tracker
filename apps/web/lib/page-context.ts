@@ -12,12 +12,7 @@ export async function loadOnboardedDateParam<TSearchParams extends DateSearchPar
 ) {
   const user = await requireOnboardedAppUser();
   const params = await searchParams;
-  // Fall back to the browser's calendar day, not the Node process day, so a
-  // cold load without `?date=` already renders the day the user is in.
-  // UI-02: `today` is returned as well so shells can be handed it as a prop
-  // instead of each recomputing `getLocalDateString()` during render, which
-  // resolves to the Node process zone (UTC) on the server and the browser zone
-  // on hydration - a mismatch for every user at a non-zero UTC offset.
+  // today is the browser's day, passed as a prop so hydration never recomputes it per-component.
   const today = await getRequestToday();
   const selectedDate = ensureDateString(params.date, today);
 

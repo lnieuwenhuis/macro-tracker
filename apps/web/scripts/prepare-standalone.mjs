@@ -65,8 +65,7 @@ export async function prepareStandaloneApp(appDir = getAppDir()) {
     resolve(appDir, ".next/static"),
     resolve(standaloneAppDir, ".next/static"),
   );
-  // Next 16.3's standalone trace can contain only the CJS half of
-  // @swc/helpers even though the server imports its ESM entry points.
+  // Next 16.3's standalone trace can omit the ESM half of @swc/helpers even though the server imports it.
   await copyCompleteSwcHelpers(appDir, standaloneAppDir);
 }
 

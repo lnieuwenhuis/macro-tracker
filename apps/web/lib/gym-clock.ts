@@ -2,12 +2,7 @@
 
 import { useSyncExternalStore } from "react";
 
-// The tense-aware skip label needs a clock, but the label may NEVER be
-// derived from `new Date()` during render: the server (UTC) and the device
-// disagree for hours every day, which is a guaranteed hydration mismatch.
-// SSR/hydration render from `getServerSnapshot` (null → neutral past form);
-// after mount a minute tick (re-fired when the tab becomes visible again)
-// keeps a long-mounted screen honest.
+// Never derive the skip label from new Date() during render (server UTC vs device clock mismatch); tick after mount.
 function subscribeToMinuteClock(notify: () => void) {
   const interval = window.setInterval(notify, 60_000);
   const onVisible = () => notify();

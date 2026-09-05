@@ -33,11 +33,7 @@ function pathnameToActiveTab(
   pathname: string,
 ): "log" | "progress" | "recipes" | "summary" {
   if (pathname.startsWith("/progress")) return "progress";
-  if (
-    pathname.startsWith("/recipes") ||
-    pathname.startsWith("/planner") ||
-    pathname.startsWith("/library")
-  ) return "recipes";
+  if (pathname.startsWith("/recipes") || pathname.startsWith("/planner") || pathname.startsWith("/library")) return "recipes";
   if (pathname.startsWith("/summary")) return "summary";
   return "log";
 }

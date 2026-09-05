@@ -49,11 +49,7 @@ function SkipLabelProbe({ date, todayStr }: { date: string; todayStr: string }) 
 
 describe("tense-aware skip label SSR contract", () => {
   it("server-renders the neutral past form even when the slot has not ended", () => {
-    // jsdom/RTL only ever exercise the client snapshot; this is the one place
-    // the server branch is pinned. If `useGymNowMinute`'s getServerSnapshot
-    // ever computes from the clock, SSR says "Skipping" for hours every
-    // evening while hydration says "Skipped" — a guaranteed hydration
-    // mismatch. The server must always emit the neutral "Skipped".
+    // getServerSnapshot must stay clock-independent or SSR/hydration text will mismatch.
     const html = renderToString(
       createElement(SkipLabelProbe, {
         date: "2026-08-31",

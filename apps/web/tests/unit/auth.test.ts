@@ -86,9 +86,7 @@ describe("session auth helpers", () => {
       email: "coach@example.com",
     };
 
-    // Every authenticated request re-mints a 7-day token, so without an
-    // absolute cap a captured token lives forever as long as it keeps being
-    // used, and signing out invalidates nothing server-side.
+    // Without an absolute cap, a captured token renews itself forever.
     it("rejects a token whose original issuance predates the absolute lifetime", async () => {
       const nowSeconds = Math.floor(Date.now() / 1000);
       const staleToken = await createSessionToken({

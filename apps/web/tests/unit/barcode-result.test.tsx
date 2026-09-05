@@ -1,13 +1,5 @@
-/**
- * @vitest-environment jsdom
- *
- * UI-05: the manual-entry "Add product" form in `barcode-result.tsx` could
- * be dismissed mid-save -- the backdrop click and the `CloseButton` were not
- * gated on `isSaving`, and `ModalSurface` was given no `dismissable` prop
- * (defaults to `true`, so Escape closed it too). `ai-food-photo-modal.tsx`
- * already handles the identical situation with `dismissable={!isAnalyzing}`;
- * this applies the same pattern here.
- */
+/** @vitest-environment jsdom */
+// The manual-entry form must not be dismissable while a save is in flight.
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -43,8 +35,7 @@ describe("BarcodeResult manual-entry form dismissal", () => {
   }
 
   it("does not close on Escape, backdrop click, or the close button while saving", async () => {
-    // A promise the test controls so the component stays "isSaving" for as
-    // long as needed.
+    // A test-controlled promise so the component stays isSaving as long as needed.
     let resolveSave!: (value: { ok: boolean }) => void;
     mocked.saveBarcodeFoodProductAction.mockReturnValue(
       new Promise((resolve) => {
@@ -63,27 +54,21 @@ describe("BarcodeResult manual-entry form dismissal", () => {
       expect((screen.getByRole("button", { name: /saving/i }) as HTMLButtonElement).disabled).toBe(true);
     });
 
-    // Escape should not dismiss.
     fireEvent.keyDown(document, { key: "Escape" });
     expect(onClose).not.toHaveBeenCalled();
 
-    // The backdrop click should not dismiss. `BarcodeResult` renders via
-    // `OverlayPortal` (a portal to `document.body`), so it is not inside the
-    // RTL `container`.
+    // `BarcodeResult` renders via `OverlayPortal`, so the backdrop is not inside the RTL container.
     const backdrop = document.body.querySelector(".absolute.inset-0.bg-black\\/40");
     expect(backdrop).not.toBeNull();
     fireEvent.click(backdrop!);
     expect(onClose).not.toHaveBeenCalled();
 
-    // The close button should be disabled and not dismiss.
     const closeButton = screen.getByRole("button", { name: /close/i });
     expect((closeButton as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(closeButton);
     expect(onClose).not.toHaveBeenCalled();
 
-    // Flush the promise resolution, resulting state update, and passive effects
-    // together. Waiting only for the button's DOM state can observe the commit
-    // before `useEscapeDismiss` has reattached its document listener.
+    // Waiting only for DOM state can observe the commit before useEscapeDismiss reattaches its listener.
     await act(async () => {
       resolveSave({ ok: false });
     });

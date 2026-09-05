@@ -1,4 +1,4 @@
-import { getDailySummary, getRecipeCount, getTemplates } from "@macro-tracker/db";
+import { getPlannedShoppingSummaries, getRecipeCount, getTemplateSummaries } from "@macro-tracker/db";
 
 import { PlannerShell } from "@/components/planner-shell";
 import { nextDateString } from "@/lib/formatting";
@@ -19,13 +19,11 @@ export default async function PlannerPage({ searchParams }: PlannerPageProps) {
     [],
   );
   const [templates, recipeCount, shoppingSummaries] = await Promise.all([
-    getTemplates(sessionUser.userId),
+    getTemplateSummaries(sessionUser.userId),
     getRecipeCount(sessionUser.userId),
-    Promise.all(
-      shoppingDates.map((date) => getDailySummary(sessionUser.userId, date)),
-    ),
+    getPlannedShoppingSummaries(sessionUser.userId, shoppingDates),
   ]);
-  const dailySummary = shoppingSummaries[0]!;
+  const selectedDaySummary = shoppingSummaries[0]!;
 
   return (
     <PlannerShell
@@ -36,7 +34,8 @@ export default async function PlannerPage({ searchParams }: PlannerPageProps) {
       todayStr={today}
       templates={templates}
       recipeCount={recipeCount}
-      dailySummary={dailySummary}
+      selectedDayEntryCount={selectedDaySummary.entryCount}
+      selectedDayPlannedCaloriesKcal={selectedDaySummary.plannedCaloriesKcal}
       shoppingSummaries={shoppingSummaries}
     />
   );

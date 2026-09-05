@@ -20,7 +20,7 @@ import {
   respondGymBuddyInvite,
   setGymSlotStatus,
   updateGymSlot,
-  getRecipes,
+  getRecipeSummaries,
   getRecipeById,
   getTemplates,
   getTemplateById,
@@ -49,6 +49,7 @@ import type {
   MealGroup,
   MealTemplate,
   RecipeRecord,
+  RecipeSummary,
   WeightUnit,
 } from "@macro-tracker/db";
 import { revalidatePath } from "next/cache";
@@ -110,9 +111,7 @@ export async function saveMealEntryAction(
   input: SaveMealEntryInput,
 ): Promise<SaveMealEntryResult> {
   return runSessionAction(async (sessionUser) => {
-    // Both paths take the same payload; only `sortOrder` differs, because an
-    // update must pin a concrete position while a create may let the backend
-    // append.
+    // sortOrder differs by path: an update pins a concrete position while a create lets the backend append.
     const { id, sortOrder, ...fields } = input;
     const entry = id
       ? await updateMealEntry(sessionUser.userId, id, {
@@ -348,10 +347,6 @@ export async function createTemplateFromDateAction(input: {
   }, { revalidate: [["/planner", "page"]] });
 }
 
-// ---------------------------------------------------------------------------
-// Weight tracking
-// ---------------------------------------------------------------------------
-
 type SaveWeightEntryInput = {
   date: string;
   weightKg: number;
@@ -417,10 +412,6 @@ export async function saveWeightGoalAction(
   }, { revalidate: [["/weight", "page"]] });
 }
 
-// ---------------------------------------------------------------------------
-// Recipes
-// ---------------------------------------------------------------------------
-
 type SaveRecipeInput = {
   id?: string;
   label: string;
@@ -431,12 +422,12 @@ type SaveRecipeInput = {
 
 type SaveRecipeResult = ActionResult & { recipe?: RecipeRecord };
 
-type LoadRecipesResult = ActionResult & { recipes?: RecipeRecord[] };
+type LoadRecipeSummariesResult = ActionResult & { recipes?: RecipeSummary[] };
 
-export async function loadRecipesAction(): Promise<LoadRecipesResult> {
+export async function loadRecipeSummariesAction(): Promise<LoadRecipeSummariesResult> {
   return runSessionAction(async (sessionUser) => ({
     ok: true,
-    recipes: await getRecipes(sessionUser.userId),
+    recipes: await getRecipeSummaries(sessionUser.userId),
   }));
 }
 
@@ -527,17 +518,11 @@ export async function searchFoodsAction(
 type LogRecipePortionInput = {
   recipeId: string;
   date: string;
-  /**
-   * Required: only the browser knows the user's calendar day, so planned-vs-
-   * eaten has to be decided there rather than from the server clock.
-   */
+  /** Decided by the browser, which knows the user's calendar day; the server clock cannot. */
   status: MealEntryStatus;
   portionCount?: number;
   gramsConsumed?: number | null;
-  /**
-   * Idempotency key minted by the caller and reused across retries of the same
-   * intent, so a double-tap collapses into one row instead of two.
-   */
+  /** Idempotency key reused across retries so a double-tap collapses into one row instead of two. */
   clientMutationId?: string;
 };
 
@@ -578,10 +563,6 @@ export async function logRecipePortionAction(
   }, { revalidate: [["/", "page"]] });
 }
 
-// ---------------------------------------------------------------------------
-// Community barcode catalogue
-// ---------------------------------------------------------------------------
-
 type SaveBarcodeFoodProductResult = ActionResult & {
   product?: FoodProduct;
 };
@@ -595,13 +576,7 @@ export async function saveBarcodeFoodProductAction(
   });
 }
 
-// ---------------------------------------------------------------------------
-// Gym schedule sharing
-//
-// User-facing copy for validation/conflict errors is authored in the Rust
-// error strings; `toActionError` passes conflict/bad_request/not_found
-// messages through verbatim, so nothing needs mapping here.
-// ---------------------------------------------------------------------------
+// Gym schedule sharing: validation/conflict copy is authored in Rust error strings, passed through by toActionError.
 
 const GYM_REVALIDATE = [["/gym", "page"], ["/", "page"]] as const;
 

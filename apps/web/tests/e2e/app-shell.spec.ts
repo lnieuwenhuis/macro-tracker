@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { Buffer } from "node:buffer";
 
-import { createTestSession, testRouteHeaders, uniqueTestEmail } from "./test-users";
+import { createTestSession, testRouteHeaders, uniqueTestEmail, waitForAppReady } from "./test-users";
 
 async function expectAppShellReady(page: Page) {
   await expect(page.getByRole("button", { name: "Open settings" })).toBeVisible();
@@ -10,6 +10,7 @@ async function expectAppShellReady(page: Page) {
 test("canonical app navigation and settings are visible", async ({ page }, testInfo) => {
   await createTestSession(page, uniqueTestEmail("coach", testInfo));
   await page.goto("/?date=2026-03-19");
+  await waitForAppReady(page);
   await expect(page.getByRole("button", { name: "Open settings" })).toBeVisible();
 
   await expect(page.getByRole("link", { name: "Food Log" })).toBeVisible();
@@ -88,6 +89,7 @@ test("keeps the bottom nav anchored when visual viewport is shortened on launch"
 
   await createTestSession(page, uniqueTestEmail("user", testInfo));
   await page.goto("/?date=2026-03-19");
+  await waitForAppReady(page);
 
   const primaryNav = page.getByRole("navigation", { name: "Primary" });
   await expect(primaryNav).toBeVisible();
@@ -133,6 +135,7 @@ test("keeps low meal action menus above the bottom controls", async ({ page }, t
   expect(seedResult).toEqual({ ok: true, status: 200 });
 
   await page.goto("/?date=2035-06-22");
+  await waitForAppReady(page);
   await page.getByRole("button", { name: "From template" }).click();
   const modal = page.getByRole("dialog", { name: "Meal Templates" });
   await expect(modal).toBeVisible();
@@ -200,6 +203,7 @@ test("keeps the empty food template tab selectable when only day templates exist
   expect(seedResult).toEqual({ ok: true, status: 200 });
 
   await page.goto(`/?date=${selectedDate}`);
+  await waitForAppReady(page);
   await page.getByRole("button", { name: "From template" }).click();
   let modal = page.getByRole("dialog", { name: "Meal Templates" });
   await expect(modal).toBeVisible();
@@ -213,6 +217,7 @@ test("keeps the empty food template tab selectable when only day templates exist
   await expect(modal).toBeHidden();
 
   await page.goto(`/library?date=${selectedDate}`);
+  await waitForAppReady(page);
   const foodTemplateSection = page.locator("section").filter({
     has: page.getByRole("heading", { name: "Food item templates" }),
   });
@@ -234,6 +239,7 @@ test("keeps the empty food template tab selectable when only day templates exist
   await expect(modal).toBeHidden();
 
   await page.goto(`/planner?date=${selectedDate}`);
+  await waitForAppReady(page);
   await page.getByRole("link", { name: /Food items/ }).click();
   modal = page.getByRole("dialog", { name: "Meal Templates" });
   await expect(modal).toBeVisible();
@@ -250,6 +256,7 @@ test("the app shell supports the bottom add flow and merged progress routes", as
   await expectAppShellReady(page);
 
   await page.goto("/summary?date=2026-03-19");
+  await waitForAppReady(page);
   await expect(page.getByRole("link", { name: "Summary" })).toHaveAttribute(
     "aria-current",
     "page",
@@ -277,9 +284,11 @@ test("the app shell supports the bottom add flow and merged progress routes", as
   await expect(page.getByText("Log Weight")).toBeVisible();
 
   await page.goto("/weight?date=2026-03-19");
+  await waitForAppReady(page);
   await expect(page).toHaveURL(/\/progress\?date=2026-03-19&tab=weight/);
 
   await page.goto("/stats?date=2026-03-19");
+  await waitForAppReady(page);
   await expect(page).toHaveURL(/\/summary\?date=2026-03-19/);
 });
 
@@ -288,6 +297,7 @@ test("goals page includes the macro calculator and applies calculated targets", 
 }, testInfo) => {
   await createTestSession(page, uniqueTestEmail("user", testInfo));
   await page.goto("/progress?date=2026-03-19&tab=goals");
+  await waitForAppReady(page);
 
   await expect(page.getByRole("heading", { name: "Macro calculator" })).toBeVisible();
   await page.getByRole("spinbutton", { name: "Age yrs" }).fill("30");

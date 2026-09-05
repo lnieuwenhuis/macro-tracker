@@ -1,11 +1,11 @@
 "use client";
 
-import type { DailySummary, GymHomeSummary, MacroGoals, MealEntryRecord, MealEntryStatus, MealGroup, MealTemplate, QuickAddCandidate, RecipeRecord } from "@macro-tracker/db";
+import type { DailySummary, GymHomeSummary, MacroGoals, MealEntryRecord, MealEntryStatus, MealGroup, MealTemplate, QuickAddCandidate, RecipeSummary } from "@macro-tracker/db";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, useTransition } from "react";
 
-import { applyTemplateAction, createMealGroupAction, deleteMealGroupAction, deleteMealEntryAction, loadRecipesAction, loadTemplatesAction, markMealEntryStatusAction, saveMealEntryAction, updateMealGroupAction } from "@/lib/actions";
+import { applyTemplateAction, createMealGroupAction, deleteMealGroupAction, deleteMealEntryAction, loadRecipeSummariesAction, loadTemplatesAction, markMealEntryStatusAction, saveMealEntryAction, updateMealGroupAction } from "@/lib/actions";
 import type { ComposeAction } from "@/lib/compose";
 import { computeLiveTotalsByStatus, rankCandidates } from "@/lib/quick-add";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
@@ -13,7 +13,8 @@ import type { OpenFoodFactsProduct } from "@/lib/openfoodfacts";
 import type { PresetTemplateKind } from "@/lib/preset-modal-state";
 import { getLocalDateString } from "@/lib/startup-date";
 import { createClientMutationIdStore } from "@/lib/client-mutation-id";
-import { createLazyCollectionLoader } from "@/lib/lazy-collection";
+import { useCopiedFlash } from "@/lib/use-copied-flash";
+import { useLazyCollection } from "@/lib/use-lazy-collection";
 import { prefetchOnIdle } from "@/lib/idle-prefetch";
 
 import { CompactModal } from "./compact-modal";
@@ -30,19 +31,8 @@ import { QuickAddRail } from "./quick-add-rail";
 import { TransitionLink } from "./transition-link";
 import { useTemplateMutations } from "./use-template-mutations";
 
-// Modals only mount behind a flag, so keep them out of the log screen's initial
-// bundle. `prefetchModalChunks` below pulls them in once the browser is idle,
-// so opening one still costs nothing at click time.
-//
-// The `loading` option is load-bearing: without it (or `ssr: false`)
-// next/dynamic emits no Suspense boundary of its own, so the first open
-// suspends up to the route-level loading.tsx and the whole page swaps to the
-// skeleton and remounts. The fallbacks mirror each modal's own shell rather
-// than rendering null — a lazy component always suspends for at least one
-// frame on first mount, and a null fallback makes the overlay vanish for that
-// frame, which reads as the modal closing and reopening. The options must stay
-// inline object literals — the bundler analyzes dynamic() options statically
-// and rejects a shared const.
+// `loading` is load-bearing for Suspense; keep it an inline literal, since dynamic() options are analyzed statically.
+// Fallbacks mirror their modal shell; null would blank the overlay for a frame.
 const AiFoodPhotoModal = dynamic(
   () => import("./ai-food-photo-modal").then((mod) => mod.AiFoodPhotoModal),
   { loading: () => <OverlayBackdropFallback /> },
@@ -74,6 +64,9 @@ function prefetchModalChunks() {
   ]);
 }
 
+const GROUP_INPUT_CLASS =
+  "min-w-0 flex-1 rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-3 py-2 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]";
+
 type DashboardShellProps = {
   userEmail: string;
   canAccessAdmin: boolean;
@@ -84,10 +77,7 @@ type DashboardShellProps = {
   gymSummary?: GymHomeSummary | null;
   initialComposeAction?: ComposeAction | null;
   initialPresetTemplateKind?: PresetTemplateKind | null;
-  // Resolved server-side (user's timezone) via `getRequestToday()` so the
-  // client render agrees with the server render on hydration. Falls back to
-  // the local runtime's day when a caller has not been updated to pass it
-  // yet -- see AUDIT-REMEDIATION.md UI-02.
+  // Server-resolved in the user's timezone so the client and server renders agree on hydration.
   todayStr?: string;
 };
 
@@ -108,8 +98,7 @@ function mealToDraft(meal: MealEntryRecord): MealDraft {
     quantity: String(meal.quantity),
     unit: meal.unit,
     servingMultiplier: String(meal.servingMultiplier),
-    // Use String() unconditionally: a falsy check like `meal.proteinG ? ...`
-    // incorrectly converts a legitimate 0 value into an empty string.
+    // String() unconditionally: a falsy check would turn a legitimate 0 into an empty string.
     proteinG: String(meal.proteinG),
     carbsG: String(meal.carbsG),
     fatG: String(meal.fatG),
@@ -144,10 +133,21 @@ function reconcileDraftsWithSavedMeals(
   return [...savedDrafts, ...unsavedDrafts];
 }
 
-function createEmptyDraft(sortOrder: number, status: MealEntryStatus): MealDraft {
+function baseDraft(
+  sortOrder: number,
+  status: MealEntryStatus,
+  fields: Omit<MealDraft, "clientId" | "sortOrder" | "status">,
+): MealDraft {
   return {
     clientId: `draft-${crypto.randomUUID()}`,
     status,
+    sortOrder,
+    ...fields,
+  };
+}
+
+function createEmptyDraft(sortOrder: number, status: MealEntryStatus): MealDraft {
+  return baseDraft(sortOrder, status, {
     label: "",
     quantity: "1",
     unit: "serving",
@@ -156,8 +156,7 @@ function createEmptyDraft(sortOrder: number, status: MealEntryStatus): MealDraft
     carbsG: "",
     fatG: "",
     caloriesKcal: "",
-    sortOrder,
-  };
+  });
 }
 
 function createDraftFromCandidate(
@@ -165,9 +164,7 @@ function createDraftFromCandidate(
   sortOrder: number,
   status: MealEntryStatus,
 ): MealDraft {
-  return {
-    clientId: `draft-${crypto.randomUUID()}`,
-    status,
+  return baseDraft(sortOrder, status, {
     label: candidate.label,
     quantity: "1",
     unit: "serving",
@@ -176,8 +173,7 @@ function createDraftFromCandidate(
     carbsG: String(candidate.carbsG),
     fatG: String(candidate.fatG),
     caloriesKcal: String(candidate.caloriesKcal),
-    sortOrder,
-  };
+  });
 }
 
 function createDraftFromMacroSelection(
@@ -195,9 +191,7 @@ function createDraftFromMacroSelection(
   sortOrder: number,
   status: MealEntryStatus,
 ): MealDraft {
-  return {
-    clientId: `draft-${crypto.randomUUID()}`,
-    status,
+  return baseDraft(sortOrder, status, {
     productId: selection.productId ?? null,
     label: selection.label,
     quantity: String(selection.quantity ?? 1),
@@ -207,8 +201,7 @@ function createDraftFromMacroSelection(
     carbsG: String(selection.carbsG),
     fatG: String(selection.fatG),
     caloriesKcal: String(selection.caloriesKcal),
-    sortOrder,
-  };
+  });
 }
 
 function toNumber(value: string, fallback = 0) {
@@ -269,6 +262,21 @@ function mealDraftToSaveInput(
 
 function getNextSortOrder(drafts: MealDraft[]) {
   return drafts.reduce((highest, draft) => Math.max(highest, draft.sortOrder), -1) + 1;
+}
+
+function loadNamedCollection<Item>(
+  action: () => Promise<{ ok: boolean; error?: string; [key: string]: unknown }>,
+  key: string,
+  fallbackError: string,
+) {
+  return async (): Promise<Item[]> => {
+    const result = await action();
+    const items = result[key] as Item[] | undefined;
+    if (!result.ok || !items) {
+      throw new Error(result.error ?? fallbackError);
+    }
+    return items;
+  };
 }
 
 function CollectionLoadStateModal({
@@ -340,18 +348,7 @@ export function DashboardShell({
   const [showPresetsModal, setShowPresetsModal] = useState(false);
   const [presetInitialKind, setPresetInitialKind] =
     useState<PresetTemplateKind | null>(null);
-  const [localTemplates, setLocalTemplates] = useState<MealTemplate[]>([]);
-  const [templatesLoaded, setTemplatesLoaded] = useState(false);
-  const [templatesLoading, setTemplatesLoading] = useState(false);
-  const [templateLoadError, setTemplateLoadError] = useState<string | null>(null);
-  const templateLoaderRef = useRef<ReturnType<typeof createLazyCollectionLoader<MealTemplate[]>> | null>(null);
-  templateLoaderRef.current ??= createLazyCollectionLoader(async () => {
-    const result = await loadTemplatesAction();
-    if (!result.ok || !result.templates) {
-      throw new Error(result.error ?? "Unable to load templates.");
-    }
-    return result.templates;
-  });
+  const templates = useLazyCollection(loadNamedCollection<MealTemplate>(loadTemplatesAction, "templates", "Unable to load templates."), "Unable to load templates.");
   const [presetMutation, setPresetMutation] = useState<PresetMutationState | null>(null);
   const [presetError, setPresetError] = useState<string | null>(null);
   const {
@@ -359,8 +356,8 @@ export function DashboardShell({
     handleDeletePreset,
     handleUpdatePreset,
   } = useTemplateMutations({
-    localTemplates,
-    setLocalTemplates,
+    localTemplates: templates.items,
+    setLocalTemplates: templates.setItems,
     setPresetError,
     setPresetMutation: (mutation) => setPresetMutation(mutation),
   });
@@ -372,25 +369,11 @@ export function DashboardShell({
   const [groupError, setGroupError] = useState<string | null>(null);
   const [groupMutationId, setGroupMutationId] = useState<string | null>(null);
 
-  // Recipe picker state
   const [showRecipePickerModal, setShowRecipePickerModal] = useState(false);
-  const [localRecipes, setLocalRecipes] = useState<RecipeRecord[]>([]);
-  const [recipesLoaded, setRecipesLoaded] = useState(false);
-  const [recipesLoading, setRecipesLoading] = useState(false);
-  const [recipeLoadError, setRecipeLoadError] = useState<string | null>(null);
-  const recipeLoaderRef = useRef<ReturnType<typeof createLazyCollectionLoader<RecipeRecord[]>> | null>(null);
-  recipeLoaderRef.current ??= createLazyCollectionLoader(async () => {
-    const result = await loadRecipesAction();
-    if (!result.ok || !result.recipes) {
-      throw new Error(result.error ?? "Unable to load recipes.");
-    }
-    return result.recipes;
-  });
+  const recipes = useLazyCollection(loadNamedCollection<RecipeSummary>(loadRecipeSummariesAction, "recipes", "Unable to load recipes."), "Unable to load recipes.");
 
-  // Food search state
   const [showSearchModal, setShowSearchModal] = useState(false);
 
-  // AI photo estimate state
   const [showPhotoModal, setShowPhotoModal] = useState(false);
 
   useEffect(() => {
@@ -412,24 +395,8 @@ export function DashboardShell({
     selectedDateRef.current = selectedDate;
   }, [dailySummary.mealGroups, dailySummary.meals, selectedDate]);
 
-  // Tracks cards that were recently copied to today so the button can give
-  // brief visual confirmation before returning to its normal state.
-  const [copiedCardIds, setCopiedCardIds] = useState<Set<string>>(new Set());
-  // Pending "copied" flash timers, keyed by clientId, cleared on unmount so a
-  // navigation away mid-flash doesn't call setState on an unmounted tree.
-  const copiedTimersRef = useRef<Map<string, number>>(new Map());
+  const { copiedIds: copiedCardIds, flash: flashCopied } = useCopiedFlash(2000);
 
-  useEffect(() => {
-    const timers = copiedTimersRef.current;
-    return () => {
-      for (const timer of timers.values()) {
-        window.clearTimeout(timer);
-      }
-      timers.clear();
-    };
-  }, []);
-
-  // Barcode scanner state
   const [showScanner, setShowScanner] = useState(false);
   const [scanResult, setScanResult] = useState<OpenFoodFactsProduct | null>(null);
   const [notFoundBarcode, setNotFoundBarcode] = useState<string | null>(null);
@@ -439,10 +406,6 @@ export function DashboardShell({
     setScanResult(null);
     setNotFoundBarcode(null);
   }
-
-  // ---------------------------------------------------------------------------
-  // Live totals react to unsaved drafts immediately.
-  // ---------------------------------------------------------------------------
 
   const totalsByStatus = useMemo(
     () => computeLiveTotalsByStatus(drafts),
@@ -458,10 +421,6 @@ export function DashboardShell({
   const defaultEntryStatus: MealEntryStatus =
     selectedDate > todayStr ? "planned" : "eaten";
 
-  // ---------------------------------------------------------------------------
-  // Quick-add rails
-  // ---------------------------------------------------------------------------
-
   // Single unified quick-add list: ranked by routine signals, not macro fit.
   const quickAddItems = useMemo(
     () =>
@@ -473,9 +432,23 @@ export function DashboardShell({
     [quickAddCandidates, todayStr],
   );
 
-  // ---------------------------------------------------------------------------
-  // Draft helpers
-  // ---------------------------------------------------------------------------
+  function clearDraftError(clientId: string) {
+    setErrors((currentErrors) => ({
+      ...currentErrors,
+      [clientId]: null,
+    }));
+  }
+
+  function appendMacroSelectionAsDraft(macros: Parameters<typeof createDraftFromMacroSelection>[0]) {
+    setDrafts((currentDrafts) => [
+      ...currentDrafts,
+      createDraftFromMacroSelection(
+        macros,
+        getNextSortOrder(currentDrafts),
+        defaultEntryStatus,
+      ),
+    ]);
+  }
 
   function updateDraft(
     clientId: string,
@@ -492,10 +465,7 @@ export function DashboardShell({
           : draft,
       ),
     );
-    setErrors((currentErrors) => ({
-      ...currentErrors,
-      [clientId]: null,
-    }));
+    clearDraftError(clientId);
   }
 
   function isOnlyGroupDirty(draft: MealDraft, nextGroupId: string | null) {
@@ -533,10 +503,7 @@ export function DashboardShell({
         item.clientId === clientId ? { ...item, mealGroupId } : item,
       ),
     );
-    setErrors((currentErrors) => ({
-      ...currentErrors,
-      [clientId]: null,
-    }));
+    clearDraftError(clientId);
 
     if (!draft.id || !isOnlyGroupDirty(draft, mealGroupId)) {
       return;
@@ -617,7 +584,7 @@ export function DashboardShell({
     }
   }
 
-  function addDraftFromRecipe(recipe: RecipeRecord) {
+  function addDraftFromRecipe(recipe: RecipeSummary) {
     const macros = recipe.perPortionMacros;
     setDrafts((currentDrafts) => [
       ...currentDrafts,
@@ -638,9 +605,7 @@ export function DashboardShell({
     setShowRecipePickerModal(false);
   }
 
-  /** Source-agnostic: tap any quick-add card to open a prefilled draft (no auto-save). */
-  // `useCallback` so the memoized QuickAddCard can actually skip re-renders —
-  // a fresh function identity each render would defeat the memo.
+  // useCallback keeps one identity across renders so the memoized QuickAddCard rows can skip re-rendering.
   const addDraftFromCandidate = useCallback(
     (candidate: QuickAddCandidate) => {
       setDrafts((currentDrafts) => [
@@ -711,10 +676,7 @@ export function DashboardShell({
         currentDraft.clientId === clientId ? restored : currentDraft,
       ),
     );
-    setErrors((currentErrors) => ({
-      ...currentErrors,
-      [clientId]: null,
-    }));
+    clearDraftError(clientId);
   }
 
   async function handleSave(clientId: string): Promise<boolean> {
@@ -925,10 +887,7 @@ export function DashboardShell({
 
   const isViewingToday = selectedDate === todayStr;
 
-  // Meal card callbacks close over draft state, so they get a fresh identity on
-  // every keystroke. Route them through a ref so each card receives a stable
-  // prop and `MealCard`'s memo can skip the cards that did not change -- typing
-  // in one row used to re-render every row on the day.
+  // Card callbacks close over draft state, so they go through a ref: each card keeps stable props and MealCard's memo can skip the rows that did not change.
   const mealCardHandlersRef = useRef({
     updateDraft,
     handleSave,
@@ -1010,11 +969,6 @@ export function DashboardShell({
       const draft = currentDrafts.find((d) => d.clientId === clientId);
       if (!draft) return currentDrafts;
 
-      const maxSortOrder = currentDrafts.reduce(
-        (max, d) => Math.max(max, d.sortOrder),
-        -1,
-      );
-
       return [
         ...currentDrafts,
         {
@@ -1030,7 +984,7 @@ export function DashboardShell({
           carbsG: draft.carbsG,
           fatG: draft.fatG,
           caloriesKcal: draft.caloriesKcal,
-          sortOrder: maxSortOrder + 1,
+          sortOrder: getNextSortOrder(currentDrafts),
         },
       ];
     });
@@ -1061,23 +1015,7 @@ export function DashboardShell({
           [clientId]: result.error ?? "Unable to copy entry to today.",
         }));
       } else {
-        // Show a brief "copied" confirmation on the button, then clear it.
-        setCopiedCardIds((prev) => new Set([...prev, clientId]));
-        const existingTimer = copiedTimersRef.current.get(clientId);
-        if (existingTimer !== undefined) {
-          window.clearTimeout(existingTimer);
-        }
-        copiedTimersRef.current.set(
-          clientId,
-          window.setTimeout(() => {
-            copiedTimersRef.current.delete(clientId);
-            setCopiedCardIds((prev) => {
-              const next = new Set(prev);
-              next.delete(clientId);
-              return next;
-            });
-          }, 2000),
-        );
+        flashCopied(clientId);
       }
 
       setActiveMutation(null);
@@ -1088,7 +1026,7 @@ export function DashboardShell({
     setPresetError(null);
     setPresetInitialKind(initialKind);
     setShowPresetsModal(true);
-    void ensureTemplatesLoaded();
+    void templates.ensureLoaded();
   }
 
   function dismissPresetModal() {
@@ -1096,47 +1034,9 @@ export function DashboardShell({
     setShowPresetsModal(false);
   }
 
-  async function ensureTemplatesLoaded() {
-    if (templatesLoaded || templatesLoading) {
-      return;
-    }
-
-    setTemplatesLoading(true);
-    setTemplateLoadError(null);
-    try {
-      const templates = await templateLoaderRef.current!.load();
-      setLocalTemplates(templates);
-      setTemplatesLoaded(true);
-    } catch (loadError) {
-      setTemplateLoadError(
-        loadError instanceof Error ? loadError.message : "Unable to load templates.",
-      );
-    }
-    setTemplatesLoading(false);
-  }
-
   function openRecipePickerModal() {
     setShowRecipePickerModal(true);
-    void ensureRecipesLoaded();
-  }
-
-  async function ensureRecipesLoaded() {
-    if (recipesLoaded || recipesLoading) {
-      return;
-    }
-
-    setRecipesLoading(true);
-    setRecipeLoadError(null);
-    try {
-      const recipes = await recipeLoaderRef.current!.load();
-      setLocalRecipes(recipes);
-      setRecipesLoaded(true);
-    } catch (loadError) {
-      setRecipeLoadError(
-        loadError instanceof Error ? loadError.message : "Unable to load recipes.",
-      );
-    }
-    setRecipesLoading(false);
+    void recipes.ensureLoaded();
   }
 
   function handleComposeAction(
@@ -1365,7 +1265,7 @@ export function DashboardShell({
                         event.currentTarget.blur();
                       }
                     }}
-                    className="min-w-0 flex-1 rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-3 py-2 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)] disabled:opacity-60"
+                    className={`${GROUP_INPUT_CLASS} disabled:opacity-60`}
                   />
                   <button
                     type="button"
@@ -1389,7 +1289,7 @@ export function DashboardShell({
                   }
                 }}
                 placeholder="New group"
-                className="min-w-0 flex-1 rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-3 py-2 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)]"
+                className={GROUP_INPUT_CLASS}
               />
               <button
                 type="button"
@@ -1482,20 +1382,20 @@ export function DashboardShell({
         </ModalChunkDismissProvider>
       )}
 
-      {showPresetsModal && !templatesLoaded && (
+      {showPresetsModal && !templates.loaded && (
         <CollectionLoadStateModal
           title="Templates"
-          loading={templatesLoading}
-          error={templateLoadError}
+          loading={templates.loading}
+          error={templates.error}
           onClose={() => setShowPresetsModal(false)}
-          onRetry={() => void ensureTemplatesLoaded()}
+          onRetry={() => void templates.ensureLoaded()}
         />
       )}
 
-      {showPresetsModal && templatesLoaded && (
+      {showPresetsModal && templates.loaded && (
         <ModalChunkDismissProvider onDismiss={dismissPresetModal}>
           <PresetModal
-            presets={localTemplates}
+            presets={templates.items}
             mutation={presetMutation}
             errorMessage={presetError}
             initialKind={presetInitialKind}
@@ -1508,22 +1408,22 @@ export function DashboardShell({
         </ModalChunkDismissProvider>
       )}
 
-      {showRecipePickerModal && !recipesLoaded && (
+      {showRecipePickerModal && !recipes.loaded && (
         <CollectionLoadStateModal
           title="Pick a Recipe"
-          loading={recipesLoading}
-          error={recipeLoadError}
+          loading={recipes.loading}
+          error={recipes.error}
           onClose={() => setShowRecipePickerModal(false)}
-          onRetry={() => void ensureRecipesLoaded()}
+          onRetry={() => void recipes.ensureLoaded()}
         />
       )}
 
-      {showRecipePickerModal && recipesLoaded && (
+      {showRecipePickerModal && recipes.loaded && (
         <ModalChunkDismissProvider
           onDismiss={() => setShowRecipePickerModal(false)}
         >
           <RecipePickerModal
-            recipes={localRecipes}
+            recipes={recipes.items}
             onClose={() => setShowRecipePickerModal(false)}
             onSelect={addDraftFromRecipe}
           />
@@ -1535,14 +1435,7 @@ export function DashboardShell({
           <AiFoodPhotoModal
             onClose={() => setShowPhotoModal(false)}
             onAddToLog={(macros) => {
-              setDrafts((currentDrafts) => [
-                ...currentDrafts,
-                createDraftFromMacroSelection(
-                  macros,
-                  getNextSortOrder(currentDrafts),
-                  defaultEntryStatus,
-                ),
-              ]);
+              appendMacroSelectionAsDraft(macros);
               setShowPhotoModal(false);
             }}
             onSaveAsPreset={(input) => {
@@ -1552,8 +1445,7 @@ export function DashboardShell({
         </ModalChunkDismissProvider>
       )}
 
-      {/* Mirrors the component's own render condition so its chunk stays
-          unloaded until a capture flow actually starts. */}
+      {/* Mirrors the component's own render condition so its chunk stays unloaded until a capture flow starts. */}
       {(showScanner || scanResult || notFoundBarcode) && (
         <ModalChunkDismissProvider onDismiss={dismissBarcodeCapture}>
           <BarcodeCaptureModals
@@ -1564,14 +1456,7 @@ export function DashboardShell({
             setScanResult={setScanResult}
             setNotFoundBarcode={setNotFoundBarcode}
             onAddToLog={(macros) => {
-              setDrafts((currentDrafts) => [
-                ...currentDrafts,
-                createDraftFromMacroSelection(
-                  macros,
-                  getNextSortOrder(currentDrafts),
-                  defaultEntryStatus,
-                ),
-              ]);
+              appendMacroSelectionAsDraft(macros);
             }}
             onSaveAsPreset={(input) => {
               handleSavePreset(input);

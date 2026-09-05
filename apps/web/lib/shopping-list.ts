@@ -1,4 +1,4 @@
-import type { DailySummary, QuantityUnit } from "@macro-tracker/db";
+import type { MealEntryRecord, PlannedShoppingEntry, QuantityUnit } from "@macro-tracker/db";
 
 export type ShoppingListItem = {
   label: string;
@@ -30,12 +30,17 @@ export function formatShoppingListText(items: ShoppingListItem[]) {
     .join("\n");
 }
 
-export function buildShoppingList(summaries: DailySummary[]): ShoppingListItem[] {
+type ShoppingSummary = {
+  date: string;
+  meals: Array<MealEntryRecord | PlannedShoppingEntry>;
+};
+
+export function buildShoppingList(summaries: ShoppingSummary[]): ShoppingListItem[] {
   const itemsByKey = new Map<string, ShoppingListItem>();
 
   for (const summary of summaries) {
     for (const meal of summary.meals) {
-      if (meal.status !== "planned") {
+      if ("status" in meal && meal.status !== "planned") {
         continue;
       }
 

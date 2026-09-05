@@ -9,23 +9,10 @@ import { getRequestProtocol } from "./request";
 export const SESSION_COOKIE_NAME = "mt_session";
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 7;
 
-/**
- * Hard ceiling on how long one sign-in can be extended for.
- *
- * `proxy.ts` re-mints a fresh 7-day token on every authenticated request, so
- * `exp` alone never expires for anyone who keeps using the app — a token
- * captured once would stay valid indefinitely, and `clearSessionCookie` only
- * deletes the browser's copy. Carrying the *original* authentication time
- * through every renewal and refusing anything older than this bounds that
- * window without a per-request database lookup or a schema change.
- */
+// Hard ceiling on one sign-in's lifetime: proxy.ts re-mints `exp` every request, so without this a captured token would stay valid forever.
 export const SESSION_ABSOLUTE_LIFETIME_SECONDS = 60 * 60 * 24 * 30;
 
-/**
- * A session that passed verification. `authenticatedAt` is Unix seconds for the
- * *original* sign-in — never the current renewal — so it must be threaded back
- * into `createSessionToken` whenever the cookie is refreshed.
- */
+// `authenticatedAt` is the *original* sign-in time, never the current renewal.
 export type VerifiedSession = SessionUser & {
   authenticatedAt: number;
 };
@@ -34,9 +21,7 @@ function nowInSeconds() {
   return Math.floor(Date.now() / 1000);
 }
 
-// Signing and verifying both run on every request, so cache the encoded secret
-// instead of allocating a TextEncoder and a fresh Uint8Array each time. Keyed
-// by secret so a changed env value is still picked up.
+// Cached to avoid a fresh TextEncoder allocation on every request; keyed by secret so a changed env value is still picked up.
 let cachedSessionKey: { secret: string; key: Uint8Array } | null = null;
 
 function getSessionKey() {
@@ -70,10 +55,7 @@ export function isSecureRequest(request: Request) {
   return getRequestProtocol(request) === "https:";
 }
 
-/**
- * Pass a {@link VerifiedSession} when renewing so the original sign-in time
- * survives; omit it only when the user has just authenticated.
- */
+// Pass a VerifiedSession when renewing so the original sign-in time survives; omit it only on fresh authentication.
 export async function createSessionToken(user: SessionUser & { authenticatedAt?: number }) {
   return new SignJWT({
     email: user.email,
@@ -107,9 +89,7 @@ export async function verifySessionToken(
       return null;
     }
 
-    // The Rust backend mints the token for the initial sign-in and does not set
-    // `authenticatedAt`, so its `iat` is the original authentication time.
-    // A token carrying neither cannot be lifetime-bounded, so it is refused.
+    // The backend-minted initial token has no `authenticatedAt`, so its `iat` is the original sign-in time.
     const authenticatedAt =
       typeof payload.authenticatedAt === "number"
         ? payload.authenticatedAt

@@ -27,8 +27,7 @@ describe("parseDecimalInput", () => {
   });
 
   it("rejects thousands-grouped input instead of shifting the decimal point", () => {
-    // The old blanket `,` -> `.` replacement turned this into 1.234, a silent
-    // 1000x error with no validation failure anywhere downstream.
+    // Grouped shapes must reject outright, not silently shift the decimal point.
     expect(parseDecimalInput("1,234")).toBeNull();
     expect(parseDecimalInput("2,500")).toBeNull();
     expect(parseDecimalInput("12,345")).toBeNull();

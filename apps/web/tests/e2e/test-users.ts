@@ -33,6 +33,11 @@ export function uniqueTestEmail(base: TestUserBase, testInfo: TestInfo) {
   return `${base}+w${testInfo.workerIndex}-r${testInfo.retry}-l${testInfo.line}-${slug}@example.com`;
 }
 
+// Call after app-shell loads and before interacting, or hydration races and reverts the interaction.
+export async function waitForAppReady(page: Page) {
+  await page.waitForSelector("html[data-app-hydrated]", { state: "attached" });
+}
+
 export async function createTestSession(
   page: Page,
   email: string,
@@ -48,4 +53,9 @@ export async function createTestSession(
 
   await page.setExtraHTTPHeaders(testRouteHeaders());
   await page.goto(`/api/test/session?${params.toString()}`);
+
+  // /onboarding renders no AppShell, so it never sets the hydration beacon.
+  if (options?.onboarded !== false) {
+    await waitForAppReady(page);
+  }
 }

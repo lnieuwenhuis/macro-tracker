@@ -137,11 +137,7 @@ export type GymOverlap = {
 export type GymBuddyLists = {
   accepted: { id: string; user: GymBuddyUser }[];
   pendingIncoming: { id: string; user: GymBuddyUser }[];
-  /**
-   * Echoes exactly what the inviter typed (normalized email or friend code) —
-   * never the target's display name, and never the email when the invite was
-   * made by code (a code invite must not reveal the target's address).
-   */
+  /** Echoes what the inviter typed (email or friend code); never the target's name or email for a code invite. */
   pendingOutgoing: { id: string; identifier: string }[];
   /** Invites this user declined; visible only to the decliner (= the block list). */
   declined: { id: string; user: GymBuddyUser }[];
@@ -380,6 +376,12 @@ export type RecipeRecord = {
   perPortionMacros: MacroNumbers;
 };
 
+/** The fields rendered by recipe lists and the dashboard recipe picker. */
+export type RecipeSummary = Pick<
+  RecipeRecord,
+  "id" | "label" | "portions" | "perPortionMacros"
+>;
+
 export type MealTemplateItemInput = {
   mealGroupLabel?: string | null;
 } & MacroFoodInput;
@@ -411,6 +413,29 @@ export type MealTemplate = {
   items: MealTemplateItem[];
   createdAt: string;
   updatedAt: string;
+};
+
+/** The fields rendered by template lists where applying/editing uses the id. */
+export type MealTemplateSummary = Pick<
+  MealTemplate,
+  "id" | "type" | "label"
+> & {
+  itemCount: number;
+  totalMacros: MacroNumbers;
+};
+
+/** A planned entry carries only the shopping-list fields. */
+export type PlannedShoppingEntry = Pick<
+  MealEntryRecord,
+  "label" | "quantity" | "unit"
+>;
+
+/** One day in the planner's preloaded shopping range. */
+export type PlannedShoppingSummary = {
+  date: string;
+  entryCount: number;
+  plannedCaloriesKcal: number;
+  meals: PlannedShoppingEntry[];
 };
 
 export type BarcodeFoodProductInput = {
@@ -549,14 +574,12 @@ export type AdminDashboardData = {
 };
 
 export type StatsPageData = {
-  allDailyTotals: Array<{
-    date: string;
-    proteinG: number;
-    carbsG: number;
-    fatG: number;
-    caloriesKcal: number;
-    plannedTotals: MacroNumbers;
-  }>;
+  allDailyTotals: Array<
+    MacroNumbers & {
+      date: string;
+      plannedTotals: MacroNumbers;
+    }
+  >;
   totalDaysTracked: number;
   currentStreak: number;
   longestStreak: number;
@@ -599,21 +622,14 @@ export type StatsPageData = {
 
 export type QuickAddSource = "preset" | "recent";
 
-export type QuickAddCandidate = {
+export type QuickAddCandidate = MacroNumbers & {
   label: string;
-  proteinG: number;
-  carbsG: number;
-  fatG: number;
-  caloriesKcal: number;
   source: QuickAddSource;
   /** ISO date string of the most recent log entry seen in history, if any */
   sourceDate?: string;
   /** Preset ID, used for touch/ranking (preset items only) */
   presetId?: string;
-  /**
-   * UTC hour (0–23) at the centre of the 3-hour window where this food is most
-   * frequently logged. Only set when habitCount ≥ 3 (a clear, repeated habit).
-   */
+  /** UTC hour (0-23) at the centre of the peak 3-hour window; set only when habitCount >= 3. */
   peakHourUtc?: number;
   /** Number of log entries that fall within the peak time window. */
   habitCount?: number;

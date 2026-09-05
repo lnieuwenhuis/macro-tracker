@@ -6,6 +6,7 @@ import {
   type AppUser,
 } from "@macro-tracker/db";
 import { notFound, redirect } from "next/navigation";
+import { cache } from "react";
 
 import { getServerEnv } from "./env";
 import { getSessionUserFromCookies } from "./session";
@@ -17,12 +18,13 @@ async function applyBootstrapOwnerRole(user: AppUser) {
     return user;
   }
 
-  // The backend re-checks the address against its own ADMIN_OWNER_EMAILS, so
-  // the promotion decision is never taken from this side.
+  // The backend re-checks the address against ADMIN_OWNER_EMAILS; the promotion decision is never taken from here.
   return (await reconcileConfiguredOwner(user.id)) ?? user;
 }
 
-export async function getCurrentAppUser() {
+// React shares the in-flight lookup (including owner reconciliation) only within
+// this server render. New requests authenticate again; route handlers stay uncached.
+export const getCurrentAppUser = cache(async function getCurrentAppUser() {
   const sessionUser = await getSessionUserFromCookies();
 
   if (!sessionUser) {
@@ -35,7 +37,7 @@ export async function getCurrentAppUser() {
   }
 
   return applyBootstrapOwnerRole(existingUser);
-}
+});
 
 export async function getCurrentSessionUser() {
   const user = await getCurrentAppUser();
@@ -60,11 +62,7 @@ export async function requireSessionUser() {
   return user;
 }
 
-/**
- * Resolve the full onboarded account. Callers that also need the role or email
- * should use this rather than pairing `requireOnboardedSessionUser` with a
- * second `getUserById`, which costs an extra backend round trip per render.
- */
+/** Prefer this over pairing `requireOnboardedSessionUser` with a second `getUserById` (extra round trip). */
 export async function requireOnboardedAppUser() {
   const user = await getCurrentAppUser();
 

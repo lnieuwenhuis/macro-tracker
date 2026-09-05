@@ -65,10 +65,6 @@ function parseServingGrams(value: string): number {
   return grams == null ? 100 : roundToTwoDecimals(grams);
 }
 
-// ---------------------------------------------------------------------------
-// Sub-component: manual entry form shown when a barcode isn't found
-// ---------------------------------------------------------------------------
-
 function NotFoundForm({
   barcode,
   onProductSaved,
@@ -151,7 +147,6 @@ function NotFoundForm({
     });
   }
 
-  // ── "not found" landing screen ──────────────────────────────────────────
   if (!showForm) {
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center">
@@ -193,7 +188,6 @@ function NotFoundForm({
     );
   }
 
-  // ── manual entry form ────────────────────────────────────────────────────
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center">
       <div
@@ -210,7 +204,6 @@ function NotFoundForm({
         dismissable={!isSaving}
         className="relative z-10 mx-4 mb-4 w-full max-w-sm rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] shadow-2xl outline-none sm:mb-0"
       >
-        {/* Header */}
         <div className="flex items-center justify-between border-b border-[var(--color-border)] px-5 py-4">
           <div>
             <h3 className="text-base font-bold text-[var(--color-ink)]">
@@ -232,7 +225,6 @@ function NotFoundForm({
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-3 p-5">
-          {/* Name */}
           <div>
             <label className="text-xs font-medium text-[var(--color-muted)]">
               Product name <span className="text-[var(--color-danger)]">*</span>
@@ -247,7 +239,6 @@ function NotFoundForm({
             />
           </div>
 
-          {/* Brand */}
           <div>
             <label className="text-xs font-medium text-[var(--color-muted)]">
               Brand
@@ -261,12 +252,10 @@ function NotFoundForm({
             />
           </div>
 
-          {/* Macros per 100 g label */}
           <p className="pt-1 text-[11px] font-semibold uppercase tracking-widest text-[var(--color-muted)]">
             Nutrition per 100 g
           </p>
 
-          {/* Macro grid */}
           <div className="grid grid-cols-2 gap-2">
             {(
               [
@@ -313,7 +302,6 @@ function NotFoundForm({
             ))}
           </div>
 
-          {/* Serving size */}
           <div>
             <label className="text-xs font-medium text-[var(--color-muted)]">
               Default serving size (g) — optional
@@ -336,7 +324,6 @@ function NotFoundForm({
             </p>
           )}
 
-          {/* Actions */}
           <div className="flex gap-2 pt-1">
             <button
               type="button"
@@ -358,10 +345,6 @@ function NotFoundForm({
     </div>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Main component
-// ---------------------------------------------------------------------------
 
 type EditedValues = {
   name: string;
@@ -392,15 +375,12 @@ export function BarcodeResult({
   const defaultServing = displayProduct?.servingSizeG ?? 100;
   const [servingG, setServingG] = useState(String(defaultServing));
   const [savedPreset, setSavedPreset] = useState(false);
-  // When isEditing is true, the macro display switches to editable inputs and
-  // scaling is paused. Add-to-log and Save-as-template send these raw edited
-  // values instead of the scaled ones.
+  // While editing, add-to-log and save-as-template send these raw values instead of the scaled ones.
   const [isEditing, setIsEditing] = useState(false);
   const [edited, setEdited] = useState<EditedValues>(emptyEdited);
 
   const serving = parseServingGrams(servingG);
 
-  // ── Not-found state: delegate to the form sub-component ─────────────────
   if (!displayProduct && notFoundBarcode) {
     return (
       <OverlayPortal>
@@ -474,8 +454,7 @@ export function BarcodeResult({
   }
 
   function updateEdited(field: keyof EditedValues, value: string) {
-    // Normalize comma decimals to dots so European keyboards work with
-    // numeric inputs; harmless for the name field.
+    // Normalize comma decimals to dots so European keyboards work; harmless for the name field.
     setEdited((prev) => ({ ...prev, [field]: value.replace(/,/g, ".") }));
   }
 
@@ -508,7 +487,6 @@ export function BarcodeResult({
           onClose={onClose}
           className="relative z-10 mx-4 w-full max-w-sm rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-6 shadow-2xl outline-none"
         >
-          {/* Header */}
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0 flex-1">
               <h3 className="truncate text-lg font-bold text-[var(--color-ink)]">
@@ -550,7 +528,6 @@ export function BarcodeResult({
             />
           </div>
 
-          {/* Serving size — hidden while editing since scaling is paused */}
           {!isEditing && (
             <div className="mt-4">
               <label className="text-xs text-[var(--color-muted)]">
@@ -568,7 +545,6 @@ export function BarcodeResult({
             </div>
           )}
 
-          {/* Name field — only visible while editing */}
           {isEditing && (
             <div className="mt-4">
               <label className="text-xs text-[var(--color-muted)]">Name</label>
@@ -581,7 +557,6 @@ export function BarcodeResult({
             </div>
           )}
 
-          {/* Macro display / inputs */}
           <div className="mt-4 grid grid-cols-2 gap-2">
             {(
               [
@@ -667,7 +642,6 @@ export function BarcodeResult({
             </p>
           )}
 
-          {/* Actions */}
           <div className="mt-5 space-y-2">
             <button
               type="button"

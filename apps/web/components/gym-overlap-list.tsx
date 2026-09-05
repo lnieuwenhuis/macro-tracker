@@ -2,11 +2,7 @@ import type { GymOverlap } from "@macro-tracker/db";
 
 import { formatMinutesAsTime } from "@/lib/formatting";
 
-/**
- * The overlap rows shared by the home-page "Gym Buddies" card and the /gym
- * schedule tab. Confirmed overlaps get the accent tint; tentative ones (a
- * "maybe" on either side) stay muted and read "might overlap".
- */
+// Shared by the home "Gym Buddies" card and the /gym schedule tab.
 export function GymOverlapList({ overlaps }: { overlaps: GymOverlap[] }) {
   if (overlaps.length === 0) {
     return null;

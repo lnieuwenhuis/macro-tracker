@@ -3,10 +3,6 @@ import type { MacroGoals, MacroNumbers, MealEntryStatus, QuickAddCandidate } fro
 import type { MealDraft } from "@/components/meal-card";
 import { roundToSingleDecimal } from "@/lib/numbers";
 
-// ---------------------------------------------------------------------------
-// Live totals
-// ---------------------------------------------------------------------------
-
 function parseDraftValue(value: string): number {
   const trimmed = value.trim();
   if (!trimmed) return 0;
@@ -16,6 +12,13 @@ function parseDraftValue(value: string): number {
 
 function emptyTotals() {
   return { proteinG: 0, carbsG: 0, fatG: 0, caloriesKcal: 0 };
+}
+
+function accumulateDraftTotals(bucket: MacroNumbers, draft: MealDraft) {
+  bucket.proteinG += parseDraftValue(draft.proteinG);
+  bucket.carbsG += parseDraftValue(draft.carbsG);
+  bucket.fatG += parseDraftValue(draft.fatG);
+  bucket.caloriesKcal += parseDraftValue(draft.caloriesKcal);
 }
 
 function roundTotals(totals: MacroNumbers): MacroNumbers {
@@ -39,19 +42,13 @@ export function computeLiveTotals(
       continue;
     }
 
-    totals.proteinG += parseDraftValue(draft.proteinG);
-    totals.carbsG += parseDraftValue(draft.carbsG);
-    totals.fatG += parseDraftValue(draft.fatG);
-    totals.caloriesKcal += parseDraftValue(draft.caloriesKcal);
+    accumulateDraftTotals(totals, draft);
   }
 
   return roundTotals(totals);
 }
 
-/**
- * Totals for every status in one pass. The dashboard needs all three at once,
- * which previously meant walking the draft array three times.
- */
+// Totals for every status in one pass, since the dashboard needs all three at once.
 export function computeLiveTotalsByStatus(
   drafts: MealDraft[],
 ): Record<MealEntryStatus, MacroNumbers> {
@@ -67,10 +64,7 @@ export function computeLiveTotalsByStatus(
       continue;
     }
 
-    bucket.proteinG += parseDraftValue(draft.proteinG);
-    bucket.carbsG += parseDraftValue(draft.carbsG);
-    bucket.fatG += parseDraftValue(draft.fatG);
-    bucket.caloriesKcal += parseDraftValue(draft.caloriesKcal);
+    accumulateDraftTotals(bucket, draft);
   }
 
   return {
@@ -80,10 +74,6 @@ export function computeLiveTotalsByStatus(
   };
 }
 
-// ---------------------------------------------------------------------------
-// Remaining macros
-// ---------------------------------------------------------------------------
-
 export type RemainingMacros = {
   caloriesKcal: number | null;
   proteinG: number | null;
@@ -91,10 +81,7 @@ export type RemainingMacros = {
   fatG: number | null;
 };
 
-/**
- * Subtract totals from goals. Returns null for any dimension that has no goal.
- * Values can be negative (meaning the user has gone over goal for that macro).
- */
+// Subtracts totals from goals; a dimension with no goal is null, and the result may go negative.
 export function computeRemaining(
   totals: MacroNumbers,
   goals: MacroGoals,
@@ -111,7 +98,6 @@ export function computeRemaining(
   };
 }
 
-/** Returns true when at least one goal dimension is configured. */
 export function hasAnyGoal(goals: MacroGoals): boolean {
   return (
     goals.caloriesKcal !== null ||
@@ -120,10 +106,6 @@ export function hasAnyGoal(goals: MacroGoals): boolean {
     goals.fatG !== null
   );
 }
-
-// ---------------------------------------------------------------------------
-// Candidate deduplication
-// ---------------------------------------------------------------------------
 
 function candidateKey(c: QuickAddCandidate): string {
   return `${c.label.toLowerCase().trim()}|${c.proteinG}|${c.carbsG}|${c.fatG}|${c.caloriesKcal}`;
@@ -192,11 +174,7 @@ function mergeCandidate(
   };
 }
 
-/**
- * Merge preset + recent history candidates by normalized label + macros.
- * Presets retain their source identity while inherited recent-history metadata
- * keeps time, recency, and frequency bonuses intact.
- */
+// Merges preset + recent-history candidates by normalized label + macros; presets keep their source identity.
 export function deduplicateCandidates(
   candidates: QuickAddCandidate[],
 ): QuickAddCandidate[] {
@@ -216,14 +194,7 @@ export function deduplicateCandidates(
   return Array.from(map.values());
 }
 
-// ---------------------------------------------------------------------------
-// Ranking
-// ---------------------------------------------------------------------------
-
-/**
- * Circular distance between two UTC hours (wraps at 24).
- * e.g. distance(23, 1) = 2, not 22.
- */
+// Circular distance between two UTC hours, wrapping at 24 (e.g. distance(23, 1) = 2, not 22).
 function hourDistance(a: number, b: number): number {
   const diff = Math.abs(a - b) % 24;
   return diff > 12 ? 24 - diff : diff;
@@ -259,11 +230,7 @@ export type RankCandidatesOptions = {
   limit?: number;
   /** Current hour in UTC, matching `peakHourUtc` on the candidates. */
   currentHourUtc: number;
-  /**
-   * The caller's calendar day. Required rather than defaulted: a UTC default
-   * would silently score against a different day boundary than the browser
-   * this always runs in.
-   */
+  // The caller's calendar day; required, not UTC-defaulted, or scoring would use the wrong day boundary.
   referenceDate: string;
 };
 
@@ -294,11 +261,7 @@ function scoreCandidate(
   return score;
 }
 
-/**
- * Rank a mixed pool of preset + recent candidates.
- * Uses likelihood-to-log signals: time-of-day habits, recent use, observed
- * repeat frequency, and original input order.
- */
+// Ranks preset + recent candidates by likelihood-to-log: time-of-day habit, recency, then repeat frequency.
 export function rankCandidates(
   candidates: QuickAddCandidate[],
   options: RankCandidatesOptions,
@@ -326,14 +289,7 @@ export function rankCandidates(
     .map(({ candidate }) => candidate);
 }
 
-// ---------------------------------------------------------------------------
-// Recent repeats (always shown, no goal required)
-// ---------------------------------------------------------------------------
-
-/**
- * Return the N most-recently-used unique foods from the candidate pool.
- * Presets without a sourceDate come after any history entry with a date.
- */
+// The N most-recently-used unique foods; presets without a sourceDate sort after any dated entry.
 export function getRecentRepeats(
   candidates: QuickAddCandidate[],
   limit = 10,

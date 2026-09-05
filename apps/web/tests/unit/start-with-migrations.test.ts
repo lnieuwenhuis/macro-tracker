@@ -93,9 +93,7 @@ describe("startup migration database SSL config", () => {
   });
 
   it("verifies the certificate chain for remote sslmode=require", async () => {
-    // SEC-04: `require` used to yield rejectUnauthorized:false, i.e. the exact TLS posture
-    // `no-verify` is rejected for a few lines above. Railway/Neon/Supabase all hand out
-    // `?sslmode=require`, so that was the likely production value.
+    // sslmode=require must still verify the chain, unlike the no-verify posture rejected above.
     const { getPostgresConnectionConfig } = await getStartupMigrationModule();
 
     expect(

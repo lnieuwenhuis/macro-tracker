@@ -1,6 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 
-import { createTestSession, testRouteHeaders, uniqueTestEmail } from "./test-users";
+import {
+  createTestSession,
+  testRouteHeaders,
+  uniqueTestEmail,
+  waitForAppReady,
+} from "./test-users";
 
 async function changeSelectedDate(page: Page, date: string) {
   const datePicker = page.getByLabel("Pick a day").first();
@@ -97,6 +102,7 @@ async function seedDayTemplate(
 
 async function applyDayTemplate(page: Page, input: { date: string; label: string }) {
   await page.goto(`/?date=${input.date}`);
+  await waitForAppReady(page);
   await page.getByRole("button", { name: "From template" }).click();
   const modal = page.getByRole("dialog", { name: "Meal Templates" });
   await expect(modal).toBeVisible();
@@ -174,6 +180,7 @@ test("allows an allowlisted user to track food items across days", async ({
   await expect(dailyTotalsCard).toContainText("620 kcal");
 
   await page.goto("/summary?date=2026-03-19");
+  await waitForAppReady(page);
   await expect(
     page.getByRole("heading", { name: "Last 7 Days" }),
   ).toBeVisible();
@@ -245,6 +252,7 @@ test("recent foods appear in quick add and create a prefilled draft", async ({
   await expect(page.getByRole("button", { name: "Open settings" })).toBeVisible();
 
   await page.goto("/?date=2026-03-17");
+  await waitForAppReady(page);
 
   await addCustomFood(page, {
     label,
@@ -255,6 +263,7 @@ test("recent foods appear in quick add and create a prefilled draft", async ({
   });
 
   await page.goto("/?date=2026-03-18");
+  await waitForAppReady(page);
 
   const quickAddCard = page.getByRole("button", { name: `Quick add ${label}` });
   await expect(quickAddCard).toBeVisible();
@@ -363,6 +372,7 @@ test("planner shopping mode copies planned items for the selected range", async 
   await applyDayTemplate(page, { date: plannedDate, label: templateLabel });
 
   await page.goto(`/planner?date=${plannedDate}`);
+  await waitForAppReady(page);
   await page.getByRole("tab", { name: "Shopping" }).click();
   await expect(page.getByRole("heading", { name: "Shopping List" })).toBeVisible();
   await expect(page.getByText(firstItem)).toBeVisible();
@@ -382,6 +392,7 @@ test("stats and weight pages load without day navigation chrome", async ({
   await expect(page.getByRole("button", { name: "Open settings" })).toBeVisible();
 
   await page.goto("/stats?date=2026-03-19");
+  await waitForAppReady(page);
   await expect(page).toHaveURL(/\/summary\?date=2026-03-19/);
   await expect(
     page.getByRole("heading", { name: "Macro Trends", exact: true }),
@@ -392,6 +403,7 @@ test("stats and weight pages load without day navigation chrome", async ({
   await expect(page.getByLabel("Pick a day")).toHaveCount(0);
 
   await page.goto("/weight?date=2026-03-19");
+  await waitForAppReady(page);
   await expect(page).toHaveURL(/\/progress\?date=2026-03-19&tab=weight/);
   await expect(
     page.getByRole("heading", { name: "Log Weight" }).first(),
@@ -456,6 +468,7 @@ test("macro trend chart shows planned intake as a translucent projection", async
   await expect(plannedCard).toContainText("planned");
 
   await page.goto(`/summary?date=${plannedDate}`);
+  await waitForAppReady(page);
   const trendSection = page.locator("section").filter({
     has: page.getByRole("heading", { name: "Calories Trend" }),
   }).last();
@@ -471,6 +484,7 @@ test("weight goal validation errors stay visible on the page", async ({
 }, testInfo) => {
   await createTestSession(page, uniqueTestEmail("user", testInfo));
   await page.goto("/weight?date=2026-03-19");
+  await waitForAppReady(page);
 
   await expect(
     page.getByRole("heading", { name: "Log Weight" }).first(),
@@ -492,6 +506,7 @@ test("weight entries can be edited from the progress weight tab", async ({
 }, testInfo) => {
   await createTestSession(page, uniqueTestEmail("user", testInfo));
   await page.goto("/weight?date=2026-03-19");
+  await waitForAppReady(page);
   await expect(page).toHaveURL(/\/progress\?date=2026-03-19&tab=weight/);
   await expect(
     page.getByRole("heading", { name: "Log Weight" }).first(),

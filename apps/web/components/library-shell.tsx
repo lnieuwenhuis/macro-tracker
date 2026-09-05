@@ -1,6 +1,6 @@
 "use client";
 
-import type { FoodProduct, MealTemplate, RecipeRecord } from "@macro-tracker/db";
+import type { FoodProduct, MealTemplateSummary, RecipeSummary } from "@macro-tracker/db";
 import { useRouter } from "next/navigation";
 import { useDeferredValue, useEffect, useMemo, useState, useTransition } from "react";
 
@@ -8,11 +8,7 @@ import {
   filterLibraryItemsByQuery,
   normalizeLibraryQuery,
 } from "@/lib/library-search";
-import {
-  getTemplateMacroTotals,
-  isDayTemplate,
-  isFoodItemTemplate,
-} from "@/lib/template-macros";
+import { isDayTemplate, isFoodItemTemplate } from "@/lib/template-macros";
 import { AppShell, SettingsButton } from "./app-shell";
 import { LibraryHubNav } from "./library-hub-nav";
 import { TransitionLink } from "./transition-link";
@@ -23,10 +19,69 @@ type LibraryShellProps = {
   selectedDate: string;
   query: string;
   products: FoodProduct[];
-  templates: MealTemplate[];
-  recipes: RecipeRecord[];
+  templates: MealTemplateSummary[];
+  recipes: RecipeSummary[];
   todayStr?: string;
 };
+
+const byLabel = (item: { label: string }) => item.label;
+
+function LibraryTemplateSection({
+  title,
+  linkHref,
+  linkLabel,
+  templates,
+  emptyFoundCopy,
+  emptySavedCopy,
+  hasActiveSearch,
+  renderMeta,
+}: {
+  title: string;
+  linkHref: string;
+  linkLabel: string;
+  templates: MealTemplateSummary[];
+  emptyFoundCopy: string;
+  emptySavedCopy: string;
+  hasActiveSearch: boolean;
+  renderMeta: (template: MealTemplateSummary) => React.ReactNode;
+}) {
+  return (
+    <section>
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
+          {title}
+        </h3>
+        <TransitionLink
+          href={linkHref}
+          motion="screen"
+          className="text-xs font-semibold text-[var(--color-accent)]"
+        >
+          {linkLabel}
+        </TransitionLink>
+      </div>
+      <div className="space-y-2">
+        {templates.map((template) => {
+          return (
+            <article
+              key={template.id}
+              className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-4"
+            >
+              <p className="font-semibold text-[var(--color-ink)]">{template.label}</p>
+              <p className="mt-1 text-xs text-[var(--color-muted)]">
+                {renderMeta(template)}
+              </p>
+            </article>
+          );
+        })}
+        {templates.length === 0 ? (
+          <p className="rounded-2xl border border-dashed border-[var(--color-border-strong)] px-5 py-6 text-center text-sm text-[var(--color-muted)]">
+            {hasActiveSearch ? emptyFoundCopy : emptySavedCopy}
+          </p>
+        ) : null}
+      </div>
+    </section>
+  );
+}
 
 export function LibraryShell({
   userEmail,
@@ -66,15 +121,15 @@ export function LibraryShell({
     [templates],
   );
   const visibleFoodItemTemplates = useMemo(
-    () => filterLibraryItemsByQuery(foodItemTemplates, deferredSearch, (template) => template.label),
+    () => filterLibraryItemsByQuery(foodItemTemplates, deferredSearch, byLabel),
     [deferredSearch, foodItemTemplates],
   );
   const visibleDayTemplates = useMemo(
-    () => filterLibraryItemsByQuery(dayTemplates, deferredSearch, (template) => template.label),
+    () => filterLibraryItemsByQuery(dayTemplates, deferredSearch, byLabel),
     [dayTemplates, deferredSearch],
   );
   const visibleRecipes = useMemo(
-    () => filterLibraryItemsByQuery(recipes, deferredSearch, (recipe) => recipe.label),
+    () => filterLibraryItemsByQuery(recipes, deferredSearch, byLabel),
     [deferredSearch, recipes],
   );
   const hasActiveTemplateSearch = normalizeLibraryQuery(deferredSearch).length > 0;
@@ -148,77 +203,31 @@ export function LibraryShell({
           )}
         </section>
 
-        <section>
-          <div className="mb-3 flex items-center justify-between gap-3">
-            <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
-              Food item templates
-            </h3>
-            <TransitionLink
-              href={`/?date=${selectedDate}&compose=template&templateKind=food`}
-              motion="screen"
-              className="text-xs font-semibold text-[var(--color-accent)]"
-            >
-              Add
-            </TransitionLink>
-          </div>
-          <div className="space-y-2">
-            {visibleFoodItemTemplates.map((template) => {
-              const totals = getTemplateMacroTotals(template.items);
-              return (
-                <article
-                  key={template.id}
-                  className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-4"
-                >
-                  <p className="font-semibold text-[var(--color-ink)]">{template.label}</p>
-                  <p className="mt-1 text-xs text-[var(--color-muted)]">
-                    {totals.caloriesKcal} kcal - P {totals.proteinG}g
-                  </p>
-                </article>
-              );
-            })}
-            {visibleFoodItemTemplates.length === 0 ? (
-              <p className="rounded-2xl border border-dashed border-[var(--color-border-strong)] px-5 py-6 text-center text-sm text-[var(--color-muted)]">
-                {hasActiveTemplateSearch ? "No food item templates found." : "No food item templates saved."}
-              </p>
-            ) : null}
-          </div>
-        </section>
+        <LibraryTemplateSection
+          title="Food item templates"
+          linkHref={`/?date=${selectedDate}&compose=template&templateKind=food`}
+          linkLabel="Add"
+          templates={visibleFoodItemTemplates}
+          emptyFoundCopy="No food item templates found."
+          emptySavedCopy="No food item templates saved."
+          hasActiveSearch={hasActiveTemplateSearch}
+          renderMeta={(template) => (
+            <>{template.totalMacros.caloriesKcal} kcal - P {template.totalMacros.proteinG}g</>
+          )}
+        />
 
-        <section>
-          <div className="mb-3 flex items-center justify-between gap-3">
-            <h3 className="text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
-              Day templates
-            </h3>
-            <TransitionLink
-              href={`/planner?date=${selectedDate}`}
-              motion="screen"
-              className="text-xs font-semibold text-[var(--color-accent)]"
-            >
-              Planner
-            </TransitionLink>
-          </div>
-          <div className="space-y-2">
-            {visibleDayTemplates.map((template) => {
-              const totals = getTemplateMacroTotals(template.items);
-              return (
-                <article
-                  key={template.id}
-                  className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-4"
-                >
-                  <p className="font-semibold text-[var(--color-ink)]">{template.label}</p>
-                  <p className="mt-1 text-xs text-[var(--color-muted)]">
-                    {template.items.length} item{template.items.length === 1 ? "" : "s"} - {totals.caloriesKcal} kcal - P {totals.proteinG}g
-                  </p>
-                </article>
-              );
-            })}
-            {visibleDayTemplates.length === 0 ? (
-              <p className="rounded-2xl border border-dashed border-[var(--color-border-strong)] px-5 py-6 text-center text-sm text-[var(--color-muted)]">
-                {hasActiveTemplateSearch ? "No day templates found." : "No day templates saved."}
-              </p>
-            ) : null}
-          </div>
-        </section>
+        <LibraryTemplateSection
+          title="Day templates"
+          linkHref={`/planner?date=${selectedDate}`}
+          linkLabel="Planner"
+          templates={visibleDayTemplates}
+          emptyFoundCopy="No day templates found."
+          emptySavedCopy="No day templates saved."
+          hasActiveSearch={hasActiveTemplateSearch}
+          renderMeta={(template) => (
+            <>{template.itemCount} item{template.itemCount === 1 ? "" : "s"} - {template.totalMacros.caloriesKcal} kcal - P {template.totalMacros.proteinG}g</>
+          )}
+        />
 
         <section>
           <h3 className="mb-3 text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">

@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { createDatabaseRuntime, getDatabaseRuntime, type DatabaseRuntime } from "./client";
 import * as schema from "./schema";
+import { readPositiveIntegerEnv } from "./postgres-config.js";
 import { resolveDestructiveTestDatabaseUrl } from "./test-database-safety";
 
 const migratedPostgresTestDatabaseUrls = new Set<string>();
@@ -17,35 +18,12 @@ function getMigrationsFolder() {
 
 const POSTGRES_MIGRATION_LOCK_ID = 1_836_027_411;
 
-/**
- * Bounds how long a blocked DDL statement (e.g. an `ALTER TABLE` fighting a
- * long-running query for a table lock) can hold up the migration before it
- * aborts and rolls back, instead of stalling every query queued behind it.
- * This runs as a Railway `preDeployCommand` while the previous version is
- * still serving traffic, so "hang forever" is not an acceptable failure mode.
- */
+// Caps how long blocked DDL stalls the migration, which runs as a Railway preDeployCommand while the old version still serves traffic.
 const DEFAULT_MIGRATION_LOCK_TIMEOUT_MS = 3_000;
-/** Overall cap per migration statement, independent of lock waits. */
 const DEFAULT_MIGRATION_STATEMENT_TIMEOUT_MS = 300_000;
-/**
- * How long to keep retrying `pg_try_advisory_lock` before giving up. Without
- * a bound, a hung-but-alive previous migration process (holding the
- * advisory lock without releasing it) blocks every subsequent deploy
- * silently and indefinitely.
- */
+// Without this bound, a hung-but-alive previous migration process holding the advisory lock blocks every subsequent deploy indefinitely.
 const DEFAULT_MIGRATION_LOCK_ACQUIRE_TIMEOUT_MS = 60_000;
 const MIGRATION_LOCK_RETRY_INTERVAL_MS = 1_000;
-
-function readPositiveIntegerEnv(name: string, fallback: number) {
-  const value = process.env[name];
-
-  if (!value) {
-    return fallback;
-  }
-
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
-}
 
 function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -58,10 +36,7 @@ type MigrationLockClient = {
   ) => Promise<{ rows: T[] }>;
 };
 
-/**
- * Applies the bounded statement/lock timeouts to the migration connection.
- * Must run before `migrateNode` touches the connection (DB-02).
- */
+// Must run before migrateNode touches the connection (DB-02).
 async function applyMigrationConnectionTimeouts(client: MigrationLockClient) {
   const lockTimeoutMs = readPositiveIntegerEnv(
     "MIGRATION_LOCK_TIMEOUT_MS",
@@ -72,18 +47,12 @@ async function applyMigrationConnectionTimeouts(client: MigrationLockClient) {
     DEFAULT_MIGRATION_STATEMENT_TIMEOUT_MS,
   );
 
-  // `SET` does not accept bind parameters; both values are validated
-  // positive integers from readPositiveIntegerEnv, never raw env text.
+  // SET does not accept bind parameters; both values are validated positive integers, never raw env text.
   await client.query(`SET lock_timeout = ${lockTimeoutMs}`);
   await client.query(`SET statement_timeout = ${statementTimeoutMs}`);
 }
 
-/**
- * Acquires the migration advisory lock with `pg_try_advisory_lock` in a
- * bounded retry loop instead of the blocking `pg_advisory_lock`, so a
- * hung previous migration process fails the deploy loudly after
- * `MIGRATION_LOCK_ACQUIRE_TIMEOUT_MS` instead of blocking it forever (DB-07).
- */
+// Bounded pg_try_advisory_lock retries rather than blocking pg_advisory_lock, so a hung prior migration fails the deploy loudly (DB-07).
 async function acquireMigrationLock(client: MigrationLockClient) {
   const acquireTimeoutMs = readPositiveIntegerEnv(
     "MIGRATION_LOCK_ACQUIRE_TIMEOUT_MS",

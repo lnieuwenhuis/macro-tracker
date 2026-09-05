@@ -73,12 +73,10 @@ describe("buildMealEntryCopyInput", () => {
           email: "copy-search@example.com",
           displayName: "Copy Search",
         },
-        runtime.db,
       );
       const mealGroup = await createMealGroup(
         user.id,
         { label: "Post-workout" },
-        runtime.db,
       );
       const product = await createPersonalFoodProduct(
         user.id,
@@ -92,7 +90,6 @@ describe("buildMealEntryCopyInput", () => {
           fatPer100: 0,
           caloriesPer100: 60,
         },
-        runtime.db,
       );
 
       await createMealEntry(
@@ -110,10 +107,9 @@ describe("buildMealEntryCopyInput", () => {
           fatG: 0,
           caloriesKcal: 1,
         },
-        runtime.db,
       );
 
-      const [result] = await searchMealEntries(user.id, "skyr", runtime.db);
+      const [result] = await searchMealEntries(user.id, "skyr");
 
       expect(buildMealEntryCopyInput(result!, "2026-06-19")).toMatchObject({
         productId: product.id,

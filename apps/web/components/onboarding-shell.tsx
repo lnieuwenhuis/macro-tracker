@@ -2,16 +2,16 @@
 
 import type { WeightUnit } from "@macro-tracker/db";
 import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
+import { useState } from "react";
 
 import { completeOnboardingAction } from "@/lib/actions";
 import {
   convertWeight,
   normalizeOnboardingWeightKg,
-  parsePositiveNumber,
 } from "@/lib/onboarding-weight";
-import { formatMacroValue } from "@/lib/numbers";
+import { formatMacroValue, parsePositiveNumber } from "@/lib/numbers";
 import { getLocalDateString } from "@/lib/startup-date";
+import { useActionRunner } from "@/lib/use-action-runner";
 
 import {
   MacroCalculatorPanel,
@@ -19,6 +19,7 @@ import {
   type MacroTargetDraft,
 } from "./macro-calculator-panel";
 import { NumberInputField } from "./number-input-field";
+import { presetDraftToInput } from "./preset-modal";
 import { ThemePicker } from "./theme-toggle";
 
 type OnboardingShellProps = {
@@ -59,7 +60,7 @@ export function OnboardingShell({
   preferredWeightUnit,
 }: OnboardingShellProps) {
   const router = useRouter();
-  const [isPending, startTransition] = useTransition();
+  const { run, isPending, error, clearError } = useActionRunner();
   const [unit, setUnit] = useState<WeightUnit>(preferredWeightUnit);
   const [calories, setCalories] = useState("");
   const [protein, setProtein] = useState("");
@@ -72,7 +73,6 @@ export function OnboardingShell({
   const [templateCarbs, setTemplateCarbs] = useState("");
   const [templateFat, setTemplateFat] = useState("");
   const [templateCalories, setTemplateCalories] = useState("");
-  const [error, setError] = useState<string | null>(null);
 
   function changeUnit(nextUnit: WeightUnit) {
     if (nextUnit === unit) {
@@ -96,48 +96,45 @@ export function OnboardingShell({
     setProtein(formatMacroInputValue(targets.proteinG));
     setCarbs(formatMacroInputValue(targets.carbsG));
     setFat(formatMacroInputValue(targets.fatG));
-    setError(null);
+    clearError();
   }
 
   function submit() {
-    setError(null);
-    startTransition(async () => {
-      const starterTemplate = templateLabel.trim()
-        ? {
-            label: templateLabel.trim(),
-            proteinG: Number(templateProtein) || 0,
-            carbsG: Number(templateCarbs) || 0,
-            fatG: Number(templateFat) || 0,
-            caloriesKcal: Math.round(Number(templateCalories) || 0),
-          }
-        : null;
+    run(
+      () => {
+        const starterTemplate = templateLabel.trim()
+          ? presetDraftToInput({
+              label: templateLabel,
+              proteinG: templateProtein,
+              carbsG: templateCarbs,
+              fatG: templateFat,
+              caloriesKcal: templateCalories,
+            })
+          : null;
 
-      // Resolved here rather than during the server render so the first
-      // weigh-in lands on the user's own calendar day.
-      const currentDate = getLocalDateString();
+        // Resolved on the device, not the server, so the first weigh-in lands on the user's own calendar day.
+        const currentDate = getLocalDateString();
 
-      const result = await completeOnboardingAction({
-        preferredWeightUnit: unit,
-        goals: {
-          caloriesKcal: parsePositiveNumber(calories),
-          proteinG: parsePositiveNumber(protein),
-          carbsG: parsePositiveNumber(carbs),
-          fatG: parsePositiveNumber(fat),
-        },
-        goalWeightKg: normalizeOnboardingWeightKg(goalWeight, unit),
-        currentWeightKg: normalizeOnboardingWeightKg(currentWeight, unit),
-        currentWeightDate: currentDate,
-        starterTemplate,
-      });
-
-      if (!result.ok) {
-        setError(result.error ?? "Unable to finish setup.");
-        return;
-      }
-
-      router.replace("/");
-      router.refresh();
-    });
+        return completeOnboardingAction({
+          preferredWeightUnit: unit,
+          goals: {
+            caloriesKcal: parsePositiveNumber(calories),
+            proteinG: parsePositiveNumber(protein),
+            carbsG: parsePositiveNumber(carbs),
+            fatG: parsePositiveNumber(fat),
+          },
+          goalWeightKg: normalizeOnboardingWeightKg(goalWeight, unit),
+          currentWeightKg: normalizeOnboardingWeightKg(currentWeight, unit),
+          currentWeightDate: currentDate,
+          starterTemplate,
+        });
+      },
+      {
+        fallbackError: "Unable to finish setup.",
+        refresh: true,
+        onSuccess: () => router.replace("/"),
+      },
+    );
   }
 
   return (

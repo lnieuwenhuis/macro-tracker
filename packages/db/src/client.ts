@@ -133,10 +133,7 @@ export async function createDatabaseRuntime(
       dataDir: getPglitePath(connectionString),
       ...(await getPgliteAssets()),
     });
-    // Schema creation is the migrator's job -- see `migrateDatabase`, which
-    // handles the PGlite dialect too. This used to replay a hand-maintained
-    // copy of every migration instead, which had to be updated twice for each
-    // schema change and could silently drift from `drizzle/`.
+    // Schema creation is migrateDatabase's job, which handles the PGlite dialect too.
     const db = drizzlePglite(client, { schema });
 
     return {
