@@ -6,6 +6,7 @@ import {
   type AppUser,
 } from "@macro-tracker/db";
 import { notFound, redirect } from "next/navigation";
+import { cache } from "react";
 
 import { getServerEnv } from "./env";
 import { getSessionUserFromCookies } from "./session";
@@ -21,7 +22,9 @@ async function applyBootstrapOwnerRole(user: AppUser) {
   return (await reconcileConfiguredOwner(user.id)) ?? user;
 }
 
-export async function getCurrentAppUser() {
+// React shares the in-flight lookup (including owner reconciliation) only within
+// this server render. New requests authenticate again; route handlers stay uncached.
+export const getCurrentAppUser = cache(async function getCurrentAppUser() {
   const sessionUser = await getSessionUserFromCookies();
 
   if (!sessionUser) {
@@ -34,7 +37,7 @@ export async function getCurrentAppUser() {
   }
 
   return applyBootstrapOwnerRole(existingUser);
-}
+});
 
 export async function getCurrentSessionUser() {
   const user = await getCurrentAppUser();
