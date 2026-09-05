@@ -5,8 +5,12 @@ export async function GET(
   { params }: { params: Promise<{ barcode: string }> },
 ) {
   const { barcode } = await params;
-  return proxyBackendRoute(request, `/api/barcode/${encodeURIComponent(barcode)}`, {
-    found: false,
-    error: "Barcode lookup service is unavailable.",
-  });
+  return proxyBackendRoute(
+    request,
+    `/api/barcode/${encodeURIComponent(barcode)}`,
+    { found: false, error: "Barcode lookup service is unavailable." },
+    // This read has no saved result/background job; dropping its backend request
+    // also drops the provider futures and releases their lookup semaphore slot.
+    { cancelReadOnDisconnect: true },
+  );
 }

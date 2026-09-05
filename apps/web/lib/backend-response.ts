@@ -62,23 +62,32 @@ export async function proxyBackendRoute(
   request: Request,
   path: string,
   unavailableBody: unknown,
-  options: { timeoutMs?: number } = {},
+  options: {
+    timeoutMs?: number;
+    /** Opt in only for reads whose work may be abandoned when the client leaves. */
+    cancelReadOnDisconnect?: boolean;
+  } = {},
 ) {
   const headers = stripHopByHopHeaders(new Headers(request.headers));
   const forwardsBody = request.method !== "GET" && request.method !== "HEAD";
+  const signal =
+    options.cancelReadOnDisconnect && !forwardsBody ? request.signal : undefined;
 
   try {
     const response = await backendFetch(path, {
       method: request.method,
       headers,
       body: forwardsBody ? request.body : undefined,
+      ...(signal ? { signal } : {}),
       ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
       ...(forwardsBody ? { duplex: "half" as const } : {}),
     } as RequestInit & { duplex?: "half"; timeoutMs?: number });
     return createBackendProxyResponse(response);
   } catch (error) {
     // Logged rather than swallowed: a 502 is indistinguishable from a genuine "not found" once it reaches the client.
-    console.error(`Backend proxy failure for ${path}`, error);
+    if (!signal?.aborted) {
+      console.error(`Backend proxy failure for ${path}`, error);
+    }
     return Response.json(unavailableBody, { status: 502 });
   }
 }

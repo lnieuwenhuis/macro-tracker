@@ -96,12 +96,12 @@ pnpm build
 pnpm backend:start:release
 
 # service 2
-pnpm --filter @macro-tracker/web start
+node apps/web/scripts/start-with-migrations.mjs
 ```
 
 For a deployed instance, set `APP_URL` to the public URL, `BACKEND_URL` to the backend service URL reachable from the frontend server, and use real random values for `SESSION_SECRET` and `BACKEND_INTERNAL_SECRET`. If you use remote PostgreSQL, `DATABASE_URL` uses TLS with certificate verification by default when `sslmode` is omitted or set to `verify-full`; use `sslmode=require` only when your provider requires encrypted TLS without certificate verification.
 
-The production build uses Next.js standalone output and starts that smaller server automatically when it is present. PostgreSQL pools default to 10 connections; set `POSTGRES_POOL_MAX` if you need a different cap. The old default of 3 was low enough that a burst of unauthenticated requests could exhaust it before any credential check ran.
+The production build uses Next.js standalone output. The direct Node command above runs startup migrations when explicitly enabled, then loads the generated server in the same process. Both Railway frontend configs use this command to avoid keeping pnpm and a launcher parent resident. `pnpm --filter @macro-tracker/web start` remains available locally; without standalone output the launcher loads the Next CLI. PostgreSQL pools default to 10 connections; set `POSTGRES_POOL_MAX` if you need a different cap. The old default of 3 was low enough that a burst of unauthenticated requests could exhaust it before any credential check ran.
 
 ## API Access
 
