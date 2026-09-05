@@ -1,4 +1,4 @@
-import { getRecipes, getTemplates, searchFoodProducts } from "@macro-tracker/db";
+import { getRecipeSummaries, getTemplateSummaries, searchFoodProducts } from "@macro-tracker/db";
 
 import { LibraryShell } from "@/components/library-shell";
 import { loadOnboardedPageContext } from "@/lib/page-context";
@@ -12,8 +12,8 @@ export default async function LibraryPage({ searchParams }: LibraryPageProps) {
     await loadOnboardedPageContext(searchParams);
   const query = params.q ?? "";
   const [templates, recipes, products] = await Promise.all([
-    getTemplates(sessionUser.userId),
-    getRecipes(sessionUser.userId),
+    getTemplateSummaries(sessionUser.userId),
+    getRecipeSummaries(sessionUser.userId),
     query.trim() ? searchFoodProducts(sessionUser.userId, query) : Promise.resolve([]),
   ]);
 

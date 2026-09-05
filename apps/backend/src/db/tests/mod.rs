@@ -816,6 +816,308 @@ async fn apply_day_template_resolves_exact_and_unambiguous_meal_group_labels() {
 
 #[cfg_attr(not(has_test_database), ignore = "needs a test database")]
 #[tokio::test]
+async fn compact_collection_payloads_preserve_rendered_values() {
+    let test_db = test_db().await;
+    let user_id = insert_test_user(&test_db.pool).await;
+    let template_id = Uuid::new_v4();
+    let recipe_id = Uuid::new_v4();
+
+    sqlx::query(
+        "INSERT INTO meal_templates (id, user_id, type, label, updated_at) VALUES ($1, $2, 'day', 'Weekday lunch', now())",
+    )
+    .bind(template_id)
+    .bind(user_id)
+    .execute(&test_db.pool)
+    .await
+    .expect("template should insert");
+    for (sort_order, label, protein, carbs, fat, calories) in [
+        (0, "Oats", 10.1, 40.2, 5.3, 250),
+        (1, "Yogurt", 8.4, 12.1, 1.6, 120),
+    ] {
+        sqlx::query(
+            "INSERT INTO meal_template_items (id, template_id, sort_order, label, quantity, unit, serving_multiplier, protein_g, carbs_g, fat_g, calories_kcal) VALUES ($1, $2, $3, $4, 1, 'serving', 1, $5, $6, $7, $8)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(template_id)
+        .bind(sort_order)
+        .bind(label)
+        .bind(protein)
+        .bind(carbs)
+        .bind(fat)
+        .bind(calories)
+        .execute(&test_db.pool)
+        .await
+        .expect("template item should insert");
+    }
+
+    sqlx::query(
+        "INSERT INTO recipes (id, user_id, label, portions, updated_at) VALUES ($1, $2, 'Chili', 2, now())",
+    )
+    .bind(recipe_id)
+    .bind(user_id)
+    .execute(&test_db.pool)
+    .await
+    .expect("recipe should insert");
+    for (sort_order, label, protein, carbs, fat, calories) in [
+        (0, "Beans", 12.0, 30.0, 1.0, 200),
+        (1, "Tomatoes", 2.0, 10.0, 0.0, 50),
+    ] {
+        sqlx::query(
+            "INSERT INTO recipe_ingredients (id, recipe_id, sort_order, label, quantity, unit, serving_multiplier, protein_g, carbs_g, fat_g, calories_kcal) VALUES ($1, $2, $3, $4, 1, 'serving', 1, $5, $6, $7, $8)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(recipe_id)
+        .bind(sort_order)
+        .bind(label)
+        .bind(protein)
+        .bind(carbs)
+        .bind(fat)
+        .bind(calories)
+        .execute(&test_db.pool)
+        .await
+        .expect("recipe ingredient should insert");
+    }
+
+    let early_group_id = Uuid::new_v4();
+    let late_group_id = Uuid::new_v4();
+    for (id, label, sort_order) in [
+        (early_group_id, "Breakfast", 0),
+        (late_group_id, "Dinner", 1),
+    ] {
+        sqlx::query(
+            "INSERT INTO meal_groups (id, user_id, label, sort_order, is_default) VALUES ($1, $2, $3, $4, false)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(label)
+        .bind(sort_order)
+        .execute(&test_db.pool)
+        .await
+        .expect("meal group should insert");
+    }
+    let planned_id = insert_test_meal_entry(
+        &test_db.pool,
+        user_id,
+        "2026-08-01",
+        "planned",
+        " greek   yogurt ",
+        0,
+        (10.0, 30.0, 5.0, 250),
+    )
+    .await;
+    sqlx::query(
+        "UPDATE meal_entries SET quantity = 2.55, unit = 'g', meal_group_id = $2 WHERE id = $1",
+    )
+    .bind(planned_id)
+    .bind(late_group_id)
+    .execute(&test_db.pool)
+    .await
+    .expect("late-group planned entry should update");
+    let early_planned_id = insert_test_meal_entry(
+        &test_db.pool,
+        user_id,
+        "2026-08-01",
+        "planned",
+        "Greek yogurt",
+        0,
+        (8.0, 20.0, 3.0, 250),
+    )
+    .await;
+    sqlx::query(
+        "UPDATE meal_entries SET quantity = 1.45, unit = 'g', meal_group_id = $2 WHERE id = $1",
+    )
+    .bind(early_planned_id)
+    .bind(early_group_id)
+    .execute(&test_db.pool)
+    .await
+    .expect("early-group planned entry should update");
+    insert_test_meal_entry(
+        &test_db.pool,
+        user_id,
+        "2026-08-01",
+        "eaten",
+        "Lunch",
+        1,
+        (20.0, 40.0, 10.0, 400),
+    )
+    .await;
+    insert_test_meal_entry(
+        &test_db.pool,
+        user_id,
+        "2026-08-01",
+        "skipped",
+        "Snack",
+        2,
+        (2.0, 5.0, 1.0, 50),
+    )
+    .await;
+
+    let template_summaries = rpc_json(
+        &test_db.pool,
+        "getTemplateSummaries",
+        json!({ "userId": user_id }),
+    )
+    .await
+    .expect("template summaries should load");
+    assert_eq!(
+        template_summaries,
+        json!([{
+            "id": template_id,
+            "type": "day",
+            "label": "Weekday lunch",
+            "itemCount": 2,
+            "totalMacros": {
+                "proteinG": 18.5,
+                "carbsG": 52.3,
+                "fatG": 6.9,
+                "caloriesKcal": 370
+            }
+        }])
+    );
+
+    let recipe_summaries = rpc_json(
+        &test_db.pool,
+        "getRecipeSummaries",
+        json!({ "userId": user_id }),
+    )
+    .await
+    .expect("recipe summaries should load");
+    assert_eq!(
+        recipe_summaries,
+        json!([{
+            "id": recipe_id,
+            "label": "Chili",
+            "portions": 2,
+            "perPortionMacros": {
+                "proteinG": 7,
+                "carbsG": 20,
+                "fatG": 0.5,
+                "caloriesKcal": 125
+            }
+        }])
+    );
+
+    let shopping_summaries = rpc_json(
+        &test_db.pool,
+        "getPlannedShoppingSummaries",
+        json!({ "userId": user_id, "dates": ["2026-08-01", "2026-08-02"] }),
+    )
+    .await
+    .expect("shopping summaries should load");
+    assert_eq!(
+        shopping_summaries,
+        json!([
+            {
+                "date": "2026-08-01",
+                "entryCount": 4,
+                "plannedCaloriesKcal": 500,
+                "meals": [
+                    { "label": "Greek yogurt", "quantity": 1.45, "unit": "g" },
+                    { "label": " greek   yogurt ", "quantity": 2.55, "unit": "g" }
+                ]
+            },
+            {
+                "date": "2026-08-02",
+                "entryCount": 0,
+                "plannedCaloriesKcal": 0,
+                "meals": []
+            }
+        ])
+    );
+
+    let full_templates = rpc_json(&test_db.pool, "getTemplates", json!({ "userId": user_id }))
+        .await
+        .expect("full templates should load");
+    let full_recipes = rpc_json(&test_db.pool, "getRecipes", json!({ "userId": user_id }))
+        .await
+        .expect("full recipes should load");
+    let template_items = full_templates[0]["items"]
+        .as_array()
+        .expect("full template should retain its items");
+    let display_tenths = |field: &str| {
+        template_items
+            .iter()
+            .map(|item| {
+                (item[field]
+                    .as_f64()
+                    .expect("template macro should be numeric")
+                    * 10.0)
+                    .round() as i64
+            })
+            .sum::<i64>() as f64
+            / 10.0
+    };
+    assert_eq!(
+        template_summaries[0]["totalMacros"],
+        json!({
+            "proteinG": display_tenths("proteinG"),
+            "carbsG": display_tenths("carbsG"),
+            "fatG": display_tenths("fatG"),
+            "caloriesKcal": template_items.iter().map(|item| item["caloriesKcal"].as_i64().expect("template calories should be integral")).sum::<i64>(),
+        }),
+        "summary totals must retain the full template's per-item displayed accumulation"
+    );
+    assert_eq!(
+        recipe_summaries[0]["perPortionMacros"], full_recipes[0]["perPortionMacros"],
+        "summary macros must retain the full recipe's displayed rounding"
+    );
+
+    let full_day_one = rpc_json(
+        &test_db.pool,
+        "getDailySummary",
+        json!({ "userId": user_id, "date": "2026-08-01" }),
+    )
+    .await
+    .expect("first full daily summary should load");
+    assert_eq!(
+        shopping_summaries[0]["meals"],
+        json!(
+            full_day_one["meals"]
+                .as_array()
+                .expect("full day should contain meals")
+                .iter()
+                .filter(|meal| meal["status"] == "planned")
+                .map(|meal| json!({
+                    "label": meal["label"],
+                    "quantity": meal["quantity"],
+                    "unit": meal["unit"],
+                }))
+                .collect::<Vec<_>>()
+        ),
+        "compact shopping entries must retain the full getter's meal-group order"
+    );
+
+    let full_day_two = rpc_json(
+        &test_db.pool,
+        "getDailySummary",
+        json!({ "userId": user_id, "date": "2026-08-02" }),
+    )
+    .await
+    .expect("second full daily summary should load");
+    let compact_bytes = serde_json::to_vec(&json!({
+        "templates": template_summaries,
+        "recipes": recipe_summaries,
+        "shopping": shopping_summaries,
+    }))
+    .expect("compact payload should serialize")
+    .len();
+    let full_bytes = serde_json::to_vec(&json!({
+        "templates": full_templates,
+        "recipes": full_recipes,
+        "shopping": [full_day_one, full_day_two],
+    }))
+    .expect("full payload should serialize")
+    .len();
+    assert!(
+        compact_bytes < full_bytes,
+        "compact payload ({compact_bytes} bytes) must be smaller than the full payload ({full_bytes} bytes)"
+    );
+    eprintln!("compact payload: {compact_bytes} bytes; full payload: {full_bytes} bytes");
+    test_db.cleanup().await;
+}
+
+#[cfg_attr(not(has_test_database), ignore = "needs a test database")]
+#[tokio::test]
 async fn list_admin_barcode_products_applies_catalogue_filters_to_items_and_totals() {
     let test_db = test_db().await;
     let alice_id = insert_test_user_with_email(&test_db.pool, "alice.submitter@example.test").await;
@@ -857,6 +1159,56 @@ async fn list_admin_barcode_products_applies_catalogue_filters_to_items_and_tota
     )
     .await;
 
+    for _ in 0..3 {
+        sqlx::query(
+            "INSERT INTO food_product_revisions (id, product_id, action, snapshot_json) VALUES ($1, $2, 'updated', '{}'::jsonb)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(barcode_match_id)
+        .execute(&test_db.pool)
+        .await
+        .expect("revision should insert");
+    }
+    sqlx::query(
+        "INSERT INTO admin_audit_events (id, actor_role, action, target_type, target_id, details_json) VALUES ($1, 'admin', 'barcode.updated', 'food_product', $2, '{}'::jsonb)",
+    )
+    .bind(Uuid::new_v4())
+    .bind(barcode_match_id.to_string())
+    .execute(&test_db.pool)
+    .await
+    .expect("audit event should insert");
+
+    let outside_page_duplicate_id = insert_test_admin_barcode_product(
+        &test_db.pool,
+        "995-outside-page-duplicate",
+        "Barcode Match",
+        "Other Brand",
+        None,
+        false,
+    )
+    .await;
+    sqlx::query("UPDATE food_products SET updated_at = now() + interval '1 hour' WHERE id = $1")
+        .bind(barcode_match_id)
+        .execute(&test_db.pool)
+        .await
+        .expect("visible duplicate should sort onto the first page");
+    let first_page_result = list_admin_barcode_products_json(
+        &test_db.pool,
+        &serde_json::Map::from_iter([("pageSize".to_string(), json!(1))]),
+        false,
+    )
+    .await
+    .expect("ordinary first page should load");
+    assert_eq!(first_page_result["items"][0]["id"], json!(barcode_match_id));
+    assert_eq!(
+        first_page_result["items"][0]["duplicateNameCount"],
+        json!(2)
+    );
+    assert_ne!(
+        first_page_result["items"][0]["id"],
+        json!(outside_page_duplicate_id)
+    );
+
     let barcode_result = list_admin_barcode_products_json(
         &test_db.pool,
         &serde_json::Map::from_iter([
@@ -869,6 +1221,13 @@ async fn list_admin_barcode_products_applies_catalogue_filters_to_items_and_tota
     .expect("barcode query should filter");
     assert_eq!(barcode_result["pagination"]["totalItems"], json!(1));
     assert_eq!(barcode_result["items"][0]["id"], json!(barcode_match_id));
+    assert_eq!(barcode_result["items"][0]["reviewReasons"], json!([]));
+    assert_eq!(barcode_result["items"][0]["revisionCount30Days"], json!(3));
+    assert_eq!(barcode_result["items"][0]["duplicateNameCount"], json!(1));
+    assert_eq!(
+        barcode_result["items"][0]["latestAuditAction"],
+        json!("barcode.updated")
+    );
 
     let name_result = list_admin_barcode_products_json(
         &test_db.pool,
@@ -900,8 +1259,8 @@ async fn list_admin_barcode_products_applies_catalogue_filters_to_items_and_tota
     )
     .await
     .expect("active status should filter");
-    assert_eq!(active_result["pagination"]["totalItems"], json!(3));
-    assert_eq!(active_result["pagination"]["totalPages"], json!(3));
+    assert_eq!(active_result["pagination"]["totalItems"], json!(4));
+    assert_eq!(active_result["pagination"]["totalPages"], json!(4));
 
     let deleted_result = list_admin_barcode_products_json(
         &test_db.pool,

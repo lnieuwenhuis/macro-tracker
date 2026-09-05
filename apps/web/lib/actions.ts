@@ -20,7 +20,7 @@ import {
   respondGymBuddyInvite,
   setGymSlotStatus,
   updateGymSlot,
-  getRecipes,
+  getRecipeSummaries,
   getRecipeById,
   getTemplates,
   getTemplateById,
@@ -49,6 +49,7 @@ import type {
   MealGroup,
   MealTemplate,
   RecipeRecord,
+  RecipeSummary,
   WeightUnit,
 } from "@macro-tracker/db";
 import { revalidatePath } from "next/cache";
@@ -421,12 +422,12 @@ type SaveRecipeInput = {
 
 type SaveRecipeResult = ActionResult & { recipe?: RecipeRecord };
 
-type LoadRecipesResult = ActionResult & { recipes?: RecipeRecord[] };
+type LoadRecipeSummariesResult = ActionResult & { recipes?: RecipeSummary[] };
 
-export async function loadRecipesAction(): Promise<LoadRecipesResult> {
+export async function loadRecipeSummariesAction(): Promise<LoadRecipeSummariesResult> {
   return runSessionAction(async (sessionUser) => ({
     ok: true,
-    recipes: await getRecipes(sessionUser.userId),
+    recipes: await getRecipeSummaries(sessionUser.userId),
   }));
 }
 

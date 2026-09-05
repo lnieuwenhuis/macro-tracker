@@ -1,13 +1,13 @@
 "use client";
 
-import type { RecipeRecord } from "@macro-tracker/db";
+import type { RecipeSummary } from "@macro-tracker/db";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CompactModal } from "./compact-modal";
 
 type RecipePickerModalProps = {
-  recipes: RecipeRecord[];
+  recipes: RecipeSummary[];
   onClose: () => void;
-  onSelect: (recipe: RecipeRecord) => void;
+  onSelect: (recipe: RecipeSummary) => void;
 };
 
 export function RecipePickerModal({
