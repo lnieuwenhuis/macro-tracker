@@ -39,19 +39,25 @@ export function BarcodeScanner({
     let stream: MediaStream | null = null;
     let controls: { stop: () => void } | null = null;
     let scanningStopped = false;
+    let controlsStopped = false;
+    let streamStopped = false;
     const lookupController = new AbortController();
 
     function stopStream() {
-      stream?.getTracks().forEach((track) => track.stop());
+      if (!stream || streamStopped) return;
+      streamStopped = true;
+      stream.getTracks().forEach((track) => track.stop());
       if (videoRef.current?.srcObject === stream) {
         videoRef.current.srcObject = null;
       }
     }
 
     function stopScanning() {
-      if (scanningStopped) return;
       scanningStopped = true;
-      controls?.stop();
+      if (controls && !controlsStopped) {
+        controlsStopped = true;
+        controls.stop();
+      }
       stopStream();
     }
 
@@ -97,7 +103,7 @@ export function BarcodeScanner({
             const barcode = result.getText();
 
             // Stop scanning immediately so we don't fire again while awaiting
-            frameControls.stop();
+            controls ??= frameControls;
             stopScanning();
             setStatus("looking-up");
 
@@ -124,13 +130,14 @@ export function BarcodeScanner({
           },
         );
 
-        controls = startedControls;
+        controls ??= startedControls;
         if (cancelled || scanningStopped) {
           stopScanning();
           return;
         }
         setStatus("scanning");
       } catch (err) {
+        stopScanning();
         if (cancelled) return;
         setStatus("error");
         const message =
