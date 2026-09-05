@@ -11,7 +11,7 @@ const mocked = vi.hoisted(() => ({
   createMealGroupAction: vi.fn(),
   updateMealGroupAction: vi.fn(),
   deleteMealGroupAction: vi.fn(),
-  loadRecipesAction: vi.fn(),
+  loadRecipeSummariesAction: vi.fn(),
   loadTemplatesAction: vi.fn(),
   applyTemplateAction: vi.fn(),
   searchFoodsAction: vi.fn(),
@@ -36,7 +36,7 @@ vi.mock("@/lib/actions", () => ({
   createMealGroupAction: mocked.createMealGroupAction,
   updateMealGroupAction: mocked.updateMealGroupAction,
   deleteMealGroupAction: mocked.deleteMealGroupAction,
-  loadRecipesAction: mocked.loadRecipesAction,
+  loadRecipeSummariesAction: mocked.loadRecipeSummariesAction,
   loadTemplatesAction: mocked.loadTemplatesAction,
   applyTemplateAction: mocked.applyTemplateAction,
   searchFoodsAction: mocked.searchFoodsAction,
@@ -62,7 +62,7 @@ describe("copied-flash timer cleanup", () => {
     vi.clearAllMocks();
     setTimeoutSpy = vi.spyOn(window, "setTimeout");
     clearTimeoutSpy = vi.spyOn(window, "clearTimeout");
-    mocked.loadRecipesAction.mockResolvedValue({ ok: true, recipes: [] });
+    mocked.loadRecipeSummariesAction.mockResolvedValue({ ok: true, recipes: [] });
     mocked.loadTemplatesAction.mockResolvedValue({ ok: true, templates: [] });
   });
 

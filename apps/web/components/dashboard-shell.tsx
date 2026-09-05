@@ -1,11 +1,11 @@
 "use client";
 
-import type { DailySummary, GymHomeSummary, MacroGoals, MealEntryRecord, MealEntryStatus, MealGroup, MealTemplate, QuickAddCandidate, RecipeRecord } from "@macro-tracker/db";
+import type { DailySummary, GymHomeSummary, MacroGoals, MealEntryRecord, MealEntryStatus, MealGroup, MealTemplate, QuickAddCandidate, RecipeSummary } from "@macro-tracker/db";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, useTransition } from "react";
 
-import { applyTemplateAction, createMealGroupAction, deleteMealGroupAction, deleteMealEntryAction, loadRecipesAction, loadTemplatesAction, markMealEntryStatusAction, saveMealEntryAction, updateMealGroupAction } from "@/lib/actions";
+import { applyTemplateAction, createMealGroupAction, deleteMealGroupAction, deleteMealEntryAction, loadRecipeSummariesAction, loadTemplatesAction, markMealEntryStatusAction, saveMealEntryAction, updateMealGroupAction } from "@/lib/actions";
 import type { ComposeAction } from "@/lib/compose";
 import { computeLiveTotalsByStatus, rankCandidates } from "@/lib/quick-add";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
@@ -370,7 +370,7 @@ export function DashboardShell({
   const [groupMutationId, setGroupMutationId] = useState<string | null>(null);
 
   const [showRecipePickerModal, setShowRecipePickerModal] = useState(false);
-  const recipes = useLazyCollection(loadNamedCollection<RecipeRecord>(loadRecipesAction, "recipes", "Unable to load recipes."), "Unable to load recipes.");
+  const recipes = useLazyCollection(loadNamedCollection<RecipeSummary>(loadRecipeSummariesAction, "recipes", "Unable to load recipes."), "Unable to load recipes.");
 
   const [showSearchModal, setShowSearchModal] = useState(false);
 
@@ -584,7 +584,7 @@ export function DashboardShell({
     }
   }
 
-  function addDraftFromRecipe(recipe: RecipeRecord) {
+  function addDraftFromRecipe(recipe: RecipeSummary) {
     const macros = recipe.perPortionMacros;
     setDrafts((currentDrafts) => [
       ...currentDrafts,

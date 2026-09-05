@@ -32,10 +32,13 @@ import type {
   MealGroup,
   MealTemplate,
   MealTemplateInput,
+  MealTemplateSummary,
   PeriodAverage,
+  PlannedShoppingSummary,
   QuickAddCandidate,
   RecipeInput,
   RecipeRecord,
+  RecipeSummary,
   ShooProfile,
   StatsPageData,
   WeightEntryInput,
@@ -248,6 +251,10 @@ export async function getTemplates(userId: string) {
   return backendRpc<MealTemplate[]>("getTemplates", { userId });
 }
 
+export async function getTemplateSummaries(userId: string) {
+  return backendRpc<MealTemplateSummary[]>("getTemplateSummaries", { userId });
+}
+
 export async function getTemplateById(userId: string, templateId: string) {
   return backendRpc<MealTemplate | null>("getTemplateById", { userId, templateId });
 }
@@ -309,6 +316,17 @@ export async function getWeightPageData(userId: string, selectedDate: string) {
 
 export async function getRecipes(userId: string) {
   return backendRpc<RecipeRecord[]>("getRecipes", { userId });
+}
+
+export async function getRecipeSummaries(userId: string) {
+  return backendRpc<RecipeSummary[]>("getRecipeSummaries", { userId });
+}
+
+export async function getPlannedShoppingSummaries(userId: string, dates: string[]) {
+  return backendRpc<PlannedShoppingSummary[]>("getPlannedShoppingSummaries", {
+    userId,
+    dates,
+  });
 }
 
 export async function getRecipeCount(userId: string) {

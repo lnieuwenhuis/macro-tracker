@@ -11,7 +11,7 @@ const mocked = vi.hoisted(() => ({
   createMealGroupAction: vi.fn(),
   updateMealGroupAction: vi.fn(),
   deleteMealGroupAction: vi.fn(),
-  loadRecipesAction: vi.fn(),
+  loadRecipeSummariesAction: vi.fn(),
   loadTemplatesAction: vi.fn(),
   applyTemplateAction: vi.fn(),
   saveTemplateAction: vi.fn(),
@@ -39,7 +39,7 @@ vi.mock("@/lib/actions", () => ({
   createMealGroupAction: mocked.createMealGroupAction,
   updateMealGroupAction: mocked.updateMealGroupAction,
   deleteMealGroupAction: mocked.deleteMealGroupAction,
-  loadRecipesAction: mocked.loadRecipesAction,
+  loadRecipeSummariesAction: mocked.loadRecipeSummariesAction,
   loadTemplatesAction: mocked.loadTemplatesAction,
   applyTemplateAction: mocked.applyTemplateAction,
   saveTemplateAction: mocked.saveTemplateAction,
@@ -111,7 +111,7 @@ function buildEmptyDailySummary(): DailySummary {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocked.loadRecipesAction.mockResolvedValue({ ok: true, recipes: [] });
+  mocked.loadRecipeSummariesAction.mockResolvedValue({ ok: true, recipes: [] });
   mocked.loadTemplatesAction.mockResolvedValue({ ok: true, templates: [] });
 });
 
