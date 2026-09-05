@@ -3377,7 +3377,43 @@ async fn admin_dashboard_json(pool: &PgPool) -> AppResult<Value> {
         "items",
     );
     let health = admin_user_health_summary_json(pool).await?;
-    Ok(json!({
+    let mut response = serde_json::Map::with_capacity(10);
+    response.insert(
+        "totalUsers".to_string(),
+        json!(counts.try_get::<i32, _>("total_users")?),
+    );
+    response.insert(
+        "ownerCount".to_string(),
+        json!(counts.try_get::<i32, _>("owner_count")?),
+    );
+    response.insert(
+        "adminCount".to_string(),
+        json!(counts.try_get::<i32, _>("admin_count")?),
+    );
+    response.insert(
+        "newUsersLast7Days".to_string(),
+        json!(counts.try_get::<i32, _>("new_users_last_7_days")?),
+    );
+    response.insert(
+        "activeUsersLast7Days".to_string(),
+        json!(counts.try_get::<i32, _>("active_users_last_7_days")?),
+    );
+    response.insert(
+        "activeBarcodeCount".to_string(),
+        json!(barcode_counts.try_get::<i32, _>("active_barcode_count")?),
+    );
+    response.insert(
+        "deletedBarcodeCount".to_string(),
+        json!(barcode_counts.try_get::<i32, _>("deleted_barcode_count")?),
+    );
+    response.insert(
+        "recentBarcodeAdditions".to_string(),
+        recent_barcode_additions,
+    );
+    response.insert("recentAuditEvents".to_string(), recent_audit_events);
+    response.insert("health".to_string(), health);
+    Ok(Value::Object(response))
+    /*json!({
         "totalUsers": counts.try_get::<i32, _>("total_users")?,
         "ownerCount": counts.try_get::<i32, _>("owner_count")?,
         "adminCount": counts.try_get::<i32, _>("admin_count")?,
@@ -3388,7 +3424,7 @@ async fn admin_dashboard_json(pool: &PgPool) -> AppResult<Value> {
         "recentBarcodeAdditions": recent_barcode_additions,
         "recentAuditEvents": recent_audit_events,
         "health": health
-    }))
+    }))*/
 }
 
 async fn admin_user_health_summary_json(pool: &PgPool) -> AppResult<Value> {
@@ -3587,11 +3623,45 @@ async fn get_admin_user_detail_json(pool: &PgPool, user_id: Uuid) -> AppResult<V
             recent_barcode_submissions_json(pool, user_id, 10),
         )?;
     let recent_weights = match recent_weights {
-        Value::Array(weights) => Value::Array(weights.into_iter().rev().collect()),
+        Value::Array(mut weights) => {
+            weights.reverse();
+            Value::Array(weights)
+        }
         // Keep the prior fallback when an internal query unexpectedly returns a non-array.
         _ => Value::Array(Vec::new()),
     };
-    Ok(json!({
+    let mut counts_json = serde_json::Map::with_capacity(5);
+    counts_json.insert(
+        "mealEntries".to_string(),
+        json!(counts.try_get::<i32, _>("meal_entries")?),
+    );
+    counts_json.insert(
+        "weightEntries".to_string(),
+        json!(counts.try_get::<i32, _>("weight_entries")?),
+    );
+    counts_json.insert(
+        "recipes".to_string(),
+        json!(counts.try_get::<i32, _>("recipes")?),
+    );
+    counts_json.insert(
+        "templates".to_string(),
+        json!(counts.try_get::<i32, _>("templates")?),
+    );
+    counts_json.insert(
+        "barcodeSubmissions".to_string(),
+        json!(counts.try_get::<i32, _>("barcode_submissions")?),
+    );
+    let mut response = serde_json::Map::with_capacity(8);
+    response.insert("user".to_string(), serde_json::to_value(user)?);
+    response.insert("goals".to_string(), serde_json::to_value(goals)?);
+    response.insert("counts".to_string(), Value::Object(counts_json));
+    response.insert("recentMeals".to_string(), recent_meals);
+    response.insert("recentWeights".to_string(), recent_weights);
+    response.insert("recentRecipes".to_string(), recent_recipes);
+    response.insert("recentTemplates".to_string(), recent_templates);
+    response.insert("recentBarcodeSubmissions".to_string(), recent_barcodes);
+    Ok(Value::Object(response))
+    /*json!({
         "user": user,
         "goals": goals,
         "counts": {
@@ -3607,7 +3677,7 @@ async fn get_admin_user_detail_json(pool: &PgPool, user_id: Uuid) -> AppResult<V
         "recentRecipes": recent_recipes,
         "recentTemplates": recent_templates,
         "recentBarcodeSubmissions": recent_barcodes
-    }))
+    }))*/
 }
 
 async fn recent_barcode_submissions_json(
@@ -5460,15 +5530,29 @@ fn pagination(input: &serde_json::Map<String, Value>) -> (i64, i64, i64) {
 
 fn page_json(items: Vec<Value>, page: i64, page_size: i64, total_items: i32) -> Value {
     let total_items = i64::from(total_items);
-    json!({
-        "items": items,
-        "pagination": {
+    let mut pagination = serde_json::Map::with_capacity(4);
+    pagination.insert("page".to_string(), json!(page));
+    pagination.insert("pageSize".to_string(), json!(page_size));
+    pagination.insert("totalItems".to_string(), json!(total_items));
+    pagination.insert(
+        "totalPages".to_string(),
+        json!(if total_items == 0 {
+            0
+        } else {
+            (total_items + page_size - 1) / page_size
+        }),
+    );
+    let mut response = serde_json::Map::with_capacity(2);
+    response.insert("items".to_string(), Value::Array(items));
+    response.insert("pagination".to_string(), Value::Object(pagination));
+    Value::Object(response)
+    /*json!({ "items": items, "pagination": {
             "page": page,
             "pageSize": page_size,
             "totalItems": total_items,
             "totalPages": if total_items == 0 { 0 } else { (total_items + page_size - 1) / page_size }
         }
-    })
+    }})*/
 }
 
 /// Moves an owned JSON field into the response without cloning potentially large page results.

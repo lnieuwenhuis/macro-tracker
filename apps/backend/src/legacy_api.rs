@@ -1001,13 +1001,14 @@ async fn analyze_food_photo_bytes(
     .await
 }
 
-/// Builds the provider data URL in one allocation rather than materialising base64 separately
-/// and copying it into a formatted string.
+/// Builds the provider data URL in one pre-sized buffer rather than materialising base64
+/// separately and copying it into a formatted string.
 fn food_photo_data_url(image_bytes: &[u8], mime_type: &str) -> String {
     let prefix = format!("data:{mime_type};base64,");
     let encoded_len = Base64::encoded_len(image_bytes);
-    let mut image_url = prefix.into_bytes();
-    let prefix_len = image_url.len();
+    let mut image_url = Vec::with_capacity(prefix.len() + encoded_len);
+    image_url.extend_from_slice(prefix.as_bytes());
+    let prefix_len = prefix.len();
     image_url.resize(prefix_len + encoded_len, 0);
     Base64::encode(image_bytes, &mut image_url[prefix_len..])
         .expect("base64 destination has the exact encoded length");
