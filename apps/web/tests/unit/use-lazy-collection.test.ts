@@ -111,4 +111,26 @@ describe("useLazyCollection", () => {
     expect(result.current.loaded).toBe(true);
     expect(load).toHaveBeenCalledOnce();
   });
+
+  it("does not retain the initial loaded array after callers replace it", async () => {
+    const initialItems = [{ id: "old", payload: "x".repeat(1024) }];
+    const load = vi.fn().mockResolvedValue(initialItems);
+    const { result } = renderHook(() => useLazyCollection(load, "Unable to load."));
+
+    await act(async () => {
+      await result.current.ensureLoaded();
+    });
+
+    const replacement = [{ id: "new", payload: "x".repeat(1024) }];
+    act(() => {
+      result.current.setItems(replacement);
+    });
+
+    await act(async () => {
+      await result.current.ensureLoaded();
+    });
+
+    expect(result.current.items).toBe(replacement);
+    expect(load).toHaveBeenCalledOnce();
+  });
 });

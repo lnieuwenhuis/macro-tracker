@@ -2,8 +2,6 @@
 
 import { useRef, useState } from "react";
 
-import { createLazyCollectionLoader } from "./lazy-collection";
-
 export function useLazyCollection<T>(
   loadItems: () => Promise<T[]>,
   fallbackError: string,
@@ -12,25 +10,35 @@ export function useLazyCollection<T>(
   const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const loaderRef = useRef<ReturnType<typeof createLazyCollectionLoader<T[]>> | null>(null);
-  loaderRef.current ??= createLazyCollectionLoader(loadItems);
-  const loader = loaderRef.current;
+  const loadedRef = useRef(false);
+  const inFlightRef = useRef<Promise<void> | null>(null);
 
-  async function ensureLoaded() {
-    if (loaded || loading) {
+  function ensureLoaded() {
+    if (loadedRef.current) {
       return;
+    }
+
+    if (inFlightRef.current) {
+      return inFlightRef.current;
     }
 
     setLoading(true);
     setError(null);
-    try {
-      const loadedItems = await loader.load();
-      setItems(loadedItems);
-      setLoaded(true);
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : fallbackError);
-    }
-    setLoading(false);
+    const inFlight = loadItems()
+      .then((loadedItems) => {
+        setItems(loadedItems);
+        loadedRef.current = true;
+        setLoaded(true);
+      })
+      .catch((loadError: unknown) => {
+        setError(loadError instanceof Error ? loadError.message : fallbackError);
+      })
+      .finally(() => {
+        inFlightRef.current = null;
+        setLoading(false);
+      });
+    inFlightRef.current = inFlight;
+    return inFlight;
   }
 
   return { items, setItems, loaded, loading, error, ensureLoaded };
