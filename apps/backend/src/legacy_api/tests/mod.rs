@@ -814,10 +814,14 @@ async fn food_photo_body_limit_allows_images_above_axum_default_to_reach_process
 
 #[test]
 fn food_photo_data_url_matches_the_provider_data_url_contract() {
-    assert_eq!(
-        food_photo_data_url(&[0, 1, 2, 3], "image/png"),
-        "data:image/png;base64,AAECAw=="
-    );
+    for length in [0, 1, 2, 3, 12_287, 12_288, 12_289, 24_575, 24_576, 24_577] {
+        let image = (0..length).map(|index| index as u8).collect::<Vec<_>>();
+        assert_eq!(
+            food_photo_data_url(&image, "image/png"),
+            format!("data:image/png;base64,{}", Base64::encode_string(&image)),
+            "length {length} must preserve the provider data URL"
+        );
+    }
 }
 
 #[tokio::test]

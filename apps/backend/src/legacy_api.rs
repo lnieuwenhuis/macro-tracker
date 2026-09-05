@@ -1006,13 +1006,17 @@ async fn analyze_food_photo_bytes(
 fn food_photo_data_url(image_bytes: &[u8], mime_type: &str) -> String {
     let prefix = format!("data:{mime_type};base64,");
     let encoded_len = Base64::encoded_len(image_bytes);
-    let mut image_url = Vec::with_capacity(prefix.len() + encoded_len);
-    image_url.extend_from_slice(prefix.as_bytes());
-    let prefix_len = prefix.len();
-    image_url.resize(prefix_len + encoded_len, 0);
-    Base64::encode(image_bytes, &mut image_url[prefix_len..])
-        .expect("base64 destination has the exact encoded length");
-    String::from_utf8(image_url).expect("data URL contains only ASCII")
+    let mut image_url = String::with_capacity(prefix.len() + encoded_len);
+    image_url.push_str(&prefix);
+    // Chunks are multiples of three bytes, so only the final chunk can add padding.
+    // This writes base64 directly into the final String and avoids a second full-buffer UTF-8 scan.
+    let mut encoded = [0_u8; 16_384];
+    for chunk in image_bytes.chunks(12_288) {
+        image_url.push_str(
+            Base64::encode(chunk, &mut encoded).expect("chunk buffer has enough base64 capacity"),
+        );
+    }
+    image_url
 }
 
 async fn analyze_food_photo_url(
