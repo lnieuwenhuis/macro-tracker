@@ -29,6 +29,10 @@ describe("isValidTimeZone", () => {
     expect(normalizeTimeZone("Europe/Amsterdam")).toBe("Europe/Amsterdam");
     expect(normalizeTimeZone("garbage")).toBeNull();
   });
+
+  it("normalizes equivalent zone aliases to one canonical cookie value", () => {
+    expect(normalizeTimeZone("Etc/UTC")).toBe("UTC");
+  });
 });
 
 describe("dateStringInTimeZone", () => {
