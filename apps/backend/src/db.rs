@@ -1984,11 +1984,12 @@ async fn planned_shopping_summaries_json(
                 'quantity', round(me.quantity::numeric, 2)::float8,
                 'unit', me.unit
               )
-              ORDER BY me.sort_order, me.created_at, me.id
+              ORDER BY coalesce(mg.sort_order, 999), me.sort_order, me.created_at, me.id
             ) FILTER (WHERE me.status = 'planned'), '[]'::jsonb) AS meals
           FROM requested_dates
           LEFT JOIN meal_entries me
             ON me.user_id = $1 AND me.entry_date = requested_dates.entry_date
+          LEFT JOIN meal_groups mg ON mg.id = me.meal_group_id
           GROUP BY requested_dates.entry_date, requested_dates.ordinality
         )
         SELECT coalesce(jsonb_agg(
