@@ -33,6 +33,10 @@ export function createTimeZoneFormatterCache(format = createFormatter) {
     const formatter = format(value);
     const canonicalTimeZone = formatter.resolvedOptions().timeZone;
     canonicalTimeZoneCache.set(cacheKey, canonicalTimeZone);
+    canonicalTimeZoneCache.set(
+      canonicalTimeZone.toLowerCase(),
+      canonicalTimeZone,
+    );
     if (!formatterCache.has(canonicalTimeZone)) {
       formatterCache.set(canonicalTimeZone, formatter);
     }

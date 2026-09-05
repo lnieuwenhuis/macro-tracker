@@ -53,6 +53,20 @@ describe("isValidTimeZone", () => {
     expect(cache.getFormatter("ETC/utc")).toBe(cache.getFormatter("Etc/UTC"));
     expect(createdFor).toEqual(["Etc/UTC"]);
   });
+
+  it("reuses an alias formatter for its canonical spelling", () => {
+    const createdFor: string[] = [];
+    const cache = createTimeZoneFormatterCache((timeZone) => {
+      createdFor.push(timeZone);
+      return {
+        resolvedOptions: () => ({ timeZone: "America/Los_Angeles" }),
+      } as Intl.DateTimeFormat;
+    });
+
+    expect(cache.getCanonicalTimeZone("US/Pacific")).toBe("America/Los_Angeles");
+    expect(cache.getFormatter("America/Los_Angeles")).toBeDefined();
+    expect(createdFor).toEqual(["US/Pacific"]);
+  });
 });
 
 describe("dateStringInTimeZone", () => {
