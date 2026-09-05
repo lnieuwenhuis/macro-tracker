@@ -23,9 +23,6 @@ export function BarcodeScanner({
   onClose,
 }: BarcodeScannerProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const controlsRef = useRef<{ stop: () => void } | null>(null);
-  const isProcessingRef = useRef(false);
-  const stoppedRef = useRef(false);
 
   // Keep stable references to callbacks so the effect doesn't re-run
   const onScanRef = useRef(onScan);
@@ -37,8 +34,32 @@ export function BarcodeScanner({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    stoppedRef.current = false;
-    isProcessingRef.current = false;
+    let cancelled = false;
+    let isProcessing = false;
+    let stream: MediaStream | null = null;
+    let controls: { stop: () => void } | null = null;
+    let scanningStopped = false;
+    let controlsStopped = false;
+    let streamStopped = false;
+    const lookupController = new AbortController();
+
+    function stopStream() {
+      if (!stream || streamStopped) return;
+      streamStopped = true;
+      stream.getTracks().forEach((track) => track.stop());
+      if (videoRef.current?.srcObject === stream) {
+        videoRef.current.srcObject = null;
+      }
+    }
+
+    function stopScanning() {
+      scanningStopped = true;
+      if (controls && !controlsStopped) {
+        controlsStopped = true;
+        controls.stop();
+      }
+      stopStream();
+    }
 
     function failLookup() {
       setStatus("error");
@@ -53,7 +74,7 @@ export function BarcodeScanner({
             import("@zxing/library"),
           ]);
 
-        if (stoppedRef.current || !videoRef.current) return;
+        if (cancelled || !videoRef.current) return;
 
         // TRY_HARDER makes ZXing rotate/invert each frame, so barcodes are detected in any orientation.
         const hints = new Map();
@@ -63,23 +84,35 @@ export function BarcodeScanner({
           delayBetweenScanAttempts: 80,
         });
 
-        const controls = await reader.decodeFromConstraints(
-          { video: { facingMode: "environment" } },
+        // Acquire the stream ourselves: ZXing 0.1.x globally retains streams created through decodeFromConstraints.
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: "environment" },
+        });
+        if (cancelled) {
+          stopStream();
+          return;
+        }
+
+        const startedControls = await reader.decodeFromStream(
+          stream,
           videoRef.current,
           async (result, _error, frameControls) => {
-            if (!result || isProcessingRef.current || stoppedRef.current)
-              return;
+            if (!result || isProcessing || cancelled) return;
 
-            isProcessingRef.current = true;
+            isProcessing = true;
             const barcode = result.getText();
 
             // Stop scanning immediately so we don't fire again while awaiting
-            frameControls.stop();
+            controls ??= frameControls;
+            stopScanning();
             setStatus("looking-up");
 
             try {
-              const lookupResult = await lookupBarcode(barcode);
-              if (stoppedRef.current) return;
+              const lookupResult = await lookupBarcode(
+                barcode,
+                lookupController.signal,
+              );
+              if (cancelled) return;
 
               if (lookupResult.found) {
                 onScanRef.current(lookupResult.product);
@@ -90,17 +123,22 @@ export function BarcodeScanner({
                 onNotFoundRef.current(lookupResult.barcode);
               }
             } catch {
-              if (!stoppedRef.current) {
+              if (!cancelled) {
                 failLookup();
               }
             }
           },
         );
 
-        controlsRef.current = controls;
-        if (!stoppedRef.current) setStatus("scanning");
+        controls ??= startedControls;
+        if (cancelled || scanningStopped) {
+          stopScanning();
+          return;
+        }
+        setStatus("scanning");
       } catch (err) {
-        if (stoppedRef.current) return;
+        stopScanning();
+        if (cancelled) return;
         setStatus("error");
         const message =
           err instanceof Error ? err.message : "Failed to start camera.";
@@ -118,8 +156,9 @@ export function BarcodeScanner({
     startScanner();
 
     return () => {
-      stoppedRef.current = true;
-      controlsRef.current?.stop();
+      cancelled = true;
+      lookupController.abort();
+      stopScanning();
     };
   }, []);
 
