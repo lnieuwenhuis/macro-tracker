@@ -987,10 +987,9 @@ async fn analyze_food_photo_bytes(
             None,
         );
     }
-    let image_url = format!(
-        "data:{mime_type};base64,{}",
-        Base64::encode_string(&image_bytes)
-    );
+    let image_url = food_photo_data_url(&image_bytes, mime_type);
+    // The provider request only needs the encoded URL across its await points.
+    drop(image_bytes);
     analyze_food_photo_url(
         state,
         &image_url,
@@ -1000,6 +999,24 @@ async fn analyze_food_photo_bytes(
         force_ready,
     )
     .await
+}
+
+/// Builds the provider data URL in one pre-sized buffer rather than materialising base64
+/// separately and copying it into a formatted string.
+fn food_photo_data_url(image_bytes: &[u8], mime_type: &str) -> String {
+    let prefix = format!("data:{mime_type};base64,");
+    let encoded_len = Base64::encoded_len(image_bytes);
+    let mut image_url = String::with_capacity(prefix.len() + encoded_len);
+    image_url.push_str(&prefix);
+    // Chunks are multiples of three bytes, so only the final chunk can add padding.
+    // This writes base64 directly into the final String and avoids a second full-buffer UTF-8 scan.
+    let mut encoded = [0_u8; 16_384];
+    for chunk in image_bytes.chunks(12_288) {
+        image_url.push_str(
+            Base64::encode(chunk, &mut encoded).expect("chunk buffer has enough base64 capacity"),
+        );
+    }
+    image_url
 }
 
 async fn analyze_food_photo_url(

@@ -31,7 +31,7 @@ const SHOO_JWKS_NEGATIVE_CACHE_TTL: StdDuration = StdDuration::from_secs(10);
 #[derive(Clone)]
 struct CachedJwks {
     // `None` is a negative entry — the last fetch failed.
-    jwks: Option<JwkSet>,
+    jwks: Option<Arc<JwkSet>>,
     expires_at: StdInstant,
 }
 
@@ -324,7 +324,7 @@ fn jwks_unreachable() -> AppError {
 }
 
 /// Reads the cache without fetching; `Some(Err(..))` is a live negative entry. Recovers from lock poisoning.
-fn cached_shoo_jwks(shoo_base_url: &str) -> Option<AppResult<JwkSet>> {
+fn cached_shoo_jwks(shoo_base_url: &str) -> Option<AppResult<Arc<JwkSet>>> {
     let now = StdInstant::now();
     let cached = shoo_jwks_cache()
         .lock()
@@ -339,7 +339,7 @@ fn cached_shoo_jwks(shoo_base_url: &str) -> Option<AppResult<JwkSet>> {
     })
 }
 
-fn store_shoo_jwks(shoo_base_url: &str, jwks: Option<JwkSet>) {
+fn store_shoo_jwks(shoo_base_url: &str, jwks: Option<Arc<JwkSet>>) {
     let ttl = if jwks.is_some() {
         SHOO_JWKS_CACHE_TTL
     } else {
@@ -357,7 +357,7 @@ fn store_shoo_jwks(shoo_base_url: &str, jwks: Option<JwkSet>) {
         );
 }
 
-async fn fetch_shoo_jwks(state: &AppState) -> AppResult<JwkSet> {
+async fn fetch_shoo_jwks(state: &AppState) -> AppResult<Arc<JwkSet>> {
     let shoo_base_url = state.config.shoo_base_url.trim_end_matches('/').to_string();
     if let Some(cached) = cached_shoo_jwks(&shoo_base_url) {
         return cached;
@@ -393,7 +393,8 @@ async fn fetch_shoo_jwks(state: &AppState) -> AppResult<JwkSet> {
     }
     .await;
 
-    store_shoo_jwks(&shoo_base_url, fetched.as_ref().ok().cloned());
+    let fetched = fetched.map(Arc::new);
+    store_shoo_jwks(&shoo_base_url, fetched.as_ref().ok().map(Arc::clone));
     fetched
 }
 
