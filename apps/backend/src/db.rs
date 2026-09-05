@@ -1186,6 +1186,10 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
             let user_id = uuid_arg(&args, "userId")?;
             templates_json(pool, user_id).await
         }
+        "getTemplateSummaries" => {
+            let user_id = uuid_arg(&args, "userId")?;
+            template_summaries_json(pool, user_id).await
+        }
         "getTemplateById" => {
             let user_id = uuid_arg(&args, "userId")?;
             let template_id = uuid_arg(&args, "templateId")?;
@@ -1233,6 +1237,15 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
         "getRecipes" => {
             let user_id = uuid_arg(&args, "userId")?;
             recipes_json(pool, user_id).await
+        }
+        "getRecipeSummaries" => {
+            let user_id = uuid_arg(&args, "userId")?;
+            recipe_summaries_json(pool, user_id).await
+        }
+        "getPlannedShoppingSummaries" => {
+            let user_id = uuid_arg(&args, "userId")?;
+            let dates = dates_arg(&args, "dates")?;
+            planned_shopping_summaries_json(pool, user_id, &dates).await
         }
         "getRecipeCount" => {
             let user_id = uuid_arg(&args, "userId")?;
@@ -1780,6 +1793,54 @@ async fn templates_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
     templates_json_filtered(pool, user_id, None, MAX_COLLECTION_ROWS).await
 }
 
+async fn template_summaries_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
+    let row = sqlx::query(
+        r#"
+        WITH visible_templates AS (
+          SELECT id, type, label, created_at, updated_at
+          FROM meal_templates
+          WHERE user_id = $1 AND deleted_at IS NULL
+          ORDER BY updated_at DESC, created_at DESC
+          LIMIT $2
+        ),
+        item_totals AS (
+          SELECT
+            template_id,
+            count(*)::int AS item_count,
+            coalesce(sum(protein_g), 0)::float8 AS protein_g,
+            coalesce(sum(carbs_g), 0)::float8 AS carbs_g,
+            coalesce(sum(fat_g), 0)::float8 AS fat_g,
+            coalesce(sum(calories_kcal), 0)::bigint AS calories_kcal
+          FROM meal_template_items
+          WHERE template_id IN (SELECT id FROM visible_templates)
+          GROUP BY template_id
+        )
+        SELECT coalesce(jsonb_agg(
+          jsonb_build_object(
+            'id', mt.id,
+            'type', mt.type,
+            'label', mt.label,
+            'itemCount', coalesce(it.item_count, 0),
+            'totalMacros', jsonb_build_object(
+              'proteinG', coalesce(it.protein_g, 0),
+              'carbsG', coalesce(it.carbs_g, 0),
+              'fatG', coalesce(it.fat_g, 0),
+              'caloriesKcal', coalesce(it.calories_kcal, 0)
+            )
+          )
+          ORDER BY mt.updated_at DESC, mt.created_at DESC
+        ), '[]'::jsonb) AS data
+        FROM visible_templates mt
+        LEFT JOIN item_totals it ON it.template_id = mt.id
+        "#,
+    )
+    .bind(user_id)
+    .bind(MAX_COLLECTION_ROWS)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.try_get("data")?)
+}
+
 /// A `template_id` narrows both the outer select and the item aggregation, so by-id reads stay indexed.
 async fn templates_json_filtered(
     pool: &PgPool,
@@ -1852,6 +1913,101 @@ async fn templates_json_filtered(
 
 async fn recipes_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
     recipes_json_filtered(pool, user_id, None, MAX_COLLECTION_ROWS).await
+}
+
+async fn recipe_summaries_json(pool: &PgPool, user_id: Uuid) -> AppResult<Value> {
+    let row = sqlx::query(
+        r#"
+        WITH visible_recipes AS (
+          SELECT id, label, portions, created_at, updated_at
+          FROM recipes
+          WHERE user_id = $1
+          ORDER BY updated_at DESC, created_at DESC
+          LIMIT $2
+        ),
+        ingredient_totals AS (
+          SELECT
+            recipe_id,
+            coalesce(sum(protein_g), 0)::float8 AS protein_g,
+            coalesce(sum(carbs_g), 0)::float8 AS carbs_g,
+            coalesce(sum(fat_g), 0)::float8 AS fat_g,
+            coalesce(sum(calories_kcal), 0)::bigint AS calories_kcal
+          FROM recipe_ingredients
+          WHERE recipe_id IN (SELECT id FROM visible_recipes)
+          GROUP BY recipe_id
+        )
+        SELECT coalesce(jsonb_agg(
+          jsonb_build_object(
+            'id', r.id,
+            'label', r.label,
+            'portions', r.portions,
+            'perPortionMacros', jsonb_build_object(
+              'proteinG', round((coalesce(it.protein_g, 0) / greatest(r.portions, 1))::numeric, 1)::float8,
+              'carbsG', round((coalesce(it.carbs_g, 0) / greatest(r.portions, 1))::numeric, 1)::float8,
+              'fatG', round((coalesce(it.fat_g, 0) / greatest(r.portions, 1))::numeric, 1)::float8,
+              'caloriesKcal', round(coalesce(it.calories_kcal, 0)::numeric / greatest(r.portions, 1))::int
+            )
+          )
+          ORDER BY r.updated_at DESC, r.created_at DESC
+        ), '[]'::jsonb) AS data
+        FROM visible_recipes r
+        LEFT JOIN ingredient_totals it ON it.recipe_id = r.id
+        "#,
+    )
+    .bind(user_id)
+    .bind(MAX_COLLECTION_ROWS)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.try_get("data")?)
+}
+
+async fn planned_shopping_summaries_json(
+    pool: &PgPool,
+    user_id: Uuid,
+    dates: &[String],
+) -> AppResult<Value> {
+    let row = sqlx::query(
+        r#"
+        WITH requested_dates AS (
+          SELECT value::date AS entry_date, ordinality
+          FROM unnest($2::text[]) WITH ORDINALITY AS requested(value, ordinality)
+        ),
+        daily AS (
+          SELECT
+            requested_dates.entry_date,
+            requested_dates.ordinality,
+            count(me.id)::int AS entry_count,
+            coalesce(sum(me.calories_kcal) FILTER (WHERE me.status = 'planned'), 0)::bigint AS planned_calories_kcal,
+            coalesce(jsonb_agg(
+              jsonb_build_object(
+                'label', me.label,
+                'quantity', round(me.quantity::numeric, 2)::float8,
+                'unit', me.unit
+              )
+              ORDER BY me.sort_order, me.created_at, me.id
+            ) FILTER (WHERE me.status = 'planned'), '[]'::jsonb) AS meals
+          FROM requested_dates
+          LEFT JOIN meal_entries me
+            ON me.user_id = $1 AND me.entry_date = requested_dates.entry_date
+          GROUP BY requested_dates.entry_date, requested_dates.ordinality
+        )
+        SELECT coalesce(jsonb_agg(
+          jsonb_build_object(
+            'date', entry_date::text,
+            'entryCount', entry_count,
+            'plannedCaloriesKcal', planned_calories_kcal,
+            'meals', meals
+          )
+          ORDER BY ordinality
+        ), '[]'::jsonb) AS data
+        FROM daily
+        "#,
+    )
+    .bind(user_id)
+    .bind(dates)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.try_get("data")?)
 }
 
 /// See [`templates_json_filtered`] for why the id filter lives in SQL.
@@ -3793,6 +3949,9 @@ async fn admin_food_products_json(
     review_queue: bool,
     filters: &AdminBarcodeFilters,
 ) -> AppResult<Value> {
+    if !review_queue {
+        return admin_food_products_page_json(pool, page, page_size, filters).await;
+    }
     // Second offset computation (DATA-06); shares the clamp with `pagination`.
     let offset = page_offset(page, page_size);
     let sql = format!(
@@ -4003,6 +4162,127 @@ async fn admin_food_products_json(
         .fetch_one(pool)
         .await?
     };
+    let total: i32 = total_row.try_get("total")?;
+    Ok(page_json(
+        rows.into_iter()
+            .map(|row| row.try_get("data"))
+            .collect::<Result<Vec<Value>, _>>()?,
+        page,
+        page_size,
+        total,
+    ))
+}
+
+async fn admin_food_products_page_json(
+    pool: &PgPool,
+    page: i64,
+    page_size: i64,
+    filters: &AdminBarcodeFilters,
+) -> AppResult<Value> {
+    let offset = page_offset(page, page_size);
+    let sql = format!(
+        r#"
+        WITH filtered_catalogue AS MATERIALIZED (
+          SELECT
+            fp.id,
+            fp.updated_at,
+            fp.created_at,
+            nullif(regexp_replace(lower(trim(fp.name)), '\s+', ' ', 'g'), '') AS review_name
+          FROM food_products fp
+          LEFT JOIN users submitter ON submitter.id = fp.submitted_by_user_id
+          WHERE fp.owner_user_id IS NULL
+            AND fp.source = 'barcode'
+            AND (
+              $3::text IS NULL
+              OR fp.barcode ILIKE $3 ESCAPE '\'
+              OR fp.name ILIKE $3 ESCAPE '\'
+              OR fp.brand ILIKE $3 ESCAPE '\'
+            )
+            AND (
+              $4 = 'all'
+              OR ($4 = 'active' AND fp.deleted_at IS NULL)
+              OR ($4 = 'deleted' AND fp.deleted_at IS NOT NULL)
+            )
+            AND ($5::text IS NULL OR submitter.email ILIKE $5 ESCAPE '\')
+        ),
+        visible_page AS (
+          SELECT id, review_name
+          FROM filtered_catalogue
+          ORDER BY updated_at DESC, created_at DESC
+          LIMIT $1 OFFSET $2
+        ),
+        duplicate_names AS (
+          SELECT review_name, count(*)::int AS duplicate_name_count
+          FROM filtered_catalogue
+          WHERE review_name IS NOT NULL
+          GROUP BY review_name
+        ),
+        revision_counts AS (
+          SELECT product_id, count(*)::int AS revision_count_30_days
+          FROM food_product_revisions
+          WHERE product_id IN (SELECT id FROM visible_page)
+            AND created_at >= now() - interval '30 days'
+          GROUP BY product_id
+        ),
+        latest_audit AS (
+          SELECT DISTINCT ON (target_id) target_id, action, created_at
+          FROM admin_audit_events
+          WHERE target_type = 'food_product'
+            AND target_id IN (SELECT id::text FROM visible_page)
+            AND created_at >= now() - interval '30 days'
+          ORDER BY target_id, created_at DESC
+        )
+        SELECT jsonb_build_object(
+          {fields},
+          'reviewReasons', '[]'::jsonb,
+          'revisionCount30Days', coalesce(rc.revision_count_30_days, 0),
+          'duplicateNameCount', coalesce(dn.duplicate_name_count, 0),
+          'latestAuditAction', la.action,
+          'latestAuditAt', la.created_at
+        ) AS data
+        FROM visible_page vp
+        JOIN food_products fp ON fp.id = vp.id
+        LEFT JOIN duplicate_names dn ON dn.review_name = vp.review_name
+        LEFT JOIN revision_counts rc ON rc.product_id = fp.id
+        LEFT JOIN latest_audit la ON la.target_id = fp.id::text
+        ORDER BY fp.updated_at DESC, fp.created_at DESC
+        "#,
+        fields = sql::food_product_fields("fp.")
+    );
+    let rows = sqlx::query(&sql)
+        .bind(page_size)
+        .bind(offset)
+        .bind(filters.q_pattern.as_deref())
+        .bind(filters.status.as_str())
+        .bind(filters.submitter_pattern.as_deref())
+        .fetch_all(pool)
+        .await?;
+    let total_row = sqlx::query(
+        r#"
+        SELECT count(*)::int AS total
+        FROM food_products fp
+        LEFT JOIN users submitter ON submitter.id = fp.submitted_by_user_id
+        WHERE fp.owner_user_id IS NULL
+          AND fp.source = 'barcode'
+          AND (
+            $1::text IS NULL
+            OR fp.barcode ILIKE $1 ESCAPE '\'
+            OR fp.name ILIKE $1 ESCAPE '\'
+            OR fp.brand ILIKE $1 ESCAPE '\'
+          )
+          AND (
+            $2 = 'all'
+            OR ($2 = 'active' AND fp.deleted_at IS NULL)
+            OR ($2 = 'deleted' AND fp.deleted_at IS NOT NULL)
+          )
+          AND ($3::text IS NULL OR submitter.email ILIKE $3 ESCAPE '\')
+        "#,
+    )
+    .bind(filters.q_pattern.as_deref())
+    .bind(filters.status.as_str())
+    .bind(filters.submitter_pattern.as_deref())
+    .fetch_one(pool)
+    .await?;
     let total: i32 = total_row.try_get("total")?;
     Ok(page_json(
         rows.into_iter()
@@ -5375,6 +5655,24 @@ fn date_arg(args: &Value, key: &str) -> AppResult<String> {
     let value = string_arg(args, key)?;
     ensure_date_string(&value)?;
     Ok(value)
+}
+
+fn dates_arg(args: &Value, key: &str) -> AppResult<Vec<String>> {
+    let values = args
+        .get(key)
+        .and_then(Value::as_array)
+        .ok_or_else(|| AppError::BadRequest(format!("{key} is required.")))?;
+    ensure_collection_size(values, key)?;
+    values
+        .iter()
+        .map(|value| {
+            let date = value
+                .as_str()
+                .ok_or_else(|| AppError::BadRequest(format!("{key} must contain dates.")))?;
+            ensure_date_string(date)?;
+            Ok(date.to_string())
+        })
+        .collect()
 }
 
 fn object_arg<'a>(args: &'a Value, key: &str) -> AppResult<&'a serde_json::Map<String, Value>> {

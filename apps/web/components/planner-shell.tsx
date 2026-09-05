@@ -1,17 +1,13 @@
 "use client";
 
-import type { DailySummary, MealTemplate } from "@macro-tracker/db";
+import type { MealTemplateSummary, PlannedShoppingSummary } from "@macro-tracker/db";
 import { useDeferredValue, useMemo, useState } from "react";
 
 import {
   applyTemplateAction,
   createTemplateFromDateAction,
 } from "@/lib/actions";
-import {
-  getTemplateMacroTotals,
-  isDayTemplate,
-  isFoodItemTemplate,
-} from "@/lib/template-macros";
+import { isDayTemplate, isFoodItemTemplate } from "@/lib/template-macros";
 import { formatShortDate } from "@/lib/formatting";
 import {
   buildShoppingList,
@@ -27,10 +23,11 @@ type PlannerShellProps = {
   userEmail: string;
   canAccessAdmin: boolean;
   selectedDate: string;
-  templates: MealTemplate[];
+  templates: MealTemplateSummary[];
   recipeCount: number;
-  dailySummary: DailySummary;
-  shoppingSummaries: DailySummary[];
+  selectedDayEntryCount: number;
+  selectedDayPlannedCaloriesKcal: number;
+  shoppingSummaries: PlannedShoppingSummary[];
   todayStr?: string;
 };
 
@@ -48,7 +45,8 @@ export function PlannerShell({
   selectedDate,
   templates,
   recipeCount,
-  dailySummary,
+  selectedDayEntryCount,
+  selectedDayPlannedCaloriesKcal,
   shoppingSummaries,
   todayStr,
 }: PlannerShellProps) {
@@ -83,7 +81,7 @@ export function PlannerShell({
         : dayTemplates,
     [dayTemplates, normalizedTemplateSearch],
   );
-  const selectedDaySummary = `${dailySummary.meals.length} entries, ${dailySummary.plannedTotals.caloriesKcal} planned kcal`;
+  const selectedDaySummary = `${selectedDayEntryCount} entries, ${selectedDayPlannedCaloriesKcal} planned kcal`;
   const filteredShoppingSummaries = useMemo(
     () =>
       shoppingSummaries.filter(
@@ -255,7 +253,7 @@ export function PlannerShell({
             />
             <button
               type="button"
-              disabled={isPending || dailySummary.meals.length === 0}
+              disabled={isPending || selectedDayEntryCount === 0}
               onClick={saveDateAsTemplate}
               className="rounded-xl bg-[var(--color-accent)] px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
             >
@@ -317,7 +315,6 @@ export function PlannerShell({
           ) : (
             <div className="space-y-3">
               {visibleDayTemplates.map((template) => {
-                const totals = getTemplateMacroTotals(template.items);
                 return (
                   <article
                     key={template.id}
@@ -327,7 +324,7 @@ export function PlannerShell({
                       <div>
                         <h4 className="font-semibold text-[var(--color-ink)]">{template.label}</h4>
                         <p className="mt-1 text-xs text-[var(--color-muted)]">
-                          {template.items.length} item{template.items.length === 1 ? "" : "s"} · {totals.caloriesKcal} kcal
+                          {template.itemCount} item{template.itemCount === 1 ? "" : "s"} · {template.totalMacros.caloriesKcal} kcal
                         </p>
                       </div>
                       <button

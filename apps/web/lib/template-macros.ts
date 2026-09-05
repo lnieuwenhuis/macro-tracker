@@ -35,10 +35,10 @@ export function canEditAsSingleFoodTemplate(template: MealTemplate) {
   return template.type === "meal" && template.items.length === 1;
 }
 
-export function isFoodItemTemplate(template: MealTemplate) {
+export function isFoodItemTemplate(template: Pick<MealTemplate, "type">) {
   return template.type === "meal";
 }
 
-export function isDayTemplate(template: MealTemplate) {
+export function isDayTemplate(template: Pick<MealTemplate, "type">) {
   return template.type === "day";
 }

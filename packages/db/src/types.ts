@@ -376,6 +376,12 @@ export type RecipeRecord = {
   perPortionMacros: MacroNumbers;
 };
 
+/** The fields rendered by recipe lists and the dashboard recipe picker. */
+export type RecipeSummary = Pick<
+  RecipeRecord,
+  "id" | "label" | "portions" | "perPortionMacros"
+>;
+
 export type MealTemplateItemInput = {
   mealGroupLabel?: string | null;
 } & MacroFoodInput;
@@ -407,6 +413,29 @@ export type MealTemplate = {
   items: MealTemplateItem[];
   createdAt: string;
   updatedAt: string;
+};
+
+/** The fields rendered by template lists where applying/editing uses the id. */
+export type MealTemplateSummary = Pick<
+  MealTemplate,
+  "id" | "type" | "label"
+> & {
+  itemCount: number;
+  totalMacros: MacroNumbers;
+};
+
+/** A planned entry carries only the shopping-list fields. */
+export type PlannedShoppingEntry = Pick<
+  MealEntryRecord,
+  "label" | "quantity" | "unit"
+>;
+
+/** One day in the planner's preloaded shopping range. */
+export type PlannedShoppingSummary = {
+  date: string;
+  entryCount: number;
+  plannedCaloriesKcal: number;
+  meals: PlannedShoppingEntry[];
 };
 
 export type BarcodeFoodProductInput = {
