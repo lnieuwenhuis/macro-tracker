@@ -158,9 +158,18 @@ async fn handle_api_v1(
     };
 
     match result {
-        Ok((status, data)) => raw_json_response(status, json!({ "ok": true, "data": data }), None),
+        Ok((status, data)) => success_response(status, data),
         Err(failure) => failure_response(failure),
     }
+}
+
+/// `json!` serializes an expression through `to_value(&expression)`. Build the envelope by
+/// moving the RPC value into its object so a large response tree is not duplicated first.
+fn success_response(status: StatusCode, data: Value) -> Response {
+    let mut body = Map::with_capacity(2);
+    body.insert("ok".to_string(), Value::Bool(true));
+    body.insert("data".to_string(), data);
+    raw_json_response(status, Value::Object(body), None)
 }
 
 fn failure_response(failure: ApiFailure) -> Response {
@@ -1029,19 +1038,17 @@ fn map_account(user: Value) -> Value {
 }
 
 fn map_food_array(products: Value) -> Value {
-    Value::Array(
-        products
-            .as_array()
-            .cloned()
-            .unwrap_or_default()
-            .into_iter()
-            .map(map_food_product)
-            .collect(),
-    )
+    match products {
+        Value::Array(products) => {
+            Value::Array(products.into_iter().map(map_food_product).collect())
+        }
+        // Preserve the established defensive response for an unexpected internal value.
+        _ => Value::Array(Vec::new()),
+    }
 }
 
 fn map_food_product(product: Value) -> Value {
-    let Some(mut object) = product.as_object().cloned() else {
+    let Value::Object(mut object) = product else {
         return product;
     };
     for key in [

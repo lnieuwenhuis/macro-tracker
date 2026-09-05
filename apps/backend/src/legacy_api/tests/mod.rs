@@ -38,7 +38,7 @@ fn test_config(provider_base_url: Option<&str>) -> Config {
 
 fn test_state(provider_base_url: Option<&str>) -> AppState {
     AppState {
-        config: test_config(provider_base_url),
+        config: Arc::new(test_config(provider_base_url)),
         db: sqlx::postgres::PgPoolOptions::new()
             .acquire_timeout(Duration::from_millis(50))
             .connect_lazy("postgres://postgres:***@127.0.0.1:1/macro_tracker")
@@ -156,9 +156,10 @@ async fn spawn_chat_stub(responses: Vec<ChatStubResponse>) -> (String, Arc<ChatS
 
 fn gateway_test_state(endpoint: &str, models: Option<&str>) -> AppState {
     let mut state = test_state(None);
-    state.config.ai_gateway_url = Some(endpoint.to_string());
-    state.config.ai_gateway_api_key = Some("test-gateway-key".to_string());
-    state.config.ai_gateway_models = models.map(str::to_string);
+    let config = Arc::make_mut(&mut state.config);
+    config.ai_gateway_url = Some(endpoint.to_string());
+    config.ai_gateway_api_key = Some("test-gateway-key".to_string());
+    config.ai_gateway_models = models.map(str::to_string);
     state
 }
 
@@ -376,7 +377,7 @@ async fn food_photo_succeeds_through_the_gateway() {
 #[tokio::test]
 async fn gateway_mode_without_api_key_fails_closed() {
     let mut state = gateway_test_state("http://127.0.0.1:9/unreachable", None);
-    state.config.ai_gateway_api_key = None;
+    Arc::make_mut(&mut state.config).ai_gateway_api_key = None;
 
     let result = analyze_food_photo_url_with_limits(
         &state,
@@ -809,6 +810,14 @@ async fn food_photo_body_limit_allows_images_above_axum_default_to_reach_process
         .to_bytes();
     let payload: Value = serde_json::from_slice(&body).expect("response should be json");
     assert_eq!(payload["kind"], json!("missing_api_key"));
+}
+
+#[test]
+fn food_photo_data_url_matches_the_provider_data_url_contract() {
+    assert_eq!(
+        food_photo_data_url(&[0, 1, 2, 3], "image/png"),
+        "data:image/png;base64,AAECAw=="
+    );
 }
 
 #[tokio::test]

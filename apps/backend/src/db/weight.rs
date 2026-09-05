@@ -116,7 +116,7 @@ pub(super) async fn weight_page_data_json(
             .fetch_one(pool)
             .await?;
     let goal_weight_kg: Option<f64> = row.try_get("goal_weight_kg")?;
-    let entry_array = entries.as_array().cloned().unwrap_or_default();
+    let entry_array = entries.as_array().map(Vec::as_slice).unwrap_or_default();
     let stat_entries = entry_array
         .iter()
         .map(weight_stat_entry)

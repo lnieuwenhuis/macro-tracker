@@ -2304,11 +2304,17 @@ async fn normalize_meal_input_with_context(
         .map(str::to_string);
 
     if let Some(product_id) = product_id {
+        // Prefetched products are immutable request context. Borrow them instead of cloning
+        // their JSON payload for each template item.
+        let fetched_product;
         let product = match context.products.get(&product_id) {
-            Some(product) => product.clone(),
-            None => food_product_json_by_id(pool, user_id, product_id)
-                .await?
-                .ok_or_else(|| AppError::NotFound("Food product not found.".to_string()))?,
+            Some(product) => product,
+            None => {
+                fetched_product = food_product_json_by_id(pool, user_id, product_id)
+                    .await?
+                    .ok_or_else(|| AppError::NotFound("Food product not found.".to_string()))?;
+                &fetched_product
+            }
         };
         let (product_label, quantity, unit, serving_multiplier, protein, carbs, fat, calories) =
             nutrition_for_product(&product, input, recalculate_product_macros);
@@ -3044,7 +3050,7 @@ async fn create_template_from_date_json(
     let groups = summary
         .get("mealGroups")
         .and_then(Value::as_array)
-        .cloned()
+        .map(Vec::as_slice)
         .unwrap_or_default();
     let group_label_by_id = groups
         .iter()
@@ -3058,9 +3064,9 @@ async fn create_template_from_date_json(
     let items = summary
         .get("meals")
         .and_then(Value::as_array)
-        .cloned()
+        .map(Vec::as_slice)
         .unwrap_or_default()
-        .into_iter()
+        .iter()
         .filter(|meal| meal.get("status").and_then(Value::as_str) != Some("skipped"))
         .map(|meal| {
             let mut item = serde_json::Map::new();
@@ -3358,15 +3364,18 @@ async fn admin_dashboard_json(pool: &PgPool) -> AppResult<Value> {
     )
     .fetch_one(pool)
     .await?;
-    let recent_barcode_additions =
-        admin_food_products_json(pool, 1, 5, false, &AdminBarcodeFilters::empty()).await?["items"]
-            .clone();
-    let recent_audit_events = list_admin_audit_events_json(
-        pool,
-        &serde_json::Map::from_iter([("pageSize".to_string(), json!(5))]),
-    )
-    .await?["items"]
-        .clone();
+    let recent_barcode_additions = take_object_field(
+        admin_food_products_json(pool, 1, 5, false, &AdminBarcodeFilters::empty()).await?,
+        "items",
+    );
+    let recent_audit_events = take_object_field(
+        list_admin_audit_events_json(
+            pool,
+            &serde_json::Map::from_iter([("pageSize".to_string(), json!(5))]),
+        )
+        .await?,
+        "items",
+    );
     let health = admin_user_health_summary_json(pool).await?;
     Ok(json!({
         "totalUsers": counts.try_get::<i32, _>("total_users")?,
@@ -3577,6 +3586,11 @@ async fn get_admin_user_detail_json(pool: &PgPool, user_id: Uuid) -> AppResult<V
             list_recent_meal_entries_json(pool, user_id, 10, false),
             recent_barcode_submissions_json(pool, user_id, 10),
         )?;
+    let recent_weights = match recent_weights {
+        Value::Array(weights) => Value::Array(weights.into_iter().rev().collect()),
+        // Keep the prior fallback when an internal query unexpectedly returns a non-array.
+        _ => Value::Array(Vec::new()),
+    };
     Ok(json!({
         "user": user,
         "goals": goals,
@@ -3589,7 +3603,7 @@ async fn get_admin_user_detail_json(pool: &PgPool, user_id: Uuid) -> AppResult<V
         },
         "recentMeals": recent_meals,
         // `recentWeights` is contracted newest-first while the series is stored ascending.
-        "recentWeights": recent_weights.as_array().cloned().unwrap_or_default().into_iter().rev().collect::<Vec<_>>(),
+        "recentWeights": recent_weights,
         "recentRecipes": recent_recipes,
         "recentTemplates": recent_templates,
         "recentBarcodeSubmissions": recent_barcodes
@@ -5455,6 +5469,15 @@ fn page_json(items: Vec<Value>, page: i64, page_size: i64, total_items: i32) -> 
             "totalPages": if total_items == 0 { 0 } else { (total_items + page_size - 1) / page_size }
         }
     })
+}
+
+/// Moves an owned JSON field into the response without cloning potentially large page results.
+/// The old indexed access yielded `null` for a non-object or absent field, which this preserves.
+fn take_object_field(value: Value, key: &str) -> Value {
+    match value {
+        Value::Object(mut object) => object.remove(key).unwrap_or(Value::Null),
+        _ => Value::Null,
+    }
 }
 
 fn is_quantity_unit(value: &str) -> bool {
