@@ -1,8 +1,8 @@
 # Godfiles audit and refactoring plan
 
-Status: analysis and plan only; no production code has been refactored.
+Status: partially implemented. The September 16 update below records completed work and revises the remaining extraction plan; it does not implement further production changes.
 
-Audit snapshot: `main`, `dev`, and `staging` at
+Historical audit snapshot: `main`, `dev`, and `staging` at
 `5bbfe766df371e17fa9bcd00013ccd18276dac34` on 2026-08-31. This refresh supersedes the original
 `dev` snapshot at `b40658ef5343a49ce952a595489f934b59c1aaab`.
 
@@ -32,6 +32,66 @@ not expected to improve runtime speed, memory use, or bundle size. Poorly chosen
 the code harder to follow through indirection, introduce Rust visibility/cycle problems, or break
 Next.js server-action boundaries. The recommended approach therefore keeps existing public facades,
 moves one cohesive responsibility at a time, and proves behavior after every move.
+
+## Update: 2026-09-16 follow-up audit (branch `dev` at `7a354d9d`)
+
+Status: analysis only. No production code was changed for this update; it records progress since
+the previous snapshot and revises the remaining plan.
+
+Implemented since the last snapshot (verified in the tree at `7a354d9d`):
+
+- Inline Rust test modules moved to child files: `api/tests/mod.rs`, `auth/tests/mod.rs`,
+  `config/tests/mod.rs`, `legacy_api/tests/mod.rs`, `db/tests/mod.rs`, and root `tests/mod.rs`.
+- `db/api_tokens.rs`, `db/weight.rs`, `db/gym.rs`, and `db/healthkit.rs` extracted from `db.rs`.
+- `db/sql.rs` owns the shared `jsonb_build_object` projections and insert fragments that were the
+  duplicate-scan clones (plan item B1), and the pool-only `_with_executor` wrappers are gone (B2).
+  The complexity plan closed with zero duplicate clones and clean knip/clippy
+  (`complexity-reduction-results.md`).
+- Web: `use-action-runner.ts`, `use-lazy-collection.ts`, and `use-copied-flash.ts` hooks exist;
+  `gym-shell.tsx` was split into `gym-buddies-panel.tsx` and `gym-slot-form-modal.tsx`.
+- DB package: the Drizzle-era `..._ignored` varargs are removed from `backend-queries.ts` (D1);
+  `queries/api-tokens.test.ts` and `queries/weight.test.ts` exist.
+
+Current line counts (physical lines, production files only, at `7a354d9d`):
+
+| File | Lines | Change vs. previous snapshot |
+| --- | ---: | --- |
+| `apps/backend/src/db.rs` | 6,275 | was 11,240 |
+| `apps/backend/src/legacy_api.rs` | 2,094 | was 3,499; tests moved out |
+| `apps/backend/src/api.rs` | 1,362 | was 2,521; tests moved out |
+| `apps/web/components/dashboard-shell.tsx` | 1,469 | roughly unchanged; still the main UI godfile |
+| `apps/backend/src/db/tests/mod.rs` | 3,124 | grew into a new test monolith |
+| `apps/backend/src/db/gym.rs` | 1,030 | new module; near-godfile |
+
+### Revised guidance
+
+The domain-only split remains the right direction. Three additions make it work:
+
+1. Separate cross-domain workflows from plain domain persistence. `apply_template_json` (db.rs
+   around line 3093) loads a template, bulk-checks product access, resolves meal-group labels,
+   normalizes every item, then inserts transactionally; it is not template CRUD. Give such
+   workflows their own owner (`db/template_workflows.rs`, `db/onboarding.rs`, `db/dashboard.rs`)
+   so domain modules do not become mutually dependent. Dispatcher arms that still contain inline
+   SQL and transactions, such as the meal-group operations at db.rs lines 964-1117 and dashboard
+   composition at lines 1124-1135, should move their implementations into the owning domain
+   before the dispatch table itself is extracted into `db/rpc.rs`.
+2. Keep one explicit string-dispatched `rpc_json` table. Do not introduce a registry, macro
+   routing, or per-domain dispatchers that each recognize the same operation names. The contract
+   tests that pin operation strings and argument objects stay authoritative.
+3. Prevent `db/sql.rs` and `db/tests/mod.rs` from becoming the next godfiles. Move domain-specific
+   SQL projections and tests beside their owning modules as each extraction lands; keep only
+   genuinely shared projections in `sql.rs`, and keep the `SCHEMA_SQL` fixture and parity
+   assertion in one place.
+
+Updated remaining sequence: extract schema readiness and shared input parsing first; then foods
+and meal groups (their SQL currently sits inside dispatcher arms); then users, meals, templates,
+and recipes; then admin (split into `admin/{users,barcodes,audit}.rs`) and stats; then a thin
+`db/rpc.rs`. `api.rs` should split into `contract.rs`, `auth.rs`, `response.rs`, `input.rs`, and
+`resources/*` while keeping the single request lifecycle (authentication, scopes, method checks,
+timeout, envelope, CORS) centralized as it is today. `legacy_api.rs` should split by capability
+with a shared `gateway.rs` used by both food-photo and benchmark paths, rather than nesting the
+gateway under food-photo. The dashboard split stays valid; extract pure draft helpers and
+render-only sections first, and keep the coupled draft/mutation state in one owner.
 
 ## Audit method and decision rule
 
