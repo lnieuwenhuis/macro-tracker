@@ -9,8 +9,13 @@ mod shared;
 mod types;
 
 use anyhow::Context;
-use axum::{Router, extract::State};
+use axum::{
+    Router,
+    extract::State,
+    http::{HeaderMap, Request, header},
+};
 use config::Config;
+use sha2::{Digest, Sha256};
 use sqlx::postgres::PgPoolOptions;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -18,8 +23,10 @@ use std::{
 };
 use tokio::net::TcpListener;
 use tower_governor::{
-    GovernorLayer, errors::GovernorError, governor::GovernorConfigBuilder,
-    key_extractor::PeerIpKeyExtractor,
+    GovernorLayer,
+    errors::GovernorError,
+    governor::GovernorConfigBuilder,
+    key_extractor::{GlobalKeyExtractor, KeyExtractor, PeerIpKeyExtractor},
 };
 use tower_http::{timeout::TimeoutLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -56,6 +63,11 @@ const API_RATE_LIMIT_TEST_BURST: u32 = 100_000;
 // Evicts quiet IPs so the rate-limit map cannot grow into its own memory-exhaustion vector.
 const API_RATE_LIMIT_GC_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
+// SEC-02: per-credential buckets keep one proxied client from starving the others, but a caller
+// cycling unique credentials would still get a fresh allowance each time; this is the aggregate ceiling.
+const API_RATE_LIMIT_GLOBAL_REPLENISH_MS: u64 = 5;
+const API_RATE_LIMIT_GLOBAL_BURST: u32 = 1_000;
+
 // SEC-06: with internal-secret checks disabled, `InternalAuth` accepts requests with no header at all.
 fn listen_address(config: &Config) -> IpAddr {
     if config.allows_insecure_internal_auth_for_app_url() {
@@ -63,6 +75,48 @@ fn listen_address(config: &Config) -> IpAddr {
     } else {
         IpAddr::V4(Ipv4Addr::UNSPECIFIED)
     }
+}
+
+// SEC-02: bucket by the credential the caller presents, never by a caller-controlled forwarding header.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum ApiRateLimitKey {
+    /// SHA-256 of the presented bearer token; the raw token never enters the limiter map.
+    Token([u8; 32]),
+    /// Peer address for anonymous traffic, including direct backend access.
+    Peer(IpAddr),
+}
+
+#[derive(Clone, Copy)]
+struct ApiClientKeyExtractor;
+
+impl KeyExtractor for ApiClientKeyExtractor {
+    type Key = ApiRateLimitKey;
+
+    fn name(&self) -> &'static str {
+        "API client"
+    }
+
+    fn extract<T>(&self, request: &Request<T>) -> Result<Self::Key, GovernorError> {
+        if let Some(token) = presented_bearer_token(request.headers()) {
+            let digest = Sha256::digest(token.as_bytes());
+            let mut key = [0_u8; 32];
+            key.copy_from_slice(&digest);
+            return Ok(ApiRateLimitKey::Token(key));
+        }
+
+        // Deliberately ignores X-Forwarded-For/X-Real-IP/Forwarded: behind the Next proxy the peer is
+        // the proxy, and anywhere else the headers are caller-controlled.
+        PeerIpKeyExtractor
+            .extract(request)
+            .map(ApiRateLimitKey::Peer)
+    }
+}
+
+fn presented_bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let (scheme, token) = value.split_once(' ')?;
+    let token = token.trim();
+    (scheme.eq_ignore_ascii_case("bearer") && !token.is_empty()).then_some(token)
 }
 
 // Answers a throttled `/api/v1` request in the same JSON envelope every other `/api/v1` failure uses.
@@ -106,20 +160,37 @@ fn build_router(state: AppState) -> Router {
 }
 
 fn build_router_with_rate_limit(state: AppState, replenish_ms: u64, burst: u32) -> Router {
-    let governor = Arc::new(
+    let per_client = Arc::new(
         GovernorConfigBuilder::<PeerIpKeyExtractor, _>::default()
+            .key_extractor(ApiClientKeyExtractor)
             .per_millisecond(replenish_ms)
             .burst_size(burst)
             .finish()
             .expect("rate-limit period and burst size must both be non-zero"),
     );
-    // The keyed map never forgets on its own; GC it or a source-cycling attacker trades the pool for unbounded memory.
-    let governor_limiter = Arc::clone(&governor);
+    let global = Arc::new(
+        GovernorConfigBuilder::<PeerIpKeyExtractor, _>::default()
+            .key_extractor(GlobalKeyExtractor)
+            .per_millisecond(API_RATE_LIMIT_GLOBAL_REPLENISH_MS)
+            .burst_size(API_RATE_LIMIT_GLOBAL_BURST)
+            .finish()
+            .expect("rate-limit period and burst size must both be non-zero"),
+    );
+    // The keyed maps never forget on their own; GC them or a source-cycling attacker trades the pool for unbounded memory.
+    let per_client_limiter = Arc::clone(&per_client);
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(API_RATE_LIMIT_GC_INTERVAL);
         loop {
             ticker.tick().await;
-            governor_limiter.limiter().retain_recent();
+            per_client_limiter.limiter().retain_recent();
+        }
+    });
+    let global_limiter = Arc::clone(&global);
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(API_RATE_LIMIT_GC_INTERVAL);
+        loop {
+            ticker.tick().await;
+            global_limiter.limiter().retain_recent();
         }
     });
     // One per `build_router` call, so a probe result never leaks between tests.
@@ -129,7 +200,11 @@ fn build_router_with_rate_limit(state: AppState, replenish_ms: u64, burst: u32) 
         // SEC-09: scoped to `/api/v1` only — `/health` must answer through a flood and `/internal` is secret-gated.
         .nest(
             "/api/v1",
-            api::router().layer(GovernorLayer::new(governor).error_handler(rate_limited_response)),
+            api::router()
+                // Inner aggregate ceiling: a request over its own bucket is refused before it can
+                // consume a global cell, so one client's flood cannot drain the shared allowance.
+                .layer(GovernorLayer::new(global).error_handler(rate_limited_response))
+                .layer(GovernorLayer::new(per_client).error_handler(rate_limited_response)),
         )
         .merge(
             Router::new()

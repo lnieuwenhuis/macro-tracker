@@ -17,6 +17,7 @@ import {
 import { useActionRunner } from "@/lib/use-action-runner";
 
 import { AppShell, SettingsButton } from "./app-shell";
+import { useTabsKeyboard } from "./accessible-tabs";
 import { LibraryHubNav } from "./library-hub-nav";
 import { TransitionLink } from "./transition-link";
 
@@ -56,6 +57,12 @@ export function PlannerShell({
   const [templateSearch, setTemplateSearch] = useState("");
   const [activeMode, setActiveMode] = useState<PlannerMode>("templates");
   const [copyStatus, setCopyStatus] = useState<string | null>(null);
+  const plannerTabIds = ["templates", "shopping"] as const;
+  const { tabProps: plannerTabProps, panelProps: plannerPanelProps } =
+    useTabsKeyboard(plannerTabIds, activeMode, (next) => {
+      setActiveMode(next);
+      setCopyStatus(null);
+    });
   const defaultShoppingStartDate = shoppingSummaries[0]?.date ?? selectedDate;
   const defaultShoppingEndDate =
     shoppingSummaries[shoppingSummaries.length - 1]?.date ?? selectedDate;
@@ -231,18 +238,18 @@ export function PlannerShell({
             {([
               { id: "templates", label: "Templates" },
               { id: "shopping", label: "Shopping" },
-            ] as const).map((mode) => {
+            ] as const).map((mode, index) => {
               const isActive = activeMode === mode.id;
               return (
                 <button
                   key={mode.id}
                   type="button"
                   role="tab"
-                  aria-selected={isActive}
                   onClick={() => {
                     setActiveMode(mode.id);
                     setCopyStatus(null);
                   }}
+                  {...plannerTabProps(mode.id, index, "planner-modes")}
                   className={[
                     "h-full rounded-[1.05rem] px-4 text-sm font-semibold transition",
                     isActive
@@ -258,7 +265,7 @@ export function PlannerShell({
         </section>
 
         {activeMode === "templates" ? (
-          <>
+          <div {...plannerPanelProps("templates", "planner-modes")} className="space-y-5">
         <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5">
           <h3 className="text-sm font-bold text-[var(--color-ink)]">Save currently selected day</h3>
           <p className="mt-1 text-xs text-[var(--color-muted)]">{selectedDaySummary}</p>
@@ -361,8 +368,9 @@ export function PlannerShell({
             </div>
           )}
         </section>
-          </>
+          </div>
         ) : (
+          <div {...plannerPanelProps("shopping", "planner-modes")}>
           <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div>
@@ -453,6 +461,7 @@ export function PlannerShell({
               </div>
             )}
           </section>
+          </div>
         )}
       </div>
     </AppShell>

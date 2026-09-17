@@ -554,6 +554,152 @@ async fn symmetric_jwks_key_is_rejected() {
     assert!(matches!(error, AppError::Unauthorized(_)));
 }
 
+fn signed_session_claims(config: &crate::config::Config, claims: SessionClaims) -> String {
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(config.session_secret.as_bytes()),
+    )
+    .expect("test token should sign")
+}
+
+fn session_claims(user_id: &str, email: &str) -> SessionClaims {
+    let now = Utc::now().timestamp() as usize;
+    SessionClaims {
+        sub: user_id.to_string(),
+        email: email.to_string(),
+        claim_type: "mt_session".to_string(),
+        exp: now + SESSION_MAX_AGE_SECONDS as usize,
+        iat: Some(now),
+        authenticated_at: Some(now),
+    }
+}
+
+/// SEC-01: a renewal near day 30 keeps a fresh `exp`, so only the absolute deadline can stop it.
+#[test]
+fn a_session_past_its_absolute_lifetime_is_rejected_however_fresh_exp_is() {
+    let config = test_config("session-secret-with-at-least-32-chars");
+    let now = Utc::now().timestamp() as usize;
+    let stale = signed_session_claims(
+        &config,
+        SessionClaims {
+            authenticated_at: Some(now - SESSION_ABSOLUTE_LIFETIME_SECONDS as usize - 60),
+            ..session_claims("11111111-1111-4111-8111-111111111111", "coach@example.com")
+        },
+    );
+
+    assert!(matches!(
+        verify_session_token(&config, &stale),
+        Err(AppError::Unauthorized(_))
+    ));
+}
+
+/// SEC-01: a renewal inside the deadline stays valid, and the original sign-in time is what ages.
+#[test]
+fn a_renewed_session_inside_the_absolute_lifetime_verifies() {
+    let config = test_config("session-secret-with-at-least-32-chars");
+    let now = Utc::now().timestamp() as usize;
+    let renewed = signed_session_claims(
+        &config,
+        SessionClaims {
+            authenticated_at: Some(now - 60 * 60 * 24 * 20),
+            ..session_claims("11111111-1111-4111-8111-111111111111", "coach@example.com")
+        },
+    );
+
+    let verified = verify_session_token(&config, &renewed).expect("a renewal must verify");
+    assert_eq!(verified.email, "coach@example.com");
+}
+
+/// SEC-01: legacy tokens predate `authenticatedAt`, so `iat` is the explicit fallback policy.
+#[test]
+fn legacy_tokens_without_authenticated_at_fall_back_to_iat() {
+    let config = test_config("session-secret-with-at-least-32-chars");
+    let now = Utc::now().timestamp() as usize;
+
+    let fresh = signed_session_claims(
+        &config,
+        SessionClaims {
+            iat: Some(now - 60),
+            authenticated_at: None,
+            ..session_claims("11111111-1111-4111-8111-111111111111", "coach@example.com")
+        },
+    );
+    assert!(verify_session_token(&config, &fresh).is_ok());
+
+    let stale = signed_session_claims(
+        &config,
+        SessionClaims {
+            iat: Some(now - SESSION_ABSOLUTE_LIFETIME_SECONDS as usize - 60),
+            authenticated_at: None,
+            ..session_claims("11111111-1111-4111-8111-111111111111", "coach@example.com")
+        },
+    );
+    assert!(verify_session_token(&config, &stale).is_err());
+}
+
+/// SEC-01: a token that carries neither claim has no verifiable sign-in time and must not pass.
+#[test]
+fn tokens_without_any_issue_time_are_rejected() {
+    let config = test_config("session-secret-with-at-least-32-chars");
+    let undated = signed_session_claims(
+        &config,
+        SessionClaims {
+            iat: None,
+            authenticated_at: None,
+            ..session_claims("11111111-1111-4111-8111-111111111111", "coach@example.com")
+        },
+    );
+
+    assert!(verify_session_token(&config, &undated).is_err());
+}
+
+/// SEC-01: the freshly minted backend token must carry the claim the web renewals preserve.
+#[test]
+fn backend_minted_tokens_carry_authenticated_at() {
+    let config = test_config("session-secret-with-at-least-32-chars");
+    let user = SessionUser {
+        user_id: Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap(),
+        email: "coach@example.com".to_string(),
+    };
+    let token = create_session_token(&config, &user).expect("token should sign");
+
+    let decoded = decode::<SessionClaims>(
+        &token,
+        &DecodingKey::from_secret(config.session_secret.as_bytes()),
+        &Validation::new(Algorithm::HS256),
+    )
+    .expect("token should decode");
+    assert!(decoded.claims.authenticated_at.is_some());
+}
+
+/// SEC-01: a caller-supplied session header must not override the cookie, and alone must not authenticate.
+#[test]
+fn the_cookie_is_the_only_accepted_session_header() {
+    let mut both = HeaderMap::new();
+    both.insert(
+        "x-macro-tracker-session",
+        "attacker-chosen-token".parse().unwrap(),
+    );
+    both.insert(
+        axum::http::header::COOKIE,
+        format!("{SESSION_COOKIE_NAME}=cookie-token")
+            .parse()
+            .unwrap(),
+    );
+    assert_eq!(
+        session_token_from_headers(&both).as_deref(),
+        Some("cookie-token")
+    );
+
+    let mut header_only = HeaderMap::new();
+    header_only.insert(
+        "x-macro-tracker-session",
+        "attacker-chosen-token".parse().unwrap(),
+    );
+    assert_eq!(session_token_from_headers(&header_only), None);
+}
+
 #[test]
 fn session_tokens_use_exact_secret_bytes_with_whitespace() {
     let secret = "  whitespace-session-secret-with-at-least-32-chars  \n";

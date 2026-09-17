@@ -36,6 +36,40 @@ type MigrationLockClient = {
   ) => Promise<{ rows: T[] }>;
 };
 
+type MigrationSessionTimeouts = {
+  lockTimeout: string;
+  statementTimeout: string;
+};
+
+async function readMigrationSessionTimeouts(
+  client: MigrationLockClient,
+): Promise<MigrationSessionTimeouts> {
+  const result = await client.query<{ lock_timeout: string; statement_timeout: string }>(
+    "SELECT current_setting('lock_timeout') AS lock_timeout, " +
+      "current_setting('statement_timeout') AS statement_timeout",
+  );
+  const row = result.rows[0];
+  if (!row) {
+    throw new Error("Could not read the migration connection's session timeouts.");
+  }
+
+  return { lockTimeout: row.lock_timeout, statementTimeout: row.statement_timeout };
+}
+
+// TEST-02: the migration pool is reused for queries after createMigratedTestDatabase
+// (and for startup migrations in the same process), so the session-level SETs above
+// must not outlive the migration. set_config accepts parameters, unlike SET, and the
+// values are PostgreSQL's own renderings read back from current_setting.
+async function restoreMigrationSessionTimeouts(
+  client: MigrationLockClient,
+  previous: MigrationSessionTimeouts,
+) {
+  await client.query(
+    "SELECT set_config('lock_timeout', $1, false), set_config('statement_timeout', $2, false)",
+    [previous.lockTimeout, previous.statementTimeout],
+  );
+}
+
 // Must run before migrateNode touches the connection (DB-02).
 async function applyMigrationConnectionTimeouts(client: MigrationLockClient) {
   const lockTimeoutMs = readPositiveIntegerEnv(
@@ -92,15 +126,32 @@ export async function migrateDatabase(
     }
 
     const client = await runtime.migrationPool.connect();
+    let previousTimeouts: MigrationSessionTimeouts | undefined;
+    let migrationError: unknown;
     try {
+      previousTimeouts = await readMigrationSessionTimeouts(client);
       await applyMigrationConnectionTimeouts(client);
       await acquireMigrationLock(client);
       await migrateNode(drizzleNode(client, { schema }), { migrationsFolder });
+    } catch (error) {
+      migrationError = error;
+      throw error;
     } finally {
       try {
+        if (previousTimeouts) {
+          await restoreMigrationSessionTimeouts(client, previousTimeouts);
+        }
         await client.query("SELECT pg_advisory_unlock($1)", [POSTGRES_MIGRATION_LOCK_ID]);
-      } finally {
         client.release();
+      } catch (cleanupError) {
+        // A connection whose session state is unknown must not be reused; the next
+        // checkout has to fail loudly instead of inheriting migration settings.
+        client.release(
+          cleanupError instanceof Error ? cleanupError : new Error(String(cleanupError)),
+        );
+        if (migrationError === undefined) {
+          throw cleanupError;
+        }
       }
     }
     return;

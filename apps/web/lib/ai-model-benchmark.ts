@@ -25,7 +25,10 @@ type MacroBenchmarkFixture = {
   servingDescription: string;
   assetFileName: string;
   thumbnailUrl: string;
+  imageFileUrl: string;
+  imageSha256: string;
   imageSourceUrl: string;
+  imageLicense: string;
   expected: MacroBenchmarkMacros;
   expectedSource: string;
   category: MacroBenchmarkCategory;
@@ -49,7 +52,10 @@ type MacroBenchmarkCaseResult = {
   fixtureName: string;
   servingDescription: string;
   thumbnailUrl: string;
+  imageFileUrl: string;
+  imageSha256: string;
   imageSourceUrl: string;
+  imageLicense: string;
   expected: MacroBenchmarkMacros;
   expectedSource: string;
   category: MacroBenchmarkCategory;
@@ -59,9 +65,17 @@ type MacroBenchmarkCaseResult = {
 
 type MacroBenchmarkMode = "compare" | "candidate_only";
 
+/// Pinned fixture-set identity. Must match the backend
+/// `BENCHMARK_FIXTURE_SET_VERSION` (AI-02). Baselines carrying any other
+/// version are rejected so incompatible caches cannot be reused (AI-01).
+/// Bumped to `...-v2` when the frozen image bytes were verified and the five
+/// mismatched photos were replaced.
+export const BENCHMARK_FIXTURE_VERSION = "2026-09-17-pinned-v2";
+
 export type MacroBenchmarkBaseline = {
   currentModel: string;
   fixtureIds: string[];
+  fixtureVersion: string;
   results: MacroBenchmarkModelCaseResult[];
   createdAt: string;
 };
@@ -86,6 +100,7 @@ export type MacroBenchmarkResult = {
   candidateModel: string;
   fixtureCount: number;
   totalFixtureCount: number;
+  fixtureVersion: string;
   comparedSameModel: boolean;
   mode: MacroBenchmarkMode;
   usedBaseline: boolean;

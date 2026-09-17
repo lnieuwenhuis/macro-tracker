@@ -4,6 +4,7 @@ import type { MacroGoals, StatsPageData } from "@macro-tracker/db";
 import { useState } from "react";
 
 import { formatShortDate } from "@/lib/formatting";
+import { useTabsKeyboard } from "./accessible-tabs";
 import { buildWeeklyInsights, type WeeklyInsightTone } from "@/lib/weekly-insights";
 
 type MacroField = "caloriesKcal" | "proteinG" | "carbsG" | "fatG";
@@ -320,6 +321,9 @@ export function StatsPanels({
   const [selectedMacro, setSelectedMacro] = useState<MacroField>("caloriesKcal");
   const macroMeta = MACRO_META[selectedMacro];
   const goalForMacro = goals[selectedMacro];
+  const macroTabIds = Object.keys(MACRO_META) as MacroField[];
+  const { tabProps: macroTabProps, panelProps: macroPanelProps } =
+    useTabsKeyboard(macroTabIds, selectedMacro, setSelectedMacro);
   const weeklyInsights = buildWeeklyInsights(statsData, goals);
 
   if (totalDaysTracked === 0 && allDailyTotals.length === 0) {
@@ -496,7 +500,7 @@ export function StatsPanels({
             aria-label="Macro"
             className="mb-4 flex flex-wrap gap-1.5"
           >
-            {(Object.keys(MACRO_META) as MacroField[]).map((macro) => {
+            {(Object.keys(MACRO_META) as MacroField[]).map((macro, index) => {
               const meta = MACRO_META[macro];
               const isActive = macro === selectedMacro;
               return (
@@ -504,8 +508,8 @@ export function StatsPanels({
                   key={macro}
                   type="button"
                   role="tab"
-                  aria-selected={isActive}
                   onClick={() => setSelectedMacro(macro)}
+                  {...macroTabProps(macro, index, "stats-macro")}
                   className="rounded-full px-3 py-1 text-xs font-semibold transition"
                   style={
                     isActive
@@ -522,6 +526,7 @@ export function StatsPanels({
             })}
           </div>
 
+          <div {...macroPanelProps(selectedMacro, "stats-macro")}>
           <MacroTrendChart
             data={allDailyTotals}
             goal={goalForMacro}
@@ -529,6 +534,7 @@ export function StatsPanels({
             unit={macroMeta.unit}
             color={macroMeta.color}
           />
+          </div>
         </section>
 
         <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5">
