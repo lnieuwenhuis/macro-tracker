@@ -78,13 +78,14 @@ async fn health_returns_unavailable_when_database_is_not_ready() {
     assert!(!String::from_utf8_lossy(&body).contains("127.0.0.1"));
 }
 
+/// TEST-01: a configured database must actually run these assertions; an absent one
+/// reports the test as ignored, never as passed, and an unreachable configured one fails.
+#[cfg_attr(not(has_test_database), ignore = "needs a test database")]
 #[tokio::test]
 async fn health_returns_ok_when_database_is_ready() {
-    let Ok(database_url) = env::var("TEST_DATABASE_URL").or_else(|_| env::var("DATABASE_URL"))
-    else {
-        eprintln!("skipping PostgreSQL health test: TEST_DATABASE_URL/DATABASE_URL unavailable");
-        return;
-    };
+    let database_url = env::var("TEST_DATABASE_URL")
+        .or_else(|_| env::var("DATABASE_URL"))
+        .expect("TEST_DATABASE_URL or DATABASE_URL must be set");
     let mut config = test_config();
     config.database_url = database_url.clone();
     let db = PgPoolOptions::new()
