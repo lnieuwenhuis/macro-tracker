@@ -362,7 +362,8 @@ describe("preset modal focus containment (UI-06)", () => {
     mockValidity(protein as HTMLInputElement, { badInput: true });
 
     fireEvent.click(screen.getByRole("button", { name: /save template/i }));
-    expect(await screen.findByRole("alert")).toMatchObject({});
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toMatch(/not a valid number/i);
     expect(onSave).not.toHaveBeenCalled();
   });
 });
