@@ -105,7 +105,9 @@ export function getVisibleApiTokens(
 // and 12:00 in Europe/Amsterdam, so rendering local time during SSR can
 // disagree with hydration. The initial markup uses a pinned en-US/UTC
 // rendering; the browser-local rendering is applied after hydration.
-// Built once rather than per token row; Intl constructors are costly.
+// The stable UTC formatter is built once (Intl constructors are costly).
+// The local formatter is built per call so it always reflects the viewer's
+// current zone instead of the zone pinned at module load.
 // dateStyle/timeStyle cannot be combined with timeZoneName, so the fields
 // are spelled out to keep the same shape with an explicit zone suffix.
 const stableTokenDateFormat = new Intl.DateTimeFormat("en-US", {
@@ -115,15 +117,6 @@ const stableTokenDateFormat = new Intl.DateTimeFormat("en-US", {
   hour: "numeric",
   minute: "2-digit",
   timeZone: "UTC",
-  timeZoneName: "short",
-});
-
-const localTokenDateFormat = new Intl.DateTimeFormat(undefined, {
-  month: "short",
-  day: "numeric",
-  year: "numeric",
-  hour: "numeric",
-  minute: "2-digit",
   timeZoneName: "short",
 });
 
@@ -140,7 +133,14 @@ function formatLocalTokenDate(value: string | null) {
     return "Never";
   }
 
-  return localTokenDateFormat.format(new Date(value));
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  }).format(new Date(value));
 }
 
 export function ApiSettingsClient({ tokens, scopes }: ApiSettingsClientProps) {
