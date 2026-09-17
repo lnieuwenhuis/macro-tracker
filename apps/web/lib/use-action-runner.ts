@@ -16,6 +16,17 @@ type RunOptions<T extends ActionResult> = {
   onError?: () => void;
 };
 
+// Next control-flow throws (redirect/notFound) must keep propagating; anything
+// else rejected before the server responds is a transport failure.
+function isFrameworkControlFlowError(error: unknown) {
+  return (
+    error instanceof Error &&
+    typeof (error as Error & { digest?: unknown }).digest === "string" &&
+    (((error as Error & { digest: string }).digest.startsWith("NEXT_REDIRECT") ||
+      (error as Error & { digest: string }).digest.startsWith("NEXT_NOT_FOUND")))
+  );
+}
+
 export function useActionRunner() {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
@@ -30,7 +41,17 @@ export function useActionRunner() {
     }
 
     startTransition(async () => {
-      const result = await action();
+      let result: T;
+      try {
+        result = await action();
+      } catch (error) {
+        if (isFrameworkControlFlowError(error)) {
+          throw error;
+        }
+        setError(options.fallbackError);
+        options.onError?.();
+        return;
+      }
 
       if (!result.ok) {
         setError(result.error ?? options.fallbackError);
