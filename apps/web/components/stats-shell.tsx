@@ -217,6 +217,49 @@ function MacroTrendChart({
   );
 }
 
+export type MacroShareAllocation = {
+  proteinPct: number;
+  carbsPct: number;
+  fatPct: number;
+};
+
+// Largest-remainder allocation: every share is a floored exact percentage
+// and leftover points go to the largest fractions (protein, then carbs,
+// then fat on ties), so shares are always nonnegative and sum to 100.
+// Independent rounding with fat-as-remainder could show -1% (and clamping
+// fat alone still leaves 101%).
+export function allocateMacroShares(
+  proteinG: number,
+  carbsG: number,
+  fatG: number,
+): MacroShareAllocation {
+  const calories = [proteinG * 4, carbsG * 4, fatG * 9];
+  const total = calories[0]! + calories[1]! + calories[2]!;
+  if (total <= 0) {
+    return { proteinPct: 0, carbsPct: 0, fatPct: 0 };
+  }
+
+  const exact = calories.map((value) => (value / total) * 100);
+  const floored = exact.map((value) => Math.floor(value));
+  let remainder = 100 - (floored[0]! + floored[1]! + floored[2]!);
+  const order = [0, 1, 2].sort((a, b) => {
+    const delta = exact[b]! - exact[a]! - (floored[b]! - floored[a]!);
+    if (delta !== 0) return delta;
+    return a - b;
+  });
+  for (const index of order) {
+    if (remainder <= 0) break;
+    floored[index] += 1;
+    remainder -= 1;
+  }
+
+  return {
+    proteinPct: floored[0]!,
+    carbsPct: floored[1]!,
+    fatPct: floored[2]!,
+  };
+}
+
 function MacroSplitBar({
   proteinG,
   carbsG,
@@ -227,18 +270,14 @@ function MacroSplitBar({
   fatG: number;
 }) {
   // Convert to calories for split (protein=4, carbs=4, fat=9)
-  const proteinCal = proteinG * 4;
-  const carbsCal = carbsG * 4;
-  const fatCal = fatG * 9;
-  const total = proteinCal + carbsCal + fatCal;
+  const total = proteinG * 4 + carbsG * 4 + fatG * 9;
 
   if (total === 0) {
     return <p className="text-sm text-[var(--color-muted)]">No data yet.</p>;
   }
 
-  const pPct = Math.round((proteinCal / total) * 100);
-  const cPct = Math.round((carbsCal / total) * 100);
-  const fPct = 100 - pPct - cPct;
+  const { proteinPct: pPct, carbsPct: cPct, fatPct: fPct } =
+    allocateMacroShares(proteinG, carbsG, fatG);
   const segments = [
     { pct: pPct, colorVar: "var(--color-bar-protein)", label: "Protein" },
     { pct: cPct, colorVar: "var(--color-bar-carbs)", label: "Carbs" },
