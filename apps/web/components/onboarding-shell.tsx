@@ -2,13 +2,18 @@
 
 import type { WeightUnit } from "@macro-tracker/db";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useRef, useState, type Ref } from "react";
 
 import { completeOnboardingAction } from "@/lib/actions";
 import {
   convertWeight,
   normalizeOnboardingWeightKg,
 } from "@/lib/onboarding-weight";
+import {
+  getNumberFieldError,
+  getPositiveOptionalFieldError,
+  snapshotNumberValidity,
+} from "@/lib/number-input-validity";
 import { formatMacroValue, parsePositiveNumber } from "@/lib/numbers";
 import { getLocalDateString } from "@/lib/startup-date";
 import { useActionRunner } from "@/lib/use-action-runner";
@@ -19,7 +24,7 @@ import {
   type MacroTargetDraft,
 } from "./macro-calculator-panel";
 import { NumberInputField } from "./number-input-field";
-import { presetDraftToInput } from "./preset-modal";
+import { getPresetDraftError, presetDraftToInput } from "./preset-modal";
 import { ThemePicker } from "./theme-toggle";
 
 type OnboardingShellProps = {
@@ -34,11 +39,15 @@ function OnboardingNumberInput({
   label,
   value,
   unit,
+  inputRef,
+  invalid,
   onChange,
 }: {
   label: string;
   value: string;
   unit: string;
+  inputRef?: Ref<HTMLInputElement>;
+  invalid?: boolean;
   onChange: (value: string) => void;
 }) {
   return (
@@ -50,6 +59,8 @@ function OnboardingNumberInput({
       fieldClassName="mb-1 block text-[11px] font-semibold uppercase tracking-[0.16em] text-[var(--color-muted-strong)]"
       inputClassName={ONBOARDING_NUMBER_INPUT_CLASS}
       unitClassName="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-[var(--color-muted)]"
+      inputRef={inputRef}
+      invalid={invalid}
       onChange={onChange}
     />
   );
@@ -60,7 +71,7 @@ export function OnboardingShell({
   preferredWeightUnit,
 }: OnboardingShellProps) {
   const router = useRouter();
-  const { run, isPending, error, clearError } = useActionRunner();
+  const { run, isPending, error, setError, clearError } = useActionRunner();
   const [unit, setUnit] = useState<WeightUnit>(preferredWeightUnit);
   const [calories, setCalories] = useState("");
   const [protein, setProtein] = useState("");
@@ -68,27 +79,58 @@ export function OnboardingShell({
   const [fat, setFat] = useState("");
   const [goalWeight, setGoalWeight] = useState("");
   const [currentWeight, setCurrentWeight] = useState("");
+  // UI-17: canonical kg values preserve entered precision across unit-only
+  // toggles; display text may round, but saves use the canonical value.
+  const [currentWeightCanonicalKg, setCurrentWeightCanonicalKg] = useState<number | null>(null);
+  const [goalWeightCanonicalKg, setGoalWeightCanonicalKg] = useState<number | null>(null);
+  const [invalidFields, setInvalidFields] = useState<Record<string, boolean>>({});
   const [templateLabel, setTemplateLabel] = useState("");
   const [templateProtein, setTemplateProtein] = useState("");
   const [templateCarbs, setTemplateCarbs] = useState("");
   const [templateFat, setTemplateFat] = useState("");
   const [templateCalories, setTemplateCalories] = useState("");
+  const caloriesRef = useRef<HTMLInputElement>(null);
+  const proteinRef = useRef<HTMLInputElement>(null);
+  const carbsRef = useRef<HTMLInputElement>(null);
+  const fatRef = useRef<HTMLInputElement>(null);
+  const currentWeightRef = useRef<HTMLInputElement>(null);
+  const goalWeightRef = useRef<HTMLInputElement>(null);
+  const templateProteinRef = useRef<HTMLInputElement>(null);
+  const templateCarbsRef = useRef<HTMLInputElement>(null);
+  const templateFatRef = useRef<HTMLInputElement>(null);
+  const templateCaloriesRef = useRef<HTMLInputElement>(null);
+
+  function displayFromCanonical(canonicalKg: number | null, fallback: string, nextUnit: WeightUnit) {
+    if (fallback.trim() === "" || canonicalKg == null) {
+      return fallback;
+    }
+
+    return formatMacroValue(convertWeight(canonicalKg, "kg", nextUnit));
+  }
 
   function changeUnit(nextUnit: WeightUnit) {
     if (nextUnit === unit) {
       return;
     }
 
-    const convert = (value: string) => {
-      const parsed = parsePositiveNumber(value);
-      return parsed == null
-        ? value
-        : formatMacroValue(convertWeight(parsed, unit, nextUnit));
-    };
-
-    setCurrentWeight(convert);
-    setGoalWeight(convert);
+    // Unit-only toggles re-render from the canonical value so 72.55 kg
+    // survives kg -> lb -> kg without collapsing to one-decimal display text.
+    // Invalid/empty text is left untouched and stays invalid until edited.
+    setCurrentWeight((prev) => displayFromCanonical(currentWeightCanonicalKg, prev, nextUnit));
+    setGoalWeight((prev) => displayFromCanonical(goalWeightCanonicalKg, prev, nextUnit));
     setUnit(nextUnit);
+  }
+
+  function editWeight(
+    value: string,
+    setDisplay: (value: string) => void,
+    setCanonical: (value: number | null) => void,
+    field: string,
+  ) {
+    setDisplay(value);
+    setCanonical(normalizeOnboardingWeightKg(value, unit));
+    setInvalidFields((prev) => ({ ...prev, [field]: false }));
+    clearError();
   }
 
   function applyCalculatedTargets(targets: MacroTargetDraft) {
@@ -96,10 +138,91 @@ export function OnboardingShell({
     setProtein(formatMacroInputValue(targets.proteinG));
     setCarbs(formatMacroInputValue(targets.carbsG));
     setFat(formatMacroInputValue(targets.fatG));
+    setInvalidFields({});
     clearError();
   }
 
+  function failWith(field: string, message: string) {
+    setInvalidFields({ [field]: true });
+    setError(message);
+  }
+
   function submit() {
+    // UI-28: fractional calories (200.5) and incomplete exponents (1e with
+    // native badInput) fail here with a field error and make no mutation call.
+    // Empty optional fields stay legitimate and map to null downstream.
+    const calorieError = getNumberFieldError({
+      value: calories,
+      label: "Calories",
+      validity: snapshotNumberValidity(caloriesRef.current),
+      integer: true,
+      min: 1,
+      optional: true,
+    });
+    if (calorieError) {
+      failWith("Calories", "Calories must be a whole number, or cleared.");
+      return;
+    }
+
+    for (const check of [
+      { label: "Protein", value: protein, ref: proteinRef },
+      { label: "Carbs", value: carbs, ref: carbsRef },
+      { label: "Fat", value: fat, ref: fatRef },
+    ] as const) {
+      const fieldError = getPositiveOptionalFieldError(
+        check.value,
+        check.label,
+        snapshotNumberValidity(check.ref.current),
+      );
+      if (fieldError) {
+        failWith(check.label, fieldError);
+        return;
+      }
+    }
+
+    for (const check of [
+      { label: "Current weight", value: currentWeight, ref: currentWeightRef, field: "Current" },
+      { label: "Goal weight", value: goalWeight, ref: goalWeightRef, field: "Goal" },
+    ] as const) {
+      const fieldError = getPositiveOptionalFieldError(
+        check.value,
+        check.label,
+        snapshotNumberValidity(check.ref.current),
+      );
+      if (fieldError) {
+        failWith(check.field, fieldError);
+        return;
+      }
+    }
+
+    if (templateLabel.trim()) {
+      for (const check of [
+        { label: "Protein", value: templateProtein, ref: templateProteinRef, field: "Template protein" },
+        { label: "Carbs", value: templateCarbs, ref: templateCarbsRef, field: "Template carbs" },
+        { label: "Fat", value: templateFat, ref: templateFatRef, field: "Template fat" },
+        { label: "Calories", value: templateCalories, ref: templateCaloriesRef, field: "Template calories" },
+      ] as const) {
+        const native = snapshotNumberValidity(check.ref.current);
+        if (native.badInput || native.rangeUnderflow || native.rangeOverflow) {
+          failWith(check.field, `${check.label} is not a valid number yet. Finish or clear it before saving.`);
+          return;
+        }
+      }
+
+      const templateError = getPresetDraftError({
+        label: templateLabel,
+        proteinG: templateProtein,
+        carbsG: templateCarbs,
+        fatG: templateFat,
+        caloriesKcal: templateCalories,
+      });
+      if (templateError) {
+        setError(templateError);
+        return;
+      }
+    }
+
+    setInvalidFields({});
     run(
       () => {
         const starterTemplate = templateLabel.trim()
@@ -123,8 +246,13 @@ export function OnboardingShell({
             carbsG: parsePositiveNumber(carbs),
             fatG: parsePositiveNumber(fat),
           },
-          goalWeightKg: normalizeOnboardingWeightKg(goalWeight, unit),
-          currentWeightKg: normalizeOnboardingWeightKg(currentWeight, unit),
+          // UI-17: saves use the canonical kg value so toggles never lose precision.
+          goalWeightKg: goalWeight.trim()
+            ? (goalWeightCanonicalKg ?? normalizeOnboardingWeightKg(goalWeight, unit))
+            : null,
+          currentWeightKg: currentWeight.trim()
+            ? (currentWeightCanonicalKg ?? normalizeOnboardingWeightKg(currentWeight, unit))
+            : null,
           currentWeightDate: currentDate,
           starterTemplate,
         });
@@ -158,10 +286,10 @@ export function OnboardingShell({
           <section className="rounded-[1.75rem] border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5">
             <h2 className="text-sm font-bold text-[var(--color-ink)]">Daily goals</h2>
             <div className="mt-4 grid gap-3 sm:grid-cols-2">
-              <OnboardingNumberInput label="Calories" unit="kcal" value={calories} onChange={setCalories} />
-              <OnboardingNumberInput label="Protein" unit="g" value={protein} onChange={setProtein} />
-              <OnboardingNumberInput label="Carbs" unit="g" value={carbs} onChange={setCarbs} />
-              <OnboardingNumberInput label="Fat" unit="g" value={fat} onChange={setFat} />
+              <OnboardingNumberInput label="Calories" unit="kcal" value={calories} inputRef={caloriesRef} invalid={invalidFields.Calories} onChange={(v) => { setCalories(v); setInvalidFields((prev) => ({ ...prev, Calories: false })); clearError(); }} />
+              <OnboardingNumberInput label="Protein" unit="g" value={protein} inputRef={proteinRef} invalid={invalidFields.Protein} onChange={(v) => { setProtein(v); setInvalidFields((prev) => ({ ...prev, Protein: false })); clearError(); }} />
+              <OnboardingNumberInput label="Carbs" unit="g" value={carbs} inputRef={carbsRef} invalid={invalidFields.Carbs} onChange={(v) => { setCarbs(v); setInvalidFields((prev) => ({ ...prev, Carbs: false })); clearError(); }} />
+              <OnboardingNumberInput label="Fat" unit="g" value={fat} inputRef={fatRef} invalid={invalidFields.Fat} onChange={(v) => { setFat(v); setInvalidFields((prev) => ({ ...prev, Fat: false })); clearError(); }} />
             </div>
           </section>
 
@@ -181,8 +309,8 @@ export function OnboardingShell({
                   <option value="lb">lb</option>
                 </select>
               </label>
-              <OnboardingNumberInput label="Current" unit={unit} value={currentWeight} onChange={setCurrentWeight} />
-              <OnboardingNumberInput label="Goal" unit={unit} value={goalWeight} onChange={setGoalWeight} />
+              <OnboardingNumberInput label="Current" unit={unit} value={currentWeight} inputRef={currentWeightRef} invalid={invalidFields.Current} onChange={(v) => editWeight(v, setCurrentWeight, setCurrentWeightCanonicalKg, "Current")} />
+              <OnboardingNumberInput label="Goal" unit={unit} value={goalWeight} inputRef={goalWeightRef} invalid={invalidFields.Goal} onChange={(v) => editWeight(v, setGoalWeight, setGoalWeightCanonicalKg, "Goal")} />
             </div>
           </section>
 
@@ -196,10 +324,10 @@ export function OnboardingShell({
               className="mt-4 w-full rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-3 py-2.5 text-sm text-[var(--color-ink)] outline-none focus:border-[var(--color-accent)]"
             />
             <div className="mt-3 grid gap-3 sm:grid-cols-4">
-              <OnboardingNumberInput label="Protein" unit="g" value={templateProtein} onChange={setTemplateProtein} />
-              <OnboardingNumberInput label="Carbs" unit="g" value={templateCarbs} onChange={setTemplateCarbs} />
-              <OnboardingNumberInput label="Fat" unit="g" value={templateFat} onChange={setTemplateFat} />
-              <OnboardingNumberInput label="Calories" unit="kcal" value={templateCalories} onChange={setTemplateCalories} />
+              <OnboardingNumberInput label="Protein" unit="g" value={templateProtein} inputRef={templateProteinRef} invalid={invalidFields["Template protein"]} onChange={(v) => { setTemplateProtein(v); clearError(); }} />
+              <OnboardingNumberInput label="Carbs" unit="g" value={templateCarbs} inputRef={templateCarbsRef} invalid={invalidFields["Template carbs"]} onChange={(v) => { setTemplateCarbs(v); clearError(); }} />
+              <OnboardingNumberInput label="Fat" unit="g" value={templateFat} inputRef={templateFatRef} invalid={invalidFields["Template fat"]} onChange={(v) => { setTemplateFat(v); clearError(); }} />
+              <OnboardingNumberInput label="Calories" unit="kcal" value={templateCalories} inputRef={templateCaloriesRef} invalid={invalidFields["Template calories"]} onChange={(v) => { setTemplateCalories(v); clearError(); }} />
             </div>
           </section>
 
