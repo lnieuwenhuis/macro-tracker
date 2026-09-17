@@ -131,12 +131,6 @@ export function getNumberFieldError({
     return `${label} must be at most ${max}.`;
   }
 
-  if (min == null && parsed <= 0 && label !== "Body fat") {
-    // Generic positive-number guard for callers that did not pass an explicit
-    // min but still treat zero/negative as invalid (goals, nutrients).
-    // Callers with legitimate zero semantics pass `min: 0` explicitly.
-  }
-
   return null;
 }
 

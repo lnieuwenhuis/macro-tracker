@@ -246,7 +246,7 @@ export function PlannerShell({
         </section>
 
         {activeMode === "templates" ? (
-          <div {...plannerPanelProps("templates", "planner-modes")}>
+          <div {...plannerPanelProps("templates", "planner-modes")} className="space-y-5">
         <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5">
           <h3 className="text-sm font-bold text-[var(--color-ink)]">Save currently selected day</h3>
           <p className="mt-1 text-xs text-[var(--color-muted)]">{selectedDaySummary}</p>

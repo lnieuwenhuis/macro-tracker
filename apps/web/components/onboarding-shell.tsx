@@ -14,7 +14,7 @@ import {
   getPositiveOptionalFieldError,
   snapshotNumberValidity,
 } from "@/lib/number-input-validity";
-import { formatMacroValue, parsePositiveNumber } from "@/lib/numbers";
+import { parsePositiveNumber } from "@/lib/numbers";
 import { getLocalDateString } from "@/lib/startup-date";
 import { useActionRunner } from "@/lib/use-action-runner";
 
@@ -105,7 +105,9 @@ export function OnboardingShell({
       return fallback;
     }
 
-    return formatMacroValue(convertWeight(canonicalKg, "kg", nextUnit));
+    // Weight display follows the stored two-decimal precision; the macro
+    // one-decimal formatter would show 72.5 for an entered 72.55 kg.
+    return String(convertWeight(canonicalKg, "kg", nextUnit));
   }
 
   function changeUnit(nextUnit: WeightUnit) {

@@ -23,7 +23,8 @@ import { useActionRunner } from "@/lib/use-action-runner";
 
 import { AppShell } from "./app-shell";
 import { useTabsKeyboard } from "./accessible-tabs";
-import { CompactModal } from "./compact-modal";import { ConfirmDeleteButton } from "./confirm-delete-button";
+import { CompactModal } from "./compact-modal";
+import { ConfirmDeleteButton } from "./confirm-delete-button";
 import { BuddiesPanel } from "./gym-buddies-panel";
 import { GymOverlapList } from "./gym-overlap-list";
 import { GymSlotFormModal } from "./gym-slot-form-modal";
