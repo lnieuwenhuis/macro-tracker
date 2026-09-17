@@ -270,6 +270,84 @@ CREATE TABLE IF NOT EXISTS gym_buddies (
 CREATE UNIQUE INDEX IF NOT EXISTS gym_buddies_pair_key ON gym_buddies USING btree (LEAST(requester_user_id, addressee_user_id), GREATEST(requester_user_id, addressee_user_id));
 CREATE INDEX IF NOT EXISTS gym_buddies_addressee_idx ON gym_buddies USING btree (addressee_user_id, status);
 CREATE INDEX IF NOT EXISTS gym_buddies_requester_idx ON gym_buddies USING btree (requester_user_id, status);
+
+-- TEST-01: mirrors migration 0016_enum_check_constraints.sql. `NOT VALID` matches
+-- production exactly: enforced for new writes, no validation scan of fixture rows.
+ALTER TABLE users
+  ADD CONSTRAINT users_role_check
+  CHECK (role IN ('user', 'admin', 'owner')) NOT VALID;
+ALTER TABLE users
+  ADD CONSTRAINT users_preferred_weight_unit_check
+  CHECK (preferred_weight_unit IN ('kg', 'lb')) NOT VALID;
+ALTER TABLE meal_entries
+  ADD CONSTRAINT meal_entries_status_check
+  CHECK (status IN ('planned', 'eaten', 'skipped')) NOT VALID;
+ALTER TABLE meal_templates
+  ADD CONSTRAINT meal_templates_type_check
+  CHECK (type IN ('meal', 'day')) NOT VALID;
+ALTER TABLE food_products
+  ADD CONSTRAINT food_products_scope_check
+  CHECK (scope IN ('global', 'personal', 'legacy')) NOT VALID;
+ALTER TABLE food_products
+  ADD CONSTRAINT food_products_source_check
+  CHECK (source IN ('manual', 'barcode', 'ai_photo', 'legacy', 'recipe')) NOT VALID;
+
+-- TEST-01: mirrors 0014_food_product_search_trigram.sql. The real migration tries
+-- to create pg_trgm and skips the indexes when the extension is unavailable, so this
+-- fixture only adds them when the database already has the extension. It never
+-- installs the extension itself, keeping scratch schemas cheap and side-effect free.
+DO $$
+DECLARE
+  trgm_schema text;
+BEGIN
+  SELECT n.nspname INTO trgm_schema
+  FROM pg_extension e
+  JOIN pg_namespace n ON n.oid = e.extnamespace
+  WHERE e.extname = 'pg_trgm';
+
+  IF trgm_schema IS NOT NULL THEN
+    EXECUTE format(
+      'CREATE INDEX IF NOT EXISTS "food_products_name_trgm_idx" ON "food_products" USING gin ("name" %I.gin_trgm_ops)',
+      trgm_schema
+    );
+    EXECUTE format(
+      'CREATE INDEX IF NOT EXISTS "food_products_brand_trgm_idx" ON "food_products" USING gin ("brand" %I.gin_trgm_ops)',
+      trgm_schema
+    );
+    EXECUTE format(
+      'CREATE INDEX IF NOT EXISTS "food_products_barcode_trgm_idx" ON "food_products" USING gin ("barcode" %I.gin_trgm_ops)',
+      trgm_schema
+    );
+  END IF;
+END $$;
+
+-- TEST-01: mirrors the trigger installed by 0013_deduplicate_default_meal_groups.sql.
+CREATE FUNCTION ignore_duplicate_active_default_meal_group()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+  IF NEW.deleted_at IS NULL
+    AND NEW.is_default = true
+    AND EXISTS (
+      SELECT 1
+      FROM meal_groups
+      WHERE meal_groups.user_id = NEW.user_id
+        AND meal_groups.label = NEW.label
+        AND meal_groups.deleted_at IS NULL
+        AND meal_groups.is_default = true
+    )
+  THEN
+    RETURN NULL;
+  END IF;
+
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER meal_groups_default_insert_compat
+BEFORE INSERT ON meal_groups
+FOR EACH ROW
+EXECUTE FUNCTION ignore_duplicate_active_default_meal_group();
 "#;
 
 use super::*;
@@ -2425,19 +2503,28 @@ fn only_admin_and_owner_roles_are_admin_actors() {
     assert!(!is_admin_actor_role(""));
 }
 
-/// Applies every Drizzle migration and `SCHEMA_SQL` into scratch schemas and compares catalogs.
-/// This stops the integration-test schema drifting from what production runs (CLEAN-03).
-/// Strips `"public".` qualifiers so they stay in the scratch schema; the only rewrite.
+/// Applies every Drizzle migration and `SCHEMA_SQL` into scratch schemas, compares
+/// columns, constraints, indexes and triggers, then probes the behavior those objects
+/// cause (TEST-01). This stops the integration-test schema drifting from what
+/// production runs (CLEAN-03). Strips `"public".` qualifiers so they stay in the
+/// scratch schema; the only rewrite.
 #[cfg_attr(not(has_test_database), ignore = "needs a test database")]
 #[tokio::test]
 async fn schema_sql_matches_the_drizzle_migrations() {
+    type ColumnRow = (String, String, String, String, Option<String>);
+    type CatalogRow = (String, String, String);
+
     async fn columns_of(
         conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
         schema: &str,
-    ) -> Vec<(String, String, String, String)> {
-        sqlx::query_as::<_, (String, String, String, String)>(
+    ) -> Vec<ColumnRow> {
+        sqlx::query_as::<_, ColumnRow>(
             r#"
-                SELECT table_name::text, column_name::text, data_type::text, is_nullable::text
+                SELECT table_name::text,
+                       column_name::text,
+                       data_type::text,
+                       is_nullable::text,
+                       column_default::text
                 FROM information_schema.columns
                 WHERE table_schema = $1
                 ORDER BY table_name, column_name
@@ -2446,7 +2533,225 @@ async fn schema_sql_matches_the_drizzle_migrations() {
         .bind(schema)
         .fetch_all(&mut **conn)
         .await
-        .expect("catalog query should succeed")
+        .expect("column catalog query should succeed")
+    }
+
+    async fn constraints_of(
+        conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+        schema: &str,
+    ) -> Vec<CatalogRow> {
+        // `contype = 'n'` (not-null constraints) only exists from PostgreSQL 17 on, so
+        // it is excluded to keep this catalog identical across supported versions.
+        sqlx::query_as::<_, CatalogRow>(
+            r#"
+                SELECT c.relname::text,
+                       con.contype::text,
+                       pg_get_constraintdef(con.oid)::text
+                FROM pg_constraint con
+                JOIN pg_class c ON c.oid = con.conrelid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = $1
+                  AND con.contype IN ('c', 'f', 'p', 'u')
+                ORDER BY c.relname, con.contype, pg_get_constraintdef(con.oid)
+                "#,
+        )
+        .bind(schema)
+        .fetch_all(&mut **conn)
+        .await
+        .expect("constraint catalog query should succeed")
+    }
+
+    async fn indexes_of(
+        conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+        schema: &str,
+    ) -> Vec<CatalogRow> {
+        sqlx::query_as::<_, CatalogRow>(
+            r#"
+                SELECT tablename::text, indexname::text, indexdef::text
+                FROM pg_indexes
+                WHERE schemaname = $1
+                ORDER BY tablename, indexname
+                "#,
+        )
+        .bind(schema)
+        .fetch_all(&mut **conn)
+        .await
+        .expect("index catalog query should succeed")
+    }
+
+    async fn triggers_of(
+        conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+        schema: &str,
+    ) -> Vec<CatalogRow> {
+        sqlx::query_as::<_, CatalogRow>(
+            r#"
+                SELECT c.relname::text,
+                       t.tgname::text,
+                       pg_get_triggerdef(t.oid)::text
+                FROM pg_trigger t
+                JOIN pg_class c ON c.oid = t.tgrelid
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE n.nspname = $1
+                  AND NOT t.tgisinternal
+                ORDER BY c.relname, t.tgname
+                "#,
+        )
+        .bind(schema)
+        .fetch_all(&mut **conn)
+        .await
+        .expect("trigger catalog query should succeed")
+    }
+
+    /// Runs the same writes against a schema and records the observable outcome, so
+    /// constraints and triggers are compared by behavior, not only by catalog text.
+    async fn behavior_probes(
+        conn: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+        schema: &str,
+    ) -> Vec<(String, String)> {
+        fn outcome(result: Result<sqlx::postgres::PgQueryResult, sqlx::Error>) -> String {
+            match result {
+                Ok(query_result) => format!("ok:{}", query_result.rows_affected()),
+                Err(error) => error
+                    .as_database_error()
+                    .and_then(|database_error| database_error.code().map(|code| code.into_owned()))
+                    .map(|code| format!("error:{code}"))
+                    .unwrap_or_else(|| "error:unknown".to_string()),
+            }
+        }
+
+        sqlx::query(&format!(r#"SET search_path TO "{schema}""#))
+            .execute(&mut **conn)
+            .await
+            .expect("probe search_path should be set");
+
+        let mut outcomes = Vec::new();
+        let user_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO users (id, shoo_pairwise_sub, email) VALUES ($1, $2, $3)")
+            .bind(user_id)
+            .bind(format!("probe-{}", user_id.simple()))
+            .bind(format!("{}@example.com", user_id.simple()))
+            .execute(&mut **conn)
+            .await
+            .expect("probe user should insert");
+
+        // Each invalid enum write must be rejected by the CHECK the migration installs.
+        let invalid_writes = [
+            (
+                "invalid_role",
+                "INSERT INTO users (id, shoo_pairwise_sub, email, role) \
+                 VALUES ($1, $2, $3, 'not_a_role')",
+            ),
+            (
+                "invalid_preferred_weight_unit",
+                "INSERT INTO users (id, shoo_pairwise_sub, email, preferred_weight_unit) \
+                 VALUES ($1, $2, $3, 'stone')",
+            ),
+            (
+                "invalid_status",
+                "INSERT INTO meal_entries \
+                 (id, user_id, entry_date, label, sort_order, protein_g, carbs_g, fat_g, calories_kcal, status) \
+                 VALUES ($1, $2, '2026-01-01', $3, 0, 0, 0, 0, 0, 'not_a_status')",
+            ),
+            (
+                "invalid_template_type",
+                "INSERT INTO meal_templates (id, user_id, type, label) \
+                 VALUES ($1, $2, 'not_a_type', $3)",
+            ),
+            (
+                "invalid_scope",
+                "INSERT INTO food_products \
+                 (id, owner_user_id, name, scope, source, default_serving_quantity, default_serving_unit, \
+                  protein_per_100, carbs_per_100, fat_per_100, calories_per_100) \
+                 VALUES ($1, $2, $3, 'not_a_scope', 'manual', 1, 'serving', 0, 0, 0, 0)",
+            ),
+            (
+                "invalid_source",
+                "INSERT INTO food_products \
+                 (id, owner_user_id, name, scope, source, default_serving_quantity, default_serving_unit, \
+                  protein_per_100, carbs_per_100, fat_per_100, calories_per_100) \
+                 VALUES ($1, $2, $3, 'personal', 'not_a_source', 1, 'serving', 0, 0, 0, 0)",
+            ),
+        ];
+        for (name, sql) in invalid_writes {
+            let row_id = Uuid::new_v4();
+            outcomes.push((
+                name.to_string(),
+                outcome(
+                    sqlx::query(sql)
+                        .bind(row_id)
+                        .bind(user_id)
+                        .bind(format!("probe-{row_id}"))
+                        .execute(&mut **conn)
+                        .await,
+                ),
+            ));
+        }
+
+        // Valid values must still be accepted.
+        let valid_status_id = Uuid::new_v4();
+        outcomes.push((
+            "valid_status".to_string(),
+            outcome(
+                sqlx::query(
+                    "INSERT INTO meal_entries \
+                     (id, user_id, entry_date, label, sort_order, protein_g, carbs_g, fat_g, calories_kcal, status) \
+                     VALUES ($1, $2, '2026-01-01', $3, 0, 0, 0, 0, 0, 'planned')",
+                )
+                .bind(valid_status_id)
+                .bind(user_id)
+                .bind(format!("probe-{valid_status_id}"))
+                .execute(&mut **conn)
+                .await,
+            ),
+        ));
+
+        // Migration 0013's trigger silently ignores a duplicate active default group...
+        let first_default_id = Uuid::new_v4();
+        outcomes.push((
+            "first_default_group".to_string(),
+            outcome(
+                sqlx::query(
+                    "INSERT INTO meal_groups (id, user_id, label, sort_order, is_default) \
+                     VALUES ($1, $2, 'Probe Default', 0, true)",
+                )
+                .bind(first_default_id)
+                .bind(user_id)
+                .execute(&mut **conn)
+                .await,
+            ),
+        ));
+        let duplicate_default_id = Uuid::new_v4();
+        outcomes.push((
+            "duplicate_default_group".to_string(),
+            outcome(
+                sqlx::query(
+                    "INSERT INTO meal_groups (id, user_id, label, sort_order, is_default) \
+                     VALUES ($1, $2, 'Probe Default', 1, true)",
+                )
+                .bind(duplicate_default_id)
+                .bind(user_id)
+                .execute(&mut **conn)
+                .await,
+            ),
+        ));
+
+        // ...while a soft-deleted duplicate is still representable.
+        let soft_deleted_default_id = Uuid::new_v4();
+        outcomes.push((
+            "soft_deleted_default_group".to_string(),
+            outcome(
+                sqlx::query(
+                    "INSERT INTO meal_groups (id, user_id, label, sort_order, is_default, deleted_at) \
+                     VALUES ($1, $2, 'Probe Default', 2, true, now())",
+                )
+                .bind(soft_deleted_default_id)
+                .bind(user_id)
+                .execute(&mut **conn)
+                .await,
+            ),
+        ));
+
+        outcomes
     }
 
     let database_url = std::env::var("TEST_DATABASE_URL")
@@ -2521,8 +2826,24 @@ async fn schema_sql_matches_the_drizzle_migrations() {
         .await
         .expect("SCHEMA_SQL should apply");
 
+    // Catalog rendering qualifies object names that are not visible on the
+    // search_path. With neither scratch schema visible, both sides render the
+    // same fully-qualified text and normalization only has to erase the name.
+    sqlx::query("SET search_path TO public")
+        .execute(&mut *conn)
+        .await
+        .expect("search_path should be reset for catalog comparison");
+
     let migrated_columns = columns_of(&mut conn, &migrated).await;
     let declared_columns = columns_of(&mut conn, &declared).await;
+    let migrated_constraints = constraints_of(&mut conn, &migrated).await;
+    let declared_constraints = constraints_of(&mut conn, &declared).await;
+    let migrated_indexes = indexes_of(&mut conn, &migrated).await;
+    let declared_indexes = indexes_of(&mut conn, &declared).await;
+    let migrated_triggers = triggers_of(&mut conn, &migrated).await;
+    let declared_triggers = triggers_of(&mut conn, &declared).await;
+    let migrated_probes = behavior_probes(&mut conn, &migrated).await;
+    let declared_probes = behavior_probes(&mut conn, &declared).await;
 
     for schema in [&migrated, &declared] {
         sqlx::query(&format!(r#"DROP SCHEMA "{schema}" CASCADE"#))
@@ -2531,20 +2852,75 @@ async fn schema_sql_matches_the_drizzle_migrations() {
             .expect("scratch schema should drop");
     }
 
-    let only_in_migrations = migrated_columns
-        .iter()
-        .filter(|column| !declared_columns.contains(column))
-        .collect::<Vec<_>>();
-    let only_in_schema_sql = declared_columns
-        .iter()
-        .filter(|column| !migrated_columns.contains(column))
-        .collect::<Vec<_>>();
+    // Object names may be schema-qualified depending on the active search_path; the
+    // scratch schema name is the only difference that rewriting must erase.
+    let normalize = |rows: Vec<CatalogRow>| {
+        rows.into_iter()
+            .map(|(table, name, definition)| {
+                (
+                    table,
+                    name,
+                    definition
+                        .replace(migrated.as_str(), "<schema>")
+                        .replace(declared.as_str(), "<schema>"),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
 
-    assert!(
-        only_in_migrations.is_empty() && only_in_schema_sql.is_empty(),
-        "SCHEMA_SQL has drifted from the Drizzle migrations.\n\
-             Present in the migrations but missing/different in SCHEMA_SQL: {only_in_migrations:#?}\n\
-             Present in SCHEMA_SQL but missing/different in the migrations: {only_in_schema_sql:#?}"
+    let probe = |name: &str, probes: &[(String, String)]| {
+        probes
+            .iter()
+            .find(|(probe_name, _)| probe_name == name)
+            .map(|(_, value)| value.clone())
+            .unwrap_or_else(|| panic!("probe {name} should have run"))
+    };
+
+    assert_eq!(
+        migrated_columns, declared_columns,
+        "SCHEMA_SQL columns (including defaults) have drifted from the Drizzle migrations"
+    );
+    assert_eq!(
+        normalize(migrated_constraints),
+        normalize(declared_constraints),
+        "SCHEMA_SQL constraints have drifted from the Drizzle migrations"
+    );
+    assert_eq!(
+        normalize(migrated_indexes),
+        normalize(declared_indexes),
+        "SCHEMA_SQL indexes have drifted from the Drizzle migrations"
+    );
+    assert_eq!(
+        normalize(migrated_triggers),
+        normalize(declared_triggers),
+        "SCHEMA_SQL triggers have drifted from the Drizzle migrations"
+    );
+    assert_eq!(
+        migrated_probes, declared_probes,
+        "SCHEMA_SQL behavior diverges from the Drizzle migrations"
+    );
+
+    // Explicit expectations, so two identically broken schemas cannot pass the comparison.
+    for name in [
+        "invalid_role",
+        "invalid_preferred_weight_unit",
+        "invalid_status",
+        "invalid_template_type",
+        "invalid_scope",
+        "invalid_source",
+    ] {
+        assert_eq!(
+            probe(name, &migrated_probes),
+            "error:23514",
+            "the migrated schema must reject {name}"
+        );
+    }
+    assert_eq!(probe("valid_status", &migrated_probes), "ok:1");
+    assert_eq!(probe("first_default_group", &migrated_probes), "ok:1");
+    assert_eq!(probe("duplicate_default_group", &migrated_probes), "ok:0");
+    assert_eq!(
+        probe("soft_deleted_default_group", &migrated_probes),
+        "ok:1"
     );
 }
 
