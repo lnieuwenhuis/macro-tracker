@@ -168,22 +168,47 @@ async fn barcode_provider_race_returns_fast_ah_without_waiting_for_slow_jumbo() 
     let result = tokio::time::timeout(
         Duration::from_millis(50),
         prefer_primary_provider(
-            async { Some(json!("albert_heijn")) },
-            std::future::pending::<Option<Value>>(),
+            async { ProviderOutcome::Found(json!("albert_heijn")) },
+            std::future::pending::<ProviderOutcome<Value>>(),
         ),
     )
     .await
     .expect("a fast Albert Heijn hit should not wait for Jumbo");
 
-    assert_eq!(result, Some(json!("albert_heijn")));
+    assert!(matches!(result, ProviderOutcome::Found(value) if value == json!("albert_heijn")));
 }
 
 #[tokio::test]
 async fn barcode_provider_race_returns_jumbo_after_ah_miss() {
-    let result =
-        prefer_primary_provider(async { None::<Value> }, async { Some(json!("jumbo")) }).await;
+    let result = prefer_primary_provider(async { ProviderOutcome::<Value>::NotFound }, async {
+        ProviderOutcome::Found(json!("jumbo"))
+    })
+    .await;
 
-    assert_eq!(result, Some(json!("jumbo")));
+    assert!(matches!(result, ProviderOutcome::Found(value) if value == json!("jumbo")));
+}
+
+/// API-04: only two successful misses establish absence; one failure keeps the answer retryable.
+#[tokio::test]
+async fn barcode_provider_race_keeps_absence_only_when_both_providers_answered() {
+    let both_missed =
+        prefer_primary_provider(async { ProviderOutcome::<Value>::NotFound }, async {
+            ProviderOutcome::<Value>::NotFound
+        })
+        .await;
+    assert!(matches!(both_missed, ProviderOutcome::NotFound));
+
+    let one_failed = prefer_primary_provider(async { ProviderOutcome::<Value>::NotFound }, async {
+        ProviderOutcome::<Value>::Unavailable
+    })
+    .await;
+    assert!(matches!(one_failed, ProviderOutcome::Unavailable));
+
+    let one_hit = prefer_primary_provider(async { ProviderOutcome::<Value>::Unavailable }, async {
+        ProviderOutcome::Found(json!("hit"))
+    })
+    .await;
+    assert!(matches!(one_hit, ProviderOutcome::Found(value) if value == json!("hit")));
 }
 
 #[tokio::test]
@@ -503,7 +528,7 @@ async fn a_content_less_upstream_200_is_sanitised_before_it_reaches_the_caller()
 
 #[tokio::test]
 async fn unparseable_model_output_is_not_echoed_back() {
-    // API-02: when the model answers with unparseable text, it must be logged, not returned.
+    // API-02/SEC-04: when the model answers with unparseable text, it is neither returned nor logged verbatim.
     let (endpoint, _stub) = spawn_chat_stub(vec![ChatStubResponse {
         status: StatusCode::OK,
         delay: Duration::ZERO,
@@ -532,6 +557,139 @@ async fn unparseable_model_output_is_not_echoed_back() {
     assert_eq!(result["statusCode"], json!(502));
     assert!(result.get("aiResponse").is_none());
     assert!(!result.to_string().contains("SecretProvider"));
+}
+
+/// Shares a byte buffer with the fmt subscriber so a test can assert what did and did not reach the log.
+struct CaptureWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CaptureWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .expect("capture lock should not be poisoned")
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+    type Writer = CaptureWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        CaptureWriter(Arc::clone(&self.0))
+    }
+}
+
+fn capture_logs<T>(run: impl FnOnce() -> T) -> (T, String) {
+    let buffer = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(CaptureWriter(Arc::clone(&buffer)))
+        .with_ansi(false)
+        .finish();
+
+    let result = tracing::subscriber::with_default(subscriber, run);
+    let logs = String::from_utf8(
+        buffer
+            .lock()
+            .expect("capture lock should not be poisoned")
+            .clone(),
+    )
+    .expect("captured logs should be UTF-8");
+
+    (result, logs)
+}
+
+fn run_gateway_analysis(response_body: Value) -> (Value, String) {
+    capture_logs(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime should build")
+            .block_on(async move {
+                let (endpoint, _stub) = spawn_chat_stub(vec![ChatStubResponse {
+                    status: StatusCode::OK,
+                    delay: Duration::ZERO,
+                    body: response_body,
+                }])
+                .await;
+                analyze_food_photo_url_with_limits(
+                    &gateway_test_state(&endpoint, Some("test/model-1")),
+                    "data:image/png;base64,AA==",
+                    "",
+                    None,
+                    "test-user",
+                    false,
+                    FoodPhotoRequestLimits {
+                        chat_completions_url: &endpoint,
+                        model_timeout: Duration::from_millis(200),
+                        request_timeout: Duration::from_secs(1),
+                    },
+                )
+                .await
+            })
+    })
+}
+
+/// SEC-04: malformed model output must not be copied into application logs.
+#[test]
+fn malformed_model_output_is_not_written_to_logs() {
+    const MARKER: &str = "SENSITIVE-PHOTO-MARKER-7c1f9d";
+    let (result, logs) = run_gateway_analysis(json!({
+        "choices": [{ "message": { "content": format!("{MARKER} {{not json") } }]
+    }));
+
+    assert_eq!(result["kind"], json!("invalid_json"));
+    assert!(
+        !logs.contains(MARKER),
+        "raw model output must never be logged: {logs}"
+    );
+    assert!(
+        logs.contains("invalid_json"),
+        "the failure category must stay diagnosable: {logs}"
+    );
+}
+
+/// SEC-04: an upstream 200 whose payload lacks message content must not be logged verbatim.
+#[test]
+fn a_contentless_provider_payload_is_not_written_to_logs() {
+    const MARKER: &str = "SENSITIVE-PAYLOAD-MARKER-3b8e42";
+    let (result, logs) = run_gateway_analysis(json!({
+        "echoedPrompt": MARKER,
+        "choices": [{ "message": { "content": null } }]
+    }));
+
+    assert_eq!(result["kind"], json!("empty_response"));
+    assert!(
+        !logs.contains(MARKER),
+        "raw provider payloads must never be logged: {logs}"
+    );
+    assert!(
+        logs.contains("empty_response"),
+        "the failure category must stay diagnosable: {logs}"
+    );
+}
+
+/// SEC-04: a provider error body can describe our misconfiguration, so only the category is logged.
+#[test]
+fn a_provider_error_body_is_not_written_to_logs() {
+    const MARKER: &str = "SENSITIVE-ERROR-MARKER-91ad";
+    let (result, logs) = run_gateway_analysis(json!({
+        "error": { "message": format!("{MARKER}: invalid model") }
+    }));
+
+    assert_eq!(result["statusCode"], json!(502));
+    assert!(
+        !logs.contains(MARKER),
+        "raw provider error bodies must never be logged: {logs}"
+    );
+    assert!(
+        logs.contains("food photo provider request failed"),
+        "the failure must stay diagnosable: {logs}"
+    );
 }
 
 #[tokio::test]
@@ -631,17 +789,25 @@ fn truncating_a_clarification_never_splits_a_character() {
 #[test]
 fn every_benchmark_fixture_points_at_a_direct_image_file() {
     // CONCERN-C3: an article page URL serves `text/html`, not the image, silently scoring models on a web page.
+    // AI-02: random per-request hosts are banned; the recorded provenance must
+    // be a pinned stable file URL from Commons.
     for fixture in BENCHMARK_FIXTURES {
         assert!(
-            !fixture.image_url.contains("/wiki/"),
-            "{}: image_url is an article page, not an image: {}",
+            !fixture.image_file_url.contains("/wiki/"),
+            "{}: image_file_url is an article page, not an image: {}",
             fixture.id,
-            fixture.image_url
+            fixture.image_file_url
         );
         assert!(
-            fixture.image_url.starts_with("https://"),
-            "{}: image_url must be https",
+            fixture.image_file_url.starts_with("https://"),
+            "{}: image_file_url must be https",
             fixture.id
+        );
+        assert!(
+            !fixture.image_file_url.contains("loremflickr.com"),
+            "{}: random loremflickr inputs are not reproducible: {}",
+            fixture.id,
+            fixture.image_file_url
         );
 
         if fixture
@@ -650,41 +816,626 @@ fn every_benchmark_fixture_points_at_a_direct_image_file() {
         {
             assert!(
                 fixture
-                    .image_url
+                    .image_file_url
                     .starts_with("https://upload.wikimedia.org/wikipedia/commons/")
-                    && fixture.image_url.ends_with(".jpg"),
-                "{}: a Commons fixture must fetch the direct file URL, got {}",
+                    && fixture
+                        .image_file_url
+                        .to_ascii_lowercase()
+                        .ends_with(".jpg"),
+                "{}: a Commons fixture must record the direct file URL, got {}",
                 fixture.id,
-                fixture.image_url
+                fixture.image_file_url
+            );
+            assert!(
+                !fixture.image_license.is_empty(),
+                "{}: missing Commons license attribution",
+                fixture.id
             );
         }
     }
 }
 
 #[test]
-fn the_unreproducible_benchmark_fixtures_are_the_known_ten() {
-    // `loremflickr.com` redirects to a random photo per request; pinned so this set can't grow unnoticed.
-    let unreproducible = BENCHMARK_FIXTURES
+fn benchmark_fixtures_are_pinned_with_content_hashes() {
+    // AI-02: freeze verified bytes with hashes and attribution; any change must
+    // bump `BENCHMARK_FIXTURE_SET_VERSION` so old baselines are rejected. The
+    // recorded hash must describe the frozen bytes the benchmark consumes, not
+    // a separate thumbnail or a remote URL's content.
+    use sha2::{Digest, Sha256};
+    use std::collections::HashSet;
+
+    assert_eq!(BENCHMARK_FIXTURES.len(), 18);
+    assert!(!BENCHMARK_FIXTURE_SET_VERSION.is_empty());
+
+    let mut ids = HashSet::new();
+    let mut hashes = HashSet::new();
+    for fixture in BENCHMARK_FIXTURES {
+        assert!(
+            ids.insert(fixture.id),
+            "duplicate fixture id {}",
+            fixture.id
+        );
+        assert!(
+            CATEGORIES.contains(&fixture.category),
+            "{}: unknown category {}",
+            fixture.id,
+            fixture.category
+        );
+        assert!(
+            fixture.image_sha256.len() == 64
+                && fixture
+                    .image_sha256
+                    .chars()
+                    .all(|ch| ch.is_ascii_hexdigit())
+                && fixture.image_sha256 == fixture.image_sha256.to_ascii_lowercase(),
+            "{}: image_sha256 must be lowercase hex (64 chars), got {}",
+            fixture.id,
+            fixture.image_sha256
+        );
+        assert!(
+            !fixture.image_source_url.is_empty(),
+            "{}: missing image attribution",
+            fixture.id
+        );
+
+        // The hash is computed from the frozen bytes themselves: the fixture
+        // declares the real input identity (AI-02).
+        let bytes = fixture.image_bytes();
+        assert!(
+            bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
+            "{}: frozen bytes must be a JPEG",
+            fixture.id
+        );
+        let digest = Sha256::digest(bytes);
+        let actual = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            actual, fixture.image_sha256,
+            "{}: image_sha256 does not match the frozen benchmark input bytes",
+            fixture.id
+        );
+        assert!(
+            hashes.insert(fixture.image_sha256),
+            "{}: two fixtures must not share one image hash",
+            fixture.id
+        );
+
+        let rendered = fixture.as_json();
+        assert_eq!(
+            rendered.get("imageFileUrl").and_then(Value::as_str),
+            Some(fixture.image_file_url),
+            "{}: as_json must expose the verified provenance URL",
+            fixture.id
+        );
+        assert_eq!(
+            rendered.get("imageLicense").and_then(Value::as_str),
+            Some(fixture.image_license),
+            "{}: as_json must expose the Commons license attribution",
+            fixture.id
+        );
+        assert_eq!(
+            rendered.get("imageSha256").and_then(Value::as_str),
+            Some(fixture.image_sha256),
+            "{}: as_json must expose the content hash",
+            fixture.id
+        );
+    }
+}
+
+#[test]
+fn provider_input_is_the_frozen_bytes_as_a_data_url() {
+    // AI-02 acceptance: the fake provider must be able to capture the actual
+    // bytes/hash. The provider input string is built directly from the frozen
+    // bytes, and the base64 payload decodes back to exactly those bytes.
+    for fixture in BENCHMARK_FIXTURES {
+        let data_url = fixture.image_data_url();
+        let prefix = "data:image/jpeg;base64,";
+        let encoded = data_url
+            .strip_prefix(prefix)
+            .unwrap_or_else(|| panic!("{}: unexpected image input prefix", fixture.id));
+        let mut decoded = vec![0_u8; encoded.len()];
+        let decoded = Base64::decode(encoded, &mut decoded)
+            .unwrap_or_else(|error| panic!("{}: invalid base64 input: {error}", fixture.id));
+        assert_eq!(
+            decoded,
+            fixture.image_bytes(),
+            "{}: provider input must decode to the frozen bytes",
+            fixture.id
+        );
+    }
+}
+
+#[test]
+fn frozen_fixture_bytes_match_the_admin_thumbnails() {
+    // The admin UI serves `apps/web/public/benchmark-foods/<asset>`; the model
+    // receives `fixture.image_bytes()` from the backend crate. Drift between
+    // the two would mean the admin never sees the benchmark input (AI-02).
+    let web_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("web")
+        .join("public")
+        .join("benchmark-foods");
+    for fixture in BENCHMARK_FIXTURES {
+        let path = web_dir.join(fixture.asset_file_name);
+        let served = std::fs::read(&path).unwrap_or_else(|error| {
+            panic!(
+                "{}: missing admin thumbnail {}: {error}",
+                fixture.id,
+                path.display()
+            )
+        });
+        assert_eq!(
+            served,
+            fixture.image_bytes(),
+            "{}: admin thumbnail differs from the frozen benchmark input",
+            fixture.id
+        );
+    }
+}
+
+fn stub_success_case(model: &str) -> Value {
+    json!({
+        "model": model,
+        "ok": true,
+        "latencyMs": 42,
+        "estimate": {
+            "label": "stub food",
+            "caloriesKcal": 100,
+            "proteinG": 5.0,
+            "carbsG": 10.0,
+            "fatG": 3.0,
+            "confidence": 0.9,
+            "notes": []
+        },
+        "absoluteError": {
+            "caloriesKcal": 0,
+            "proteinG": 0.0,
+            "carbsG": 0.0,
+            "fatG": 0.0
+        },
+        "normalizedErrorPct": 0.0,
+        "error": Value::Null
+    })
+}
+
+fn baseline_for_current(
+    current_model: &str,
+    fixture_limit: usize,
+    created_at: &str,
+    mutate: impl FnOnce(&mut serde_json::Map<String, Value>),
+) -> Value {
+    let fixtures = BENCHMARK_FIXTURES
         .iter()
-        .filter(|fixture| fixture.image_url.contains("loremflickr.com"))
-        .map(|fixture| fixture.id)
+        .take(fixture_limit)
         .collect::<Vec<_>>();
+    let mut record = serde_json::Map::new();
+    record.insert(
+        "currentModel".to_string(),
+        Value::String(current_model.to_string()),
+    );
+    record.insert(
+        "fixtureVersion".to_string(),
+        Value::String(BENCHMARK_FIXTURE_SET_VERSION.to_string()),
+    );
+    record.insert(
+        "fixtureIds".to_string(),
+        json!(
+            fixtures
+                .iter()
+                .map(|fixture| fixture.id)
+                .collect::<Vec<_>>()
+        ),
+    );
+    record.insert(
+        "results".to_string(),
+        json!(
+            fixtures
+                .iter()
+                .map(|_| stub_success_case(current_model))
+                .collect::<Vec<_>>()
+        ),
+    );
+    record.insert(
+        "createdAt".to_string(),
+        Value::String(created_at.to_string()),
+    );
+    mutate(&mut record);
+    Value::Object(record)
+}
+
+fn fresh_created_at() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+#[tokio::test]
+async fn valid_same_model_baseline_reuses_without_provider_calls() {
+    // AI-01 acceptance: valid same-model baseline makes 0 calls.
+    let current_model = "current/test-model";
+    let baseline = baseline_for_current(current_model, 4, &fresh_created_at(), |_| {});
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen_urls = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let calls_clone = calls.clone();
+    let seen_clone = seen_urls.clone();
+
+    let result = run_macro_benchmark_with_runner(
+        current_model.to_string(),
+        current_model,
+        4,
+        "compare",
+        Some(baseline.clone()),
+        move |fixture: BenchmarkFixture, model: String| {
+            let calls = calls_clone.clone();
+            let seen = seen_clone.clone();
+            let fixture_id = fixture.id.to_string();
+            let image_input = fixture.image_data_url();
+            let model = model.to_string();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                seen.lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push((model.clone(), image_input));
+                let _ = fixture_id;
+                stub_success_case(&model)
+            }
+        },
+    )
+    .await
+    .expect("benchmark should succeed");
 
     assert_eq!(
-        unreproducible,
-        vec![
-            "medium-carrot",
-            "white-bread-slice",
-            "cheddar-ounce",
-            "almonds-ounce",
-            "rolled-oats-40g",
-            "cooked-shrimp-100g",
-            "cooked-salmon-100g",
-            "cooked-lentils-cup",
-            "whole-milk-cup",
-            "nonfat-greek-yogurt-170g",
-        ]
+        calls.load(Ordering::SeqCst),
+        0,
+        "valid same-model baseline must make 0 provider calls"
     );
+    assert_eq!(
+        result.get("usedBaseline").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        result.get("baselineCreatedAt").and_then(Value::as_str),
+        baseline.get("createdAt").and_then(Value::as_str)
+    );
+    assert_eq!(
+        result.get("fixtureVersion").and_then(Value::as_str),
+        Some(BENCHMARK_FIXTURE_SET_VERSION)
+    );
+}
+
+#[tokio::test]
+async fn valid_different_model_baseline_runs_only_candidate_calls() {
+    // AI-01 acceptance: valid baseline with a different candidate makes only candidate calls.
+    let current_model = "current/test-model";
+    let candidate_model = "candidate/test-model";
+    let baseline = baseline_for_current(current_model, 4, &fresh_created_at(), |_| {});
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen_models = Arc::new(Mutex::new(Vec::<String>::new()));
+    let calls_clone = calls.clone();
+    let seen_clone = seen_models.clone();
+
+    let result = run_macro_benchmark_with_runner(
+        current_model.to_string(),
+        candidate_model,
+        4,
+        "compare",
+        Some(baseline),
+        move |_fixture: BenchmarkFixture, model: String| {
+            let calls = calls_clone.clone();
+            let seen = seen_clone.clone();
+            let model = model.to_string();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                seen.lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(model.clone());
+                stub_success_case(&model)
+            }
+        },
+    )
+    .await
+    .expect("benchmark should succeed");
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        4,
+        "valid baseline must run only the 4 candidate calls"
+    );
+    let seen = seen_models
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    assert!(
+        seen.iter().all(|model| model == candidate_model),
+        "current-model calls must be skipped, got {seen:?}"
+    );
+    assert_eq!(
+        result.get("usedBaseline").and_then(Value::as_bool),
+        Some(true)
+    );
+}
+
+#[tokio::test]
+async fn invalid_or_stale_baselines_are_rejected_truthfully() {
+    // AI-01 acceptance: absent/invalid/stale baselines follow an explicit truthful budget.
+    let current_model = "current/test-model";
+    let candidate_model = "candidate/test-model";
+    let stale = (chrono::Utc::now() - chrono::Duration::hours(25))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let cases: Vec<(&str, Option<Value>)> = vec![
+        ("absent", None),
+        (
+            "wrong-model",
+            Some(baseline_for_current(
+                "other/model",
+                4,
+                &fresh_created_at(),
+                |_| {},
+            )),
+        ),
+        (
+            "wrong-version",
+            Some(baseline_for_current(
+                current_model,
+                4,
+                &fresh_created_at(),
+                |record| {
+                    record.insert(
+                        "fixtureVersion".to_string(),
+                        Value::String("stale-version".to_string()),
+                    );
+                },
+            )),
+        ),
+        (
+            "wrong-ids",
+            Some(baseline_for_current(
+                current_model,
+                4,
+                &fresh_created_at(),
+                |record| {
+                    record.insert("fixtureIds".to_string(), json!(["wrong-id"]));
+                },
+            )),
+        ),
+        (
+            "stale",
+            Some(baseline_for_current(current_model, 4, &stale, |_| {})),
+        ),
+        (
+            "failed-row",
+            Some(baseline_for_current(
+                current_model,
+                4,
+                &fresh_created_at(),
+                |record| {
+                    let mut results = record
+                        .get("results")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    if let Some(first) = results.first_mut() {
+                        if let Some(object) = first.as_object_mut() {
+                            object.insert("ok".to_string(), Value::Bool(false));
+                        }
+                    }
+                    record.insert("results".to_string(), Value::Array(results));
+                },
+            )),
+        ),
+    ];
+
+    for (name, baseline) in cases {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let result = run_macro_benchmark_with_runner(
+            current_model.to_string(),
+            candidate_model,
+            4,
+            "compare",
+            baseline,
+            move |_fixture: BenchmarkFixture, model: String| {
+                let calls = calls_clone.clone();
+                let model = model.to_string();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    stub_success_case(&model)
+                }
+            },
+        )
+        .await
+        .expect("benchmark should succeed");
+
+        assert_eq!(
+            result.get("usedBaseline").and_then(Value::as_bool),
+            Some(false),
+            "{name} baseline must not be marked reused"
+        );
+        assert_eq!(
+            result.get("baselineCreatedAt").and_then(Value::as_str),
+            None,
+            "{name} baseline must not report a reused timestamp"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            8,
+            "{name} baseline must fall back to the full 4+4 call budget"
+        );
+    }
+}
+
+#[tokio::test]
+async fn future_baselines_within_clock_skew_are_reused_but_far_future_is_rejected() {
+    // AI-01 regression: the documented 5-minute future tolerance must actually
+    // accept small client-clock skew. It previously looked like a tolerance
+    // while the TTL duration conversion rejected every future timestamp.
+    let current_model = "current/test-model";
+    let near_future = (chrono::Utc::now() + chrono::Duration::minutes(2))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let far_future = (chrono::Utc::now() + chrono::Duration::minutes(10))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_clone = calls.clone();
+    let result = run_macro_benchmark_with_runner(
+        current_model.to_string(),
+        current_model,
+        4,
+        "compare",
+        Some(baseline_for_current(current_model, 4, &near_future, |_| {})),
+        move |_fixture: BenchmarkFixture, model: String| {
+            let calls = calls_clone.clone();
+            let model = model.to_string();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                stub_success_case(&model)
+            }
+        },
+    )
+    .await
+    .expect("benchmark should succeed");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "a baseline stamped within the future tolerance must be reused"
+    );
+    assert_eq!(
+        result.get("usedBaseline").and_then(Value::as_bool),
+        Some(true)
+    );
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_clone = calls.clone();
+    let result = run_macro_benchmark_with_runner(
+        current_model.to_string(),
+        "candidate/test-model",
+        4,
+        "compare",
+        Some(baseline_for_current(current_model, 4, &far_future, |_| {})),
+        move |_fixture: BenchmarkFixture, model: String| {
+            let calls = calls_clone.clone();
+            let model = model.to_string();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                stub_success_case(&model)
+            }
+        },
+    )
+    .await
+    .expect("benchmark should succeed");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        8,
+        "a baseline far in the future must be rejected and run the full budget"
+    );
+    assert_eq!(
+        result.get("usedBaseline").and_then(Value::as_bool),
+        Some(false)
+    );
+}
+
+#[tokio::test]
+async fn every_compared_model_receives_identical_image_inputs() {
+    // AI-02 acceptance: fake provider captures actual image inputs for every
+    // model; inputs are identical and fixture identities invalidate caches.
+    // The captured value is the same construction the production runner sends,
+    // so its hash can be checked against the fixture's declared hash.
+    use sha2::{Digest, Sha256};
+    let current_model = "current/test-model";
+    let candidate_model = "candidate/test-model";
+    let seen = Arc::new(Mutex::new(Vec::<(String, String, String)>::new()));
+    let seen_clone = seen.clone();
+
+    let result = run_macro_benchmark_with_runner(
+        current_model.to_string(),
+        candidate_model,
+        8,
+        "compare",
+        None,
+        move |fixture: BenchmarkFixture, model: String| {
+            let seen = seen_clone.clone();
+            let fixture_id = fixture.id.to_string();
+            let image_input = fixture.image_data_url();
+            let model = model.to_string();
+            async move {
+                seen.lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push((model.clone(), fixture_id, image_input.clone()));
+                stub_success_case(&model)
+            }
+        },
+    )
+    .await
+    .expect("benchmark should succeed");
+
+    let seen = seen
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    assert_eq!(seen.len(), 16, "8 fixtures x 2 models without a baseline");
+    for fixture in BENCHMARK_FIXTURES.iter().take(8) {
+        let inputs: Vec<&(String, String, String)> = seen
+            .iter()
+            .filter(|(_, fixture_id, _)| fixture_id == fixture.id)
+            .collect();
+        assert_eq!(
+            inputs.len(),
+            2,
+            "{}: both models must be called once",
+            fixture.id
+        );
+        assert_eq!(
+            inputs[0].2, inputs[1].2,
+            "{}: image inputs must be identical across models",
+            fixture.id
+        );
+        assert_eq!(
+            inputs[0].2,
+            fixture.image_data_url(),
+            "{}: captured input must equal the frozen fixture input",
+            fixture.id
+        );
+        // Decode the captured data URL and hash the bytes the fake provider
+        // actually saw; it must match the hash the fixture advertises.
+        let encoded = inputs[0]
+            .2
+            .strip_prefix("data:image/jpeg;base64,")
+            .unwrap_or_else(|| panic!("{}: unexpected input prefix", fixture.id));
+        let mut buffer = vec![0_u8; encoded.len()];
+        let decoded = Base64::decode(encoded, &mut buffer)
+            .unwrap_or_else(|error| panic!("{}: invalid base64 input: {error}", fixture.id));
+        let digest = Sha256::digest(decoded);
+        let actual = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            actual, fixture.image_sha256,
+            "{}: captured bytes must hash to the declared fixture hash",
+            fixture.id
+        );
+    }
+    // Fixture identities are part of the result so incompatible caches invalidate.
+    let fixtures_json = result
+        .get("fixtures")
+        .and_then(Value::as_array)
+        .expect("result must carry fixtures");
+    assert_eq!(fixtures_json.len(), 8);
+    for (index, rendered) in fixtures_json.iter().enumerate() {
+        let expected = &BENCHMARK_FIXTURES[index];
+        assert_eq!(
+            rendered.get("id").and_then(Value::as_str),
+            Some(expected.id)
+        );
+        assert_eq!(
+            rendered.get("imageSha256").and_then(Value::as_str),
+            Some(expected.image_sha256)
+        );
+        assert_eq!(
+            rendered.get("imageFileUrl").and_then(Value::as_str),
+            Some(expected.image_file_url)
+        );
+    }
 }
 
 /// `BENCHMARK_LOCK` is process-global, so the tests that drive it have to take turns.
@@ -941,22 +1692,24 @@ fn one_account_cannot_hold_every_food_photo_slot() {
 
     let held = (0..MAX_FOOD_PHOTO_UPLOADS_PER_USER)
         .map(|_| {
-            acquire_food_photo_user_slot(noisy).expect("slots up to the cap should be granted")
+            FOOD_PHOTO_USER_SLOTS
+                .acquire(noisy)
+                .expect("slots up to the cap should be granted")
         })
         .collect::<Vec<_>>();
 
     assert!(
-        acquire_food_photo_user_slot(noisy).is_none(),
+        FOOD_PHOTO_USER_SLOTS.acquire(noisy).is_none(),
         "an account past its cap must be refused"
     );
     assert!(
-        acquire_food_photo_user_slot(other).is_some(),
+        FOOD_PHOTO_USER_SLOTS.acquire(other).is_some(),
         "one noisy account must not starve everyone else"
     );
 
     drop(held);
     assert!(
-        acquire_food_photo_user_slot(noisy).is_some(),
+        FOOD_PHOTO_USER_SLOTS.acquire(noisy).is_some(),
         "finishing an upload must return the slot"
     );
 }
@@ -965,14 +1718,72 @@ fn one_account_cannot_hold_every_food_photo_slot() {
 fn released_food_photo_slots_do_not_accumulate_per_account() {
     let user_id = Uuid::new_v4();
 
-    drop(acquire_food_photo_user_slot(user_id).expect("slot should be granted"));
+    drop(
+        FOOD_PHOTO_USER_SLOTS
+            .acquire(user_id)
+            .expect("slot should be granted"),
+    );
 
-    let slots = food_photo_user_slots()
+    let slots = FOOD_PHOTO_USER_SLOTS
+        .slots
+        .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     assert!(
         !slots.contains_key(&user_id),
         "the map must not grow one entry per account that ever uploaded"
+    );
+}
+
+/// SEC-05: one account must not be able to occupy the whole barcode provider fan-out.
+#[test]
+fn one_account_cannot_hold_every_barcode_slot() {
+    let noisy = Uuid::new_v4();
+    let other = Uuid::new_v4();
+
+    let held = (0..MAX_BARCODE_LOOKUPS_PER_USER)
+        .map(|_| {
+            BARCODE_LOOKUP_USER_SLOTS
+                .acquire(noisy)
+                .expect("slots up to the cap should be granted")
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        BARCODE_LOOKUP_USER_SLOTS.acquire(noisy).is_none(),
+        "an account past its cap must be refused"
+    );
+    assert!(
+        BARCODE_LOOKUP_USER_SLOTS.acquire(other).is_some(),
+        "one noisy account must not starve everyone else"
+    );
+
+    // Cancellation and error paths drop the future's guards, releasing both counters.
+    drop(held);
+    assert!(
+        BARCODE_LOOKUP_USER_SLOTS.acquire(noisy).is_some(),
+        "finishing or cancelling a lookup must return the slot"
+    );
+}
+
+#[test]
+fn released_barcode_slots_do_not_accumulate_per_account() {
+    let user_id = Uuid::new_v4();
+
+    drop(
+        BARCODE_LOOKUP_USER_SLOTS
+            .acquire(user_id)
+            .expect("slot should be granted"),
+    );
+
+    let slots = BARCODE_LOOKUP_USER_SLOTS
+        .slots
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    assert!(
+        !slots.contains_key(&user_id),
+        "the map must not grow one entry per account that ever looked up a barcode"
     );
 }
 
@@ -1054,17 +1865,16 @@ async fn open_food_facts_lookup_enforces_the_size_cap() {
         let base_url = spawn_padded_open_food_facts_stub(padding).await;
         let state = test_state(Some(&base_url));
 
-        let product = lookup_open_food_facts(&state, "8712345678901").await;
+        let outcome = lookup_open_food_facts(&state, "8712345678901").await;
 
         match expected {
-            Some(name) => assert_eq!(
-                product.map(|product| product["name"].clone()),
-                Some(name),
+            Some(name) => assert!(
+                matches!(outcome, ProviderOutcome::Found(product) if product["name"] == name),
                 "a body just under the cap must be accepted (padding {padding})"
             ),
             None => assert!(
-                product.is_none(),
-                "a body over the cap must be dropped (padding {padding})"
+                matches!(outcome, ProviderOutcome::Unavailable),
+                "an unreadable body is unavailability, not a confirmed miss (padding {padding})"
             ),
         }
     }
@@ -1117,11 +1927,10 @@ async fn open_food_facts_lookup_drops_a_streamed_body_over_the_size_cap() {
     let base_url = spawn_chunked_open_food_facts_stub().await;
     let state = test_state(Some(&base_url));
 
-    assert!(
-        lookup_open_food_facts(&state, "8712345678901")
-            .await
-            .is_none()
-    );
+    assert!(matches!(
+        lookup_open_food_facts(&state, "8712345678901").await,
+        ProviderOutcome::Unavailable
+    ));
 }
 
 #[tokio::test]
@@ -1137,13 +1946,13 @@ async fn provider_fetch_gives_up_when_the_upstream_stalls_past_its_deadline() {
     let client = reqwest::Client::new();
 
     let started = Instant::now();
-    let body = fetch_provider_json(
+    let body = fetch_provider_json_result(
         client.get(format!("{base_url}/stall")),
         Duration::from_millis(50),
     )
     .await;
 
-    assert!(body.is_none());
+    assert!(matches!(body, Err(())));
     assert!(started.elapsed() < Duration::from_secs(2));
 }
 
@@ -1161,11 +1970,232 @@ async fn provider_fetch_rejects_a_failing_status_before_reading_the_body() {
     .await;
     let client = reqwest::Client::new();
 
-    let body = fetch_provider_json(
+    let body = fetch_provider_json_result(
         client.get(format!("{base_url}/failing")),
         PROVIDER_REQUEST_TIMEOUT,
     )
     .await;
 
-    assert!(body.is_none());
+    assert!(matches!(body, Err(())));
+}
+
+/// SEC-03: browser photo requests must prove same-origin; direct non-browser clients stay allowed.
+#[test]
+fn browser_photo_requests_require_same_origin_metadata() {
+    let trusted = vec!["https://macro.example.com".to_string()];
+
+    let mut same_site = HeaderMap::new();
+    same_site.insert(header::ORIGIN, "https://evil.example.com".parse().unwrap());
+    same_site.insert("sec-fetch-site", "same-site".parse().unwrap());
+    assert!(
+        !same_origin_browser_request(&same_site, &trusted),
+        "a same-site sibling origin must be refused"
+    );
+
+    let mut cross_site = HeaderMap::new();
+    cross_site.insert(header::ORIGIN, "https://evil.example.com".parse().unwrap());
+    cross_site.insert("sec-fetch-site", "cross-site".parse().unwrap());
+    assert!(!same_origin_browser_request(&cross_site, &trusted));
+
+    let mut same_origin = HeaderMap::new();
+    same_origin.insert("sec-fetch-site", "same-origin".parse().unwrap());
+    assert!(same_origin_browser_request(&same_origin, &trusted));
+
+    let mut configured_origin = HeaderMap::new();
+    configured_origin.insert(header::ORIGIN, "https://macro.example.com".parse().unwrap());
+    assert!(same_origin_browser_request(&configured_origin, &trusted));
+
+    let mut contradictory = HeaderMap::new();
+    contradictory.insert(header::ORIGIN, "https://macro.example.com".parse().unwrap());
+    contradictory.insert("sec-fetch-site", "cross-site".parse().unwrap());
+    assert!(
+        !same_origin_browser_request(&contradictory, &trusted),
+        "fetch metadata wins over a trusted Origin header"
+    );
+
+    // A direct non-browser client sends neither header.
+    assert!(same_origin_browser_request(&HeaderMap::new(), &trusted));
+}
+
+/// API-04 stubs: what each provider answers for the barcode chain.
+#[derive(Clone)]
+enum StubAnswer {
+    Json(Value),
+    Raw(&'static str),
+    Status(StatusCode),
+}
+
+impl StubAnswer {
+    fn into_response(self) -> Response {
+        match self {
+            StubAnswer::Json(value) => Json(value).into_response(),
+            StubAnswer::Raw(body) => (
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                body,
+            )
+                .into_response(),
+            StubAnswer::Status(status) => status.into_response(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ProviderStubConfig {
+    open_food_facts: StubAnswer,
+    albert_heijn_token: StubAnswer,
+    albert_heijn_search: StubAnswer,
+    jumbo_search: StubAnswer,
+}
+
+impl ProviderStubConfig {
+    fn all(answer: StubAnswer) -> Self {
+        Self {
+            open_food_facts: answer.clone(),
+            albert_heijn_token: answer.clone(),
+            albert_heijn_search: answer.clone(),
+            jumbo_search: answer,
+        }
+    }
+
+    /// Every provider answers successfully, but none carries the product.
+    fn missing_products() -> Self {
+        Self {
+            open_food_facts: StubAnswer::Json(json!({ "status": 0 })),
+            albert_heijn_token: StubAnswer::Json(json!({ "access_token": "test-token" })),
+            albert_heijn_search: StubAnswer::Json(json!({ "cards": [] })),
+            jumbo_search: StubAnswer::Json(json!({ "products": { "data": [] } })),
+        }
+    }
+}
+
+async fn spawn_provider_scenario_stub(config: ProviderStubConfig) -> String {
+    let open_food_facts = config.open_food_facts.clone();
+    let albert_heijn_token = config.albert_heijn_token.clone();
+    let albert_heijn_search = config.albert_heijn_search.clone();
+    let jumbo_search = config.jumbo_search.clone();
+    let app = Router::new()
+        .route(
+            "/api/v2/product/{*path}",
+            get(move || {
+                let answer = open_food_facts.clone();
+                async move { answer.into_response() }
+            }),
+        )
+        .route(
+            "/mobile-auth/v1/auth/token/anonymous",
+            post(move || {
+                let answer = albert_heijn_token.clone();
+                async move { answer.into_response() }
+            }),
+        )
+        .route(
+            "/mobile-services/product/search/v2",
+            get(move || {
+                let answer = albert_heijn_search.clone();
+                async move { answer.into_response() }
+            }),
+        )
+        .route(
+            "/v17/search",
+            get(move || {
+                let answer = jumbo_search.clone();
+                async move { answer.into_response() }
+            }),
+        );
+
+    spawn_provider_stub(app).await
+}
+
+async fn response_json(response: Response) -> Value {
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("response body should collect")
+        .to_bytes();
+    serde_json::from_slice(&body).expect("response should be json")
+}
+
+/// API-04: three provider outages must be reported as retryable unavailability, not as a missing product.
+#[tokio::test]
+async fn provider_outage_is_reported_as_unavailable_not_as_a_missing_product() {
+    let base_url = spawn_provider_scenario_stub(ProviderStubConfig::all(StubAnswer::Status(
+        StatusCode::SERVICE_UNAVAILABLE,
+    )))
+    .await;
+    let state = test_state(Some(&base_url));
+
+    let response = lookup_barcode_for_user(&state, "8712345678901".to_string()).await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let payload = response_json(response).await;
+    assert_eq!(payload["found"], json!(false));
+    assert_eq!(payload["retryable"], json!(true));
+}
+
+/// API-04: unusable provider bodies are unavailability too, not absence.
+#[tokio::test]
+async fn malformed_provider_bodies_are_reported_as_unavailable() {
+    let base_url = spawn_provider_scenario_stub(ProviderStubConfig::all(StubAnswer::Raw(
+        "<html>maintenance</html>",
+    )))
+    .await;
+    let state = test_state(Some(&base_url));
+
+    let response = lookup_barcode_for_user(&state, "8712345678901".to_string()).await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let payload = response_json(response).await;
+    assert_eq!(payload["found"], json!(false));
+    assert_eq!(payload["retryable"], json!(true));
+}
+
+/// API-04: a genuine miss plus a failed fallback cannot establish absence.
+#[tokio::test]
+async fn a_genuine_miss_with_a_failed_fallback_stays_retryable() {
+    let mut config = ProviderStubConfig::missing_products();
+    config.albert_heijn_token = StubAnswer::Status(StatusCode::SERVICE_UNAVAILABLE);
+    let base_url = spawn_provider_scenario_stub(config).await;
+    let state = test_state(Some(&base_url));
+
+    let response = lookup_barcode_for_user(&state, "8712345678901".to_string()).await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let payload = response_json(response).await;
+    assert_eq!(payload["found"], json!(false));
+    assert_eq!(payload["retryable"], json!(true));
+}
+
+/// API-04: only every provider answering "no" produces the authoritative miss.
+#[tokio::test]
+async fn all_genuine_misses_still_return_not_found() {
+    let base_url = spawn_provider_scenario_stub(ProviderStubConfig::missing_products()).await;
+    let state = test_state(Some(&base_url));
+
+    let response = lookup_barcode_for_user(&state, "8712345678901".to_string()).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload = response_json(response).await;
+    assert_eq!(payload["found"], json!(false));
+    assert_eq!(payload.get("retryable"), None);
+}
+
+/// API-04: a successful fallback wins even while another provider is down.
+#[tokio::test]
+async fn a_successful_fallback_wins_over_an_outage() {
+    let mut config = ProviderStubConfig::missing_products();
+    config.open_food_facts = StubAnswer::Status(StatusCode::SERVICE_UNAVAILABLE);
+    config.albert_heijn_search = StubAnswer::Status(StatusCode::SERVICE_UNAVAILABLE);
+    config.jumbo_search = StubAnswer::Json(json!({
+        "products": { "data": [{ "title": "Jumbo Test Product", "id": "jumbo-1" }] }
+    }));
+    let base_url = spawn_provider_scenario_stub(config).await;
+    let state = test_state(Some(&base_url));
+
+    let response = lookup_barcode_for_user(&state, "8712345678901".to_string()).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload = response_json(response).await;
+    assert_eq!(payload["found"], json!(true));
+    assert_eq!(payload["product"]["source"], json!("jumbo"));
 }

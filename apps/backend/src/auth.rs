@@ -23,6 +23,8 @@ use uuid::Uuid;
 
 pub const SESSION_COOKIE_NAME: &str = "mt_session";
 pub const SESSION_MAX_AGE_SECONDS: i64 = 60 * 60 * 24 * 7;
+// SEC-01: the same hard ceiling the web session enforces; a sliding `exp` alone renews forever.
+pub const SESSION_ABSOLUTE_LIFETIME_SECONDS: i64 = 60 * 60 * 24 * 30;
 const SHOO_JWKS_FETCH_TIMEOUT: StdDuration = StdDuration::from_secs(2);
 const SHOO_JWKS_CACHE_TTL: StdDuration = StdDuration::from_secs(5 * 60);
 // CLEAN-A2: negative results are cached too, briefly, or a provider outage pays the fetch timeout per login.
@@ -66,7 +68,11 @@ struct SessionClaims {
     #[serde(rename = "type")]
     claim_type: String,
     exp: usize,
-    iat: usize,
+    // SEC-01: backend-minted tokens carry `authenticatedAt`; tokens from before that claim fall back to `iat`.
+    #[serde(default)]
+    iat: Option<usize>,
+    #[serde(default, rename = "authenticatedAt")]
+    authenticated_at: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -127,7 +133,8 @@ pub fn create_session_token(
         sub: user.user_id.to_string(),
         email: user.email.clone(),
         claim_type: "mt_session".to_string(),
-        iat: now.timestamp() as usize,
+        iat: Some(now.timestamp() as usize),
+        authenticated_at: Some(now.timestamp() as usize),
         exp: (now + Duration::seconds(SESSION_MAX_AGE_SECONDS)).timestamp() as usize,
     };
 
@@ -154,6 +161,19 @@ pub fn verify_session_token(config: &crate::config::Config, token: &str) -> AppR
         return Err(AppError::Unauthorized("Invalid session.".to_string()));
     }
 
+    // SEC-01: enforce the original sign-in age, or a renewed token outlives the web's absolute deadline.
+    let authenticated_at = decoded
+        .claims
+        .authenticated_at
+        .or(decoded.claims.iat)
+        .filter(|value| *value > 0)
+        .ok_or_else(|| AppError::Unauthorized("Invalid session.".to_string()))?;
+    if Utc::now().timestamp() - authenticated_at as i64 > SESSION_ABSOLUTE_LIFETIME_SECONDS {
+        return Err(AppError::Unauthorized(
+            "Invalid or expired session.".to_string(),
+        ));
+    }
+
     Ok(SessionUser {
         user_id: Uuid::parse_str(&decoded.claims.sub)
             .map_err(|_| AppError::Unauthorized("Invalid session subject.".to_string()))?,
@@ -162,20 +182,15 @@ pub fn verify_session_token(config: &crate::config::Config, token: &str) -> AppR
 }
 
 pub fn session_token_from_headers(headers: &HeaderMap) -> Option<String> {
+    // SEC-01: the caller must not choose which credential is evaluated; only the cookie the browser sent.
     headers
-        .get("x-macro-tracker-session")
+        .get(axum::http::header::COOKIE)
         .and_then(|value| value.to_str().ok())
-        .map(str::to_string)
-        .or_else(|| {
-            headers
-                .get(axum::http::header::COOKIE)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|cookie| {
-                    cookie.split(';').find_map(|part| {
-                        let (name, value) = part.trim().split_once('=')?;
-                        (name == SESSION_COOKIE_NAME).then(|| value.to_string())
-                    })
-                })
+        .and_then(|cookie| {
+            cookie.split(';').find_map(|part| {
+                let (name, value) = part.trim().split_once('=')?;
+                (name == SESSION_COOKIE_NAME).then(|| value.to_string())
+            })
         })
 }
 

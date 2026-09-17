@@ -8,6 +8,7 @@ import type {
   MacroBenchmarkModelSummary,
   MacroBenchmarkResult,
 } from "@/lib/ai-model-benchmark";
+import { BENCHMARK_FIXTURE_VERSION } from "@/lib/ai-model-benchmark";
 import type { AnalyzeFoodPhotoFailureKind } from "@/lib/ai-food-photo";
 
 type ApiResponse =
@@ -20,7 +21,10 @@ type ApiResponse =
       error: string;
     };
 
-const BASELINE_CACHE_PREFIX = "macro-benchmark-baseline:v2:";
+// v3 invalidates v2 caches that lack `fixtureVersion` (AI-01/AI-02): old
+// baselines with random loremflickr inputs or timestamp-only validation must
+// never be reused.
+const BASELINE_CACHE_PREFIX = "macro-benchmark-baseline:v3:";
 const BASELINE_TTL_MS = 24 * 60 * 60 * 1000;
 
 const FAILURE_LABELS: Record<AnalyzeFoodPhotoFailureKind, string> = {
@@ -54,6 +58,24 @@ function formatExpected(macros: {
   ].join(" / ");
 }
 
+function isReusableBaselineRow(
+  value: unknown,
+  currentModel: string,
+): boolean {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const row = value as Record<string, unknown>;
+  return (
+    row.ok === true &&
+    row.wasSkipped !== true &&
+    row.model === currentModel &&
+    !!row.estimate &&
+    typeof row.estimate === "object"
+  );
+}
+
 function isFreshBaseline(value: unknown): value is MacroBenchmarkBaseline & {
   fixtureLimit: number;
 } {
@@ -66,14 +88,25 @@ function isFreshBaseline(value: unknown): value is MacroBenchmarkBaseline & {
     typeof record.createdAt === "string" ? Date.parse(record.createdAt) : NaN;
   const now = Date.now();
 
-  return (
-    typeof record.currentModel === "string" &&
-    typeof record.fixtureLimit === "number" &&
-    Array.isArray(record.fixtureIds) &&
-    Array.isArray(record.results) &&
-    Number.isFinite(createdAt) &&
-    createdAt <= now &&
-    now - createdAt <= BASELINE_TTL_MS
+  if (
+    typeof record.currentModel !== "string" ||
+    typeof record.fixtureLimit !== "number" ||
+    record.fixtureVersion !== BENCHMARK_FIXTURE_VERSION ||
+    !Array.isArray(record.fixtureIds) ||
+    !Array.isArray(record.results) ||
+    (record.fixtureIds as unknown[]).length !== record.fixtureLimit ||
+    (record.results as unknown[]).length !== record.fixtureLimit ||
+    !Number.isFinite(createdAt) ||
+    createdAt > now ||
+    now - createdAt > BASELINE_TTL_MS
+  ) {
+    return false;
+  }
+
+  // The server rejects baselines whose rows are not all reusable current-model
+  // cases; the client must not advertise a 0-call budget for one either.
+  return (record.results as unknown[]).every((row) =>
+    isReusableBaselineRow(row, record.currentModel as string),
   );
 }
 
@@ -118,6 +151,10 @@ export function shouldCacheBenchmarkBaseline(result: MacroBenchmarkResult) {
     return false;
   }
 
+  if (result.fixtureVersion !== BENCHMARK_FIXTURE_VERSION) {
+    return false;
+  }
+
   if (result.cases.length === 0) {
     return false;
   }
@@ -151,7 +188,10 @@ export function getBenchmarkCallCountText(params: {
     return `This run will make up to ${params.fixtureLimit} AI provider calls.`;
   }
 
-  if (params.cachedBaseline?.currentModel === params.currentModel) {
+  if (
+    params.cachedBaseline?.currentModel === params.currentModel &&
+    params.cachedBaseline?.fixtureVersion === BENCHMARK_FIXTURE_VERSION
+  ) {
     if (params.model.trim() === params.currentModel) {
       return "This run can use the cached baseline and may make 0 AI provider calls.";
     }
@@ -176,6 +216,7 @@ function writeBaselineCache(result: MacroBenchmarkResult) {
     createdAt,
     currentModel: result.currentModel,
     fixtureLimit: result.fixtureCount,
+    fixtureVersion: result.fixtureVersion,
     fixtureIds: result.cases.map((item) => item.fixtureId),
     results: result.cases.map((item) => item.current),
   };

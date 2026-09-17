@@ -107,6 +107,60 @@ describe("server actions", () => {
     expect(mocked.searchFoodProducts).toHaveBeenCalledWith("user-1", "greek");
   });
 
+  it("omits internal product provenance from session search results (SEC-06)", async () => {
+    mocked.searchMealEntries.mockResolvedValue([]);
+    mocked.searchFoodProducts.mockResolvedValue([
+      {
+        id: "product-1",
+        ownerUserId: null,
+        scope: "global",
+        source: "barcode",
+        barcode: "1234567890123",
+        name: "Shared yogurt",
+        brand: "Brand",
+        defaultServingQuantity: 1,
+        defaultServingUnit: "serving",
+        servingWeightG: 150,
+        servingVolumeMl: null,
+        proteinPer100: 10,
+        carbsPer100: 4,
+        fatPer100: 0.5,
+        caloriesPer100: 61,
+        submittedByUserId: "contributor-uuid",
+        deletedByUserId: null,
+        sourceProvider: "community",
+        sourceConfidence: 0.9,
+        sourceMetadata: { servingSizeG: null },
+        correctedFromProductId: "original-uuid",
+        createdAt: "2026-06-20T00:00:00.000Z",
+        updatedAt: "2026-06-20T00:00:00.000Z",
+        deletedAt: null,
+      },
+    ]);
+
+    const result = await searchFoodsAction({ query: "shared" });
+    const product = result.products?.[0];
+
+    expect(product).toMatchObject({
+      name: "Shared yogurt",
+      source: "barcode",
+      barcode: "1234567890123",
+      proteinPer100: 10,
+      caloriesPer100: 61,
+    });
+    for (const field of [
+      "ownerUserId",
+      "submittedByUserId",
+      "deletedByUserId",
+      "sourceProvider",
+      "sourceConfidence",
+      "sourceMetadata",
+      "correctedFromProductId",
+    ]) {
+      expect(product).not.toHaveProperty(field);
+    }
+  });
+
   it("keeps history results available when product search fails", async () => {
     mocked.searchMealEntries.mockResolvedValue([
       {
