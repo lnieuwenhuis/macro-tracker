@@ -4,6 +4,7 @@ import type { QuantityUnit } from "@macro-tracker/db";
 import { useState } from "react";
 
 import { saveBarcodeFoodProductAction } from "@/lib/actions";
+import { isFrameworkControlFlowError } from "@/lib/framework-control-flow";
 import type { OpenFoodFactsProduct } from "@/lib/openfoodfacts";
 import {
   parseNonNegativeNumber,
@@ -145,7 +146,10 @@ function NotFoundForm({
         imageUrl: null,
         source: "custom",
       });
-    } catch {
+    } catch (error) {
+      if (isFrameworkControlFlowError(error)) {
+        throw error;
+      }
       // Transport rejection (UI-05): keep the form open with a retryable error.
       setSaveError("Failed to save product.");
     } finally {
@@ -486,7 +490,10 @@ export function BarcodeResult({
       } else {
         setPresetError("Unable to save template.");
       }
-    } catch {
+    } catch (error) {
+      if (isFrameworkControlFlowError(error)) {
+        throw error;
+      }
       setPresetError("Unable to save template.");
     } finally {
       setIsSavingPreset(false);

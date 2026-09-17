@@ -4,6 +4,7 @@ import type { FoodProduct, MealEntryRecord } from "@macro-tracker/db";
 import { useEffect, useRef, useState } from "react";
 
 import { saveMealEntryAction, searchFoodsAction } from "@/lib/actions";
+import { isFrameworkControlFlowError } from "@/lib/framework-control-flow";
 import {
   hasCurrentFoodSearchResults,
   normalizeFoodSearchQuery,
@@ -86,7 +87,10 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
           setResults([]);
           setProducts([]);
         }
-      } catch {
+      } catch (error) {
+        if (isFrameworkControlFlowError(error)) {
+          throw error;
+        }
         if (cancelled) return;
         setResultQuery(trimmedQuery);
         setError("Search failed.");
@@ -128,7 +132,10 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
       }
 
       setError(result.error ?? "Unable to add this food to today.");
-    } catch {
+    } catch (error) {
+      if (isFrameworkControlFlowError(error)) {
+        throw error;
+      }
       // Transport rejection keeps the original date/key so a retry reuses them.
       setError("Unable to add this food to today.");
     } finally {
@@ -175,7 +182,10 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
       }
 
       setError(result.error ?? "Unable to add this food to today.");
-    } catch {
+    } catch (error) {
+      if (isFrameworkControlFlowError(error)) {
+        throw error;
+      }
       // Transport rejection keeps the original date/key so a retry reuses them.
       setError("Unable to add this food to today.");
     } finally {

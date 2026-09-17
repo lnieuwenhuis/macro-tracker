@@ -132,4 +132,30 @@ describe("useTemplateMutations transport rejection (UI-05)", () => {
     expect(saved).toBe(true);
     expect(getLatest().items.map((t) => t.id)).toEqual(["preset-new"]);
   });
+
+  it("rethrows framework control flow instead of reporting it as a failed save", async () => {
+    const redirect = Object.assign(new Error("redirect"), {
+      digest: "NEXT_REDIRECT;replace;/login;307;",
+    });
+    mocked.saveTemplateAction.mockRejectedValue(redirect);
+    const { presetErrorSpy, getLatest } = setup();
+
+    let caught: unknown;
+    await act(async () => {
+      try {
+        await getLatest().handleSavePreset({
+          label: "Oats",
+          proteinG: 10,
+          carbsG: 20,
+          fatG: 5,
+          caloriesKcal: 200,
+        });
+      } catch (error) {
+        caught = error;
+      }
+    });
+
+    expect(caught).toBe(redirect);
+    expect(presetErrorSpy).not.toHaveBeenCalledWith("Unable to save template.");
+  });
 });

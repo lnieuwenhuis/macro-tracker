@@ -8,6 +8,7 @@ import {
   saveTemplateAction,
   updateTemplateAction,
 } from "@/lib/actions";
+import { isFrameworkControlFlowError } from "@/lib/framework-control-flow";
 
 type TemplateMutationState =
   | { type: "save" }
@@ -24,17 +25,6 @@ type TemplateMutationOptions = {
 
 function sortTemplatesByLabel(templates: MealTemplate[]) {
   return [...templates].sort((a, b) => a.label.localeCompare(b.label));
-}
-
-// Same contract as use-action-runner: NEXT_* control flow keeps throwing so
-// navigation still works; a rejected transport promise becomes a local error.
-function isFrameworkControlFlowError(error: unknown) {
-  return (
-    error instanceof Error &&
-    typeof (error as Error & { digest?: unknown }).digest === "string" &&
-    (((error as Error & { digest: string }).digest.startsWith("NEXT_REDIRECT") ||
-      (error as Error & { digest: string }).digest.startsWith("NEXT_NOT_FOUND")))
-  );
 }
 
 export function useTemplateMutations({

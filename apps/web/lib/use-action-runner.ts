@@ -3,6 +3,8 @@
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 
+import { isFrameworkControlFlowError } from "@/lib/framework-control-flow";
+
 type ActionResult = {
   ok: boolean;
   error?: string;
@@ -15,17 +17,6 @@ type RunOptions<T extends ActionResult> = {
   onSuccess?: (result: T) => void;
   onError?: () => void;
 };
-
-// Next control-flow throws (redirect/notFound) must keep propagating; anything
-// else rejected before the server responds is a transport failure.
-function isFrameworkControlFlowError(error: unknown) {
-  return (
-    error instanceof Error &&
-    typeof (error as Error & { digest?: unknown }).digest === "string" &&
-    (((error as Error & { digest: string }).digest.startsWith("NEXT_REDIRECT") ||
-      (error as Error & { digest: string }).digest.startsWith("NEXT_NOT_FOUND")))
-  );
-}
 
 export function useActionRunner() {
   const router = useRouter();

@@ -11,6 +11,7 @@ import {
   replaceFoodPhotoObjectUrl,
   setOptimizedFoodPhoto,
 } from "@/lib/image-optimization";
+import { isFrameworkControlFlowError } from "@/lib/framework-control-flow";
 
 import { CloseButton } from "./close-button";
 import { ModalSurface } from "./modal-surface";
@@ -227,7 +228,10 @@ export function AiFoodPhotoModal({
       } else {
         setPresetError("Unable to save template.");
       }
-    } catch {
+    } catch (error) {
+      if (isFrameworkControlFlowError(error)) {
+        throw error;
+      }
       setPresetError("Unable to save template.");
     } finally {
       setIsSavingPreset(false);

@@ -7,6 +7,7 @@ import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRe
 
 import { applyTemplateAction, createMealGroupAction, deleteMealGroupAction, deleteMealEntryAction, loadRecipeSummariesAction, loadTemplatesAction, markMealEntryStatusAction, saveMealEntryAction, updateMealGroupAction } from "@/lib/actions";
 import type { ComposeAction } from "@/lib/compose";
+import { isFrameworkControlFlowError } from "@/lib/framework-control-flow";
 import { computeLiveTotalsByStatus, rankCandidates } from "@/lib/quick-add";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
 import type { OpenFoodFactsProduct } from "@/lib/openfoodfacts";
@@ -683,7 +684,10 @@ export function DashboardShell({
           );
         }
         router.refresh();
-      } catch {
+      } catch (error) {
+        if (isFrameworkControlFlowError(error)) {
+          throw error;
+        }
         // UI-05: transport rejection rolls back the optimistic group change.
         setDrafts((currentDrafts) =>
           currentDrafts.map((item) =>
@@ -734,7 +738,10 @@ export function DashboardShell({
       ]);
       setShowPresetsModal(false);
       router.refresh();
-    } catch {
+    } catch (error) {
+      if (isFrameworkControlFlowError(error)) {
+        throw error;
+      }
       // UI-05: transport rejection surfaces locally instead of unhandled.
       setPresetError("Unable to apply template.");
     } finally {
@@ -869,7 +876,10 @@ export function DashboardShell({
             clientMutationId: mutationIds.current.take(mutationKey),
           }),
         );
-      } catch {
+      } catch (error) {
+        if (isFrameworkControlFlowError(error)) {
+          throw error;
+        }
         // UI-05: transport rejection is a local error, not a hang.
         setErrors((currentErrors) => ({
           ...currentErrors,
@@ -945,7 +955,10 @@ export function DashboardShell({
         setSavedMeals((meals) => meals.filter((meal) => meal.id !== draft.id));
         removeLocalDraft(clientId);
         router.refresh();
-      } catch {
+      } catch (error) {
+        if (isFrameworkControlFlowError(error)) {
+          throw error;
+        }
         // UI-05: transport rejection surfaces locally for this card only.
         setErrors((currentErrors) => ({
           ...currentErrors,
@@ -982,7 +995,10 @@ export function DashboardShell({
             id: submittedDraft.id!,
             status,
           });
-        } catch {
+        } catch (error) {
+          if (isFrameworkControlFlowError(error)) {
+            throw error;
+          }
           // UI-05: transport rejection keeps local edits and reports per card.
           setErrors((currentErrors) => ({
             ...currentErrors,
@@ -1049,7 +1065,10 @@ export function DashboardShell({
 
       setLocalMealGroups((groups) => [...groups, result.group!]);
       setNewGroupLabel("");
-    } catch {
+    } catch (error) {
+      if (isFrameworkControlFlowError(error)) {
+        throw error;
+      }
       // UI-05: transport rejection surfaces locally instead of unhandled.
       setGroupError("Unable to create group.");
     } finally {
@@ -1075,7 +1094,10 @@ export function DashboardShell({
         setLocalMealGroups(previousGroups);
         setGroupError(result.error ?? "Unable to rename group.");
       }
-    } catch {
+    } catch (error) {
+      if (isFrameworkControlFlowError(error)) {
+        throw error;
+      }
       // UI-05: transport rejection rolls back the optimistic rename.
       setLocalMealGroups(previousGroups);
       setGroupError("Unable to rename group.");
@@ -1110,7 +1132,10 @@ export function DashboardShell({
         ),
       );
       router.refresh();
-    } catch {
+    } catch (error) {
+      if (isFrameworkControlFlowError(error)) {
+        throw error;
+      }
       // UI-05: transport rejection rolls back the optimistic removal.
       setLocalMealGroups(previousGroups);
       setDrafts(previousDrafts);
@@ -1257,7 +1282,10 @@ export function DashboardShell({
         } else {
           flashCopied(clientId);
         }
-      } catch {
+      } catch (error) {
+        if (isFrameworkControlFlowError(error)) {
+          throw error;
+        }
         // UI-05: transport rejection surfaces locally for this card only.
         setErrors((currentErrors) => ({
           ...currentErrors,
