@@ -451,7 +451,8 @@ export type BarcodeFoodProductInput = {
 
 export type AdminAuditEvent = {
   id: string;
-  actorUserId: string;
+  /** Null once the acting user is deleted: `admin_audit_events.actor_user_id` is `ON DELETE SET NULL`. */
+  actorUserId: string | null;
   actorEmail: string | null;
   actorDisplayName: string | null;
   actorRole: AdminRole;
