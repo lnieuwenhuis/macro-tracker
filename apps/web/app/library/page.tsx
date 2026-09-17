@@ -3,10 +3,11 @@ import {
   getRecipeSummaries,
   getTemplateSummaries,
   searchFoodProducts,
-  type FoodProduct,
+  type BrowserFoodProduct,
 } from "@macro-tracker/db";
 
 import { LibraryShell } from "@/components/library-shell";
+import { toBrowserFoodProducts } from "@/lib/browser-product";
 import { validateSearchQuery } from "@/lib/input-validation";
 import { loadOnboardedPageContext } from "@/lib/page-context";
 
@@ -34,13 +35,16 @@ export default async function LibraryPage({ searchParams }: LibraryPageProps) {
 
   // Invalid input stays on the page as an actionable message with the query
   // preserved; only genuine backend outages reach the error boundary.
-  let products: FoodProduct[] = [];
+  // Successful rows are projected to the browser-safe shape (SEC-06).
+  let products: BrowserFoodProduct[] = [];
   let searchError: string | null = null;
   if (query.trim()) {
     searchError = validateSearchQuery(query);
     if (!searchError) {
       try {
-        products = await searchFoodProducts(sessionUser.userId, query);
+        products = toBrowserFoodProducts(
+          await searchFoodProducts(sessionUser.userId, query),
+        );
       } catch (error) {
         if (isSearchValidationError(error)) {
           searchError = (error as Error).message;

@@ -19,6 +19,19 @@ type ApiRequestBodyKey =
   | "weightEntryPatch"
   | "weightGoal";
 
+type ApiParameterLocation = "path" | "query";
+
+/** Semantic formats the runtime enforces but a bare JSON Schema string cannot express. */
+type ApiParameterFormat = "date" | "uuid";
+
+export type ApiParameter = {
+  name: string;
+  in: ApiParameterLocation;
+  required: boolean;
+  format?: ApiParameterFormat;
+  description?: string;
+};
+
 type ApiEndpointMethod = {
   method: "get" | "post" | "patch" | "delete";
   summary: string;
@@ -27,6 +40,9 @@ type ApiEndpointMethod = {
     scopes: ApiScope[];
     when: string;
   }[];
+  parameters?: ApiParameter[];
+  /** True when the operation, or a resource it references in its body, can answer the documented 404. */
+  hasNotFoundResponse?: boolean;
   successStatus?: 200 | 201;
   requestBody?: ApiRequestBodyKey;
   hasConflictResponse?: boolean;
@@ -40,6 +56,26 @@ type ApiEndpoint = {
 const PRODUCT_ID_CONDITIONAL_SCOPES: NonNullable<ApiEndpointMethod["conditionalRequiredScopes"]> = [
   { scopes: ["read:foods"], when: "non-null productId is supplied" },
 ];
+
+function datePathParameter(): ApiParameter {
+  return { name: "date", in: "path", required: true, format: "date" };
+}
+
+function uuidPathParameter(name = "id"): ApiParameter {
+  return { name, in: "path", required: true, format: "uuid" };
+}
+
+/** Every `date` query parameter defaults to the current UTC date; the server never infers a browser timezone. */
+function utcReferenceDateParameter(): ApiParameter {
+  return {
+    name: "date",
+    in: "query",
+    required: false,
+    format: "date",
+    description:
+      "Reference date in UTC. Defaults to the current UTC date when omitted; there is no browser-timezone inference.",
+  };
+}
 
 export const API_V1_ENDPOINTS: ApiEndpoint[] = [
   {
@@ -55,7 +91,9 @@ export const API_V1_ENDPOINTS: ApiEndpoint[] = [
   },
   {
     path: "/days/{date}",
-    methods: [{ method: "get", summary: "Read a daily log", scopes: ["read:daily"] }],
+    methods: [
+      { method: "get", summary: "Read a daily log", scopes: ["read:daily"], parameters: [datePathParameter()] },
+    ],
   },
   {
     path: "/days/{date}/entries",
@@ -65,6 +103,8 @@ export const API_V1_ENDPOINTS: ApiEndpoint[] = [
         summary: "Create a meal entry on a date",
         scopes: ["write:daily"],
         conditionalRequiredScopes: PRODUCT_ID_CONDITIONAL_SCOPES,
+        parameters: [datePathParameter()],
+        hasNotFoundResponse: true,
         successStatus: 201,
         requestBody: "mealEntryCreate",
       },
@@ -78,15 +118,17 @@ export const API_V1_ENDPOINTS: ApiEndpoint[] = [
         summary: "Update a meal entry",
         scopes: ["write:daily", "read:daily"],
         conditionalRequiredScopes: PRODUCT_ID_CONDITIONAL_SCOPES,
+        parameters: [uuidPathParameter()],
+        hasNotFoundResponse: true,
         requestBody: "mealEntryPatch",
         hasConflictResponse: true,
       },
-      { method: "delete", summary: "Delete a meal entry", scopes: ["write:daily"] },
+      { method: "delete", summary: "Delete a meal entry", scopes: ["write:daily"], parameters: [uuidPathParameter()], hasNotFoundResponse: true },
     ],
   },
   {
     path: "/meal-entries/{id}/status",
-    methods: [{ method: "patch", summary: "Update a meal entry status", scopes: ["write:daily", "read:daily"], requestBody: "mealEntryStatus" }],
+    methods: [{ method: "patch", summary: "Update a meal entry status", scopes: ["write:daily", "read:daily"], parameters: [uuidPathParameter()], hasNotFoundResponse: true, requestBody: "mealEntryStatus" }],
   },
   {
     path: "/meal-groups",
@@ -98,8 +140,8 @@ export const API_V1_ENDPOINTS: ApiEndpoint[] = [
   {
     path: "/meal-groups/{id}",
     methods: [
-      { method: "patch", summary: "Update a meal group", scopes: ["write:daily"], requestBody: "mealGroup" },
-      { method: "delete", summary: "Delete a meal group", scopes: ["write:daily"] },
+      { method: "patch", summary: "Update a meal group", scopes: ["write:daily"], parameters: [uuidPathParameter()], hasNotFoundResponse: true, requestBody: "mealGroup" },
+      { method: "delete", summary: "Delete a meal group", scopes: ["write:daily"], parameters: [uuidPathParameter()], hasNotFoundResponse: true },
     ],
   },
   {
@@ -108,7 +150,7 @@ export const API_V1_ENDPOINTS: ApiEndpoint[] = [
   },
   {
     path: "/foods/search",
-    methods: [{ method: "get", summary: "Search food products", scopes: ["read:foods"] }],
+    methods: [{ method: "get", summary: "Search food products", scopes: ["read:foods"], parameters: [{ name: "q", in: "query", required: false }] }],
   },
   {
     path: "/foods",
@@ -116,30 +158,30 @@ export const API_V1_ENDPOINTS: ApiEndpoint[] = [
   },
   {
     path: "/foods/{id}",
-    methods: [{ method: "patch", summary: "Update a personal food product", scopes: ["write:foods", "read:foods"], requestBody: "foodPatch" }],
+    methods: [{ method: "patch", summary: "Update a personal food product", scopes: ["write:foods", "read:foods"], parameters: [uuidPathParameter()], hasNotFoundResponse: true, requestBody: "foodPatch" }],
   },
   {
     path: "/barcodes/{barcode}",
-    methods: [{ method: "get", summary: "Lookup a barcode food product", scopes: ["read:foods"] }],
+    methods: [{ method: "get", summary: "Lookup a barcode food product", scopes: ["read:foods"], parameters: [{ name: "barcode", in: "path", required: true }] }],
   },
   {
     path: "/templates",
     methods: [
       { method: "get", summary: "List meal templates", scopes: ["read:templates"] },
-      { method: "post", summary: "Create a meal template", scopes: ["write:templates"], successStatus: 201, requestBody: "templateMutation" },
+      { method: "post", summary: "Create a meal template", scopes: ["write:templates"], hasNotFoundResponse: true, successStatus: 201, requestBody: "templateMutation" },
     ],
   },
   {
     path: "/templates/{id}",
     methods: [
-      { method: "get", summary: "Read a meal template", scopes: ["read:templates"] },
-      { method: "patch", summary: "Update a meal template", scopes: ["write:templates"], requestBody: "templateMutation" },
-      { method: "delete", summary: "Delete a meal template", scopes: ["write:templates"] },
+      { method: "get", summary: "Read a meal template", scopes: ["read:templates"], parameters: [uuidPathParameter()], hasNotFoundResponse: true },
+      { method: "patch", summary: "Update a meal template", scopes: ["write:templates"], parameters: [uuidPathParameter()], hasNotFoundResponse: true, requestBody: "templateMutation" },
+      { method: "delete", summary: "Delete a meal template", scopes: ["write:templates"], parameters: [uuidPathParameter()], hasNotFoundResponse: true },
     ],
   },
   {
     path: "/templates/{id}/apply",
-    methods: [{ method: "post", summary: "Apply a template to a date", scopes: ["read:templates", "write:daily"], successStatus: 201, requestBody: "date", hasConflictResponse: true }],
+    methods: [{ method: "post", summary: "Apply a template to a date", scopes: ["read:templates", "write:daily"], parameters: [uuidPathParameter()], hasNotFoundResponse: true, successStatus: 201, requestBody: "date", hasConflictResponse: true }],
   },
   {
     path: "/templates/from-day",
@@ -149,24 +191,24 @@ export const API_V1_ENDPOINTS: ApiEndpoint[] = [
     path: "/recipes",
     methods: [
       { method: "get", summary: "List recipes", scopes: ["read:recipes"] },
-      { method: "post", summary: "Create a recipe", scopes: ["write:recipes"], successStatus: 201, requestBody: "recipeMutation" },
+      { method: "post", summary: "Create a recipe", scopes: ["write:recipes"], hasNotFoundResponse: true, successStatus: 201, requestBody: "recipeMutation" },
     ],
   },
   {
     path: "/recipes/{id}",
     methods: [
-      { method: "get", summary: "Read a recipe", scopes: ["read:recipes"] },
-      { method: "patch", summary: "Update a recipe", scopes: ["write:recipes"], requestBody: "recipeMutation" },
-      { method: "delete", summary: "Delete a recipe", scopes: ["write:recipes"] },
+      { method: "get", summary: "Read a recipe", scopes: ["read:recipes"], parameters: [uuidPathParameter()], hasNotFoundResponse: true },
+      { method: "patch", summary: "Update a recipe", scopes: ["write:recipes"], parameters: [uuidPathParameter()], hasNotFoundResponse: true, requestBody: "recipeMutation" },
+      { method: "delete", summary: "Delete a recipe", scopes: ["write:recipes"], parameters: [uuidPathParameter()], hasNotFoundResponse: true },
     ],
   },
   {
     path: "/recipes/{id}/log",
-    methods: [{ method: "post", summary: "Log a recipe portion", scopes: ["read:recipes", "write:daily"], successStatus: 201, requestBody: "recipeLog" }],
+    methods: [{ method: "post", summary: "Log a recipe portion", scopes: ["read:recipes", "write:daily"], parameters: [uuidPathParameter()], hasNotFoundResponse: true, successStatus: 201, requestBody: "recipeLog" }],
   },
   {
     path: "/weight",
-    methods: [{ method: "get", summary: "Read weight entries and progress", scopes: ["read:weight"] }],
+    methods: [{ method: "get", summary: "Read weight entries and progress", scopes: ["read:weight"], parameters: [utcReferenceDateParameter()] }],
   },
   {
     path: "/weight/entries",
@@ -178,8 +220,8 @@ export const API_V1_ENDPOINTS: ApiEndpoint[] = [
   {
     path: "/weight/entries/{id}",
     methods: [
-      { method: "patch", summary: "Update a weight entry", scopes: ["write:weight", "read:weight"], requestBody: "weightEntryPatch", hasConflictResponse: true },
-      { method: "delete", summary: "Delete a weight entry", scopes: ["write:weight"] },
+      { method: "patch", summary: "Update a weight entry", scopes: ["write:weight", "read:weight"], parameters: [uuidPathParameter()], hasNotFoundResponse: true, requestBody: "weightEntryPatch", hasConflictResponse: true },
+      { method: "delete", summary: "Delete a weight entry", scopes: ["write:weight"], parameters: [uuidPathParameter()], hasNotFoundResponse: true },
     ],
   },
   {
@@ -191,7 +233,7 @@ export const API_V1_ENDPOINTS: ApiEndpoint[] = [
   },
   {
     path: "/stats",
-    methods: [{ method: "get", summary: "Read stats", scopes: ["read:stats", "read:weight", "read:goals"] }],
+    methods: [{ method: "get", summary: "Read stats", scopes: ["read:stats", "read:weight", "read:goals"], parameters: [utcReferenceDateParameter()] }],
   },
   {
     path: "/summary",
@@ -200,12 +242,13 @@ export const API_V1_ENDPOINTS: ApiEndpoint[] = [
         method: "get",
         summary: "Read dashboard summary data",
         scopes: ["read:stats", "read:daily", "read:goals", "read:weight"],
+        parameters: [utcReferenceDateParameter()],
       },
     ],
   },
   {
     path: "/leaderboard",
-    methods: [{ method: "get", summary: "Read personal leaderboard stats", scopes: ["read:stats"] }],
+    methods: [{ method: "get", summary: "Read personal leaderboard stats", scopes: ["read:stats"], parameters: [utcReferenceDateParameter()] }],
   },
   {
     path: "/sync/healthkit",
@@ -214,6 +257,11 @@ export const API_V1_ENDPOINTS: ApiEndpoint[] = [
         method: "get",
         summary: "List eaten meal entries not yet synced to Apple Health",
         scopes: ["read:daily"],
+        parameters: [
+          { name: "days", in: "query", required: false, description: "How many days back to look." },
+          { name: "limit", in: "query", required: false, description: "Maximum entries returned in one page." },
+          { name: "tzOffsetMinutes", in: "query", required: false, description: "Client UTC offset in minutes (east positive); the day window and `sampleTime` clamp use this local day. Defaults to UTC when omitted." },
+        ],
       },
     ],
   },
