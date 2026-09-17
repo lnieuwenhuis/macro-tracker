@@ -260,6 +260,7 @@ export const API_V1_ENDPOINTS: ApiEndpoint[] = [
         parameters: [
           { name: "days", in: "query", required: false, description: "How many days back to look." },
           { name: "limit", in: "query", required: false, description: "Maximum entries returned in one page." },
+          { name: "tzOffsetMinutes", in: "query", required: false, description: "Client UTC offset in minutes (east positive); the day window and `sampleTime` clamp use this local day. Defaults to UTC when omitted." },
         ],
       },
     ],
