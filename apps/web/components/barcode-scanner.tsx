@@ -40,8 +40,14 @@ export function BarcodeScanner({
   const [failedBarcode, setFailedBarcode] = useState<string | null>(null);
   const mountedRef = useRef(true);
 
-  useEffect(() => () => {
-    mountedRef.current = false;
+  useEffect(() => {
+    // Set on setup as well as cleared on cleanup: React StrictMode runs
+    // setup → cleanup → setup in development, and without this the second
+    // setup would leave retryBarcodeLookup permanently short-circuiting.
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
 
   function failLookup() {
