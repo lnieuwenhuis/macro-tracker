@@ -454,7 +454,12 @@ export function BarcodeResult({
   }
 
   function updateEdited(field: keyof EditedValues, value: string) {
-    // Normalize comma decimals to dots so European keyboards work; harmless for the name field.
+    // Decimal-comma normalization is numeric-only; the product label keeps
+    // commas verbatim (UI-09: "Yoghurt, Grieks" must not become "Yoghurt. Grieks").
+    if (field === "name") {
+      setEdited((prev) => ({ ...prev, [field]: value }));
+      return;
+    }
     setEdited((prev) => ({ ...prev, [field]: value.replace(/,/g, ".") }));
   }
 

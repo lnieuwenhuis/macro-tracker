@@ -6,7 +6,7 @@ import { lookupBarcode, type OpenFoodFactsProduct } from "@/lib/openfoodfacts";
 import { ModalSurface } from "./modal-surface";
 import { OverlayPortal } from "./overlay-portal";
 
-type ScannerStatus = "loading" | "scanning" | "looking-up" | "error";
+type ScannerStatus = "loading" | "scanning" | "looking-up" | "error" | "auth-error";
 
 type BarcodeScannerProps = {
   onScan: (product: OpenFoodFactsProduct) => void;
@@ -16,6 +16,10 @@ type BarcodeScannerProps = {
 
 const LOOKUP_UNAVAILABLE_MESSAGE =
   "Could not reach the product database. Check your connection and try again.";
+
+// UI-07: expired sessions / onboarding gates recover via sign-in, not a connectivity retry.
+const LOOKUP_AUTH_MESSAGE =
+  "Your session expired or needs onboarding. Sign in again, then retry — your scanned code is kept.";
 
 export function BarcodeScanner({
   onScan,
@@ -32,6 +36,53 @@ export function BarcodeScanner({
 
   const [status, setStatus] = useState<ScannerStatus>("loading");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // Kept so an auth failure can retry the same code without rescanning.
+  const [failedBarcode, setFailedBarcode] = useState<string | null>(null);
+  const mountedRef = useRef(true);
+
+  useEffect(() => () => {
+    mountedRef.current = false;
+  }, []);
+
+  function failLookup() {
+    setFailedBarcode(null);
+    setStatus("error");
+    setErrorMessage(LOOKUP_UNAVAILABLE_MESSAGE);
+  }
+
+  function failAuth(barcode: string) {
+    setFailedBarcode(barcode);
+    setStatus("auth-error");
+    setErrorMessage(LOOKUP_AUTH_MESSAGE);
+  }
+
+  async function retryBarcodeLookup() {
+    const barcode = failedBarcode;
+    if (!barcode) {
+      return;
+    }
+    setStatus("looking-up");
+    setErrorMessage(null);
+    try {
+      const lookupResult = await lookupBarcode(barcode);
+      if (!mountedRef.current) {
+        return;
+      }
+      if (lookupResult.found) {
+        onScanRef.current(lookupResult.product);
+      } else if (lookupResult.reason === "auth") {
+        failAuth(barcode);
+      } else if (lookupResult.reason === "unavailable") {
+        failLookup();
+      } else {
+        onNotFoundRef.current(lookupResult.barcode);
+      }
+    } catch {
+      if (mountedRef.current) {
+        failLookup();
+      }
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -59,11 +110,6 @@ export function BarcodeScanner({
         controls.stop();
       }
       stopStream();
-    }
-
-    function failLookup() {
-      setStatus("error");
-      setErrorMessage(LOOKUP_UNAVAILABLE_MESSAGE);
     }
 
     async function startScanner() {
@@ -116,6 +162,9 @@ export function BarcodeScanner({
 
               if (lookupResult.found) {
                 onScanRef.current(lookupResult.product);
+              } else if (lookupResult.reason === "auth") {
+                // Session/onboarding failure: keep the code and offer sign-in recovery.
+                failAuth(barcode);
               } else if (lookupResult.reason === "unavailable") {
                 // Not a catalogue miss: the lookup failed, so don't send the user to re-enter a product that may exist.
                 failLookup();
@@ -229,6 +278,35 @@ export function BarcodeScanner({
                 >
                   Go back
                 </button>
+              </>
+            )}
+            {status === "auth-error" && (
+              <>
+                <p className="text-sm text-red-400">
+                  {errorMessage ?? LOOKUP_AUTH_MESSAGE}
+                </p>
+                <div className="flex items-center gap-2">
+                  <a
+                    href="/login"
+                    className="rounded-xl bg-white px-5 py-2.5 text-sm font-semibold text-black transition hover:bg-white/85"
+                  >
+                    Sign in
+                  </a>
+                  <button
+                    type="button"
+                    onClick={() => void retryBarcodeLookup()}
+                    className="rounded-xl bg-white/20 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-white/30"
+                  >
+                    Retry
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onClose}
+                    className="rounded-xl bg-white/20 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-white/30"
+                  >
+                    Go back
+                  </button>
+                </div>
               </>
             )}
           </div>

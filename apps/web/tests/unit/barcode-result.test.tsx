@@ -81,3 +81,55 @@ describe("BarcodeResult manual-entry form dismissal", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("BarcodeResult edited values (UI-09)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("preserves commas in the product name while normalizing numeric commas", () => {
+    const onAddToLog = vi.fn();
+    render(
+      <BarcodeResult
+        product={{
+          productId: null,
+          name: "Yoghurt",
+          brands: "",
+          barcode: "12345678",
+          proteinG: 10,
+          carbsG: 10,
+          fatG: 10,
+          caloriesKcal: 100,
+          servingSizeG: 100,
+          imageUrl: null,
+          source: "openfoodfacts",
+        }}
+        notFoundBarcode={null}
+        onAddToLog={onAddToLog}
+        onSaveAsPreset={vi.fn()}
+        onScanAnother={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /edit values/i }));
+
+    // The Name field is a plain label + input pair without htmlFor, so find it by value.
+    fireEvent.change(screen.getByDisplayValue("Yoghurt"), {
+      target: { value: "Yoghurt, Grieks" },
+    });
+    fireEvent.change(screen.getByLabelText("Protein in g"), {
+      target: { value: "1,5" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /add to log/i }));
+
+    expect(onAddToLog).toHaveBeenCalledTimes(1);
+    const submitted = onAddToLog.mock.calls[0]![0] as {
+      label: string;
+      proteinG: number;
+    };
+    expect(submitted.label).toBe("Yoghurt, Grieks");
+    expect(submitted.proteinG).toBe(1.5);
+  });
+});
