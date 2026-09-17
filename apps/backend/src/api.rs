@@ -17,11 +17,16 @@ const CORS_ALLOW_ORIGIN: &str = "*";
 const CORS_ALLOW_METHODS: &str = "GET, POST, PATCH, DELETE, OPTIONS";
 const CORS_ALLOW_HEADERS: &str = "Authorization, Content-Type";
 const CORS_MAX_AGE: &str = "86400";
+// API-01: browser clients can only read response headers that are explicitly exposed.
+const CORS_EXPOSE_HEADERS: &str = "x-result-limit, x-result-count, x-result-truncated, x-daily-totals-limit, x-daily-totals-count, x-daily-totals-truncated, x-smoothed-weight-trend-limit, x-smoothed-weight-trend-count, x-smoothed-weight-trend-truncated";
 const API_V1_OPENAPI_JSON: &[u8] = include_bytes!("generated/api-v1-openapi.json");
 /// Deadline for one `/api/v1` request; see `handle_api_v1` for why this is not a tower layer.
 pub const API_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 type ApiResult<T> = Result<T, ApiFailure>;
+
+/// API-01: a success response may carry truncation metadata in its headers.
+type ApiSuccess = (StatusCode, Value, HeaderMap);
 
 #[derive(Debug)]
 struct ApiFailure {
@@ -158,18 +163,20 @@ async fn handle_api_v1(
     };
 
     match result {
-        Ok((status, data)) => success_response(status, data),
+        Ok((status, data, headers)) => success_response(status, data, headers),
         Err(failure) => failure_response(failure),
     }
 }
 
 /// `json!` serializes an expression through `to_value(&expression)`. Build the envelope by
 /// moving the RPC value into its object so a large response tree is not duplicated first.
-fn success_response(status: StatusCode, data: Value) -> Response {
+fn success_response(status: StatusCode, data: Value, extra_headers: HeaderMap) -> Response {
     let mut body = Map::with_capacity(2);
     body.insert("ok".to_string(), Value::Bool(true));
     body.insert("data".to_string(), data);
-    raw_json_response(status, Value::Object(body), None)
+    let mut headers = cors_headers();
+    headers.extend(extra_headers);
+    (status, headers, Json(Value::Object(body))).into_response()
 }
 
 fn failure_response(failure: ApiFailure) -> Response {
@@ -292,7 +299,7 @@ async fn dispatch_api_request(
     path: &[String],
     body: Bytes,
     auth: ApiAuth,
-) -> ApiResult<(StatusCode, Value)> {
+) -> ApiResult<ApiSuccess> {
     let resource = path.first().map(String::as_str);
     let id = path.get(1).map(String::as_str);
     let action = path.get(2).map(String::as_str);
@@ -433,7 +440,32 @@ async fn dispatch_api_request(
             require_date(&date)?;
             created(user_rpc!(state, auth, "createTemplateFromDate", "input": input).await?)
         }
-        (Some("templates"), None, None, "GET") => ok(user_rpc!(state, auth, "getTemplates").await?),
+        (Some("templates"), None, None, "GET") => match page_request(uri)? {
+            None => {
+                let page = db::pagination::templates_page_json(
+                    &state.db,
+                    auth.user_id,
+                    db::pagination::LEGACY_COLLECTION_LIMIT,
+                    None,
+                )
+                .await
+                .map_err(api_failure_from_app_error)?;
+                let headers = collection_page_headers(&page);
+                ok_with_headers(page.items, headers)
+            }
+            Some(request) => {
+                let page = db::pagination::templates_page_json(
+                    &state.db,
+                    auth.user_id,
+                    request.limit,
+                    request.cursor.as_deref(),
+                )
+                .await
+                .map_err(api_failure_from_app_error)?;
+                let body = json!({ "items": page.items, "nextCursor": page.next_cursor });
+                ok_with_headers(body, collection_page_headers(&page))
+            }
+        },
         (Some("templates"), None, None, "POST") => {
             let input = require_object(read_json(&body)?)?;
             created(user_rpc!(state, auth, "createTemplate", "input": input).await?)
@@ -468,7 +500,32 @@ async fn dispatch_api_request(
                 .await?,
             "Template not found.",
         ),
-        (Some("recipes"), None, None, "GET") => ok(user_rpc!(state, auth, "getRecipes").await?),
+        (Some("recipes"), None, None, "GET") => match page_request(uri)? {
+            None => {
+                let page = db::pagination::recipes_page_json(
+                    &state.db,
+                    auth.user_id,
+                    db::pagination::LEGACY_COLLECTION_LIMIT,
+                    None,
+                )
+                .await
+                .map_err(api_failure_from_app_error)?;
+                let headers = collection_page_headers(&page);
+                ok_with_headers(page.items, headers)
+            }
+            Some(request) => {
+                let page = db::pagination::recipes_page_json(
+                    &state.db,
+                    auth.user_id,
+                    request.limit,
+                    request.cursor.as_deref(),
+                )
+                .await
+                .map_err(api_failure_from_app_error)?;
+                let body = json!({ "items": page.items, "nextCursor": page.next_cursor });
+                ok_with_headers(body, collection_page_headers(&page))
+            }
+        },
         (Some("recipes"), None, None, "POST") => {
             let input = require_object(read_json(&body)?)?;
             created(user_rpc!(state, auth, "createRecipe", "input": input).await?)
@@ -506,9 +563,32 @@ async fn dispatch_api_request(
             user_rpc!(state, auth, "getWeightPageData", "selectedDate": reference_date(uri)?)
                 .await?,
         ),
-        (Some("weight"), Some("entries"), None, "GET") => {
-            ok(user_rpc!(state, auth, "getWeightEntries").await?)
-        }
+        (Some("weight"), Some("entries"), None, "GET") => match page_request(uri)? {
+            None => {
+                let page = db::pagination::weight_entries_page_json(
+                    &state.db,
+                    auth.user_id,
+                    db::pagination::LEGACY_COLLECTION_LIMIT,
+                    None,
+                )
+                .await
+                .map_err(api_failure_from_app_error)?;
+                let headers = collection_page_headers(&page);
+                ok_with_headers(page.items, headers)
+            }
+            Some(request) => {
+                let page = db::pagination::weight_entries_page_json(
+                    &state.db,
+                    auth.user_id,
+                    request.limit,
+                    request.cursor.as_deref(),
+                )
+                .await
+                .map_err(api_failure_from_app_error)?;
+                let body = json!({ "items": page.items, "nextCursor": page.next_cursor });
+                ok_with_headers(body, collection_page_headers(&page))
+            }
+        },
         (Some("weight"), Some("entries"), None, "POST") => {
             let input = require_object(read_json(&body)?)?;
             let date = require_string_field(&input, "date", "Date must use YYYY-MM-DD.")?;
@@ -570,7 +650,12 @@ async fn dispatch_api_request(
             ok(json!({ "goalWeightKg": user_rpc!(state, auth, "getWeightGoal").await? }))
         }
         (Some("stats"), None, None, "GET") => {
-            ok(user_rpc!(state, auth, "getStatsPageData", "today": reference_date(uri)?).await?)
+            let stats =
+                db::pagination::stats_page_json(&state.db, auth.user_id, &reference_date(uri)?)
+                    .await
+                    .map_err(api_failure_from_app_error)?;
+            let headers = stats_page_headers(&stats);
+            ok_with_headers(stats.data, headers)
         }
         (Some("summary"), None, None, "GET") => {
             let date = reference_date(uri)?;
@@ -908,7 +993,7 @@ fn require_found(value: Value, message: impl Into<String>) -> ApiResult<Value> {
     Ok(value)
 }
 
-fn require_deleted(deleted: Value, message: impl Into<String>) -> ApiResult<(StatusCode, Value)> {
+fn require_deleted(deleted: Value, message: impl Into<String>) -> ApiResult<ApiSuccess> {
     if !deleted.as_bool().unwrap_or(false) {
         return Err(not_found(message));
     }
@@ -1206,12 +1291,109 @@ fn bounded_query_int(uri: &Uri, name: &str, default: i64, min: i64, max: i64) ->
     }
 }
 
-fn ok(data: Value) -> ApiResult<(StatusCode, Value)> {
-    Ok((StatusCode::OK, data))
+/// API-01: a request opts into cursor pagination by sending `limit` and/or
+/// `cursor`. Neither parameter alone changes any other response.
+#[derive(Debug)]
+struct PageRequest {
+    limit: i64,
+    cursor: Option<String>,
 }
 
-fn created(data: Value) -> ApiResult<(StatusCode, Value)> {
-    Ok((StatusCode::CREATED, data))
+fn page_request(uri: &Uri) -> ApiResult<Option<PageRequest>> {
+    let limit = query_param(uri, "limit");
+    let cursor = query_param(uri, "cursor");
+    if limit.is_none() && cursor.is_none() {
+        return Ok(None);
+    }
+    let limit = match limit {
+        None => db::pagination::DEFAULT_PAGE_LIMIT,
+        Some(raw) => raw
+            .parse::<i64>()
+            .ok()
+            .filter(|value| {
+                (db::pagination::MIN_PAGE_LIMIT..=db::pagination::MAX_PAGE_LIMIT).contains(value)
+            })
+            .ok_or_else(|| bad_request("limit must be an integer between 1 and 1000."))?,
+    };
+    let cursor = match cursor {
+        None => None,
+        Some(raw) if raw.trim().is_empty() => return Err(bad_request("cursor is invalid.")),
+        Some(raw) => Some(raw),
+    };
+    Ok(Some(PageRequest { limit, cursor }))
+}
+
+fn header_value(value: impl std::fmt::Display) -> header::HeaderValue {
+    value
+        .to_string()
+        .parse()
+        .expect("truncation metadata header values are valid")
+}
+
+/// Truncation is only announced when the cap actually bit, and then always with the count.
+fn collection_page_headers(page: &db::pagination::CollectionPage) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    if page.truncated {
+        headers.insert(
+            header::HeaderName::from_static("x-result-limit"),
+            header_value(page.limit),
+        );
+        headers.insert(
+            header::HeaderName::from_static("x-result-count"),
+            header_value(page.returned),
+        );
+        headers.insert(
+            header::HeaderName::from_static("x-result-truncated"),
+            header_value(true),
+        );
+    }
+    headers
+}
+
+fn stats_page_headers(stats: &db::pagination::StatsPage) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    if stats.daily_totals.truncated {
+        headers.insert(
+            header::HeaderName::from_static("x-daily-totals-limit"),
+            header_value(stats.daily_totals.limit),
+        );
+        headers.insert(
+            header::HeaderName::from_static("x-daily-totals-count"),
+            header_value(stats.daily_totals.count),
+        );
+        headers.insert(
+            header::HeaderName::from_static("x-daily-totals-truncated"),
+            header_value(true),
+        );
+    }
+    if stats.smoothed_weight_trend.truncated {
+        headers.insert(
+            header::HeaderName::from_static("x-smoothed-weight-trend-limit"),
+            header_value(stats.smoothed_weight_trend.limit),
+        );
+        headers.insert(
+            header::HeaderName::from_static("x-smoothed-weight-trend-count"),
+            header_value(stats.smoothed_weight_trend.count),
+        );
+        headers.insert(
+            header::HeaderName::from_static("x-smoothed-weight-trend-truncated"),
+            header_value(true),
+        );
+    }
+    headers
+}
+
+fn ok(data: Value) -> ApiResult<ApiSuccess> {
+    Ok((StatusCode::OK, data, HeaderMap::new()))
+}
+
+fn created(data: Value) -> ApiResult<ApiSuccess> {
+    Ok((StatusCode::CREATED, data, HeaderMap::new()))
+}
+
+/// API-01: success responses may carry truthful truncation metadata headers.
+fn ok_with_headers(data: Value, headers: HeaderMap) -> ApiResult<ApiSuccess> {
+    Ok((StatusCode::OK, data, headers))
 }
 
 fn bad_request(message: impl Into<String>) -> ApiFailure {
@@ -1344,6 +1526,10 @@ pub(crate) fn cors_headers() -> HeaderMap {
     headers.insert(
         header::ACCESS_CONTROL_MAX_AGE,
         CORS_MAX_AGE.parse().unwrap(),
+    );
+    headers.insert(
+        header::ACCESS_CONTROL_EXPOSE_HEADERS,
+        CORS_EXPOSE_HEADERS.parse().unwrap(),
     );
     headers
 }

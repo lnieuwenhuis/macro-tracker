@@ -3553,4 +3553,5 @@ fn shared_sql_fragments_render_unchanged() {
 mod api_tokens;
 mod data_integrity;
 mod gym;
+mod pagination;
 mod weight;

@@ -238,9 +238,9 @@ async fn zero_calorie_eaten_days_count_in_stats() {
     let stats = stats_page_data_json(&test_db.pool, user_id, "2026-06-20")
         .await
         .expect("stats should load");
-    assert_eq!(stats["totalDaysTracked"], json!(2));
-    assert_eq!(stats["totalProteinG"].as_f64(), Some(30.0));
-    assert_eq!(stats["totalCaloriesKcal"], json!(165));
+    assert_eq!(stats.data["totalDaysTracked"], json!(2));
+    assert_eq!(stats.data["totalProteinG"].as_f64(), Some(30.0));
+    assert_eq!(stats.data["totalCaloriesKcal"], json!(165));
 
     let daily = daily_summary_json(&test_db.pool, user_id, "2026-06-18")
         .await
