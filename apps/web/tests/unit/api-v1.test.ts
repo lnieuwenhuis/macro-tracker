@@ -1,3 +1,5 @@
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+
 import {
   completeUserOnboarding,
   createApiToken,
@@ -15,12 +17,39 @@ import { createTestDatabase } from "@macro-tracker/db/testing";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { handleApiV1Request } from "@/lib/api-v1";
+import { API_V1_BACKEND_TIMEOUT_MS, handleApiV1Request } from "@/lib/api-v1";
 import { API_V1_ENDPOINTS, formatApiV1ScopeSummary } from "@/lib/api-v1-openapi";
 import * as apiV1Route from "@/app/api/v1/[[...path]]/route";
 import { withBackendUrl } from "./helpers/test-env";
 
 describe("API v1 backend proxy failures", () => {
+
+  async function withStubBackend<T>(
+    handler: (request: IncomingMessage, response: ServerResponse) => void,
+    operation: (baseUrl: string) => Promise<T>,
+  ): Promise<T> {
+    const server = createServer(handler);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") {
+      throw new Error("stub backend failed to bind a TCP port");
+    }
+
+    try {
+      return await operation(`http://127.0.0.1:${address.port}`);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
+  }
+
+  it("keeps the proxy budget above the backend's 30 second dispatch deadline", () => {
+    // `API_REQUEST_TIMEOUT` in apps/backend/src/api.rs is 30s: the proxy must outlive it so the
+    // backend's own documented 504 envelope reaches the client first.
+    expect(API_V1_BACKEND_TIMEOUT_MS).toBeGreaterThan(30_000);
+  });
 
   it("returns upstream_error with CORS headers when backendFetch rejects", async () => {
     const response = await withBackendUrl("http://127.0.0.1:9", () =>
@@ -37,6 +66,93 @@ describe("API v1 backend proxy failures", () => {
         message: "Backend service is unavailable.",
       },
     });
+  });
+
+  it("classifies a proxy deadline expiry as 504 timeout without retrying the request", async () => {
+    let requestCount = 0;
+    const response = await withStubBackend(
+      () => {
+        requestCount += 1;
+        // Deliberately never respond; the proxy deadline must end the wait.
+      },
+      (baseUrl) =>
+        withBackendUrl(baseUrl, () =>
+          handleApiV1Request(new Request("http://localhost/api/v1/me"), ["me"], "GET", {
+            timeoutMs: 100,
+          }),
+        ),
+    );
+
+    expect(response.status).toBe(504);
+    expect(response.headers.get("access-control-allow-origin")).toBe("*");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    await expect(response.json()).resolves.toEqual({
+      ok: false,
+      error: {
+        code: "timeout",
+        message: "The request took too long to complete.",
+      },
+    });
+    expect(requestCount).toBe(1);
+  });
+
+  it("passes the backend's own 504 timeout envelope through unchanged", async () => {
+    const response = await withStubBackend(
+      (_request, stubResponse) => {
+        stubResponse.writeHead(504, { "content-type": "application/json" });
+        stubResponse.end(
+          JSON.stringify({
+            ok: false,
+            error: {
+              code: "timeout",
+              message: "The request took too long to complete.",
+            },
+          }),
+        );
+      },
+      (baseUrl) =>
+        withBackendUrl(baseUrl, () =>
+          handleApiV1Request(new Request("http://localhost/api/v1/stats"), ["stats"], "GET"),
+        ),
+    );
+
+    expect(response.status).toBe(504);
+    await expect(response.json()).resolves.toMatchObject({
+      ok: false,
+      error: { code: "timeout" },
+    });
+  });
+
+  it("forwards a failing mutation exactly once", async () => {
+    let requestCount = 0;
+    const response = await withStubBackend(
+      (stubRequest, stubResponse) => {
+        requestCount += 1;
+        stubRequest.resume();
+        stubResponse.writeHead(503, { "content-type": "application/json" });
+        stubResponse.end(
+          JSON.stringify({
+            ok: false,
+            error: { code: "upstream_error", message: "Backend service is unavailable." },
+          }),
+        );
+      },
+      (baseUrl) =>
+        withBackendUrl(baseUrl, () =>
+          handleApiV1Request(
+            new Request("http://localhost/api/v1/goals", {
+              method: "PATCH",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ proteinG: 150 }),
+            }),
+            ["goals"],
+            "PATCH",
+          ),
+        ),
+    );
+
+    expect(response.status).toBe(503);
+    expect(requestCount).toBe(1);
   });
 
   it("rejects dot-segment path traversal before proxying to the backend", async () => {
