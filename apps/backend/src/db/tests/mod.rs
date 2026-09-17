@@ -419,6 +419,12 @@ fn barcode_payload(barcode: &str) -> serde_json::Map<String, Value> {
     ])
 }
 
+/// DATA-15: writes now enforce the shared 4-20 byte lookup domain, so fixture barcodes must fit it.
+fn unique_test_barcode() -> String {
+    let uuid = Uuid::new_v4().simple().to_string();
+    format!("t{}", &uuid[..12])
+}
+
 struct TestDb {
     pool: PgPool,
     schema: String,
@@ -1090,8 +1096,8 @@ async fn compact_collection_payloads_preserve_rendered_values() {
                 "entryCount": 4,
                 "plannedCaloriesKcal": 500,
                 "meals": [
-                    { "label": "Greek yogurt", "quantity": 1.45, "unit": "g" },
-                    { "label": " greek   yogurt ", "quantity": 2.55, "unit": "g" }
+                    { "label": "Greek yogurt", "quantity": 1.45, "unit": "g", "servingMultiplier": 1 },
+                    { "label": " greek   yogurt ", "quantity": 2.55, "unit": "g", "servingMultiplier": 1 }
                 ]
             },
             {
@@ -1159,6 +1165,7 @@ async fn compact_collection_payloads_preserve_rendered_values() {
                     "label": meal["label"],
                     "quantity": meal["quantity"],
                     "unit": meal["unit"],
+                    "servingMultiplier": meal["servingMultiplier"],
                 }))
                 .collect::<Vec<_>>()
         ),
@@ -1995,7 +2002,7 @@ async fn rollback_fixture(pool: &PgPool, actor_role: &str) -> RollbackFixture {
     ensure_user_role(pool, actor_id, actor_role)
         .await
         .expect("actor role should be set");
-    let seed_barcode = format!("seed-{}", Uuid::new_v4());
+    let seed_barcode = unique_test_barcode();
     let product_id = insert_test_admin_barcode_product(
         pool,
         &seed_barcode,
@@ -2010,7 +2017,7 @@ async fn rollback_fixture(pool: &PgPool, actor_role: &str) -> RollbackFixture {
         target_id,
         product_id,
         seed_barcode,
-        barcode: format!("case-{}", Uuid::new_v4()),
+        barcode: unique_test_barcode(),
     }
 }
 
@@ -2172,7 +2179,7 @@ async fn an_injected_fault_rolls_back_the_whole_write() {
 async fn save_barcode_food_product_rpc_creates_created_revision() {
     let test_db = test_db().await;
     let user_id = insert_test_user(&test_db.pool).await;
-    let barcode = format!("test-{}", Uuid::new_v4());
+    let barcode = unique_test_barcode();
 
     let product = rpc_json(
         &test_db.pool,
@@ -2291,15 +2298,52 @@ fn required_date_rejects_special_dates_on_the_rpc_path() {
 fn optional_f64_rejects_non_finite_strings() {
     for raw in ["inf", "-inf", "NaN", "infinity"] {
         let payload = serde_json::Map::from_iter([("weightKg".to_string(), json!(raw))]);
-        assert_eq!(
-            optional_f64(&payload, "weightKg"),
-            None,
+        assert!(
+            optional_f64(&payload, "weightKg").is_err(),
             "expected {raw:?} to be rejected"
         );
     }
 
     let payload = serde_json::Map::from_iter([("weightKg".to_string(), json!("72.5"))]);
-    assert_eq!(optional_f64(&payload, "weightKg"), Some(72.5));
+    assert_eq!(
+        optional_f64(&payload, "weightKg").expect("numeric string should parse"),
+        Some(72.5)
+    );
+}
+
+/// DATA-14: present invalid values are rejected instead of silently becoming `None`/defaults.
+#[test]
+fn optional_f64_rejects_present_non_numbers() {
+    for raw in [
+        json!(true),
+        json!(false),
+        json!({}),
+        json!([]),
+        json!("abc"),
+    ] {
+        let payload = serde_json::Map::from_iter([("quantity".to_string(), raw.clone())]);
+        assert!(
+            optional_f64(&payload, "quantity").is_err(),
+            "expected {raw:?} to be rejected"
+        );
+    }
+
+    let payload = serde_json::Map::from_iter([
+        ("quantity".to_string(), Value::Null),
+        ("servingWeightG".to_string(), json!(2.5)),
+    ]);
+    assert_eq!(
+        optional_f64(&payload, "quantity").expect("null is omitted"),
+        None
+    );
+    assert_eq!(
+        optional_f64(&payload, "servingWeightG").expect("number parses"),
+        Some(2.5)
+    );
+    assert_eq!(
+        optional_f64(&payload, "missing").expect("missing is omitted"),
+        None
+    );
 }
 
 #[test]
@@ -2316,6 +2360,17 @@ fn goal_weight_is_bounded_after_rounding() {
     assert!(validate_goal_weight_kg(Some(1e30)).is_err());
     // Rounds up into overflow for numeric(5, 2), so it must be rejected.
     assert!(validate_goal_weight_kg(Some(999.995)).is_err());
+    // DATA-10: zero and values that round to zero are invalid goals; representable tiny ones stay valid.
+    assert!(validate_goal_weight_kg(Some(0.0)).is_err());
+    assert!(validate_goal_weight_kg(Some(0.004)).is_err());
+    assert_eq!(
+        validate_goal_weight_kg(Some(0.005)).expect("rounds to a representable goal"),
+        Some(0.01)
+    );
+    assert_eq!(
+        validate_goal_weight_kg(Some(0.01)).expect("minimum representable goal"),
+        Some(0.01)
+    );
 }
 
 #[test]
@@ -3496,5 +3551,7 @@ fn shared_sql_fragments_render_unchanged() {
 }
 
 mod api_tokens;
+mod data_integrity;
 mod gym;
+mod pagination;
 mod weight;

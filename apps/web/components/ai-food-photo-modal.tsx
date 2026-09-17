@@ -11,6 +11,7 @@ import {
   replaceFoodPhotoObjectUrl,
   setOptimizedFoodPhoto,
 } from "@/lib/image-optimization";
+import { isFrameworkControlFlowError } from "@/lib/framework-control-flow";
 
 import { CloseButton } from "./close-button";
 import { ModalSurface } from "./modal-surface";
@@ -25,13 +26,15 @@ type AiFoodPhotoModalProps = {
     fatG: number;
     caloriesKcal: number;
   }) => void;
+  // UI-01: resolves true only when the template actually persisted, so the
+  // dialog never shows Saved for a failed save.
   onSaveAsPreset: (input: {
     label: string;
     proteinG: number;
     carbsG: number;
     fatG: number;
     caloriesKcal: number;
-  }) => void;
+  }) => Promise<boolean>;
 };
 
 type ApiResponse =
@@ -59,6 +62,9 @@ export function AiFoodPhotoModal({
   const libraryInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const optimizationSequenceRef = useRef(0);
+  // UI-02: invalidates in-flight analysis when the selected image changes.
+  // The optimization guard alone lets an older photo's result land on a newer one.
+  const analysisSequenceRef = useRef(0);
   const previewUrlRef = useRef<string | null>(null);
   const [imageFile, setImageFile] = useState<Blob | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -67,11 +73,14 @@ export function AiFoodPhotoModal({
   const [estimate, setEstimate] = useState<FoodPhotoEstimate | null>(null);
   const [savedPreset, setSavedPreset] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [presetError, setPresetError] = useState<string | null>(null);
+  const [isSavingPreset, setIsSavingPreset] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isOptimizing, setIsOptimizing] = useState(false);
 
   useEffect(() => () => {
     optimizationSequenceRef.current += 1;
+    analysisSequenceRef.current += 1;
     if (previewUrlRef.current) {
       URL.revokeObjectURL(previewUrlRef.current);
     }
@@ -86,12 +95,17 @@ export function AiFoodPhotoModal({
   async function handleFileChange(file: File | null) {
     const sequence = optimizationSequenceRef.current + 1;
     optimizationSequenceRef.current = sequence;
+    // A new selection invalidates any pending analysis for the previous photo.
+    analysisSequenceRef.current += 1;
+    // The stale request must not keep the new photo stuck in an analyzing state.
+    setIsAnalyzing(false);
     replacePreview(null);
 
     setEstimate(null);
     setQuestion(null);
     setClarification("");
     setSavedPreset(false);
+    setPresetError(null);
     setError(null);
 
     if (!file) {
@@ -141,8 +155,10 @@ export function AiFoodPhotoModal({
       return;
     }
 
+    const requestSequence = analysisSequenceRef.current;
+    const requestImage = imageFile;
     const formData = new FormData();
-    setOptimizedFoodPhoto(formData, imageFile);
+    setOptimizedFoodPhoto(formData, requestImage);
     formData.set("clarification", clarification);
 
     setIsAnalyzing(true);
@@ -154,6 +170,12 @@ export function AiFoodPhotoModal({
         body: formData,
       });
       const payload = (await response.json()) as ApiResponse;
+
+      // The user may have replaced the photo while this request was in flight;
+      // never commit a stale result (estimate, question, or error) to the new photo.
+      if (analysisSequenceRef.current !== requestSequence) {
+        return;
+      }
 
       if (!payload.ok) {
         if (payload.aiResponse) {
@@ -175,15 +197,45 @@ export function AiFoodPhotoModal({
       setEstimate(payload.analysis.estimate);
       setSavedPreset(false);
     } catch {
+      if (analysisSequenceRef.current !== requestSequence) {
+        return;
+      }
       setError("Unable to analyze this photo right now.");
     } finally {
-      setIsAnalyzing(false);
+      if (analysisSequenceRef.current === requestSequence) {
+        setIsAnalyzing(false);
+      }
     }
   }
 
   function handleAddEstimate() {
     if (!estimate) return;
     onAddToLog(estimateToMacros(estimate));
+  }
+
+  // UI-01: only mark Saved after the async save actually succeeds; failures
+  // (resolved false or transport rejection) keep retry available.
+  async function handleSavePreset() {
+    if (!estimate || isSavingPreset || savedPreset) {
+      return;
+    }
+    setIsSavingPreset(true);
+    setPresetError(null);
+    try {
+      const saved = await onSaveAsPreset(estimateToMacros(estimate));
+      if (saved) {
+        setSavedPreset(true);
+      } else {
+        setPresetError("Unable to save template.");
+      }
+    } catch (error) {
+      if (isFrameworkControlFlowError(error)) {
+        throw error;
+      }
+      setPresetError("Unable to save template.");
+    } finally {
+      setIsSavingPreset(false);
+    }
   }
 
   return (
@@ -354,6 +406,12 @@ export function AiFoodPhotoModal({
               </p>
             ) : null}
 
+            {presetError ? (
+              <p className="rounded-lg bg-[color-mix(in_srgb,var(--color-danger)_12%,transparent)] px-3 py-2 text-xs text-[var(--color-danger)]">
+                {presetError}
+              </p>
+            ) : null}
+
             <div className="space-y-2">
               {!estimate ? (
                 <button
@@ -381,14 +439,11 @@ export function AiFoodPhotoModal({
                   </button>
                   <button
                     type="button"
-                    disabled={savedPreset}
-                    onClick={() => {
-                      onSaveAsPreset(estimateToMacros(estimate));
-                      setSavedPreset(true);
-                    }}
+                    disabled={savedPreset || isSavingPreset}
+                    onClick={() => void handleSavePreset()}
                     className="w-full rounded-xl border border-[var(--color-accent)] py-2.5 text-sm font-semibold text-[var(--color-accent)] transition hover:-translate-y-0.5 disabled:opacity-50"
                   >
-                    {savedPreset ? "Saved!" : "Save template"}
+                    {savedPreset ? "Saved!" : isSavingPreset ? "Saving…" : "Save template"}
                   </button>
                 </>
               )}

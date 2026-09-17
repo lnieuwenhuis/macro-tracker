@@ -3,6 +3,8 @@
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
 
+import { isFrameworkControlFlowError } from "@/lib/framework-control-flow";
+
 type ActionResult = {
   ok: boolean;
   error?: string;
@@ -30,7 +32,17 @@ export function useActionRunner() {
     }
 
     startTransition(async () => {
-      const result = await action();
+      let result: T;
+      try {
+        result = await action();
+      } catch (error) {
+        if (isFrameworkControlFlowError(error)) {
+          throw error;
+        }
+        setError(options.fallbackError);
+        options.onError?.();
+        return;
+      }
 
       if (!result.ok) {
         setError(result.error ?? options.fallbackError);

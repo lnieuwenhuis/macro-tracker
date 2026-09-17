@@ -586,9 +586,7 @@ export function RecipeBuilderShell({
             },
           ]);
         }}
-        onSaveAsPreset={(input) => {
-          handleSavePreset(input);
-        }}
+        onSaveAsPreset={(input) => handleSavePreset(input)}
       />
         </ModalChunkDismissProvider>
       )}
