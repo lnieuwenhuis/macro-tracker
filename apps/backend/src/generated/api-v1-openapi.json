@@ -3775,6 +3775,18 @@
               "default": 100
             },
             "description": "Maximum entries returned in one page."
+          },
+          {
+            "name": "tzOffsetMinutes",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": -840,
+              "maximum": 840,
+              "default": 0
+            },
+            "description": "Client UTC offset in minutes (east positive); the day window and `sampleTime` clamp use this local day. Defaults to UTC when omitted."
           }
         ],
         "responses": {

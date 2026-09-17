@@ -1,5 +1,6 @@
 use crate::{
     errors::{AppError, AppResult},
+    legacy_api::{MAX_BARCODE_LENGTH, MIN_BARCODE_LENGTH},
     shared::{round1, round2},
     types::{AppUser, MacroGoals, ShooProfile},
 };
@@ -338,6 +339,23 @@ fn map_unique_violation(message: &'static str) -> impl Fn(sqlx::Error) -> AppErr
     }
 }
 
+/// DATA-09: only the named expected collisions become actionable conflicts; other `23505`s keep
+/// the caller's previous handling so unrelated database failures are not disguised as conflicts.
+pub(super) fn map_named_unique_violation(
+    constraint: &'static str,
+    message: &'static str,
+) -> impl Fn(sqlx::Error) -> AppError {
+    move |error| {
+        if let sqlx::Error::Database(db_error) = &error
+            && db_error.code().as_deref() == Some("23505")
+            && db_error.constraint() == Some(constraint)
+        {
+            return AppError::Conflict(message.to_string());
+        }
+        AppError::Sqlx(error)
+    }
+}
+
 /// A `users_email_key` duplicate is the pre-check's conflict reached concurrently, so it answers with the same 409.
 fn map_user_email_conflict(error: sqlx::Error) -> AppError {
     if let sqlx::Error::Database(db_error) = &error
@@ -511,14 +529,42 @@ fn validate_macro_goals(goals: &MacroGoals) -> AppResult<()> {
     Ok(())
 }
 
+/// DATA-10: null/omitted clears the goal, but a present value must be numeric (or a finite
+/// numeric string) so a malformed payload cannot silently clear an existing goal.
+fn optional_goal_weight_arg(value: Option<&Value>) -> AppResult<Option<f64>> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(number)) => number
+            .as_f64()
+            .filter(|value| value.is_finite())
+            .map(Some)
+            .ok_or_else(|| {
+                AppError::BadRequest("goalWeightKg must be a finite number.".to_string())
+            }),
+        Some(Value::String(text)) => text
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .map(Some)
+            .ok_or_else(|| {
+                AppError::BadRequest("goalWeightKg must be a finite number.".to_string())
+            }),
+        Some(_) => Err(AppError::BadRequest(
+            "goalWeightKg must be a finite number or null.".to_string(),
+        )),
+    }
+}
+
+/// Rounds before the strict positivity check: `numeric(5, 2)` would otherwise store a tiny
+/// positive input as `0.00`, an invalid goal that the UI then cannot clear by emptiness.
 pub(crate) fn validate_goal_weight_kg(value: Option<f64>) -> AppResult<Option<f64>> {
     match value {
         None => Ok(None),
         Some(value) => {
             let rounded = round2(value);
-            if !rounded.is_finite() || !(0.0..1000.0).contains(&rounded) {
+            if !rounded.is_finite() || rounded <= 0.0 || rounded >= 1000.0 {
                 return Err(AppError::BadRequest(
-                    "goalWeightKg must be between 0 and 1000 kg.".to_string(),
+                    "goalWeightKg must be a positive number below 1000 kg.".to_string(),
                 ));
             }
             Ok(Some(rounded))
@@ -1015,7 +1061,13 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
             .bind(group_id)
             .bind(label)
             .fetch_optional(pool)
-            .await?;
+            .await
+            // DATA-09: renaming a default group onto another default's label is a conflict the
+            // user can resolve, not an internal error.
+            .map_err(map_named_unique_violation(
+                "meal_groups_active_default_label_key",
+                "A default meal group already uses that name.",
+            ))?;
             Ok(row
                 .ok_or_else(|| AppError::NotFound("Meal group not found.".to_string()))?
                 .try_get("data")?)
@@ -1312,7 +1364,8 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
         }
         "saveWeightGoal" => {
             let user_id = uuid_arg(&args, "userId")?;
-            let goal = validate_goal_weight_kg(args.get("goalWeightKg").and_then(Value::as_f64))?;
+            let goal = optional_goal_weight_arg(args.get("goalWeightKg"))?;
+            let goal = validate_goal_weight_kg(goal)?;
             sqlx::query("UPDATE users SET goal_weight_kg = $2 WHERE id = $1")
                 .bind(user_id)
                 .bind(goal)
@@ -1572,7 +1625,19 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
                 .and_then(Value::as_i64)
                 .unwrap_or(100)
                 .clamp(1, 200) as i32;
-            healthkit::healthkit_sync_entries_json(pool, user_id, days, limit).await
+            let timezone_offset_minutes = args
+                .get("timezoneOffsetMinutes")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+                .clamp(-840, 840) as i32;
+            healthkit::healthkit_sync_entries_json(
+                pool,
+                user_id,
+                days,
+                limit,
+                timezone_offset_minutes,
+            )
+            .await
         }
         "ackHealthkitSyncEntries" => {
             let user_id = uuid_arg(&args, "userId")?;
@@ -1982,6 +2047,7 @@ async fn planned_shopping_summaries_json(
               jsonb_build_object(
                 'label', me.label,
                 'quantity', round(me.quantity::numeric, 2)::float8,
+                'servingMultiplier', round(me.serving_multiplier::numeric, 2)::float8,
                 'unit', me.unit
               )
               ORDER BY coalesce(mg.sort_order, 999), me.sort_order, me.created_at, me.id
@@ -2018,7 +2084,24 @@ async fn recipes_json_filtered(
     recipe_id: Option<Uuid>,
     limit: i64,
 ) -> AppResult<Value> {
-    let row = sqlx::query(
+    recipes_json_filtered_with_projection(pool, user_id, recipe_id, limit, false).await
+}
+
+/// API-05: the admin user detail promises `updatedAt`, so only that view asks for the extra
+/// column instead of widening every public-facing recipe payload.
+async fn recipes_json_filtered_with_projection(
+    pool: &PgPool,
+    user_id: Uuid,
+    recipe_id: Option<Uuid>,
+    limit: i64,
+    include_updated_at: bool,
+) -> AppResult<Value> {
+    let updated_at_field = if include_updated_at {
+        ",\n            'updatedAt', r.updated_at"
+    } else {
+        ""
+    };
+    let sql = format!(
         r#"
         WITH visible_recipes AS (
           SELECT id, user_id, label, portions, total_cooked_weight_g, created_at, updated_at
@@ -2075,19 +2158,20 @@ async fn recipes_json_filtered(
               'carbsG', round((coalesce(ingredient_data.carbs_g, 0) / greatest(r.portions, 1))::numeric, 1)::float8,
               'fatG', round((coalesce(ingredient_data.fat_g, 0) / greatest(r.portions, 1))::numeric, 1)::float8,
               'caloriesKcal', round(coalesce(ingredient_data.calories_kcal, 0)::numeric / greatest(r.portions, 1))::int
-            )
+            ){updated_at_field}
           )
           ORDER BY r.updated_at DESC, r.created_at DESC
         ), '[]'::jsonb) AS data
         FROM visible_recipes r
         LEFT JOIN ingredient_data ON ingredient_data.recipe_id = r.id
         "#,
-    )
-    .bind(user_id)
-    .bind(recipe_id)
-    .bind(limit)
-    .fetch_one(pool)
-    .await?;
+    );
+    let row = sqlx::query(&sql)
+        .bind(user_id)
+        .bind(recipe_id)
+        .bind(limit)
+        .fetch_one(pool)
+        .await?;
     Ok(row.try_get("data")?)
 }
 
@@ -2198,11 +2282,48 @@ fn escape_like_pattern(value: &str) -> String {
         .replace('_', "\\_")
 }
 
-async fn assert_meal_group_access(
-    pool: &PgPool,
+fn meal_group_not_found() -> AppError {
+    AppError::NotFound("Meal group not found.".to_string())
+}
+
+/// DATA-07: creates validate and lock the group (`FOR SHARE`) so a concurrent soft-delete
+/// cannot commit between validation and insert; deletes take the same row lock first.
+async fn lock_active_meal_group<'e, E>(
+    executor: E,
     user_id: Uuid,
     group_id: Option<Uuid>,
-) -> AppResult<()> {
+) -> AppResult<()>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    let Some(group_id) = group_id else {
+        return Ok(());
+    };
+    let locked = sqlx::query(
+        "SELECT id FROM meal_groups WHERE id = $2 AND user_id = $1 AND deleted_at IS NULL FOR SHARE",
+    )
+    .bind(user_id)
+    .bind(group_id)
+    .fetch_optional(executor)
+    .await?
+    .is_some();
+    if locked {
+        Ok(())
+    } else {
+        Err(meal_group_not_found())
+    }
+}
+
+/// Unlocked existence check for updates that already hold the meal row lock; the row write
+/// serializes against `deleteMealGroup`'s unassignment, which re-checks the row after us.
+async fn assert_meal_group_access<'e, E>(
+    executor: E,
+    user_id: Uuid,
+    group_id: Option<Uuid>,
+) -> AppResult<()>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     let Some(group_id) = group_id else {
         return Ok(());
     };
@@ -2211,14 +2332,39 @@ async fn assert_meal_group_access(
     )
     .bind(user_id)
     .bind(group_id)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?
     .is_some();
     if exists {
         Ok(())
     } else {
-        Err(AppError::NotFound("Meal group not found.".to_string()))
+        Err(meal_group_not_found())
     }
+}
+
+/// DATA-13: append allocation stays representable for an existing extreme `sort_order`
+/// (e.g. legacy `i32::MAX`) instead of overflowing the `integer` column. `additional`
+/// reserves slots for a multi-item append such as a template application.
+async fn allocate_append_sort_order<'e, E>(
+    executor: E,
+    user_id: Uuid,
+    date: &str,
+    additional: usize,
+) -> AppResult<i32>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    let ceiling = (i32::MAX as i64) - (additional as i64).max(1);
+    let row = sqlx::query(
+        "SELECT LEAST(coalesce(max(sort_order), -1)::bigint + 1, $3::bigint) AS sort_order FROM meal_entries WHERE user_id = $1 AND entry_date = $2::date",
+    )
+    .bind(user_id)
+    .bind(date)
+    .bind(ceiling)
+    .fetch_one(executor)
+    .await?;
+    let next: i64 = row.try_get("sort_order")?;
+    Ok(next.clamp(0, ceiling) as i32)
 }
 
 async fn food_product_json_by_id<'e, E>(
@@ -2252,11 +2398,14 @@ where
         .map_err(Into::into)
 }
 
+/// DATA-05: quantity and multiplier are rounded to the `numeric(8, 2)` persistence precision
+/// before positivity checks, nutrition maths and defaults, so a value that stores as `0.00`
+/// is rejected instead of being silently persisted.
 fn nutrition_for_product(
     product: &Value,
     input: &serde_json::Map<String, Value>,
     recalculate_product_macros: bool,
-) -> (String, f64, String, f64, f64, f64, f64, i32) {
+) -> AppResult<(String, f64, String, f64, f64, f64, f64, i32)> {
     let product_name = product
         .get("name")
         .and_then(Value::as_str)
@@ -2268,20 +2417,44 @@ fn nutrition_for_product(
     } else {
         format!("{product_name} ({brand})")
     };
-    let quantity = optional_f64(input, "quantity")
-        .or_else(|| {
-            product
-                .get("defaultServingQuantity")
-                .and_then(Value::as_f64)
-        })
-        .unwrap_or(1.0);
+    // DATA-14: a present-but-invalid number is rejected by `optional_f64`; only an omitted or
+    // null value falls back to the product's stored default.
+    let supplied_quantity = optional_f64(input, "quantity")?;
+    let quantity = match supplied_quantity {
+        Some(value) => {
+            let rounded = round2(value);
+            if rounded <= 0.0 {
+                return Err(AppError::BadRequest(
+                    "Quantity must be at least 0.01.".to_string(),
+                ));
+            }
+            rounded
+        }
+        None => product
+            .get("defaultServingQuantity")
+            .and_then(Value::as_f64)
+            .map(round2)
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .unwrap_or(1.0),
+    };
     let unit = input
         .get("unit")
         .and_then(Value::as_str)
         .or_else(|| product.get("defaultServingUnit").and_then(Value::as_str))
         .unwrap_or("serving")
         .to_string();
-    let serving_multiplier = optional_f64(input, "servingMultiplier").unwrap_or(1.0);
+    let serving_multiplier = match optional_f64(input, "servingMultiplier")? {
+        Some(value) => {
+            let rounded = round2(value);
+            if rounded <= 0.0 {
+                return Err(AppError::BadRequest(
+                    "Serving multiplier must be at least 0.01.".to_string(),
+                ));
+            }
+            rounded
+        }
+        None => 1.0,
+    };
     let scope = product
         .get("scope")
         .and_then(Value::as_str)
@@ -2293,37 +2466,27 @@ fn nutrition_for_product(
     let controls_macros = recalculate_product_macros && scope != "legacy" && source != "legacy";
 
     if !controls_macros {
-        return (
+        return Ok((
             label,
             quantity,
             unit,
             serving_multiplier,
-            required_f64_lossy(input, "proteinG"),
-            required_f64_lossy(input, "carbsG"),
-            required_f64_lossy(input, "fatG"),
+            required_f64_lossy(input, "proteinG")?,
+            required_f64_lossy(input, "carbsG")?,
+            required_f64_lossy(input, "fatG")?,
             required_i32_lossy(input, "caloriesKcal"),
-        );
+        ));
     }
 
-    let safe_quantity = if quantity.is_finite() && quantity > 0.0 {
-        quantity
-    } else {
-        1.0
-    };
-    let safe_multiplier = if serving_multiplier.is_finite() && serving_multiplier > 0.0 {
-        serving_multiplier
-    } else {
-        1.0
-    };
     let factor = if unit == "g" || unit == "ml" {
-        safe_quantity / 100.0
+        quantity / 100.0
     } else {
         let base_amount = product
             .get("servingWeightG")
             .and_then(Value::as_f64)
             .or_else(|| product.get("servingVolumeMl").and_then(Value::as_f64))
             .unwrap_or(100.0);
-        safe_quantity * safe_multiplier * base_amount / 100.0
+        quantity * serving_multiplier * base_amount / 100.0
     };
     let protein = round1(
         product
@@ -2353,7 +2516,7 @@ fn nutrition_for_product(
         * factor)
         .round() as i32;
 
-    (
+    Ok((
         label,
         quantity,
         unit,
@@ -2362,7 +2525,7 @@ fn nutrition_for_product(
         carbs,
         fat,
         calories,
-    )
+    ))
 }
 
 /// A meal entry after validation, ready to be written.
@@ -2409,24 +2572,6 @@ struct MealInputContext {
     products: HashMap<Uuid, Value>,
 }
 
-async fn normalize_meal_input(
-    pool: &PgPool,
-    user_id: Uuid,
-    input: &serde_json::Map<String, Value>,
-    default_sort_order: i32,
-    recalculate_product_macros: bool,
-) -> AppResult<NormalizedMealEntry> {
-    normalize_meal_input_with_context(
-        pool,
-        user_id,
-        input,
-        default_sort_order,
-        recalculate_product_macros,
-        &MealInputContext::default(),
-    )
-    .await
-}
-
 async fn normalize_meal_input_with_context(
     pool: &PgPool,
     user_id: Uuid,
@@ -2455,10 +2600,22 @@ async fn normalize_meal_input_with_context(
     if !matches!(status.as_str(), "planned" | "eaten" | "skipped") {
         return Err(AppError::BadRequest("Meal status is invalid.".to_string()));
     }
-    let client_mutation_id = input
-        .get("clientMutationId")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    let client_mutation_id = match input.get("clientMutationId") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => {
+            if value.chars().count() > MAX_CLIENT_MUTATION_ID_LENGTH {
+                return Err(AppError::BadRequest(format!(
+                    "clientMutationId must be at most {MAX_CLIENT_MUTATION_ID_LENGTH} characters."
+                )));
+            }
+            Some(value.clone())
+        }
+        Some(_) => {
+            return Err(AppError::BadRequest(
+                "clientMutationId must be a string.".to_string(),
+            ));
+        }
+    };
 
     if let Some(product_id) = product_id {
         // Prefetched products are immutable request context. Borrow them instead of cloning
@@ -2474,7 +2631,7 @@ async fn normalize_meal_input_with_context(
             }
         };
         let (product_label, quantity, unit, serving_multiplier, protein, carbs, fat, calories) =
-            nutrition_for_product(&product, input, recalculate_product_macros);
+            nutrition_for_product(&product, input, recalculate_product_macros)?;
         let label = input
             .get("label")
             .and_then(Value::as_str)
@@ -2535,92 +2692,140 @@ async fn create_meal_entry_json(
     input: &serde_json::Map<String, Value>,
 ) -> AppResult<Value> {
     let date = required_date(input, "date")?;
-    let row = sqlx::query(
-        "SELECT coalesce(max(sort_order), -1) + 1 AS sort_order FROM meal_entries WHERE user_id = $1 AND entry_date = $2::date",
-    )
-    .bind(user_id)
-    .bind(&date)
-    .fetch_one(pool)
-    .await?;
-    let next_sort_order: i32 = row.try_get("sort_order")?;
-    let entry = normalize_meal_input(pool, user_id, input, next_sort_order, true).await?;
+    let mut tx = pool.begin().await?;
+    let next_sort_order = allocate_append_sort_order(&mut *tx, user_id, &date, 1).await?;
+    // DATA-07: hold the group until commit so a delete cannot unassign a row we are inserting.
+    // Everything `normalize_meal_input` needs is resolved on this connection or prefetched into
+    // the context, so the transaction never borrows a second pooled connection.
+    let mut context = MealInputContext::default();
+    if let Some(group_id) = optional_uuid(input, "mealGroupId")? {
+        lock_active_meal_group(&mut *tx, user_id, Some(group_id)).await?;
+        context.trusted_meal_group_ids.insert(group_id);
+    }
+    if let Some(product_id) = optional_uuid(input, "productId")? {
+        let product = food_product_json_by_id(&mut *tx, user_id, product_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Food product not found.".to_string()))?;
+        context.products.insert(product_id, product);
+    }
+    let entry =
+        normalize_meal_input_with_context(pool, user_id, input, next_sort_order, true, &context)
+            .await?;
 
     let id = Uuid::new_v4();
     let inserted = entry
         .bind_columns(sqlx::query(sql::INSERT_MEAL_ENTRY).bind(id).bind(user_id))
-        .fetch_optional(pool)
+        .fetch_optional(&mut *tx)
         .await?;
 
-    if let Some(row) = inserted {
-        let created_id: Uuid = row.try_get("id")?;
-        return meal_entry_json(pool, user_id, created_id).await;
-    }
-
-    if let Some(client_mutation_id) = entry.client_mutation_id {
+    let created_id = if let Some(row) = inserted {
+        row.try_get("id")?
+    } else if let Some(client_mutation_id) = entry.client_mutation_id {
         let existing = sqlx::query(
             "SELECT id FROM meal_entries WHERE user_id = $1 AND client_mutation_id = $2",
         )
         .bind(user_id)
         .bind(client_mutation_id)
-        .fetch_one(pool)
+        .fetch_one(&mut *tx)
         .await?;
-        return meal_entry_json(pool, user_id, existing.try_get("id")?).await;
-    }
-
-    Err(AppError::Conflict(
-        "Unable to create meal entry.".to_string(),
-    ))
+        existing.try_get("id")?
+    } else {
+        return Err(AppError::Conflict(
+            "Unable to create meal entry.".to_string(),
+        ));
+    };
+    let created = meal_entry_json(&mut *tx, user_id, created_id).await?;
+    tx.commit().await?;
+    Ok(created)
 }
 
+/// DATA-01: the caller's patch keys are merged onto the row **under its row lock**, so a
+/// concurrent update cannot be overwritten by a stale full record and only explicitly
+/// supplied fields change. DATA-02: a product-backed row recalculates from the product only
+/// when a nutrition input (product, quantity, unit or multiplier) actually changed.
 async fn update_meal_entry_json(
     pool: &PgPool,
     user_id: Uuid,
     entry_id: Uuid,
     input: &serde_json::Map<String, Value>,
 ) -> AppResult<Value> {
-    let existing = sqlx::query(
-        r#"
-        SELECT jsonb_build_object(
-          'date', entry_date,
-          'mealGroupId', meal_group_id,
-          'status', status,
-          'productId', product_id,
-          'label', label,
-          'sortOrder', sort_order,
-          'quantity', quantity::float8,
-          'unit', unit,
-          'servingMultiplier', serving_multiplier::float8,
-          'proteinG', protein_g::float8,
-          'carbsG', carbs_g::float8,
-          'fatG', fat_g::float8,
-          'caloriesKcal', calories_kcal,
-          'clientMutationId', client_mutation_id
-        ) AS data
-        FROM meal_entries
-        WHERE user_id = $1 AND id = $2
-        "#,
-    )
-    .bind(user_id)
-    .bind(entry_id)
-    .fetch_optional(pool)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Meal entry not found.".to_string()))?;
-    let recalculate_product_macros = input
+    let mut tx = pool.begin().await?;
+    // Unlocked pre-read only to learn which group ids to lock first (DATA-07 lock order:
+    // group rows before the meal row, matching deleteMealGroup's soft-delete-then-unassign).
+    let pre_read = fetch_stored_meal_json(&mut *tx, user_id, entry_id, false)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Meal entry not found.".to_string()))?;
+    let mut candidate_groups: Vec<Uuid> = Vec::with_capacity(2);
+    if let Some(group_id) = pre_read.get("mealGroupId").and_then(Value::as_str) {
+        if let Ok(group_id) = Uuid::parse_str(group_id) {
+            candidate_groups.push(group_id);
+        }
+    }
+    if let Some(group_id) = optional_uuid(input, "mealGroupId")? {
+        candidate_groups.push(group_id);
+    }
+    candidate_groups.sort();
+    candidate_groups.dedup();
+    for group_id in &candidate_groups {
+        lock_active_meal_group(&mut *tx, user_id, Some(*group_id)).await?;
+    }
+
+    let stored = fetch_stored_meal_json(&mut *tx, user_id, entry_id, true)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Meal entry not found.".to_string()))?;
+    let stored_obj = stored
+        .as_object()
+        .ok_or_else(|| AppError::BadRequest("Invalid meal entry.".to_string()))?;
+    let mut merged = stored_obj.clone();
+    for (key, value) in input {
+        if key.starts_with("__") {
+            continue;
+        }
+        merged.insert(key.clone(), value.clone());
+    }
+
+    // A concurrent writer may have moved the row to a group discovered after our pre-read;
+    // that group was validated under its writer's own lock, and a delete's unassignment
+    // re-checks this row after our commit, so an unlocked check keeps the invariant.
+    let final_group = optional_uuid(&merged, "mealGroupId")?;
+    if let Some(group_id) = final_group
+        && !candidate_groups.contains(&group_id)
+    {
+        assert_meal_group_access(&mut *tx, user_id, Some(group_id)).await?;
+    }
+
+    let requested_recalculation = input
         .get("__recalculateProductMacros")
         .and_then(Value::as_bool)
         .unwrap_or(true);
-    let mut merged = existing.try_get::<Value, _>("data")?;
-    let merged_obj = merged
-        .as_object_mut()
-        .ok_or_else(|| AppError::BadRequest("Invalid meal entry.".to_string()))?;
-    for (key, value) in input {
-        if key == "__recalculateProductMacros" {
-            continue;
-        }
-        merged_obj.insert(key.clone(), value.clone());
+    let recalculate_product_macros =
+        requested_recalculation && product_recalculation_needed(stored_obj, &merged)?;
+    let default_sort_order = stored_obj
+        .get("sortOrder")
+        .and_then(Value::as_i64)
+        .and_then(|value| i32::try_from(value).ok())
+        .unwrap_or(0);
+    // Resolve everything `normalize_meal_input` needs on this connection so the transaction
+    // never borrows a second pooled connection.
+    let mut context = MealInputContext::default();
+    if let Some(group_id) = final_group {
+        context.trusted_meal_group_ids.insert(group_id);
     }
-    let entry =
-        normalize_meal_input(pool, user_id, merged_obj, 0, recalculate_product_macros).await?;
+    if let Some(product_id) = optional_uuid(&merged, "productId")? {
+        let product = food_product_json_by_id(&mut *tx, user_id, product_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Food product not found.".to_string()))?;
+        context.products.insert(product_id, product);
+    }
+    let entry = normalize_meal_input_with_context(
+        pool,
+        user_id,
+        &merged,
+        default_sort_order,
+        recalculate_product_macros,
+        &context,
+    )
+    .await?;
 
     let update = sqlx::query(
         r#"
@@ -2648,17 +2853,106 @@ async fn update_meal_entry_json(
     .bind(entry_id);
     entry
         .bind_columns(update)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         // LOW-B1: a duplicate clientMutationId is a client-visible collision, not a fault.
         .map_err(map_unique_violation(
             "That clientMutationId is already used by another meal entry.",
         ))?;
 
-    meal_entry_json(pool, user_id, entry_id).await
+    let updated = meal_entry_json(&mut *tx, user_id, entry_id).await?;
+    tx.commit().await?;
+    Ok(updated)
 }
 
-async fn meal_entry_json(pool: &PgPool, user_id: Uuid, entry_id: Uuid) -> AppResult<Value> {
+/// The stored row, or `None` when it does not belong to the caller; the caller decides the error.
+/// `for_update` selects the locked variant used as the authoritative merge base (DATA-01).
+async fn fetch_stored_meal_json<'e, E>(
+    executor: E,
+    user_id: Uuid,
+    entry_id: Uuid,
+    for_update: bool,
+) -> AppResult<Option<Value>>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
+    let lock = if for_update { " FOR UPDATE" } else { "" };
+    let sql = format!(
+        r#"
+        SELECT jsonb_build_object(
+          'date', entry_date,
+          'mealGroupId', meal_group_id,
+          'status', status,
+          'productId', product_id,
+          'label', label,
+          'sortOrder', sort_order,
+          'quantity', quantity::float8,
+          'unit', unit,
+          'servingMultiplier', serving_multiplier::float8,
+          'proteinG', protein_g::float8,
+          'carbsG', carbs_g::float8,
+          'fatG', fat_g::float8,
+          'caloriesKcal', calories_kcal,
+          'clientMutationId', client_mutation_id
+        ) AS data
+        FROM meal_entries
+        WHERE user_id = $1 AND id = $2{lock}
+        "#,
+    );
+    let row = sqlx::query(&sql)
+        .bind(user_id)
+        .bind(entry_id)
+        .fetch_optional(executor)
+        .await?;
+    row.map(|row| row.try_get("data"))
+        .transpose()
+        .map_err(Into::into)
+}
+
+/// Whether a product-backed row must be recalculated from the product (DATA-01/DATA-02): a
+/// nutrition input or the product changed, or the caller supplied macro values that differ from
+/// the stored snapshot, so a client cannot pin stale macros on a linked row. A full draft that
+/// merely echoes the stored values (the web edit path) preserves the snapshot.
+fn product_recalculation_needed(
+    stored: &serde_json::Map<String, Value>,
+    merged: &serde_json::Map<String, Value>,
+) -> AppResult<bool> {
+    let stored_product = stored.get("productId").and_then(Value::as_str);
+    let merged_product = merged.get("productId").and_then(Value::as_str);
+    if stored_product != merged_product {
+        return Ok(true);
+    }
+    if stored_product.is_none() {
+        return Ok(false);
+    }
+    for key in ["quantity", "servingMultiplier"] {
+        let stored_value = optional_f64(stored, key)?.map(round2);
+        let merged_value = optional_f64(merged, key)?.map(round2);
+        if stored_value != merged_value {
+            return Ok(true);
+        }
+    }
+    let stored_unit = stored.get("unit").and_then(Value::as_str);
+    let merged_unit = merged.get("unit").and_then(Value::as_str);
+    if stored_unit != merged_unit {
+        return Ok(true);
+    }
+    for key in ["proteinG", "carbsG", "fatG"] {
+        let stored_value = optional_f64(stored, key)?.map(round1);
+        let merged_value = optional_f64(merged, key)?.map(round1);
+        if stored_value != merged_value {
+            return Ok(true);
+        }
+    }
+    let stored_calories = optional_f64(stored, "caloriesKcal")?.map(|value| value.round() as i64);
+    let merged_calories = optional_f64(merged, "caloriesKcal")?.map(|value| value.round() as i64);
+    Ok(stored_calories != merged_calories)
+}
+
+async fn meal_entry_json<'e, E>(executor: E, user_id: Uuid, entry_id: Uuid) -> AppResult<Value>
+where
+    E: sqlx::Executor<'e, Database = Postgres>,
+{
     let sql = format!(
         r#"
         SELECT jsonb_build_object(
@@ -2676,7 +2970,7 @@ async fn meal_entry_json(pool: &PgPool, user_id: Uuid, entry_id: Uuid) -> AppRes
     let row = sqlx::query(&sql)
         .bind(user_id)
         .bind(entry_id)
-        .fetch_optional(pool)
+        .fetch_optional(executor)
         .await?;
     Ok(row
         .ok_or_else(|| AppError::NotFound("Meal entry not found.".to_string()))?
@@ -3111,14 +3405,6 @@ async fn apply_template_json(
         .ok_or_else(|| AppError::BadRequest("Template items missing.".to_string()))?;
     validate_item_product_access(pool, user_id, items).await?;
     let meal_groups = MealGroupLabelIndex::load(pool, user_id).await?;
-    let row = sqlx::query(
-        "SELECT coalesce(max(sort_order), -1) + 1 AS sort_order FROM meal_entries WHERE user_id = $1 AND entry_date = $2::date",
-    )
-    .bind(user_id)
-    .bind(&date)
-    .fetch_one(pool)
-    .await?;
-    let next_sort_order: i32 = row.try_get("sort_order")?;
 
     // The group ids and the products above are already access-checked in bulk, so per-item lookups would be redundant.
     let mut product_ids = Vec::new();
@@ -3134,6 +3420,9 @@ async fn apply_template_json(
         trusted_meal_group_ids: meal_groups.resolvable_ids(),
         products: food_products_json_by_ids(pool, user_id, &product_ids).await?,
     };
+    // DATA-06: template items carry template-local positions; each new meal appends after the
+    // day's existing entries in template order instead of reproducing the local 0..N.
+    let append_base = allocate_append_sort_order(pool, user_id, &date, items.len()).await?;
 
     let mut normalized = Vec::new();
     for (index, item) in items.iter().enumerate() {
@@ -3150,12 +3439,13 @@ async fn apply_template_json(
         }
         meal.insert("date".to_string(), Value::String(date.clone()));
         meal.insert("status".to_string(), Value::String(status.clone()));
+        meal.insert("sortOrder".to_string(), json!(append_base + index as i32));
         normalized.push(
             normalize_meal_input_with_context(
                 pool,
                 user_id,
                 &meal,
-                next_sort_order + index as i32,
+                append_base + index as i32,
                 true,
                 &context,
             )
@@ -3163,7 +3453,19 @@ async fn apply_template_json(
         );
     }
 
+    // DATA-07: lock every touched group before inserting the batch, in sorted order so two
+    // concurrent applies cannot deadlock on each other's group set.
+    let mut group_ids: Vec<Uuid> = normalized
+        .iter()
+        .filter_map(|entry| entry.meal_group_id)
+        .collect();
+    group_ids.sort();
+    group_ids.dedup();
     let mut tx = pool.begin().await?;
+    for group_id in group_ids {
+        lock_active_meal_group(&mut *tx, user_id, Some(group_id)).await?;
+    }
+
     let mut created_ids = Vec::new();
     for (index, entry) in normalized.into_iter().enumerate() {
         maybe_trigger_test_fault(test_fault, index + 1)?;
@@ -3760,7 +4062,7 @@ async fn get_admin_user_detail_json(pool: &PgPool, user_id: Uuid) -> AppResult<V
     // Independent reads, joined so latency is their max rather than their sum.
     let (recent_recipes, recent_templates, recent_weights, goals, recent_meals, recent_barcodes) =
         tokio::try_join!(
-            recipes_json_filtered(pool, user_id, None, ADMIN_DETAIL_ROWS),
+            recipes_json_filtered_with_projection(pool, user_id, None, ADMIN_DETAIL_ROWS, true),
             templates_json_filtered(pool, user_id, None, ADMIN_DETAIL_ROWS),
             weight::weight_entries_json_limited(pool, user_id, ADMIN_DETAIL_ROWS),
             get_user_goals(pool, user_id),
@@ -4079,7 +4381,7 @@ async fn admin_food_products_json(
           {fields},
           'reviewReasons', CASE WHEN $3 THEN
             (CASE WHEN fp.source_confidence IS NOT NULL AND fp.source_confidence < 0.75 THEN jsonb_build_array('low_confidence') ELSE '[]'::jsonb END)
-            || (CASE WHEN fp.serving_weight_g IS NULL AND fp.serving_volume_ml IS NULL THEN jsonb_build_array('missing_serving_size') ELSE '[]'::jsonb END)
+            || (CASE WHEN (fp.serving_weight_g IS NULL AND fp.serving_volume_ml IS NULL) OR fp.source_metadata -> 'servingSizeG' = 'null'::jsonb THEN jsonb_build_array('missing_serving_size') ELSE '[]'::jsonb END)
             || (CASE WHEN fp.recently_deleted THEN jsonb_build_array('recently_deleted') ELSE '[]'::jsonb END)
             || (CASE WHEN fp.recently_restored THEN jsonb_build_array('recently_restored') ELSE '[]'::jsonb END)
             || (CASE WHEN fp.duplicate_name_count > 1 THEN jsonb_build_array('duplicate_name') ELSE '[]'::jsonb END)
@@ -4095,6 +4397,7 @@ async fn admin_food_products_json(
           OR (
             (fp.source_confidence IS NOT NULL AND fp.source_confidence < 0.75)
             OR (fp.serving_weight_g IS NULL AND fp.serving_volume_ml IS NULL)
+            OR fp.source_metadata -> 'servingSizeG' = 'null'::jsonb
             OR fp.recently_deleted
             OR fp.recently_restored
             OR fp.duplicate_name_count > 1
@@ -4177,6 +4480,7 @@ async fn admin_food_products_json(
           OR (
             (fp.source_confidence IS NOT NULL AND fp.source_confidence < 0.75)
             OR (fp.serving_weight_g IS NULL AND fp.serving_volume_ml IS NULL)
+            OR fp.source_metadata -> 'servingSizeG' = 'null'::jsonb
             OR fp.recently_deleted
             OR fp.recently_restored
             OR fp.duplicate_name_count > 1
@@ -4440,6 +4744,18 @@ async fn update_admin_barcode_product_json(
         .ok_or_else(|| AppError::BadRequest("Barcode is required.".to_string()))?;
 
     let mut tx = pool.begin().await?;
+    // DATA-17: lock the target row before capturing the before-image, so a concurrent admin
+    // cannot commit between the read and the write and leave a stale predecessor in the audit.
+    let locked = sqlx::query(
+        "SELECT id FROM food_products WHERE id = $1 AND owner_user_id IS NULL AND source = 'barcode' FOR UPDATE",
+    )
+    .bind(product_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .is_some();
+    if !locked {
+        return Err(AppError::NotFound("Barcode product not found.".to_string()));
+    }
     let before = admin_food_product_by_id_json(&mut *tx, product_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Barcode product not found.".to_string()))?;
@@ -4532,6 +4848,17 @@ async fn set_admin_barcode_deleted_json(
 ) -> AppResult<Value> {
     let actor = require_admin_actor(pool, actor_user_id).await?;
     let mut tx = pool.begin().await?;
+    // DATA-17: same before-image protocol as the update path.
+    let locked = sqlx::query(
+        "SELECT id FROM food_products WHERE id = $1 AND owner_user_id IS NULL AND source = 'barcode' FOR UPDATE",
+    )
+    .bind(product_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .is_some();
+    if !locked {
+        return Err(AppError::NotFound("Barcode product not found.".to_string()));
+    }
     let existing = admin_food_product_by_id_json(&mut *tx, product_id)
         .await?
         .ok_or_else(|| AppError::NotFound("Barcode product not found.".to_string()))?;
@@ -5325,6 +5652,7 @@ async fn stats_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppR
         daily AS (
           SELECT
             entry_date,
+            count(*) FILTER (WHERE status = 'eaten')::int AS eaten_entry_count,
             coalesce(sum(protein_g) FILTER (WHERE status = 'eaten'), 0)::float8 AS protein_g,
             coalesce(sum(carbs_g) FILTER (WHERE status = 'eaten'), 0)::float8 AS carbs_g,
             coalesce(sum(fat_g) FILTER (WHERE status = 'eaten'), 0)::float8 AS fat_g,
@@ -5344,7 +5672,7 @@ async fn stats_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppR
         eaten_days AS (
           SELECT *
           FROM daily
-          WHERE calories_kcal > 0
+          WHERE eaten_entry_count > 0
         ),
         totals AS (
           SELECT
@@ -5833,6 +6161,9 @@ fn is_quantity_unit(value: &str) -> bool {
 
 /// Caps every string reaching a `text` column: names, labels and codes are never prose, free text gets the looser bound.
 const MAX_TEXT_FIELD_LENGTH: usize = 500;
+/// DATA-11: bounded so an arbitrary id cannot overflow the `(user_id, client_mutation_id)` btree
+/// index; UUIDs and every current caller sit far below it.
+const MAX_CLIENT_MUTATION_ID_LENGTH: usize = 128;
 const MAX_FREE_TEXT_LENGTH: usize = 2_000;
 /// Bounds how many rows one `items` / `ingredients` request can ask for.
 const MAX_COLLECTION_ITEMS: usize = 200;
@@ -5905,7 +6236,9 @@ fn normalize_positive_number(
     field_name: &str,
     fallback: f64,
 ) -> AppResult<f64> {
-    let value = optional_f64(input, key).unwrap_or(fallback);
+    // DATA-05: round to persistence precision first, so a value too small to store is rejected
+    // rather than normalized to `0.00` and written.
+    let value = optional_f64(input, key)?.map(round2).unwrap_or(fallback);
     if !value.is_finite() || value <= 0.0 {
         return Err(AppError::BadRequest(format!(
             "{field_name} must be a positive number."
@@ -5916,7 +6249,7 @@ fn normalize_positive_number(
             "{field_name} must be at most {MAX_QUANTITY}."
         )));
     }
-    Ok(round2(value))
+    Ok(value)
 }
 
 fn optional_positive_number(
@@ -6131,7 +6464,7 @@ fn normalize_food_product_input(
             "Product source is invalid.".to_string(),
         ));
     }
-    let source_confidence = optional_f64(input, "sourceConfidence").map(round2);
+    let source_confidence = optional_f64(input, "sourceConfidence")?.map(round2);
     if let Some(value) = source_confidence
         && (!value.is_finite() || !(0.0..=1.0).contains(&value))
     {
@@ -6139,10 +6472,20 @@ fn normalize_food_product_input(
             "Source confidence must be between 0 and 1.".to_string(),
         ));
     }
+    // DATA-15: the same byte domain both barcode lookups accept, enforced before persistence so
+    // a stored barcode is always addressable through either endpoint.
+    let barcode = trim_optional_string(input, "barcode");
+    if let Some(value) = barcode.as_deref()
+        && (value.len() < MIN_BARCODE_LENGTH || value.len() > MAX_BARCODE_LENGTH)
+    {
+        return Err(AppError::BadRequest(format!(
+            "Barcode must be {MIN_BARCODE_LENGTH} to {MAX_BARCODE_LENGTH} characters."
+        )));
+    }
     Ok(FoodProductValues {
         scope: scope.to_string(),
         source: source.to_string(),
-        barcode: trim_optional_string(input, "barcode"),
+        barcode,
         name: required_string_with_message(input, "name", "Product name is required.")?,
         brand: trim_optional_string(input, "brand").unwrap_or_default(),
         default_serving_quantity: normalize_positive_number(
@@ -6196,16 +6539,25 @@ fn optional_uuid(input: &serde_json::Map<String, Value>, key: &str) -> AppResult
     }
 }
 
-fn optional_f64(input: &serde_json::Map<String, Value>, key: &str) -> Option<f64> {
-    input
-        .get(key)
-        .and_then(|value| match value {
-            Value::Number(number) => number.as_f64(),
-            // `"inf"`/`"NaN"`/`"-inf"` all parse into f64, so the finiteness check below is what rejects them.
-            Value::String(value) => value.parse().ok(),
-            _ => None,
-        })
+/// DATA-14: omitted or null is `None`, but a *present* value must be a finite number or a finite
+/// numeric string; booleans, objects, arrays and non-numeric text are rejected rather than
+/// silently becoming a default.
+fn optional_f64(input: &serde_json::Map<String, Value>, key: &str) -> AppResult<Option<f64>> {
+    let parsed = match input.get(key) {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::Number(number)) => number.as_f64(),
+        // `"inf"`/`"NaN"`/`"-inf"` all parse into f64, so the finiteness check below is what rejects them.
+        Some(Value::String(value)) => value.parse().ok(),
+        Some(_) => {
+            return Err(AppError::BadRequest(format!(
+                "{key} must be a finite number."
+            )));
+        }
+    };
+    parsed
         .filter(|value: &f64| value.is_finite())
+        .map(Some)
+        .ok_or_else(|| AppError::BadRequest(format!("{key} must be a finite number.")))
 }
 
 fn optional_i32(input: &serde_json::Map<String, Value>, key: &str) -> Option<i32> {
@@ -6224,7 +6576,7 @@ pub(crate) const MAX_QUANTITY: f64 = 999_999.99;
 pub(crate) const MAX_CALORIES_KCAL: i32 = 99_999;
 
 fn required_f64(input: &serde_json::Map<String, Value>, key: &str) -> AppResult<f64> {
-    optional_f64(input, key)
+    optional_f64(input, key)?
         .filter(|value| value.is_finite() && *value >= 0.0)
         .ok_or_else(|| AppError::BadRequest(format!("{key} must be a non-negative number.")))
 }
@@ -6263,8 +6615,8 @@ fn required_i32_bounded(
     Ok(value)
 }
 
-fn required_f64_lossy(input: &serde_json::Map<String, Value>, key: &str) -> f64 {
-    optional_f64(input, key).unwrap_or(0.0)
+fn required_f64_lossy(input: &serde_json::Map<String, Value>, key: &str) -> AppResult<f64> {
+    Ok(optional_f64(input, key)?.unwrap_or(0.0))
 }
 
 fn required_i32_lossy(input: &serde_json::Map<String, Value>, key: &str) -> i32 {

@@ -112,6 +112,7 @@ export const IngredientCard = memo(function IngredientCard({
             value={draft.quantity ?? "1"}
             unit={draft.unit ?? "serving"}
             step="0.01"
+            name="quantity"
             disabled={disabled}
             onChange={(value) => update("quantity", value)}
           />
@@ -139,6 +140,7 @@ export const IngredientCard = memo(function IngredientCard({
             value={draft.proteinG}
             unit="g"
             step="0.1"
+            name="proteinG"
             disabled={disabled}
             onChange={(v) => update("proteinG", v)}
           />
@@ -147,6 +149,7 @@ export const IngredientCard = memo(function IngredientCard({
             value={draft.carbsG}
             unit="g"
             step="0.1"
+            name="carbsG"
             disabled={disabled}
             onChange={(v) => update("carbsG", v)}
           />
@@ -155,6 +158,7 @@ export const IngredientCard = memo(function IngredientCard({
             value={draft.fatG}
             unit="g"
             step="0.1"
+            name="fatG"
             disabled={disabled}
             onChange={(v) => update("fatG", v)}
           />
@@ -163,6 +167,7 @@ export const IngredientCard = memo(function IngredientCard({
             value={draft.caloriesKcal}
             unit="kcal"
             step="1"
+            name="caloriesKcal"
             disabled={disabled}
             onChange={(v) => update("caloriesKcal", v)}
           />

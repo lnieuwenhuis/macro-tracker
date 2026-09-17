@@ -1,6 +1,6 @@
 "use client";
 
-import type { FoodProduct, MealEntryRecord } from "@macro-tracker/db";
+import type { BrowserFoodProduct, MealEntryRecord } from "@macro-tracker/db";
 import { useEffect, useRef, useState } from "react";
 
 import { saveMealEntryAction, searchFoodsAction } from "@/lib/actions";
@@ -26,7 +26,7 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
   const [query, setQuery] = useState("");
   const [resultQuery, setResultQuery] = useState("");
   const [results, setResults] = useState<MealEntryRecord[]>([]);
-  const [products, setProducts] = useState<FoodProduct[]>([]);
+  const [products, setProducts] = useState<BrowserFoodProduct[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [copyingId, setCopyingId] = useState<string | null>(null);
@@ -143,7 +143,7 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
     }
   }
 
-  async function handleAddProduct(product: FoodProduct) {
+  async function handleAddProduct(product: BrowserFoodProduct) {
     const operationId = `product:${product.id}`;
     const operationDate =
       operationDates.current.get(operationId) ?? getLocalDateString();
