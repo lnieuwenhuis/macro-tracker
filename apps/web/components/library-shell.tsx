@@ -1,6 +1,6 @@
 "use client";
 
-import type { FoodProduct, MealTemplateSummary, RecipeSummary } from "@macro-tracker/db";
+import type { BrowserFoodProduct, MealTemplateSummary, RecipeSummary } from "@macro-tracker/db";
 import { useRouter } from "next/navigation";
 import { useDeferredValue, useEffect, useMemo, useState, useTransition } from "react";
 
@@ -18,7 +18,7 @@ type LibraryShellProps = {
   canAccessAdmin: boolean;
   selectedDate: string;
   query: string;
-  products: FoodProduct[];
+  products: BrowserFoodProduct[];
   templates: MealTemplateSummary[];
   recipes: RecipeSummary[];
   todayStr?: string;
