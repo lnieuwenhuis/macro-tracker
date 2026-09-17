@@ -168,22 +168,47 @@ async fn barcode_provider_race_returns_fast_ah_without_waiting_for_slow_jumbo() 
     let result = tokio::time::timeout(
         Duration::from_millis(50),
         prefer_primary_provider(
-            async { Some(json!("albert_heijn")) },
-            std::future::pending::<Option<Value>>(),
+            async { ProviderOutcome::Found(json!("albert_heijn")) },
+            std::future::pending::<ProviderOutcome<Value>>(),
         ),
     )
     .await
     .expect("a fast Albert Heijn hit should not wait for Jumbo");
 
-    assert_eq!(result, Some(json!("albert_heijn")));
+    assert!(matches!(result, ProviderOutcome::Found(value) if value == json!("albert_heijn")));
 }
 
 #[tokio::test]
 async fn barcode_provider_race_returns_jumbo_after_ah_miss() {
-    let result =
-        prefer_primary_provider(async { None::<Value> }, async { Some(json!("jumbo")) }).await;
+    let result = prefer_primary_provider(async { ProviderOutcome::<Value>::NotFound }, async {
+        ProviderOutcome::Found(json!("jumbo"))
+    })
+    .await;
 
-    assert_eq!(result, Some(json!("jumbo")));
+    assert!(matches!(result, ProviderOutcome::Found(value) if value == json!("jumbo")));
+}
+
+/// API-04: only two successful misses establish absence; one failure keeps the answer retryable.
+#[tokio::test]
+async fn barcode_provider_race_keeps_absence_only_when_both_providers_answered() {
+    let both_missed =
+        prefer_primary_provider(async { ProviderOutcome::<Value>::NotFound }, async {
+            ProviderOutcome::<Value>::NotFound
+        })
+        .await;
+    assert!(matches!(both_missed, ProviderOutcome::NotFound));
+
+    let one_failed = prefer_primary_provider(async { ProviderOutcome::<Value>::NotFound }, async {
+        ProviderOutcome::<Value>::Unavailable
+    })
+    .await;
+    assert!(matches!(one_failed, ProviderOutcome::Unavailable));
+
+    let one_hit = prefer_primary_provider(async { ProviderOutcome::<Value>::Unavailable }, async {
+        ProviderOutcome::Found(json!("hit"))
+    })
+    .await;
+    assert!(matches!(one_hit, ProviderOutcome::Found(value) if value == json!("hit")));
 }
 
 #[tokio::test]
@@ -503,7 +528,7 @@ async fn a_content_less_upstream_200_is_sanitised_before_it_reaches_the_caller()
 
 #[tokio::test]
 async fn unparseable_model_output_is_not_echoed_back() {
-    // API-02: when the model answers with unparseable text, it must be logged, not returned.
+    // API-02/SEC-04: when the model answers with unparseable text, it is neither returned nor logged verbatim.
     let (endpoint, _stub) = spawn_chat_stub(vec![ChatStubResponse {
         status: StatusCode::OK,
         delay: Duration::ZERO,
@@ -532,6 +557,139 @@ async fn unparseable_model_output_is_not_echoed_back() {
     assert_eq!(result["statusCode"], json!(502));
     assert!(result.get("aiResponse").is_none());
     assert!(!result.to_string().contains("SecretProvider"));
+}
+
+/// Shares a byte buffer with the fmt subscriber so a test can assert what did and did not reach the log.
+struct CaptureWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CaptureWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .expect("capture lock should not be poisoned")
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+    type Writer = CaptureWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        CaptureWriter(Arc::clone(&self.0))
+    }
+}
+
+fn capture_logs<T>(run: impl FnOnce() -> T) -> (T, String) {
+    let buffer = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(CaptureWriter(Arc::clone(&buffer)))
+        .with_ansi(false)
+        .finish();
+
+    let result = tracing::subscriber::with_default(subscriber, run);
+    let logs = String::from_utf8(
+        buffer
+            .lock()
+            .expect("capture lock should not be poisoned")
+            .clone(),
+    )
+    .expect("captured logs should be UTF-8");
+
+    (result, logs)
+}
+
+fn run_gateway_analysis(response_body: Value) -> (Value, String) {
+    capture_logs(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime should build")
+            .block_on(async move {
+                let (endpoint, _stub) = spawn_chat_stub(vec![ChatStubResponse {
+                    status: StatusCode::OK,
+                    delay: Duration::ZERO,
+                    body: response_body,
+                }])
+                .await;
+                analyze_food_photo_url_with_limits(
+                    &gateway_test_state(&endpoint, Some("test/model-1")),
+                    "data:image/png;base64,AA==",
+                    "",
+                    None,
+                    "test-user",
+                    false,
+                    FoodPhotoRequestLimits {
+                        chat_completions_url: &endpoint,
+                        model_timeout: Duration::from_millis(200),
+                        request_timeout: Duration::from_secs(1),
+                    },
+                )
+                .await
+            })
+    })
+}
+
+/// SEC-04: malformed model output must not be copied into application logs.
+#[test]
+fn malformed_model_output_is_not_written_to_logs() {
+    const MARKER: &str = "SENSITIVE-PHOTO-MARKER-7c1f9d";
+    let (result, logs) = run_gateway_analysis(json!({
+        "choices": [{ "message": { "content": format!("{MARKER} {{not json") } }]
+    }));
+
+    assert_eq!(result["kind"], json!("invalid_json"));
+    assert!(
+        !logs.contains(MARKER),
+        "raw model output must never be logged: {logs}"
+    );
+    assert!(
+        logs.contains("invalid_json"),
+        "the failure category must stay diagnosable: {logs}"
+    );
+}
+
+/// SEC-04: an upstream 200 whose payload lacks message content must not be logged verbatim.
+#[test]
+fn a_contentless_provider_payload_is_not_written_to_logs() {
+    const MARKER: &str = "SENSITIVE-PAYLOAD-MARKER-3b8e42";
+    let (result, logs) = run_gateway_analysis(json!({
+        "echoedPrompt": MARKER,
+        "choices": [{ "message": { "content": null } }]
+    }));
+
+    assert_eq!(result["kind"], json!("empty_response"));
+    assert!(
+        !logs.contains(MARKER),
+        "raw provider payloads must never be logged: {logs}"
+    );
+    assert!(
+        logs.contains("empty_response"),
+        "the failure category must stay diagnosable: {logs}"
+    );
+}
+
+/// SEC-04: a provider error body can describe our misconfiguration, so only the category is logged.
+#[test]
+fn a_provider_error_body_is_not_written_to_logs() {
+    const MARKER: &str = "SENSITIVE-ERROR-MARKER-91ad";
+    let (result, logs) = run_gateway_analysis(json!({
+        "error": { "message": format!("{MARKER}: invalid model") }
+    }));
+
+    assert_eq!(result["statusCode"], json!(502));
+    assert!(
+        !logs.contains(MARKER),
+        "raw provider error bodies must never be logged: {logs}"
+    );
+    assert!(
+        logs.contains("food photo provider request failed"),
+        "the failure must stay diagnosable: {logs}"
+    );
 }
 
 #[tokio::test]
@@ -1534,22 +1692,24 @@ fn one_account_cannot_hold_every_food_photo_slot() {
 
     let held = (0..MAX_FOOD_PHOTO_UPLOADS_PER_USER)
         .map(|_| {
-            acquire_food_photo_user_slot(noisy).expect("slots up to the cap should be granted")
+            FOOD_PHOTO_USER_SLOTS
+                .acquire(noisy)
+                .expect("slots up to the cap should be granted")
         })
         .collect::<Vec<_>>();
 
     assert!(
-        acquire_food_photo_user_slot(noisy).is_none(),
+        FOOD_PHOTO_USER_SLOTS.acquire(noisy).is_none(),
         "an account past its cap must be refused"
     );
     assert!(
-        acquire_food_photo_user_slot(other).is_some(),
+        FOOD_PHOTO_USER_SLOTS.acquire(other).is_some(),
         "one noisy account must not starve everyone else"
     );
 
     drop(held);
     assert!(
-        acquire_food_photo_user_slot(noisy).is_some(),
+        FOOD_PHOTO_USER_SLOTS.acquire(noisy).is_some(),
         "finishing an upload must return the slot"
     );
 }
@@ -1558,14 +1718,72 @@ fn one_account_cannot_hold_every_food_photo_slot() {
 fn released_food_photo_slots_do_not_accumulate_per_account() {
     let user_id = Uuid::new_v4();
 
-    drop(acquire_food_photo_user_slot(user_id).expect("slot should be granted"));
+    drop(
+        FOOD_PHOTO_USER_SLOTS
+            .acquire(user_id)
+            .expect("slot should be granted"),
+    );
 
-    let slots = food_photo_user_slots()
+    let slots = FOOD_PHOTO_USER_SLOTS
+        .slots
+        .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     assert!(
         !slots.contains_key(&user_id),
         "the map must not grow one entry per account that ever uploaded"
+    );
+}
+
+/// SEC-05: one account must not be able to occupy the whole barcode provider fan-out.
+#[test]
+fn one_account_cannot_hold_every_barcode_slot() {
+    let noisy = Uuid::new_v4();
+    let other = Uuid::new_v4();
+
+    let held = (0..MAX_BARCODE_LOOKUPS_PER_USER)
+        .map(|_| {
+            BARCODE_LOOKUP_USER_SLOTS
+                .acquire(noisy)
+                .expect("slots up to the cap should be granted")
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        BARCODE_LOOKUP_USER_SLOTS.acquire(noisy).is_none(),
+        "an account past its cap must be refused"
+    );
+    assert!(
+        BARCODE_LOOKUP_USER_SLOTS.acquire(other).is_some(),
+        "one noisy account must not starve everyone else"
+    );
+
+    // Cancellation and error paths drop the future's guards, releasing both counters.
+    drop(held);
+    assert!(
+        BARCODE_LOOKUP_USER_SLOTS.acquire(noisy).is_some(),
+        "finishing or cancelling a lookup must return the slot"
+    );
+}
+
+#[test]
+fn released_barcode_slots_do_not_accumulate_per_account() {
+    let user_id = Uuid::new_v4();
+
+    drop(
+        BARCODE_LOOKUP_USER_SLOTS
+            .acquire(user_id)
+            .expect("slot should be granted"),
+    );
+
+    let slots = BARCODE_LOOKUP_USER_SLOTS
+        .slots
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    assert!(
+        !slots.contains_key(&user_id),
+        "the map must not grow one entry per account that ever looked up a barcode"
     );
 }
 
@@ -1647,17 +1865,16 @@ async fn open_food_facts_lookup_enforces_the_size_cap() {
         let base_url = spawn_padded_open_food_facts_stub(padding).await;
         let state = test_state(Some(&base_url));
 
-        let product = lookup_open_food_facts(&state, "8712345678901").await;
+        let outcome = lookup_open_food_facts(&state, "8712345678901").await;
 
         match expected {
-            Some(name) => assert_eq!(
-                product.map(|product| product["name"].clone()),
-                Some(name),
+            Some(name) => assert!(
+                matches!(outcome, ProviderOutcome::Found(product) if product["name"] == name),
                 "a body just under the cap must be accepted (padding {padding})"
             ),
             None => assert!(
-                product.is_none(),
-                "a body over the cap must be dropped (padding {padding})"
+                matches!(outcome, ProviderOutcome::Unavailable),
+                "an unreadable body is unavailability, not a confirmed miss (padding {padding})"
             ),
         }
     }
@@ -1710,11 +1927,10 @@ async fn open_food_facts_lookup_drops_a_streamed_body_over_the_size_cap() {
     let base_url = spawn_chunked_open_food_facts_stub().await;
     let state = test_state(Some(&base_url));
 
-    assert!(
-        lookup_open_food_facts(&state, "8712345678901")
-            .await
-            .is_none()
-    );
+    assert!(matches!(
+        lookup_open_food_facts(&state, "8712345678901").await,
+        ProviderOutcome::Unavailable
+    ));
 }
 
 #[tokio::test]
@@ -1730,13 +1946,13 @@ async fn provider_fetch_gives_up_when_the_upstream_stalls_past_its_deadline() {
     let client = reqwest::Client::new();
 
     let started = Instant::now();
-    let body = fetch_provider_json(
+    let body = fetch_provider_json_result(
         client.get(format!("{base_url}/stall")),
         Duration::from_millis(50),
     )
     .await;
 
-    assert!(body.is_none());
+    assert!(matches!(body, Err(())));
     assert!(started.elapsed() < Duration::from_secs(2));
 }
 
@@ -1754,11 +1970,232 @@ async fn provider_fetch_rejects_a_failing_status_before_reading_the_body() {
     .await;
     let client = reqwest::Client::new();
 
-    let body = fetch_provider_json(
+    let body = fetch_provider_json_result(
         client.get(format!("{base_url}/failing")),
         PROVIDER_REQUEST_TIMEOUT,
     )
     .await;
 
-    assert!(body.is_none());
+    assert!(matches!(body, Err(())));
+}
+
+/// SEC-03: browser photo requests must prove same-origin; direct non-browser clients stay allowed.
+#[test]
+fn browser_photo_requests_require_same_origin_metadata() {
+    let trusted = vec!["https://macro.example.com".to_string()];
+
+    let mut same_site = HeaderMap::new();
+    same_site.insert(header::ORIGIN, "https://evil.example.com".parse().unwrap());
+    same_site.insert("sec-fetch-site", "same-site".parse().unwrap());
+    assert!(
+        !same_origin_browser_request(&same_site, &trusted),
+        "a same-site sibling origin must be refused"
+    );
+
+    let mut cross_site = HeaderMap::new();
+    cross_site.insert(header::ORIGIN, "https://evil.example.com".parse().unwrap());
+    cross_site.insert("sec-fetch-site", "cross-site".parse().unwrap());
+    assert!(!same_origin_browser_request(&cross_site, &trusted));
+
+    let mut same_origin = HeaderMap::new();
+    same_origin.insert("sec-fetch-site", "same-origin".parse().unwrap());
+    assert!(same_origin_browser_request(&same_origin, &trusted));
+
+    let mut configured_origin = HeaderMap::new();
+    configured_origin.insert(header::ORIGIN, "https://macro.example.com".parse().unwrap());
+    assert!(same_origin_browser_request(&configured_origin, &trusted));
+
+    let mut contradictory = HeaderMap::new();
+    contradictory.insert(header::ORIGIN, "https://macro.example.com".parse().unwrap());
+    contradictory.insert("sec-fetch-site", "cross-site".parse().unwrap());
+    assert!(
+        !same_origin_browser_request(&contradictory, &trusted),
+        "fetch metadata wins over a trusted Origin header"
+    );
+
+    // A direct non-browser client sends neither header.
+    assert!(same_origin_browser_request(&HeaderMap::new(), &trusted));
+}
+
+/// API-04 stubs: what each provider answers for the barcode chain.
+#[derive(Clone)]
+enum StubAnswer {
+    Json(Value),
+    Raw(&'static str),
+    Status(StatusCode),
+}
+
+impl StubAnswer {
+    fn into_response(self) -> Response {
+        match self {
+            StubAnswer::Json(value) => Json(value).into_response(),
+            StubAnswer::Raw(body) => (
+                [(axum::http::header::CONTENT_TYPE, "application/json")],
+                body,
+            )
+                .into_response(),
+            StubAnswer::Status(status) => status.into_response(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ProviderStubConfig {
+    open_food_facts: StubAnswer,
+    albert_heijn_token: StubAnswer,
+    albert_heijn_search: StubAnswer,
+    jumbo_search: StubAnswer,
+}
+
+impl ProviderStubConfig {
+    fn all(answer: StubAnswer) -> Self {
+        Self {
+            open_food_facts: answer.clone(),
+            albert_heijn_token: answer.clone(),
+            albert_heijn_search: answer.clone(),
+            jumbo_search: answer,
+        }
+    }
+
+    /// Every provider answers successfully, but none carries the product.
+    fn missing_products() -> Self {
+        Self {
+            open_food_facts: StubAnswer::Json(json!({ "status": 0 })),
+            albert_heijn_token: StubAnswer::Json(json!({ "access_token": "test-token" })),
+            albert_heijn_search: StubAnswer::Json(json!({ "cards": [] })),
+            jumbo_search: StubAnswer::Json(json!({ "products": { "data": [] } })),
+        }
+    }
+}
+
+async fn spawn_provider_scenario_stub(config: ProviderStubConfig) -> String {
+    let open_food_facts = config.open_food_facts.clone();
+    let albert_heijn_token = config.albert_heijn_token.clone();
+    let albert_heijn_search = config.albert_heijn_search.clone();
+    let jumbo_search = config.jumbo_search.clone();
+    let app = Router::new()
+        .route(
+            "/api/v2/product/{*path}",
+            get(move || {
+                let answer = open_food_facts.clone();
+                async move { answer.into_response() }
+            }),
+        )
+        .route(
+            "/mobile-auth/v1/auth/token/anonymous",
+            post(move || {
+                let answer = albert_heijn_token.clone();
+                async move { answer.into_response() }
+            }),
+        )
+        .route(
+            "/mobile-services/product/search/v2",
+            get(move || {
+                let answer = albert_heijn_search.clone();
+                async move { answer.into_response() }
+            }),
+        )
+        .route(
+            "/v17/search",
+            get(move || {
+                let answer = jumbo_search.clone();
+                async move { answer.into_response() }
+            }),
+        );
+
+    spawn_provider_stub(app).await
+}
+
+async fn response_json(response: Response) -> Value {
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("response body should collect")
+        .to_bytes();
+    serde_json::from_slice(&body).expect("response should be json")
+}
+
+/// API-04: three provider outages must be reported as retryable unavailability, not as a missing product.
+#[tokio::test]
+async fn provider_outage_is_reported_as_unavailable_not_as_a_missing_product() {
+    let base_url = spawn_provider_scenario_stub(ProviderStubConfig::all(StubAnswer::Status(
+        StatusCode::SERVICE_UNAVAILABLE,
+    )))
+    .await;
+    let state = test_state(Some(&base_url));
+
+    let response = lookup_barcode_for_user(&state, "8712345678901".to_string()).await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let payload = response_json(response).await;
+    assert_eq!(payload["found"], json!(false));
+    assert_eq!(payload["retryable"], json!(true));
+}
+
+/// API-04: unusable provider bodies are unavailability too, not absence.
+#[tokio::test]
+async fn malformed_provider_bodies_are_reported_as_unavailable() {
+    let base_url = spawn_provider_scenario_stub(ProviderStubConfig::all(StubAnswer::Raw(
+        "<html>maintenance</html>",
+    )))
+    .await;
+    let state = test_state(Some(&base_url));
+
+    let response = lookup_barcode_for_user(&state, "8712345678901".to_string()).await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let payload = response_json(response).await;
+    assert_eq!(payload["found"], json!(false));
+    assert_eq!(payload["retryable"], json!(true));
+}
+
+/// API-04: a genuine miss plus a failed fallback cannot establish absence.
+#[tokio::test]
+async fn a_genuine_miss_with_a_failed_fallback_stays_retryable() {
+    let mut config = ProviderStubConfig::missing_products();
+    config.albert_heijn_token = StubAnswer::Status(StatusCode::SERVICE_UNAVAILABLE);
+    let base_url = spawn_provider_scenario_stub(config).await;
+    let state = test_state(Some(&base_url));
+
+    let response = lookup_barcode_for_user(&state, "8712345678901".to_string()).await;
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let payload = response_json(response).await;
+    assert_eq!(payload["found"], json!(false));
+    assert_eq!(payload["retryable"], json!(true));
+}
+
+/// API-04: only every provider answering "no" produces the authoritative miss.
+#[tokio::test]
+async fn all_genuine_misses_still_return_not_found() {
+    let base_url = spawn_provider_scenario_stub(ProviderStubConfig::missing_products()).await;
+    let state = test_state(Some(&base_url));
+
+    let response = lookup_barcode_for_user(&state, "8712345678901".to_string()).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload = response_json(response).await;
+    assert_eq!(payload["found"], json!(false));
+    assert_eq!(payload.get("retryable"), None);
+}
+
+/// API-04: a successful fallback wins even while another provider is down.
+#[tokio::test]
+async fn a_successful_fallback_wins_over_an_outage() {
+    let mut config = ProviderStubConfig::missing_products();
+    config.open_food_facts = StubAnswer::Status(StatusCode::SERVICE_UNAVAILABLE);
+    config.albert_heijn_search = StubAnswer::Status(StatusCode::SERVICE_UNAVAILABLE);
+    config.jumbo_search = StubAnswer::Json(json!({
+        "products": { "data": [{ "title": "Jumbo Test Product", "id": "jumbo-1" }] }
+    }));
+    let base_url = spawn_provider_scenario_stub(config).await;
+    let state = test_state(Some(&base_url));
+
+    let response = lookup_barcode_for_user(&state, "8712345678901".to_string()).await;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload = response_json(response).await;
+    assert_eq!(payload["found"], json!(true));
+    assert_eq!(payload["product"]["source"], json!("jumbo"));
 }
