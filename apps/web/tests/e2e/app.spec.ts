@@ -479,6 +479,66 @@ test("macro trend chart shows planned intake as a translucent projection", async
   expect(await trendSection.locator('svg rect[opacity="0.28"]').count()).toBeGreaterThan(0);
 });
 
+test("status changes keep an unsaved draft label on the card", async ({
+  page,
+}, testInfo) => {
+  const suffix = Date.now();
+  const originalLabel = `Draft oats ${suffix}`;
+  const editedLabel = `${originalLabel} + honey`;
+  const templateLabel = `Draft preserve day ${suffix}`;
+  const plannedDate = "2026-06-18";
+
+  await createTestSession(page, uniqueTestEmail("user", testInfo));
+  await expect(page.getByRole("button", { name: "Open settings" })).toBeVisible();
+  await seedDayTemplate(page, {
+    label: templateLabel,
+    items: [
+      {
+        label: originalLabel,
+        proteinG: 20,
+        carbsG: 40,
+        fatG: 8,
+        caloriesKcal: 312,
+      },
+    ],
+  });
+  await applyDayTemplate(page, { date: plannedDate, label: templateLabel });
+
+  // hasText (substring) keeps matching after the heading adopts the edited label.
+  const card = page.locator("article").filter({ hasText: originalLabel });
+  await expect(card).toContainText("planned");
+
+  await card
+    .getByRole("button", { name: `Edit details for ${originalLabel}` })
+    .click();
+  const nameInput = card.getByPlaceholder("Chicken breast, rice, banana...");
+  await nameInput.fill(editedLabel);
+
+  await Promise.all([
+    page.waitForResponse((response) => {
+      const request = response.request();
+      return (
+        request.method() === "POST" &&
+        response.url().includes(`date=${plannedDate}`) &&
+        response.status() < 400
+      );
+    }),
+    card.getByRole("button", { name: "Mark eaten", exact: true }).click(),
+  ]);
+
+  // UI-03: the status moved on the server, but the unsaved label survives the
+  // status response and the same-day refresh that follows it.
+  await expect(card).toContainText("eaten");
+  await expect(nameInput).toHaveValue(editedLabel);
+
+  // Only the status was persisted; the unsaved label is still local-only.
+  await page.reload();
+  await waitForAppReady(page);
+  const reloadedCard = page.locator("article").filter({ hasText: originalLabel });
+  await expect(reloadedCard).toContainText("eaten");
+  await expect(page.getByRole("heading", { name: editedLabel })).toHaveCount(0);
+});
+
 test("weight goal validation errors stay visible on the page", async ({
   page,
 }, testInfo) => {
