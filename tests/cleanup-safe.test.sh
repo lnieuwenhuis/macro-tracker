@@ -29,6 +29,9 @@ make_fake_gh() {
 #!/bin/bash
 log_file="${GH_CALL_LOG:?}"
 printf 'gh %s\n' "$*" >> "$log_file"
+# Record each argv entry separately; tests assert flag boundaries here so an
+# endpoint with embedded flags (real gh: HTTP 404) cannot pass again.
+for a in "$@"; do printf 'argv %s\n' "$a" >> "$log_file"; done
 args="$*"
 # Mutating calls: just record success.
 case "$args" in
@@ -90,18 +93,19 @@ run_with_fake() {
   PATH="$bin_dir:$PATH" GH_CALL_LOG="$log_file" bash "$CLEANUP" $@ >"$log_file.out" 2>"$log_file.err" || return $?
 }
 
-# --- Test 1: default invocation performs no mutations --------------------
+# --- Test 1: default and --apply-without-repo invocations make no mutations
 t1_dir="$(mktemp -d)"
 t1_log="$t1_dir/calls.log"
-if run_with_fake "$t1_log"; then
-  if grep -q -- "-X PATCH" "$t1_log" || grep -q -- "-X DELETE" "$t1_log" || grep -q -- "rename" "$t1_log"; then
-    bad "T1 default invocation issued a mutation (see $t1_log)"
+t1b_log="$t1_dir/calls-apply-only.log"
+if run_with_fake "$t1_log" && run_with_fake "$t1b_log" --apply; then
+  if grep -q -- "-X PATCH" "$t1_log" "$t1b_log" || grep -q -- "-X DELETE" "$t1_log" "$t1b_log" || grep -q -- "rename" "$t1_log" "$t1b_log"; then
+    bad "T1 default/--apply-without-repo invocation issued a mutation (see $t1_dir)"
   else
-    ok "T1 default invocation makes no mutations"
+    ok "T1 default and --apply-without-repo invocations make no mutations"
   fi
 else
   # cleanup.sh discovery mode exits 0; any failure here is a regression.
-  bad "T1 default invocation exited non-zero (see $t1_log.err)"
+  bad "T1 invocation exited non-zero (see $t1_dir)"
 fi
 rm -rf "$t1_dir"
 
@@ -138,14 +142,14 @@ if run_with_fake "$t3_log" --user testuser --repo testuser/allowed --apply; then
   else
     bad "T3 --apply did not delete merged branch (see $t3_log)"
   fi
-  for protected in "/heads/dev" "/heads/staging" "/heads/main" "feature-unmerged"; do
-    if grep -q -- "$protected" "$t3_log" | grep -q "DELETE" 2>/dev/null; then
-      bad "T3 deleted protected/unmerged branch matching $protected"
+  bad_delete=0
+  for must_not in "heads/main" "heads/dev" "heads/staging" "heads/feature-unmerged"; do
+    if grep -q -- "${must_not} .*-X DELETE" "$t3_log"; then
+      bad "T3 deleted branch matching ${must_not} (must never happen)"
+      bad_delete=1
     fi
   done
-  if grep -q -- "-X DELETE.*heads/dev" "$t3_log" || grep -q -- "-X DELETE.*heads/staging" "$t3_log" || grep -q -- "-X DELETE.*heads/main" "$t3_log" || grep -q -- "heads/feature-unmerged.*-X DELETE" "$t3_log" || grep -q -- "-X DELETE.*heads/feature-unmerged" "$t3_log"; then
-    bad "T3 deleted a protected or unmerged branch (see $t3_log)"
-  else
+  if [ "$bad_delete" -eq 0 ]; then
     ok "T3 never deletes protected/unmerged branches"
   fi
   if grep -q -- "-X PATCH" "$t3_log" || grep -q -- "rename" "$t3_log"; then
@@ -171,6 +175,22 @@ else
   bad "T4 exited non-zero (see $t4_log.err)"
 fi
 rm -rf "$t4_dir"
+
+# --- Test 5: branch listing keeps gh api flags as separate arguments ------
+t5_dir="$(mktemp -d)"
+t5_log="$t5_dir/calls.log"
+if run_with_fake "$t5_log" --user testuser --repo testuser/allowed; then
+  if grep -q -- '^argv repos/testuser/allowed/branches$' "$t5_log" \
+     && grep -q -- '^argv --paginate$' "$t5_log" \
+     && grep -q -- '^argv --jq$' "$t5_log"; then
+    ok "T5 branch listing passes --paginate/--jq as separate gh api arguments"
+  else
+    bad "T5 branch listing embedded flags in the endpoint (real gh 404s) (see $t5_log)"
+  fi
+else
+  bad "T5 exited non-zero (see $t5_log.err)"
+fi
+rm -rf "$t5_dir"
 
 echo "---"
 echo "pass=$pass fail=$fail"

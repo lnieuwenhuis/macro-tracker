@@ -147,7 +147,9 @@ for repo_full in "${REPOS[@]}"; do
   echo "Default branch for ${repo_full} is '${default_branch}' (never deleted)."
 
   branches=""
-  if ! branches="$(gh api "repos/${repo_full}/branches --paginate --jq '.[].name'")"; then
+  # Flags must be separate argv entries: `gh` does not parse flags embedded
+  # in the endpoint string (it requests a 404 path instead).
+  if ! branches="$(gh api "repos/${repo_full}/branches" --paginate --jq '.[].name')"; then
     echo "warning: could not list branches for ${repo_full}; skipping repo" >&2
     echo "---"
     continue
