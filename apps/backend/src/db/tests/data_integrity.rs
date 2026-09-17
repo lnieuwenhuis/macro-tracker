@@ -706,15 +706,7 @@ async fn expected_unique_conflicts_are_conflicts() {
             .expect("stored weight");
     assert_eq!(stored, 80.0, "a failed move must not change the row");
 
-    // The fixture schema omits the partial index until TEST-01 fixture parity lands; mirroring
-    // production here keeps this regression meaningful either way.
-    sqlx::query(
-        "CREATE UNIQUE INDEX IF NOT EXISTS meal_groups_active_default_label_key ON meal_groups USING btree (user_id, label) WHERE deleted_at IS NULL AND is_default = true",
-    )
-    .execute(&test_db.pool)
-    .await
-    .expect("unique default-label index");
-
+    // Fixture parity (TEST-01/MIG-01) provides meal_groups_active_default_label_key; no stopgap needed.
     ensure_default_meal_groups(&test_db.pool, user_id)
         .await
         .expect("default groups");
