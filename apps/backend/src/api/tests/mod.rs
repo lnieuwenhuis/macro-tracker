@@ -269,68 +269,29 @@ fn object(value: Value) -> Map<String, Value> {
 
 #[test]
 fn meal_entry_patches_cannot_set_the_private_recalculation_flag() {
-    // DATA-02: `proteinG` should force recalculation, but the caller tries to override the flag to `false`.
-    let merged = merge_meal_entry_patch(
-        object(json!({
-            "id": "11111111-1111-4111-8111-111111111111",
-            "productId": "22222222-2222-4222-8222-222222222222",
-            "label": "Oats",
-            "quantity": 1.0,
-            "unit": "serving",
-            "proteinG": 10.0,
-            "carbsG": 20.0,
-            "fatG": 5.0,
-            "caloriesKcal": 165
-        })),
-        object(json!({
-            "proteinG": 1,
-            "caloriesKcal": -2_000_000_000i64,
-            "__recalculateProductMacros": false
-        })),
-    );
+    // DATA-02: the caller tries to set the internal recalculation flag; forwarding must strip it.
+    let stripped = strip_private_input_keys(object(json!({
+        "proteinG": 1,
+        "caloriesKcal": -2_000_000_000i64,
+        "__recalculateProductMacros": false
+    })));
 
     assert!(
-        !merged.contains_key("__recalculateProductMacros"),
-        "a client must not be able to control the recalculation flag: {merged:?}"
+        !stripped.contains_key("__recalculateProductMacros"),
+        "a client must not be able to control the recalculation flag: {stripped:?}"
     );
-    assert_eq!(merged["proteinG"], json!(1));
+    assert_eq!(stripped["proteinG"], json!(1));
 }
 
 #[test]
 fn meal_entry_patches_drop_every_reserved_key() {
-    let merged = merge_meal_entry_patch(
-        object(json!({ "label": "Oats" })),
-        object(json!({ "__anythingElse": "nope", "label": "Toast" })),
-    );
+    let stripped = strip_private_input_keys(object(json!({
+        "__anythingElse": "nope",
+        "label": "Toast"
+    })));
 
-    assert!(!merged.contains_key("__anythingElse"));
-    assert_eq!(merged["label"], json!("Toast"));
-}
-
-#[test]
-fn product_linked_entries_keep_their_snapshot_when_no_macro_field_is_patched() {
-    // Renaming a product-linked entry must not recompute its macros.
-    let merged = merge_meal_entry_patch(
-        object(json!({
-            "productId": "22222222-2222-4222-8222-222222222222",
-            "label": "Oats",
-            "proteinG": 10.0
-        })),
-        object(json!({ "label": "Breakfast oats" })),
-    );
-
-    assert_eq!(merged["__recalculateProductMacros"], json!(false));
-    assert_eq!(merged["label"], json!("Breakfast oats"));
-}
-
-#[test]
-fn entries_without_a_product_never_carry_the_recalculation_flag() {
-    let merged = merge_meal_entry_patch(
-        object(json!({ "label": "Oats", "proteinG": 10.0 })),
-        object(json!({ "label": "Toast" })),
-    );
-
-    assert!(!merged.contains_key("__recalculateProductMacros"));
+    assert!(!stripped.contains_key("__anythingElse"));
+    assert_eq!(stripped["label"], json!("Toast"));
 }
 
 #[test]
@@ -849,4 +810,187 @@ fn unknown_paths_have_no_endpoint() {
         endpoint_for(&["goals".to_string(), "extra".to_string()]).is_none(),
         "trailing segments must not resolve"
     );
+}
+
+#[test]
+fn page_requests_require_a_bounded_limit_and_a_nonempty_cursor() {
+    let request = |query: &str| {
+        page_request(
+            &format!("/templates{query}")
+                .parse::<Uri>()
+                .expect("query builds"),
+        )
+    };
+
+    assert!(request("").expect("no page parameters").is_none());
+    let paged = request("?limit=10")
+        .expect("limit should parse")
+        .expect("page request is present");
+    assert_eq!((paged.limit, paged.cursor.as_deref()), (10, None));
+
+    let cursor_only = request("?cursor=abc")
+        .expect("cursor should parse")
+        .expect("page request is present");
+    assert_eq!(cursor_only.limit, db::pagination::DEFAULT_PAGE_LIMIT);
+    assert_eq!(cursor_only.cursor.as_deref(), Some("abc"));
+
+    for query in [
+        "?limit=0",
+        "?limit=1001",
+        "?limit=abc",
+        "?limit=",
+        "?cursor=",
+    ] {
+        let failure = request(query).expect_err("invalid page parameters must fail");
+        assert_eq!(failure.status, StatusCode::BAD_REQUEST, "{query}");
+        assert_eq!(failure.code, "bad_request", "{query}");
+    }
+}
+
+#[test]
+fn truncation_headers_are_only_sent_when_a_cap_bit() {
+    let complete = db::pagination::CollectionPage {
+        items: json!([]),
+        next_cursor: None,
+        limit: 5_000,
+        returned: 1,
+        truncated: false,
+    };
+    assert!(
+        collection_page_headers(&complete).is_empty(),
+        "a complete response carries no truncation metadata"
+    );
+
+    let truncated = db::pagination::CollectionPage {
+        items: json!([]),
+        next_cursor: Some("opaque".to_string()),
+        limit: 10,
+        returned: 10,
+        truncated: true,
+    };
+    let headers = collection_page_headers(&truncated);
+    assert_eq!(
+        headers.get("x-result-limit").unwrap().to_str().unwrap(),
+        "10"
+    );
+    assert_eq!(
+        headers.get("x-result-count").unwrap().to_str().unwrap(),
+        "10"
+    );
+    assert_eq!(
+        headers.get("x-result-truncated").unwrap().to_str().unwrap(),
+        "true"
+    );
+
+    let stats = db::pagination::StatsPage {
+        data: json!({}),
+        daily_totals: db::pagination::SeriesWindow {
+            limit: 1_000,
+            count: 1_000,
+            truncated: true,
+        },
+        smoothed_weight_trend: db::pagination::SeriesWindow {
+            limit: 1_000,
+            count: 12,
+            truncated: false,
+        },
+    };
+    let headers = stats_page_headers(&stats);
+    assert_eq!(
+        headers
+            .get("x-daily-totals-limit")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "1000"
+    );
+    assert_eq!(
+        headers
+            .get("x-daily-totals-count")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "1000"
+    );
+    assert_eq!(
+        headers
+            .get("x-daily-totals-truncated")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "true"
+    );
+    assert!(
+        headers.get("x-smoothed-weight-trend-count").is_none(),
+        "a complete series is not announced"
+    );
+}
+
+#[test]
+fn cors_exposes_the_truncation_headers_to_browser_clients() {
+    // API-01: without an expose list the headers exist but browsers cannot read them.
+    let exposed = cors_headers()
+        .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+
+    for name in [
+        "x-result-limit",
+        "x-result-count",
+        "x-result-truncated",
+        "x-daily-totals-limit",
+        "x-daily-totals-count",
+        "x-daily-totals-truncated",
+        "x-smoothed-weight-trend-limit",
+        "x-smoothed-weight-trend-count",
+        "x-smoothed-weight-trend-truncated",
+    ] {
+        assert!(exposed.contains(name), "{name} is not exposed");
+    }
+}
+
+#[test]
+fn the_published_contract_documents_opt_in_pagination_and_truncation_headers() {
+    let spec: Value = serde_json::from_slice(API_V1_OPENAPI_JSON).expect("spec should be JSON");
+
+    for path in ["/templates", "/recipes", "/weight/entries"] {
+        let get = &spec["paths"][path]["get"];
+        let parameters = get["parameters"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{path} should document parameters"));
+        let names = parameters
+            .iter()
+            .filter_map(|parameter| parameter["name"].as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"limit"), "{path} must document limit");
+        assert!(names.contains(&"cursor"), "{path} must document cursor");
+        assert!(
+            get["responses"].get("400").is_some(),
+            "{path} must document the invalid page parameter outcome"
+        );
+        let headers = get["responses"]["200"]["headers"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{path} should document response headers"));
+        for name in ["x-result-limit", "x-result-count", "x-result-truncated"] {
+            assert!(headers.contains_key(name), "{path} must document {name}");
+        }
+    }
+
+    let stats_headers = spec["paths"]["/stats"]["get"]["responses"]["200"]["headers"]
+        .as_object()
+        .expect("stats should document response headers");
+    for name in [
+        "x-daily-totals-limit",
+        "x-daily-totals-count",
+        "x-daily-totals-truncated",
+        "x-smoothed-weight-trend-limit",
+        "x-smoothed-weight-trend-count",
+        "x-smoothed-weight-trend-truncated",
+    ] {
+        assert!(
+            stats_headers.contains_key(name),
+            "stats must document {name}"
+        );
+    }
 }

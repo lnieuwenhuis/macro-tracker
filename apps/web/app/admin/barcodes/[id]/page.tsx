@@ -14,6 +14,7 @@ import {
   updateAdminBarcodeProductAction,
 } from "@/lib/admin-actions";
 import { requireAdminUser } from "@/lib/auth";
+import { isRouteUuid } from "@/lib/input-validation";
 
 type AdminBarcodeDetailPageProps = {
   params: Promise<{ id: string }>;
@@ -29,6 +30,9 @@ export default async function AdminBarcodeDetailPage({
 }: AdminBarcodeDetailPageProps) {
   const adminUser = await requireAdminUser();
   const [{ id }, query] = await Promise.all([params, searchParams]);
+  if (!isRouteUuid(id)) {
+    notFound();
+  }
   const [barcode, audit] = await Promise.all([
     getAdminBarcodeProductById(adminUser.id, id),
     listAdminAuditEvents(adminUser.id, {

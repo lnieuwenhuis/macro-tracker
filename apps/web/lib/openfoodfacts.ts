@@ -12,8 +12,9 @@ export type OpenFoodFactsProduct = {
   source?: "openfoodfacts" | "albert_heijn" | "jumbo" | "custom";
 };
 
-// Distinguishes a genuine catalogue miss ("not_found") from "we could not ask" ("unavailable").
-export type BarcodeLookupFailureReason = "not_found" | "unavailable";
+// Distinguishes a genuine catalogue miss ("not_found") from "we could not ask" ("unavailable")
+// and from "the caller must sign in again" ("auth": expired session / onboarding gate / login HTML).
+export type BarcodeLookupFailureReason = "not_found" | "unavailable" | "auth";
 
 export type OpenFoodFactsResult =
   | { found: true; product: OpenFoodFactsProduct }
@@ -96,6 +97,16 @@ export async function lookupBarcode(
       signal: controller.signal,
     });
 
+    // UI-07: expired sessions and onboarding gates are auth recovery, not outages.
+    // The session proxy redirects unauthenticated barcode reads to HTML login,
+    // which fetch follows to a 200; direct 401/403 JSON is the same signal.
+    if (response.status === 401 || response.status === 403) {
+      return { found: false, barcode, reason: "auth" };
+    }
+
+    // Outage pages from a hosting/proxy layer can be HTML too; an error status
+    // stays an outage. Auth recovery is only for the 2xx paths below, where a
+    // followed login redirect or an HTML login body is the session gate.
     if (!response.ok) {
       console.error(
         `Barcode lookup for ${barcode} failed with status ${response.status}`,
@@ -103,14 +114,35 @@ export async function lookupBarcode(
       return { found: false, barcode, reason: "unavailable" };
     }
 
-    const data = (await response.json()) as unknown;
+    const contentType = response.headers.get("content-type") ?? "";
+    if (response.redirected || contentType.includes("text/html")) {
+      return { found: false, barcode, reason: "auth" };
+    }
+
+    let data: unknown;
+    try {
+      const raw = await response.text();
+      if (raw.trimStart().startsWith("<")) {
+        // Login HTML served with 200 despite a missing content-type header.
+        return { found: false, barcode, reason: "auth" };
+      }
+      data = JSON.parse(raw) as unknown;
+    } catch {
+      console.error(`Barcode lookup for ${barcode} returned an unusable body`);
+      return { found: false, barcode, reason: "unavailable" };
+    }
     const envelope =
       typeof data === "object" && data !== null
-        ? (data as { found?: unknown; product?: unknown })
+        ? (data as { found?: unknown; product?: unknown; retryable?: unknown })
         : null;
 
     if (envelope?.found !== true) {
-      return { found: false, barcode, reason: "not_found" };
+      // API-04: the backend marks "we could not ask" as retryable; that is not a catalogue miss.
+      return {
+        found: false,
+        barcode,
+        reason: envelope?.retryable === true ? "unavailable" : "not_found",
+      };
     }
 
     const product = toProduct(envelope.product, barcode);
