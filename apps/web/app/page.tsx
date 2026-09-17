@@ -33,6 +33,7 @@ export default async function HomePage({ searchParams }: HomePageProps) {
       canAccessAdmin={canAccessAdmin}
       selectedDate={selectedDate}
       todayStr={today}
+      initialHourUtc={new Date().getUTCHours()}
       dailySummary={dailySummary}
       goals={goals}
       quickAddCandidates={quickAddCandidates}
