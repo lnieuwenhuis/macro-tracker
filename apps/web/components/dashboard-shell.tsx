@@ -1015,7 +1015,8 @@ export function DashboardShell({
               if (!dirty) {
                 return serverDraft;
               }
-              const { status: _ignored, ...preserved } = dirty;
+              const preserved = { ...dirty };
+              delete preserved.status;
               return { ...serverDraft, ...preserved };
             }),
           );

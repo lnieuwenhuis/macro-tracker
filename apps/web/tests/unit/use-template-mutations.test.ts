@@ -28,12 +28,6 @@ function setup(initialLabels: string[] = []) {
     caloriesKcal: 100,
   }));
   const presetErrorSpy = vi.fn();
-  let latestResult: {
-    handleSavePreset: ReturnType<typeof useTemplateMutations>["handleSavePreset"];
-    handleDeletePreset: ReturnType<typeof useTemplateMutations>["handleDeletePreset"];
-    items: typeof initial;
-    mutation: unknown;
-  } | null = null;
 
   function useHarness() {
     const [items, setItems] = useState(initial);
@@ -44,17 +38,16 @@ function setup(initialLabels: string[] = []) {
       setPresetError: presetErrorSpy,
       setPresetMutation: setMutation as never,
     });
-    latestResult = {
+    return {
       handleSavePreset: mutations.handleSavePreset,
       handleDeletePreset: mutations.handleDeletePreset,
       items: items as typeof initial,
       mutation,
     };
-    return latestResult;
   }
 
-  const utils = renderHook(() => useHarness());
-  return { utils, presetErrorSpy, getLatest: () => latestResult! };
+  const { result } = renderHook(() => useHarness());
+  return { presetErrorSpy, getLatest: () => result.current };
 }
 
 describe("useTemplateMutations transport rejection (UI-05)", () => {

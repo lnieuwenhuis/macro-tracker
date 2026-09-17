@@ -63,7 +63,15 @@ describe("BarcodeScanner auth recovery (UI-07)", () => {
 
     // First the camera decodes a barcode; the lookup then hits an expired session.
     mocked.decodeFromStream.mockImplementation(
-      async (_stream: unknown, _video: unknown, callback: Function) => {
+      async (
+        _stream: unknown,
+        _video: unknown,
+        callback: (
+          result: { getText: () => string },
+          error: unknown,
+          controls: { stop: () => void },
+        ) => void,
+      ) => {
         queueMicrotask(() =>
           callback({ getText: () => "12345678" }, null, { stop: vi.fn() }),
         );
