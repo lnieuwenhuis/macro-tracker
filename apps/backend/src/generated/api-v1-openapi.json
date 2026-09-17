@@ -1643,6 +1643,7 @@
     "/templates": {
       "get": {
         "summary": "List meal templates",
+        "description": "Returns the newest 5000 templates as a bare array. Send `limit` and/or `cursor` to opt into cursor pagination: the response becomes `{ items, nextCursor }` and pages walk a stable `(updatedAt DESC, createdAt DESC, id DESC)` keyset. A truncated response always carries `x-result-limit`, `x-result-count`, and `x-result-truncated`; a complete one carries none of them.",
         "security": [
           {
             "bearerAuth": []
@@ -1651,9 +1652,51 @@
         "x-required-scopes": [
           "read:templates"
         ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Opt in to cursor pagination: 1-1000 rows per page (default 1000 when only `cursor` is sent). Invalid values return 400.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "Opaque continuation cursor from `nextCursor`. Bound to the authenticated user; a malformed or foreign cursor returns 400.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful response",
+            "headers": {
+              "x-result-limit": {
+                "description": "Present only when the response was truncated: the applied row limit (5000 for the legacy answer, otherwise `limit`).",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "x-result-count": {
+                "description": "Present only when the response was truncated: the number of rows actually returned.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "x-result-truncated": {
+                "description": "Present only when the response was truncated; always `true`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1667,15 +1710,44 @@
                       "const": true
                     },
                     "data": {
-                      "type": "array",
-                      "items": {
-                        "$ref": "#/components/schemas/Template"
-                      }
+                      "description": "The capped bare array by default; the opt-in envelope when `limit` or `cursor` is sent.",
+                      "oneOf": [
+                        {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/Template"
+                          }
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "items",
+                            "nextCursor"
+                          ],
+                          "properties": {
+                            "items": {
+                              "type": "array",
+                              "items": {
+                                "$ref": "#/components/schemas/Template"
+                              }
+                            },
+                            "nextCursor": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            }
+                          }
+                        }
+                      ]
                     }
                   }
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -2365,6 +2437,7 @@
     "/recipes": {
       "get": {
         "summary": "List recipes",
+        "description": "Returns the newest 5000 recipes as a bare array. Send `limit` and/or `cursor` to opt into cursor pagination: the response becomes `{ items, nextCursor }` and pages walk a stable `(updatedAt DESC, createdAt DESC, id DESC)` keyset. A truncated response always carries `x-result-limit`, `x-result-count`, and `x-result-truncated`; a complete one carries none of them.",
         "security": [
           {
             "bearerAuth": []
@@ -2373,9 +2446,51 @@
         "x-required-scopes": [
           "read:recipes"
         ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Opt in to cursor pagination: 1-1000 rows per page (default 1000 when only `cursor` is sent). Invalid values return 400.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "Opaque continuation cursor from `nextCursor`. Bound to the authenticated user; a malformed or foreign cursor returns 400.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful response",
+            "headers": {
+              "x-result-limit": {
+                "description": "Present only when the response was truncated: the applied row limit (5000 for the legacy answer, otherwise `limit`).",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "x-result-count": {
+                "description": "Present only when the response was truncated: the number of rows actually returned.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "x-result-truncated": {
+                "description": "Present only when the response was truncated; always `true`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2389,15 +2504,44 @@
                       "const": true
                     },
                     "data": {
-                      "type": "array",
-                      "items": {
-                        "$ref": "#/components/schemas/Recipe"
-                      }
+                      "description": "The capped bare array by default; the opt-in envelope when `limit` or `cursor` is sent.",
+                      "oneOf": [
+                        {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/Recipe"
+                          }
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "items",
+                            "nextCursor"
+                          ],
+                          "properties": {
+                            "items": {
+                              "type": "array",
+                              "items": {
+                                "$ref": "#/components/schemas/Recipe"
+                              }
+                            },
+                            "nextCursor": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            }
+                          }
+                        }
+                      ]
                     }
                   }
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -3057,6 +3201,7 @@
     "/weight/entries": {
       "get": {
         "summary": "List weight entries",
+        "description": "Returns the newest 5000 entries as a bare array, oldest first. Send `limit` and/or `cursor` to opt into cursor pagination: the response becomes `{ items, nextCursor }` and pages walk a stable `(date DESC, id DESC)` keyset, each page still re-sorted ascending. A truncated response always carries `x-result-limit`, `x-result-count`, and `x-result-truncated`; a complete one carries none of them.",
         "security": [
           {
             "bearerAuth": []
@@ -3065,9 +3210,51 @@
         "x-required-scopes": [
           "read:weight"
         ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Opt in to cursor pagination: 1-1000 rows per page (default 1000 when only `cursor` is sent). Invalid values return 400.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "Opaque continuation cursor from `nextCursor`. Bound to the authenticated user; a malformed or foreign cursor returns 400.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful response",
+            "headers": {
+              "x-result-limit": {
+                "description": "Present only when the response was truncated: the applied row limit (5000 for the legacy answer, otherwise `limit`).",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "x-result-count": {
+                "description": "Present only when the response was truncated: the number of rows actually returned.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "x-result-truncated": {
+                "description": "Present only when the response was truncated; always `true`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -3081,15 +3268,44 @@
                       "const": true
                     },
                     "data": {
-                      "type": "array",
-                      "items": {
-                        "$ref": "#/components/schemas/WeightEntry"
-                      }
+                      "description": "The capped bare array by default; the opt-in envelope when `limit` or `cursor` is sent.",
+                      "oneOf": [
+                        {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/WeightEntry"
+                          }
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "items",
+                            "nextCursor"
+                          ],
+                          "properties": {
+                            "items": {
+                              "type": "array",
+                              "items": {
+                                "$ref": "#/components/schemas/WeightEntry"
+                              }
+                            },
+                            "nextCursor": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            }
+                          }
+                        }
+                      ]
                     }
                   }
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -3538,6 +3754,7 @@
     "/stats": {
       "get": {
         "summary": "Read stats",
+        "description": "Lifetime aggregates cover the full history, but `allDailyTotals` and `smoothedWeightTrend` are bounded to the newest 1000 rows. When that bound truncates a series, the response carries the matching `x-daily-totals-*` or `x-smoothed-weight-trend-*` headers; otherwise none of those headers are present.",
         "security": [
           {
             "bearerAuth": []
@@ -3561,6 +3778,44 @@
         "responses": {
           "200": {
             "description": "Successful response",
+            "headers": {
+              "x-daily-totals-limit": {
+                "description": "Present only when `allDailyTotals` was truncated: always 1000.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "x-daily-totals-count": {
+                "description": "Present only when `allDailyTotals` was truncated: the rows actually returned.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "x-daily-totals-truncated": {
+                "description": "Present only when `allDailyTotals` was truncated; always `true`.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "x-smoothed-weight-trend-limit": {
+                "description": "Present only when `smoothedWeightTrend` was truncated: always 1000.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "x-smoothed-weight-trend-count": {
+                "description": "Present only when `smoothedWeightTrend` was truncated: the rows actually returned.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "x-smoothed-weight-trend-truncated": {
+                "description": "Present only when `smoothedWeightTrend` was truncated; always `true`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {

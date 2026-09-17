@@ -12,6 +12,7 @@ use uuid::Uuid;
 mod api_tokens;
 mod gym;
 mod healthkit;
+pub(crate) mod pagination;
 mod sql;
 mod weight;
 
@@ -1401,7 +1402,7 @@ pub async fn rpc_json(pool: &PgPool, op: &str, args: Value) -> AppResult<Value> 
             let today = date_arg(&args, "today")
                 .or_else(|_| date_arg(&args, "referenceDate"))
                 .unwrap_or_else(|_| Utc::now().date_naive().to_string());
-            stats_page_data_json(pool, user_id, &today).await
+            Ok(stats_page_data_json(pool, user_id, &today).await?.data)
         }
         "getLeaderboardStats" => {
             let user_id = uuid_arg(&args, "userId")?;
@@ -5307,7 +5308,20 @@ async fn period_averages_json(
     Ok(row.try_get("data")?)
 }
 
-async fn stats_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppResult<Value> {
+/// API-01: `/stats` keeps full-history aggregates but bounds the two chart
+/// series; these counts let the public response report an honest truncation
+/// window without changing the body.
+pub(crate) struct StatsPageData {
+    pub(crate) data: Value,
+    pub(crate) daily_totals_available: i64,
+    pub(crate) smoothed_weight_available: i64,
+}
+
+async fn stats_page_data_json(
+    pool: &PgPool,
+    user_id: Uuid,
+    today: &str,
+) -> AppResult<StatsPageData> {
     let row = sqlx::query(concat!(
         r#"
         WITH user_goals AS (
@@ -5497,6 +5511,15 @@ async fn stats_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppR
             SELECT * FROM daily ORDER BY entry_date DESC LIMIT 1000
           ) bounded_daily
         ),
+        -- API-01: rows the series would have returned without the 1000-row bound.
+        daily_totals_meta AS (
+          SELECT count(*)::bigint AS available FROM daily
+        ),
+        smoothed_weight_meta AS (
+          SELECT count(*)::bigint AS available
+          FROM weight_entries
+          WHERE user_id = $1
+        ),
         -- Same date set the leaderboard streaks over: one row per date with an
         -- eaten entry. `daily` above also carries planned-only dates, which must
         -- not count towards a streak.
@@ -5556,13 +5579,17 @@ async fn stats_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppR
             'skippedCount', planned_adherence.skipped_count,
             'adherencePct', CASE WHEN planned_adherence.base_count = 0 THEN NULL ELSE round(planned_adherence.eaten_count * 100.0 / planned_adherence.base_count)::int END
           )
-        ) AS data
+        ) AS data,
+        daily_totals_meta.available AS daily_totals_available,
+        smoothed_weight_meta.available AS smoothed_weight_available
         FROM totals
         CROSS JOIN rolling_7
         CROSS JOIN rolling_30
         CROSS JOIN goal_hits
         CROSS JOIN user_goals
         CROSS JOIN daily_totals
+        CROSS JOIN daily_totals_meta
+        CROSS JOIN smoothed_weight_meta
         CROSS JOIN top_labels
         CROSS JOIN macro_consistency
         CROSS JOIN energy_balance
@@ -5577,7 +5604,11 @@ async fn stats_page_data_json(pool: &PgPool, user_id: Uuid, today: &str) -> AppR
     .bind(today)
     .fetch_one(pool)
     .await?;
-    Ok(row.try_get("data")?)
+    Ok(StatsPageData {
+        data: row.try_get("data")?,
+        daily_totals_available: row.try_get("daily_totals_available")?,
+        smoothed_weight_available: row.try_get("smoothed_weight_available")?,
+    })
 }
 
 async fn leaderboard_json(pool: &PgPool, user_id: Uuid, reference_date: &str) -> AppResult<Value> {

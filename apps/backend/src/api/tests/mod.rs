@@ -850,3 +850,186 @@ fn unknown_paths_have_no_endpoint() {
         "trailing segments must not resolve"
     );
 }
+
+#[test]
+fn page_requests_require_a_bounded_limit_and_a_nonempty_cursor() {
+    let request = |query: &str| {
+        page_request(
+            &format!("/templates{query}")
+                .parse::<Uri>()
+                .expect("query builds"),
+        )
+    };
+
+    assert!(request("").expect("no page parameters").is_none());
+    let paged = request("?limit=10")
+        .expect("limit should parse")
+        .expect("page request is present");
+    assert_eq!((paged.limit, paged.cursor.as_deref()), (10, None));
+
+    let cursor_only = request("?cursor=abc")
+        .expect("cursor should parse")
+        .expect("page request is present");
+    assert_eq!(cursor_only.limit, db::pagination::DEFAULT_PAGE_LIMIT);
+    assert_eq!(cursor_only.cursor.as_deref(), Some("abc"));
+
+    for query in [
+        "?limit=0",
+        "?limit=1001",
+        "?limit=abc",
+        "?limit=",
+        "?cursor=",
+    ] {
+        let failure = request(query).expect_err("invalid page parameters must fail");
+        assert_eq!(failure.status, StatusCode::BAD_REQUEST, "{query}");
+        assert_eq!(failure.code, "bad_request", "{query}");
+    }
+}
+
+#[test]
+fn truncation_headers_are_only_sent_when_a_cap_bit() {
+    let complete = db::pagination::CollectionPage {
+        items: json!([]),
+        next_cursor: None,
+        limit: 5_000,
+        returned: 1,
+        truncated: false,
+    };
+    assert!(
+        collection_page_headers(&complete).is_empty(),
+        "a complete response carries no truncation metadata"
+    );
+
+    let truncated = db::pagination::CollectionPage {
+        items: json!([]),
+        next_cursor: Some("opaque".to_string()),
+        limit: 10,
+        returned: 10,
+        truncated: true,
+    };
+    let headers = collection_page_headers(&truncated);
+    assert_eq!(
+        headers.get("x-result-limit").unwrap().to_str().unwrap(),
+        "10"
+    );
+    assert_eq!(
+        headers.get("x-result-count").unwrap().to_str().unwrap(),
+        "10"
+    );
+    assert_eq!(
+        headers.get("x-result-truncated").unwrap().to_str().unwrap(),
+        "true"
+    );
+
+    let stats = db::pagination::StatsPage {
+        data: json!({}),
+        daily_totals: db::pagination::SeriesWindow {
+            limit: 1_000,
+            count: 1_000,
+            truncated: true,
+        },
+        smoothed_weight_trend: db::pagination::SeriesWindow {
+            limit: 1_000,
+            count: 12,
+            truncated: false,
+        },
+    };
+    let headers = stats_page_headers(&stats);
+    assert_eq!(
+        headers
+            .get("x-daily-totals-limit")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "1000"
+    );
+    assert_eq!(
+        headers
+            .get("x-daily-totals-count")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "1000"
+    );
+    assert_eq!(
+        headers
+            .get("x-daily-totals-truncated")
+            .unwrap()
+            .to_str()
+            .unwrap(),
+        "true"
+    );
+    assert!(
+        headers.get("x-smoothed-weight-trend-count").is_none(),
+        "a complete series is not announced"
+    );
+}
+
+#[test]
+fn cors_exposes_the_truncation_headers_to_browser_clients() {
+    // API-01: without an expose list the headers exist but browsers cannot read them.
+    let exposed = cors_headers()
+        .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+
+    for name in [
+        "x-result-limit",
+        "x-result-count",
+        "x-result-truncated",
+        "x-daily-totals-limit",
+        "x-daily-totals-count",
+        "x-daily-totals-truncated",
+        "x-smoothed-weight-trend-limit",
+        "x-smoothed-weight-trend-count",
+        "x-smoothed-weight-trend-truncated",
+    ] {
+        assert!(exposed.contains(name), "{name} is not exposed");
+    }
+}
+
+#[test]
+fn the_published_contract_documents_opt_in_pagination_and_truncation_headers() {
+    let spec: Value = serde_json::from_slice(API_V1_OPENAPI_JSON).expect("spec should be JSON");
+
+    for path in ["/templates", "/recipes", "/weight/entries"] {
+        let get = &spec["paths"][path]["get"];
+        let parameters = get["parameters"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{path} should document parameters"));
+        let names = parameters
+            .iter()
+            .filter_map(|parameter| parameter["name"].as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"limit"), "{path} must document limit");
+        assert!(names.contains(&"cursor"), "{path} must document cursor");
+        assert!(
+            get["responses"].get("400").is_some(),
+            "{path} must document the invalid page parameter outcome"
+        );
+        let headers = get["responses"]["200"]["headers"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{path} should document response headers"));
+        for name in ["x-result-limit", "x-result-count", "x-result-truncated"] {
+            assert!(headers.contains_key(name), "{path} must document {name}");
+        }
+    }
+
+    let stats_headers = spec["paths"]["/stats"]["get"]["responses"]["200"]["headers"]
+        .as_object()
+        .expect("stats should document response headers");
+    for name in [
+        "x-daily-totals-limit",
+        "x-daily-totals-count",
+        "x-daily-totals-truncated",
+        "x-smoothed-weight-trend-limit",
+        "x-smoothed-weight-trend-count",
+        "x-smoothed-weight-trend-truncated",
+    ] {
+        assert!(
+            stats_headers.contains_key(name),
+            "stats must document {name}"
+        );
+    }
+}

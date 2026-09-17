@@ -3121,4 +3121,5 @@ fn shared_sql_fragments_render_unchanged() {
 
 mod api_tokens;
 mod gym;
+mod pagination;
 mod weight;
