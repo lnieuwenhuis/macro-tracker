@@ -3,11 +3,17 @@
 import type { MealTemplate, RecipeRecord } from "@macro-tracker/db";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 import {
   saveRecipeAction,
 } from "@/lib/actions";
+import {
+  findBlockingNumberInput,
+  getNumberFieldError,
+  snapshotNumberValidity,
+} from "@/lib/number-input-validity";
+import { parseDecimalInput } from "@/lib/numbers";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
 import type { OpenFoodFactsProduct } from "@/lib/openfoodfacts";
 import { useActionRunner } from "@/lib/use-action-runner";
@@ -52,6 +58,42 @@ function toNumber(value: string) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+/**
+ * UI-29: portions must be a finite positive integer. Invalid text (including
+ * an incomplete exponent with native badInput) blocks with an explanation and
+ * preserves the entered text; valid input passes through unchanged.
+ */
+export function getRecipePortionsError(
+  value: string,
+  validity?: { badInput: boolean; rangeUnderflow: boolean; rangeOverflow: boolean },
+): string | null {
+  if (validity?.badInput) {
+    return "Portions is not a valid number yet. Finish or clear it before saving.";
+  }
+
+  if (validity?.rangeUnderflow) {
+    return "Portions must be at least 1.";
+  }
+
+  if (validity?.rangeOverflow) {
+    return "Portions must be at most 999.";
+  }
+
+  return getNumberFieldError({
+    value,
+    label: "Portions",
+    optional: false,
+    integer: true,
+    min: 1,
+    max: 999,
+  });
+}
+
+function describeRecipeBlockingInput(input: HTMLInputElement): string {
+  const label = input.closest("label")?.querySelector("span")?.textContent?.trim();
+  return label || input.getAttribute("name") || "Number";
+}
+
 function makeIngredientDraft(source: {
   clientId: string;
   productId?: string | null;
@@ -88,12 +130,15 @@ export function RecipeBuilderShell({
   todayStr,
 }: RecipeBuilderShellProps) {
   const router = useRouter();
-  const { run, isPending, error, clearError } = useActionRunner();
+  const { run, isPending, error, setError, clearError } = useActionRunner();
   const [label, setLabel] = useState(recipe?.label ?? "");
   const [portions, setPortions] = useState(String(recipe?.portions ?? 1));
   const [totalCookedWeightG, setTotalCookedWeightG] = useState(
     recipe?.totalCookedWeightG != null ? String(recipe.totalCookedWeightG) : "",
   );
+  const formRef = useRef<HTMLDivElement>(null);
+  const portionsRef = useRef<HTMLInputElement>(null);
+  const cookedWeightRef = useRef<HTMLInputElement>(null);
 
   const [ingredients, setIngredients] = useState<IngredientDraft[]>(() => {
     if (!recipe) return [];
@@ -224,12 +269,96 @@ export function RecipeBuilderShell({
   }
 
   function handleSave() {
+    // UI-21/UI-29: native badInput/range blocks first so an incomplete `1e`
+    // (React state "") cannot silently become 0/1, then parser checks cover
+    // explicit -1/0/1.5. Legitimate empty optional nutrients still map to 0/1.
+    const blocking = findBlockingNumberInput(formRef.current);
+    if (blocking) {
+      const snapshot = snapshotNumberValidity(blocking);
+      const fieldLabel = describeRecipeBlockingInput(blocking);
+      if (fieldLabel.toLowerCase().includes("portion")) {
+        setError(getRecipePortionsError("", snapshot) ?? `${fieldLabel} is not valid.`);
+      } else {
+        setError(
+          snapshot.rangeUnderflow
+            ? `${fieldLabel} must be at least 0.`
+            : `${fieldLabel} is not a valid number yet. Finish or clear it before saving.`,
+        );
+      }
+      return;
+    }
+
+    const portionsError = getRecipePortionsError(
+      portions,
+      snapshotNumberValidity(portionsRef.current),
+    );
+    if (portionsError) {
+      setError(portionsError);
+      return;
+    }
+
+    const validPortions = Number(portions.trim());
+
+    if (totalCookedWeightG.trim()) {
+      const cookedError = getNumberFieldError({
+        value: totalCookedWeightG,
+        label: "Cooked weight",
+        validity: snapshotNumberValidity(cookedWeightRef.current),
+        optional: true,
+        min: 0,
+      });
+      if (cookedError) {
+        setError(cookedError);
+        return;
+      }
+    }
+
+    for (const ing of ingredients) {
+      const name = ing.label.trim() || "Ingredient";
+      const quantityRaw = (ing.quantity ?? "").trim();
+      if (quantityRaw) {
+        const quantityError = getNumberFieldError({
+          value: quantityRaw,
+          label: `Quantity for ${name}`,
+          optional: true,
+          min: 0,
+        });
+        if (quantityError || parseDecimalInput(quantityRaw) == null) {
+          setError(quantityError ?? `Quantity for ${name} is not a valid number yet. Finish or clear it before saving.`);
+          return;
+        }
+      }
+
+      for (const nutrient of [
+        { key: "proteinG", label: `Protein for ${name}` },
+        { key: "carbsG", label: `Carbs for ${name}` },
+        { key: "fatG", label: `Fat for ${name}` },
+        { key: "caloriesKcal", label: `Calories for ${name}` },
+      ] as const) {
+        const raw = ing[nutrient.key].trim();
+        if (!raw) {
+          continue;
+        }
+
+        const nutrientError = getNumberFieldError({
+          value: raw,
+          label: nutrient.label,
+          optional: true,
+          min: 0,
+        });
+        if (nutrientError) {
+          setError(nutrientError);
+          return;
+        }
+      }
+    }
+
     run(
       () =>
         saveRecipeAction({
           id: recipe?.id,
           label,
-          portions: parsedPortions,
+          portions: validPortions,
           totalCookedWeightG: totalCookedWeightG.trim()
             ? Math.max(toNumber(totalCookedWeightG), 0)
             : null,
@@ -259,7 +388,7 @@ export function RecipeBuilderShell({
 
   const content = (
     <>
-      <div className="space-y-5">
+      <div ref={formRef} className="space-y-5">
         <section className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5 shadow-[0_12px_32px_rgba(0,0,0,0.06)]">
           <label className="block">
             <span className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.12em] text-[var(--color-muted-strong)]">
@@ -285,6 +414,8 @@ export function RecipeBuilderShell({
               min="1"
               max="999"
               step="1"
+              name="portions"
+              ref={portionsRef}
               value={portions}
               disabled={isPending}
               onChange={(e) => { setPortions(e.target.value); clearError(); }}
@@ -301,6 +432,8 @@ export function RecipeBuilderShell({
                 inputMode="decimal"
                 min="0"
                 step="1"
+                name="totalCookedWeightG"
+                ref={cookedWeightRef}
                 value={totalCookedWeightG}
                 disabled={isPending}
                 onChange={(e) => { setTotalCookedWeightG(e.target.value); clearError(); }}
