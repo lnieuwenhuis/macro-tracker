@@ -157,7 +157,8 @@ test("UI-06/UI-21: preset dialog traps focus and blocks a typed 1e without losin
   await trigger.click();
   const dialog = page.getByRole("dialog", { name: "Meal Templates" });
   await expect(dialog).toBeVisible();
-  expect(await focusIsInsideDialog(page)).toBe(true);
+  // The trap focuses on its mount effect; poll instead of racing the commit.
+  await expect.poll(() => focusIsInsideDialog(page)).toBe(true);
 
   for (let index = 0; index < 15; index += 1) {
     await page.keyboard.press("Tab");

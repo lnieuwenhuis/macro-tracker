@@ -27,6 +27,9 @@ export function stripHopByHopHeaders(headers: Headers) {
   }
 
   headers.delete("host");
+  // SEC-01: the backend derives identity only from the cookie it validates, so a caller-supplied
+  // session header must never survive the proxy hop.
+  headers.delete("x-macro-tracker-session");
 
   return headers;
 }
