@@ -1,7 +1,7 @@
 "use client";
 
 import type { FoodProduct, MealEntryRecord } from "@macro-tracker/db";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { saveMealEntryAction, searchFoodsAction } from "@/lib/actions";
 import {
@@ -32,8 +32,11 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
   const { copiedIds, setCopiedIds, flash: flashCopied } = useCopiedFlash(2500);
   const inputRef = useRef<HTMLInputElement>(null);
   const mutationIds = useRef(createClientMutationIdStore());
+  // UI-22: the local day is captured per operation, not at mount. A retry of an
+  // already-started operation keeps its original date/key until it settles so a
+  // pre-midnight attempt cannot duplicate onto the new day.
+  const operationDates = useRef(new Map<string, string>());
 
-  const todayStr = useMemo(() => getLocalDateString(), []);
   const trimmedQuery = normalizeFoodSearchQuery(query);
   const hasCurrentResults = hasCurrentFoodSearchResults(resultQuery, trimmedQuery);
   const visibleResults = hasCurrentResults ? results : [];
@@ -83,6 +86,12 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
           setResults([]);
           setProducts([]);
         }
+      } catch {
+        if (cancelled) return;
+        setResultQuery(trimmedQuery);
+        setError("Search failed.");
+        setResults([]);
+        setProducts([]);
       } finally {
         if (!cancelled) setIsSearching(false);
       }
@@ -95,17 +104,22 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
   }, [trimmedQuery]);
 
   async function handleCopyToToday(entry: MealEntryRecord) {
-    const mutationKey = `history:${entry.id}:${todayStr}`;
+    const operationId = `history:${entry.id}`;
+    const operationDate =
+      operationDates.current.get(operationId) ?? getLocalDateString();
+    operationDates.current.set(operationId, operationDate);
+    const mutationKey = `${operationId}:${operationDate}`;
     setCopyingId(entry.id);
     setError(null);
     try {
       const result = await saveMealEntryAction({
-        ...buildMealEntryCopyInput(entry, todayStr),
+        ...buildMealEntryCopyInput(entry, operationDate),
         clientMutationId: mutationIds.current.take(mutationKey),
       });
 
       if (result.ok) {
         mutationIds.current.settle(mutationKey);
+        operationDates.current.delete(operationId);
         if (result.entry) {
           onEntrySaved?.(result.entry);
         }
@@ -114,13 +128,20 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
       }
 
       setError(result.error ?? "Unable to add this food to today.");
+    } catch {
+      // Transport rejection keeps the original date/key so a retry reuses them.
+      setError("Unable to add this food to today.");
     } finally {
       setCopyingId(null);
     }
   }
 
   async function handleAddProduct(product: FoodProduct) {
-    const mutationKey = `product:${product.id}:${todayStr}`;
+    const operationId = `product:${product.id}`;
+    const operationDate =
+      operationDates.current.get(operationId) ?? getLocalDateString();
+    operationDates.current.set(operationId, operationDate);
+    const mutationKey = `${operationId}:${operationDate}`;
     setCopyingId(product.id);
     setError(null);
     try {
@@ -130,7 +151,7 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
           ? quantity / 100
           : ((product.servingWeightG ?? product.servingVolumeMl ?? 100) * quantity) / 100;
       const result = await saveMealEntryAction({
-        date: todayStr,
+        date: operationDate,
         status: "eaten",
         clientMutationId: mutationIds.current.take(mutationKey),
         productId: product.id,
@@ -145,6 +166,7 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
 
       if (result.ok) {
         mutationIds.current.settle(mutationKey);
+        operationDates.current.delete(operationId);
         if (result.entry) {
           onEntrySaved?.(result.entry);
         }
@@ -153,6 +175,9 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
       }
 
       setError(result.error ?? "Unable to add this food to today.");
+    } catch {
+      // Transport rejection keeps the original date/key so a retry reuses them.
+      setError("Unable to add this food to today.");
     } finally {
       setCopyingId(null);
     }
