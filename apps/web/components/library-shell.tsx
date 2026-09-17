@@ -22,6 +22,9 @@ type LibraryShellProps = {
   templates: MealTemplateSummary[];
   recipes: RecipeSummary[];
   todayStr?: string;
+  // Invalid submitted queries stay on the page as an actionable message
+  // with templates/recipes still usable; outages still use the boundary.
+  searchError?: string | null;
 };
 
 const byLabel = (item: { label: string }) => item.label;
@@ -92,6 +95,7 @@ export function LibraryShell({
   templates,
   recipes,
   todayStr,
+  searchError,
 }: LibraryShellProps) {
   const router = useRouter();
   const [search, setSearch] = useState(query);
@@ -133,6 +137,14 @@ export function LibraryShell({
     [deferredSearch, recipes],
   );
   const hasActiveTemplateSearch = normalizeLibraryQuery(deferredSearch).length > 0;
+  // Foods shows server results for the last *submitted* query while the
+  // template/recipe sections filter live on the typed query. Until the new
+  // query is submitted the screen mixes two different terms, so the Foods
+  // section is labeled with the query it actually reflects.
+  const committedQuery = normalizeLibraryQuery(query);
+  const foodsStale =
+    committedQuery.length > 0 &&
+    normalizeLibraryQuery(deferredSearch) !== committedQuery;
 
   return (
     <AppShell
@@ -180,7 +192,29 @@ export function LibraryShell({
           <h3 className="mb-3 text-xs font-bold uppercase tracking-[0.2em] text-[var(--color-muted-strong)]">
             Foods
           </h3>
-          {products.length === 0 ? (
+          {foodsStale ? (
+            <p
+              aria-live="polite"
+              className="mb-3 rounded-2xl border border-[var(--color-border)] bg-[var(--color-card-muted)] px-4 py-2.5 text-xs text-[var(--color-muted-strong)]"
+            >
+              Food results are for &ldquo;{query.trim()}&rdquo;. Press Search
+              to update them.
+            </p>
+          ) : null}
+          {searchError ? (
+            <div
+              role="alert"
+              className="rounded-2xl border border-[var(--color-danger)]/20 bg-[var(--color-danger)]/8 px-5 py-4"
+            >
+              <p className="text-sm font-semibold text-[var(--color-danger)]">
+                {searchError}
+              </p>
+              <p className="mt-1 text-xs text-[var(--color-muted)]">
+                Shorten the search to look through foods; templates and
+                recipes below still filter as you type.
+              </p>
+            </div>
+          ) : products.length === 0 ? (
             <div className="rounded-2xl border border-dashed border-[var(--color-border-strong)] bg-[var(--color-shell-panel)] px-5 py-6 text-center">
               <p className="text-sm text-[var(--color-muted)]">
                 {query ? "No food products found." : "Search to find foods."}
@@ -243,7 +277,7 @@ export function LibraryShell({
               >
                 <p className="font-semibold text-[var(--color-ink)]">{recipe.label}</p>
                 <p className="mt-1 text-xs text-[var(--color-muted)]">
-                  {recipe.portions} portions · {recipe.perPortionMacros.caloriesKcal} kcal per portion
+                  {recipe.portions} portion{recipe.portions !== 1 ? "s" : ""} · {recipe.perPortionMacros.caloriesKcal} kcal per portion
                 </p>
               </TransitionLink>
             ))}

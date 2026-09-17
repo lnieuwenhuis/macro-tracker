@@ -1,24 +1,59 @@
-import { getRecipeSummaries, getTemplateSummaries, searchFoodProducts } from "@macro-tracker/db";
+import {
+  BackendError,
+  getRecipeSummaries,
+  getTemplateSummaries,
+  searchFoodProducts,
+  type BrowserFoodProduct,
+} from "@macro-tracker/db";
 
 import { LibraryShell } from "@/components/library-shell";
 import { toBrowserFoodProducts } from "@/lib/browser-product";
+import { validateSearchQuery } from "@/lib/input-validation";
 import { loadOnboardedPageContext } from "@/lib/page-context";
 
 type LibraryPageProps = {
   searchParams: Promise<{ q?: string; date?: string }>;
 };
 
+function isSearchValidationError(error: unknown) {
+  const code = (error as { code?: string } | null)?.code;
+  const name = (error as { name?: string } | null)?.name;
+  return (
+    code === "bad_request" &&
+    (error instanceof BackendError || name === "BackendError")
+  );
+}
+
 export default async function LibraryPage({ searchParams }: LibraryPageProps) {
   const { params, sessionUser, selectedDate, userEmail, canAccessAdmin, today} =
     await loadOnboardedPageContext(searchParams);
   const query = params.q ?? "";
-  const [templates, recipes, productRows] = await Promise.all([
+  const [templates, recipes] = await Promise.all([
     getTemplateSummaries(sessionUser.userId),
     getRecipeSummaries(sessionUser.userId),
-    query.trim() ? searchFoodProducts(sessionUser.userId, query) : Promise.resolve([]),
   ]);
-  // SEC-06: strip internal provenance before the rows are serialized into client props.
-  const products = toBrowserFoodProducts(productRows);
+
+  // Invalid input stays on the page as an actionable message with the query
+  // preserved; only genuine backend outages reach the error boundary.
+  // Successful rows are projected to the browser-safe shape (SEC-06).
+  let products: BrowserFoodProduct[] = [];
+  let searchError: string | null = null;
+  if (query.trim()) {
+    searchError = validateSearchQuery(query);
+    if (!searchError) {
+      try {
+        products = toBrowserFoodProducts(
+          await searchFoodProducts(sessionUser.userId, query),
+        );
+      } catch (error) {
+        if (isSearchValidationError(error)) {
+          searchError = (error as Error).message;
+        } else {
+          throw error;
+        }
+      }
+    }
+  }
 
   return (
     <LibraryShell
@@ -30,6 +65,7 @@ export default async function LibraryPage({ searchParams }: LibraryPageProps) {
       products={products}
       templates={templates}
       recipes={recipes}
+      searchError={searchError}
     />
   );
 }

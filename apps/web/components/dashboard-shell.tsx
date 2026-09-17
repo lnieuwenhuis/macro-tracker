@@ -80,6 +80,9 @@ type DashboardShellProps = {
   initialPresetTemplateKind?: PresetTemplateKind | null;
   // Server-resolved in the user's timezone so the client and server renders agree on hydration.
   todayStr?: string;
+  // Server-captured UTC hour so SSR and the first client render rank
+  // quick-add identically; the live hour applies after hydration.
+  initialHourUtc?: number;
 };
 
 type ErrorState = Record<string, string | null>;
@@ -440,6 +443,7 @@ export function DashboardShell({
   initialComposeAction = null,
   initialPresetTemplateKind = null,
   todayStr: todayStrProp,
+  initialHourUtc,
 }: DashboardShellProps) {
   const router = useRouter();
   const composeHandledRef = useRef<string | null>(null);
@@ -560,14 +564,23 @@ export function DashboardShell({
     selectedDate > todayStr ? "planned" : "eaten";
 
   // Single unified quick-add list: ranked by routine signals, not macro fit.
+  // The hour is a stable snapshot for SSR/first render; the live clock
+  // only takes over after hydration so an hour boundary in flight cannot
+  // reorder the initial markup.
+  const [currentHourUtc, setCurrentHourUtc] = useState(
+    () => initialHourUtc ?? new Date().getUTCHours(),
+  );
+  useEffect(() => {
+    setCurrentHourUtc(new Date().getUTCHours());
+  }, []);
   const quickAddItems = useMemo(
     () =>
       rankCandidates(quickAddCandidates, {
         limit: 10,
-        currentHourUtc: new Date().getUTCHours(),
+        currentHourUtc,
         referenceDate: todayStr,
       }),
-    [quickAddCandidates, todayStr],
+    [quickAddCandidates, todayStr, currentHourUtc],
   );
 
   function clearDraftError(clientId: string) {

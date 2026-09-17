@@ -1,6 +1,7 @@
 "use client";
 
 import type { MealTemplateSummary, PlannedShoppingSummary } from "@macro-tracker/db";
+import { isValidDateString } from "@macro-tracker/db";
 import { useDeferredValue, useMemo, useState } from "react";
 
 import {
@@ -89,13 +90,23 @@ export function PlannerShell({
     [dayTemplates, normalizedTemplateSearch],
   );
   const selectedDaySummary = `${selectedDayEntryCount} entries, ${selectedDayPlannedCaloriesKcal} planned kcal`;
+  // Date inputs hold raw editable text, which is empty/incomplete mid-edit.
+  // Filtering and formatting only ever read these validated snapshots, so
+  // clearing a field never throws and the page stays usable while typing.
+  const effectiveShoppingStartDate = isValidDateString(shoppingStartDate)
+    ? shoppingStartDate
+    : defaultShoppingStartDate;
+  const effectiveShoppingEndDate = isValidDateString(shoppingEndDate)
+    ? shoppingEndDate
+    : defaultShoppingEndDate;
   const filteredShoppingSummaries = useMemo(
     () =>
       shoppingSummaries.filter(
         (summary) =>
-          summary.date >= shoppingStartDate && summary.date <= shoppingEndDate,
+          summary.date >= effectiveShoppingStartDate &&
+          summary.date <= effectiveShoppingEndDate,
       ),
-    [shoppingEndDate, shoppingStartDate, shoppingSummaries],
+    [effectiveShoppingEndDate, effectiveShoppingStartDate, shoppingSummaries],
   );
   const shoppingItems = useMemo(
     () => buildShoppingList(filteredShoppingSummaries),
@@ -105,8 +116,8 @@ export function PlannerShell({
     () => formatShoppingListText(shoppingItems),
     [shoppingItems],
   );
-  const shoppingRangeLabel = `${formatShortDate(shoppingStartDate)} to ${formatShortDate(
-    shoppingEndDate,
+  const shoppingRangeLabel = `${formatShortDate(effectiveShoppingStartDate)} to ${formatShortDate(
+    effectiveShoppingEndDate,
   )}`;
   const templateTiles = [
     {
@@ -161,7 +172,11 @@ export function PlannerShell({
 
   function updateShoppingStartDate(value: string) {
     setShoppingStartDate(value);
-    if (value > shoppingEndDate) {
+    if (
+      isValidDateString(value) &&
+      isValidDateString(shoppingEndDate) &&
+      value > shoppingEndDate
+    ) {
       setShoppingEndDate(value);
     }
     setCopyStatus(null);
@@ -169,7 +184,11 @@ export function PlannerShell({
 
   function updateShoppingEndDate(value: string) {
     setShoppingEndDate(value);
-    if (value < shoppingStartDate) {
+    if (
+      isValidDateString(value) &&
+      isValidDateString(shoppingStartDate) &&
+      value < shoppingStartDate
+    ) {
       setShoppingStartDate(value);
     }
     setCopyStatus(null);
