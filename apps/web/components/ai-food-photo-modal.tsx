@@ -59,6 +59,9 @@ export function AiFoodPhotoModal({
   const libraryInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
   const optimizationSequenceRef = useRef(0);
+  // UI-02: invalidates in-flight analysis when the selected image changes.
+  // The optimization guard alone lets an older photo's result land on a newer one.
+  const analysisSequenceRef = useRef(0);
   const previewUrlRef = useRef<string | null>(null);
   const [imageFile, setImageFile] = useState<Blob | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -72,6 +75,7 @@ export function AiFoodPhotoModal({
 
   useEffect(() => () => {
     optimizationSequenceRef.current += 1;
+    analysisSequenceRef.current += 1;
     if (previewUrlRef.current) {
       URL.revokeObjectURL(previewUrlRef.current);
     }
@@ -86,6 +90,10 @@ export function AiFoodPhotoModal({
   async function handleFileChange(file: File | null) {
     const sequence = optimizationSequenceRef.current + 1;
     optimizationSequenceRef.current = sequence;
+    // A new selection invalidates any pending analysis for the previous photo.
+    analysisSequenceRef.current += 1;
+    // The stale request must not keep the new photo stuck in an analyzing state.
+    setIsAnalyzing(false);
     replacePreview(null);
 
     setEstimate(null);
@@ -141,8 +149,10 @@ export function AiFoodPhotoModal({
       return;
     }
 
+    const requestSequence = analysisSequenceRef.current;
+    const requestImage = imageFile;
     const formData = new FormData();
-    setOptimizedFoodPhoto(formData, imageFile);
+    setOptimizedFoodPhoto(formData, requestImage);
     formData.set("clarification", clarification);
 
     setIsAnalyzing(true);
@@ -154,6 +164,12 @@ export function AiFoodPhotoModal({
         body: formData,
       });
       const payload = (await response.json()) as ApiResponse;
+
+      // The user may have replaced the photo while this request was in flight;
+      // never commit a stale result (estimate, question, or error) to the new photo.
+      if (analysisSequenceRef.current !== requestSequence) {
+        return;
+      }
 
       if (!payload.ok) {
         if (payload.aiResponse) {
@@ -175,9 +191,14 @@ export function AiFoodPhotoModal({
       setEstimate(payload.analysis.estimate);
       setSavedPreset(false);
     } catch {
+      if (analysisSequenceRef.current !== requestSequence) {
+        return;
+      }
       setError("Unable to analyze this photo right now.");
     } finally {
-      setIsAnalyzing(false);
+      if (analysisSequenceRef.current === requestSequence) {
+        setIsAnalyzing(false);
+      }
     }
   }
 
