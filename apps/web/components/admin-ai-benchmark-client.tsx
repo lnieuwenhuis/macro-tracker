@@ -58,6 +58,24 @@ function formatExpected(macros: {
   ].join(" / ");
 }
 
+function isReusableBaselineRow(
+  value: unknown,
+  currentModel: string,
+): boolean {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const row = value as Record<string, unknown>;
+  return (
+    row.ok === true &&
+    row.wasSkipped !== true &&
+    row.model === currentModel &&
+    !!row.estimate &&
+    typeof row.estimate === "object"
+  );
+}
+
 function isFreshBaseline(value: unknown): value is MacroBenchmarkBaseline & {
   fixtureLimit: number;
 } {
@@ -70,17 +88,25 @@ function isFreshBaseline(value: unknown): value is MacroBenchmarkBaseline & {
     typeof record.createdAt === "string" ? Date.parse(record.createdAt) : NaN;
   const now = Date.now();
 
-  return (
-    typeof record.currentModel === "string" &&
-    typeof record.fixtureLimit === "number" &&
-    record.fixtureVersion === BENCHMARK_FIXTURE_VERSION &&
-    Array.isArray(record.fixtureIds) &&
-    Array.isArray(record.results) &&
-    (record.fixtureIds as unknown[]).length === record.fixtureLimit &&
-    (record.results as unknown[]).length === record.fixtureLimit &&
-    Number.isFinite(createdAt) &&
-    createdAt <= now &&
-    now - createdAt <= BASELINE_TTL_MS
+  if (
+    typeof record.currentModel !== "string" ||
+    typeof record.fixtureLimit !== "number" ||
+    record.fixtureVersion !== BENCHMARK_FIXTURE_VERSION ||
+    !Array.isArray(record.fixtureIds) ||
+    !Array.isArray(record.results) ||
+    (record.fixtureIds as unknown[]).length !== record.fixtureLimit ||
+    (record.results as unknown[]).length !== record.fixtureLimit ||
+    !Number.isFinite(createdAt) ||
+    createdAt > now ||
+    now - createdAt > BASELINE_TTL_MS
+  ) {
+    return false;
+  }
+
+  // The server rejects baselines whose rows are not all reusable current-model
+  // cases; the client must not advertise a 0-call budget for one either.
+  return (record.results as unknown[]).every((row) =>
+    isReusableBaselineRow(row, record.currentModel as string),
   );
 }
 

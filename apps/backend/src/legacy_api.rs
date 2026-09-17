@@ -42,11 +42,11 @@ const FOOD_PHOTO_REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
 const BENCHMARK_ROUTE_RUNTIME_BUDGET_MS: u64 = 270_000;
 const BENCHMARK_RUN_LOCK_TTL: Duration = Duration::from_secs(300);
 
-/// Pinned fixture-set identity (AI-02). Bump whenever any fixture id, provider
-/// image URL, expected macros, or checked-in thumbnail bytes change. Baselines
+/// Pinned fixture-set identity (AI-02). Bump whenever any fixture id, frozen
+/// input bytes, expected macros, or provenance attribution changes. Baselines
 /// carrying any other version are rejected so incompatible caches cannot be
 /// reused (AI-01).
-pub(super) const BENCHMARK_FIXTURE_SET_VERSION: &str = "2026-09-17-pinned-v1";
+pub(super) const BENCHMARK_FIXTURE_SET_VERSION: &str = "2026-09-17-pinned-v2";
 /// Baseline reuse window, matching the admin client's 24h cache.
 const BENCHMARK_BASELINE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 /// Clock-skew tolerance for baseline `createdAt` values minted by client clocks.
@@ -1550,7 +1550,13 @@ fn validate_benchmark_baseline(
     if created > now + BENCHMARK_BASELINE_FUTURE_TOLERANCE {
         return None;
     }
-    if now.signed_duration_since(created).to_std().ok()? > BENCHMARK_BASELINE_TTL {
+    // Compare against the TTL as a duration from "now". A timestamp within the
+    // future tolerance yields a negative age and is accepted (client clock
+    // skew); calling `to_std()` on it would reject every future timestamp and
+    // make the tolerance below dead code.
+    let age = now.signed_duration_since(created);
+    let ttl = chrono::Duration::from_std(BENCHMARK_BASELINE_TTL).ok()?;
+    if age > ttl {
         return None;
     }
     Some(ValidatedBaseline {
@@ -1624,8 +1630,9 @@ where
 
     for (index, fixture) in fixtures.iter().enumerate() {
         // A validated baseline reuses the actual compatible current-model cases
-        // without any provider call (AI-01). The same `fixture.image_url`
-        // string reaches every compared model, so inputs are identical (AI-02).
+        // without any provider call (AI-01). Every compared model receives the
+        // same frozen `fixture.image_data_url()` bytes, so inputs are identical
+        // and their hash matches the fixture `image_sha256` (AI-02).
         let current = if mode == "candidate_only" {
             skipped_result(&current_model, "Not run in candidate-only mode.", "unknown")
         } else if let Some(ref reused) = reused_current {
@@ -1659,9 +1666,10 @@ where
             "fixtureName": fixture.name,
             "servingDescription": fixture.serving_description,
             "thumbnailUrl": format!("/benchmark-foods/{}", fixture.asset_file_name),
-            "imageUrl": fixture.image_url,
+            "imageFileUrl": fixture.image_file_url,
             "imageSha256": fixture.image_sha256,
             "imageSourceUrl": fixture.image_source_url,
+            "imageLicense": fixture.image_license,
             "expected": fixture.expected_json(),
             "expectedSource": fixture.expected_source,
             "category": fixture.category,
@@ -1697,10 +1705,12 @@ async fn run_fixture_for_model(
 ) -> Value {
     let started = Instant::now();
     let clarification = format!("Benchmark fixture: {}", fixture.serving_description);
+    // Frozen checked-in bytes as a data URL: byte-identical for every compared
+    // model and offline-verifiable against `image_sha256` (AI-02).
+    let image_data_url = fixture.image_data_url();
     let result = analyze_food_photo_url(
         state,
-        // The direct file URL, not the Commons article page (see `BenchmarkFixture::image_url`).
-        fixture.image_url,
+        &image_data_url,
         &clarification,
         Some(model),
         user_id,
@@ -2178,19 +2188,20 @@ struct BenchmarkFixture {
     id: &'static str,
     name: &'static str,
     serving_description: &'static str,
+    /// File name of the frozen bytes under
+    /// `apps/backend/assets/benchmark-foods/`, mirrored byte-for-byte in
+    /// `apps/web/public/benchmark-foods/` so the admin thumbnail is the input.
     asset_file_name: &'static str,
-    /// Pinned stable file URL sent to the provider. Random per-request hosts
-    /// (for example loremflickr) must never be used: every compared model
-    /// receives this exact URL string for the fixture (AI-02).
-    image_url: &'static str,
+    /// Direct Commons file URL the frozen bytes were derived from. Provenance
+    /// only: it is never fetched at benchmark time.
+    image_file_url: &'static str,
     /// Attribution page shown in the admin UI. Never fetched.
     image_source_url: &'static str,
-    /// SHA-256 (lowercase hex) of the checked-in thumbnail
-    /// `apps/web/public/benchmark-foods/<asset_file_name>`. The thumbnail is
-    /// the admin-visible frozen reference; provider URLs above are pinned
-    /// stable Commons files (not random). Thumbnail and provider photos may be
-    /// different shots of the same food type; ground truth remains
-    /// serving-based. Recorded so fixture changes invalidate baselines.
+    /// Commons license short name recorded on the attribution page.
+    image_license: &'static str,
+    /// SHA-256 (lowercase hex) of the frozen bytes in `image_bytes()`. Those
+    /// exact bytes are what every compared model receives (as a data URL), so
+    /// the hash describes the consumed input and is verifiable offline.
     image_sha256: &'static str,
     expected_source: &'static str,
     category: &'static str,
@@ -2201,6 +2212,92 @@ struct BenchmarkFixture {
 }
 
 impl BenchmarkFixture {
+    /// Frozen input bytes for this fixture (AI-02), embedded at compile time.
+    fn image_bytes(&self) -> &'static [u8] {
+        match self.asset_file_name {
+            "banana.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/banana.jpg"
+            )),
+            "apple.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/apple.jpg"
+            )),
+            "hard-boiled-egg.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/hard-boiled-egg.jpg"
+            )),
+            "orange.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/orange.jpg"
+            )),
+            "white-rice.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/white-rice.jpg"
+            )),
+            "pasta.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/pasta.jpg"
+            )),
+            "avocado.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/avocado.jpg"
+            )),
+            "broccoli.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/broccoli.jpg"
+            )),
+            "carrot.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/carrot.jpg"
+            )),
+            "white-bread.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/white-bread.jpg"
+            )),
+            "cheddar.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/cheddar.jpg"
+            )),
+            "almonds.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/almonds.jpg"
+            )),
+            "oats.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/oats.jpg"
+            )),
+            "shrimp.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/shrimp.jpg"
+            )),
+            "salmon.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/salmon.jpg"
+            )),
+            "lentils.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/lentils.jpg"
+            )),
+            "whole-milk.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/whole-milk.jpg"
+            )),
+            "greek-yogurt.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/greek-yogurt.jpg"
+            )),
+            other => panic!("no frozen benchmark bytes for asset {other}"),
+        }
+    }
+
+    /// The exact provider input string for this fixture: a data URL carrying
+    /// the frozen bytes, so every compared model receives identical bytes and
+    /// no remote host can serve a different photo per request (AI-02).
+    fn image_data_url(&self) -> String {
+        food_photo_data_url(self.image_bytes(), "image/jpeg")
+    }
+
     fn expected_json(&self) -> Value {
         json!({
             "caloriesKcal": self.calories,
@@ -2217,9 +2314,10 @@ impl BenchmarkFixture {
             "servingDescription": self.serving_description,
             "assetFileName": self.asset_file_name,
             "thumbnailUrl": format!("/benchmark-foods/{}", self.asset_file_name),
-            "imageUrl": self.image_url,
+            "imageFileUrl": self.image_file_url,
             "imageSha256": self.image_sha256,
             "imageSourceUrl": self.image_source_url,
+            "imageLicense": self.image_license,
             "expected": self.expected_json(),
             "expectedSource": self.expected_source,
             "category": self.category

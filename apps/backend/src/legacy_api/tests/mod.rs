@@ -631,24 +631,25 @@ fn truncating_a_clarification_never_splits_a_character() {
 #[test]
 fn every_benchmark_fixture_points_at_a_direct_image_file() {
     // CONCERN-C3: an article page URL serves `text/html`, not the image, silently scoring models on a web page.
-    // AI-02: random per-request hosts are banned; every fixture must be a pinned stable file.
+    // AI-02: random per-request hosts are banned; the recorded provenance must
+    // be a pinned stable file URL from Commons.
     for fixture in BENCHMARK_FIXTURES {
         assert!(
-            !fixture.image_url.contains("/wiki/"),
-            "{}: image_url is an article page, not an image: {}",
+            !fixture.image_file_url.contains("/wiki/"),
+            "{}: image_file_url is an article page, not an image: {}",
             fixture.id,
-            fixture.image_url
+            fixture.image_file_url
         );
         assert!(
-            fixture.image_url.starts_with("https://"),
-            "{}: image_url must be https",
+            fixture.image_file_url.starts_with("https://"),
+            "{}: image_file_url must be https",
             fixture.id
         );
         assert!(
-            !fixture.image_url.contains("loremflickr.com"),
+            !fixture.image_file_url.contains("loremflickr.com"),
             "{}: random loremflickr inputs are not reproducible: {}",
             fixture.id,
-            fixture.image_url
+            fixture.image_file_url
         );
 
         if fixture
@@ -657,12 +658,20 @@ fn every_benchmark_fixture_points_at_a_direct_image_file() {
         {
             assert!(
                 fixture
-                    .image_url
+                    .image_file_url
                     .starts_with("https://upload.wikimedia.org/wikipedia/commons/")
-                    && fixture.image_url.to_ascii_lowercase().ends_with(".jpg"),
-                "{}: a Commons fixture must fetch the direct file URL, got {}",
+                    && fixture
+                        .image_file_url
+                        .to_ascii_lowercase()
+                        .ends_with(".jpg"),
+                "{}: a Commons fixture must record the direct file URL, got {}",
                 fixture.id,
-                fixture.image_url
+                fixture.image_file_url
+            );
+            assert!(
+                !fixture.image_license.is_empty(),
+                "{}: missing Commons license attribution",
+                fixture.id
             );
         }
     }
@@ -671,13 +680,17 @@ fn every_benchmark_fixture_points_at_a_direct_image_file() {
 #[test]
 fn benchmark_fixtures_are_pinned_with_content_hashes() {
     // AI-02: freeze verified bytes with hashes and attribution; any change must
-    // bump `BENCHMARK_FIXTURE_SET_VERSION` so old baselines are rejected.
+    // bump `BENCHMARK_FIXTURE_SET_VERSION` so old baselines are rejected. The
+    // recorded hash must describe the frozen bytes the benchmark consumes, not
+    // a separate thumbnail or a remote URL's content.
+    use sha2::{Digest, Sha256};
     use std::collections::HashSet;
 
     assert_eq!(BENCHMARK_FIXTURES.len(), 18);
     assert!(!BENCHMARK_FIXTURE_SET_VERSION.is_empty());
 
     let mut ids = HashSet::new();
+    let mut hashes = HashSet::new();
     for fixture in BENCHMARK_FIXTURES {
         assert!(
             ids.insert(fixture.id),
@@ -706,17 +719,99 @@ fn benchmark_fixtures_are_pinned_with_content_hashes() {
             "{}: missing image attribution",
             fixture.id
         );
+
+        // The hash is computed from the frozen bytes themselves: the fixture
+        // declares the real input identity (AI-02).
+        let bytes = fixture.image_bytes();
+        assert!(
+            bytes.starts_with(&[0xFF, 0xD8, 0xFF]),
+            "{}: frozen bytes must be a JPEG",
+            fixture.id
+        );
+        let digest = Sha256::digest(bytes);
+        let actual = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            actual, fixture.image_sha256,
+            "{}: image_sha256 does not match the frozen benchmark input bytes",
+            fixture.id
+        );
+        assert!(
+            hashes.insert(fixture.image_sha256),
+            "{}: two fixtures must not share one image hash",
+            fixture.id
+        );
+
         let rendered = fixture.as_json();
         assert_eq!(
-            rendered.get("imageUrl").and_then(Value::as_str),
-            Some(fixture.image_url),
-            "{}: as_json must expose the exact provider input",
+            rendered.get("imageFileUrl").and_then(Value::as_str),
+            Some(fixture.image_file_url),
+            "{}: as_json must expose the verified provenance URL",
+            fixture.id
+        );
+        assert_eq!(
+            rendered.get("imageLicense").and_then(Value::as_str),
+            Some(fixture.image_license),
+            "{}: as_json must expose the Commons license attribution",
             fixture.id
         );
         assert_eq!(
             rendered.get("imageSha256").and_then(Value::as_str),
             Some(fixture.image_sha256),
             "{}: as_json must expose the content hash",
+            fixture.id
+        );
+    }
+}
+
+#[test]
+fn provider_input_is_the_frozen_bytes_as_a_data_url() {
+    // AI-02 acceptance: the fake provider must be able to capture the actual
+    // bytes/hash. The provider input string is built directly from the frozen
+    // bytes, and the base64 payload decodes back to exactly those bytes.
+    for fixture in BENCHMARK_FIXTURES {
+        let data_url = fixture.image_data_url();
+        let prefix = "data:image/jpeg;base64,";
+        let encoded = data_url
+            .strip_prefix(prefix)
+            .unwrap_or_else(|| panic!("{}: unexpected image input prefix", fixture.id));
+        let mut decoded = vec![0_u8; encoded.len()];
+        let decoded = Base64::decode(encoded, &mut decoded)
+            .unwrap_or_else(|error| panic!("{}: invalid base64 input: {error}", fixture.id));
+        assert_eq!(
+            decoded,
+            fixture.image_bytes(),
+            "{}: provider input must decode to the frozen bytes",
+            fixture.id
+        );
+    }
+}
+
+#[test]
+fn frozen_fixture_bytes_match_the_admin_thumbnails() {
+    // The admin UI serves `apps/web/public/benchmark-foods/<asset>`; the model
+    // receives `fixture.image_bytes()` from the backend crate. Drift between
+    // the two would mean the admin never sees the benchmark input (AI-02).
+    let web_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("web")
+        .join("public")
+        .join("benchmark-foods");
+    for fixture in BENCHMARK_FIXTURES {
+        let path = web_dir.join(fixture.asset_file_name);
+        let served = std::fs::read(&path).unwrap_or_else(|error| {
+            panic!(
+                "{}: missing admin thumbnail {}: {error}",
+                fixture.id,
+                path.display()
+            )
+        });
+        assert_eq!(
+            served,
+            fixture.image_bytes(),
+            "{}: admin thumbnail differs from the frozen benchmark input",
             fixture.id
         );
     }
@@ -816,13 +911,13 @@ async fn valid_same_model_baseline_reuses_without_provider_calls() {
             let calls = calls_clone.clone();
             let seen = seen_clone.clone();
             let fixture_id = fixture.id.to_string();
-            let image_url = fixture.image_url.to_string();
+            let image_input = fixture.image_data_url();
             let model = model.to_string();
             async move {
                 calls.fetch_add(1, Ordering::SeqCst);
                 seen.lock()
                     .unwrap_or_else(|error| error.into_inner())
-                    .push((model.clone(), image_url));
+                    .push((model.clone(), image_input));
                 let _ = fixture_id;
                 stub_success_case(&model)
             }
@@ -1012,9 +1107,82 @@ async fn invalid_or_stale_baselines_are_rejected_truthfully() {
 }
 
 #[tokio::test]
+async fn future_baselines_within_clock_skew_are_reused_but_far_future_is_rejected() {
+    // AI-01 regression: the documented 5-minute future tolerance must actually
+    // accept small client-clock skew. It previously looked like a tolerance
+    // while the TTL duration conversion rejected every future timestamp.
+    let current_model = "current/test-model";
+    let near_future = (chrono::Utc::now() + chrono::Duration::minutes(2))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let far_future = (chrono::Utc::now() + chrono::Duration::minutes(10))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_clone = calls.clone();
+    let result = run_macro_benchmark_with_runner(
+        current_model.to_string(),
+        current_model,
+        4,
+        "compare",
+        Some(baseline_for_current(current_model, 4, &near_future, |_| {})),
+        move |_fixture: BenchmarkFixture, model: String| {
+            let calls = calls_clone.clone();
+            let model = model.to_string();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                stub_success_case(&model)
+            }
+        },
+    )
+    .await
+    .expect("benchmark should succeed");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "a baseline stamped within the future tolerance must be reused"
+    );
+    assert_eq!(
+        result.get("usedBaseline").and_then(Value::as_bool),
+        Some(true)
+    );
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let calls_clone = calls.clone();
+    let result = run_macro_benchmark_with_runner(
+        current_model.to_string(),
+        "candidate/test-model",
+        4,
+        "compare",
+        Some(baseline_for_current(current_model, 4, &far_future, |_| {})),
+        move |_fixture: BenchmarkFixture, model: String| {
+            let calls = calls_clone.clone();
+            let model = model.to_string();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                stub_success_case(&model)
+            }
+        },
+    )
+    .await
+    .expect("benchmark should succeed");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        8,
+        "a baseline far in the future must be rejected and run the full budget"
+    );
+    assert_eq!(
+        result.get("usedBaseline").and_then(Value::as_bool),
+        Some(false)
+    );
+}
+
+#[tokio::test]
 async fn every_compared_model_receives_identical_image_inputs() {
     // AI-02 acceptance: fake provider captures actual image inputs for every
     // model; inputs are identical and fixture identities invalidate caches.
+    // The captured value is the same construction the production runner sends,
+    // so its hash can be checked against the fixture's declared hash.
+    use sha2::{Digest, Sha256};
     let current_model = "current/test-model";
     let candidate_model = "candidate/test-model";
     let seen = Arc::new(Mutex::new(Vec::<(String, String, String)>::new()));
@@ -1029,14 +1197,12 @@ async fn every_compared_model_receives_identical_image_inputs() {
         move |fixture: BenchmarkFixture, model: String| {
             let seen = seen_clone.clone();
             let fixture_id = fixture.id.to_string();
-            let image_url = fixture.image_url.to_string();
-            let image_sha = fixture.image_sha256.to_string();
+            let image_input = fixture.image_data_url();
             let model = model.to_string();
             async move {
                 seen.lock()
                     .unwrap_or_else(|error| error.into_inner())
-                    .push((model.clone(), fixture_id, image_url.clone()));
-                let _ = image_sha;
+                    .push((model.clone(), fixture_id, image_input.clone()));
                 stub_success_case(&model)
             }
         },
@@ -1066,8 +1232,28 @@ async fn every_compared_model_receives_identical_image_inputs() {
             fixture.id
         );
         assert_eq!(
-            inputs[0].2, fixture.image_url,
-            "{}: captured input must equal the pinned fixture URL",
+            inputs[0].2,
+            fixture.image_data_url(),
+            "{}: captured input must equal the frozen fixture input",
+            fixture.id
+        );
+        // Decode the captured data URL and hash the bytes the fake provider
+        // actually saw; it must match the hash the fixture advertises.
+        let encoded = inputs[0]
+            .2
+            .strip_prefix("data:image/jpeg;base64,")
+            .unwrap_or_else(|| panic!("{}: unexpected input prefix", fixture.id));
+        let mut buffer = vec![0_u8; encoded.len()];
+        let decoded = Base64::decode(encoded, &mut buffer)
+            .unwrap_or_else(|error| panic!("{}: invalid base64 input: {error}", fixture.id));
+        let digest = Sha256::digest(decoded);
+        let actual = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            actual, fixture.image_sha256,
+            "{}: captured bytes must hash to the declared fixture hash",
             fixture.id
         );
     }
@@ -1084,12 +1270,12 @@ async fn every_compared_model_receives_identical_image_inputs() {
             Some(expected.id)
         );
         assert_eq!(
-            rendered.get("imageUrl").and_then(Value::as_str),
-            Some(expected.image_url)
-        );
-        assert_eq!(
             rendered.get("imageSha256").and_then(Value::as_str),
             Some(expected.image_sha256)
+        );
+        assert_eq!(
+            rendered.get("imageFileUrl").and_then(Value::as_str),
+            Some(expected.image_file_url)
         );
     }
 }
