@@ -23,6 +23,21 @@ describe("stripHopByHopHeaders", () => {
     expect(stripped.get("content-type")).toBe("application/json");
   });
 
+  it("drops a caller-supplied session header before it can be forwarded", () => {
+    // SEC-01: the backend derives identity only from the cookie it validates.
+    const headers = new Headers({
+      "x-macro-tracker-session": "attacker-chosen-token",
+      cookie: "mt_session=cookie-token",
+      authorization: "Bearer mtk_v1_keep",
+    });
+
+    const stripped = stripHopByHopHeaders(headers);
+
+    expect(stripped.has("x-macro-tracker-session")).toBe(false);
+    expect(stripped.get("cookie")).toBe("mt_session=cookie-token");
+    expect(stripped.get("authorization")).toBe("Bearer mtk_v1_keep");
+  });
+
   it("also drops headers nominated by a Connection header before dropping connection itself", () => {
     const headers = new Headers({
       connection: "x-secret, x-other",

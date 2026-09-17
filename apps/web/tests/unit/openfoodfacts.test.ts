@@ -59,6 +59,18 @@ describe("lookupBarcode", () => {
     expect(result).toEqual({ found: false, barcode: "00000000", reason: "not_found" });
   });
 
+  it("returns unavailable for a retryable miss envelope, not not_found", async () => {
+    // API-04: the backend sets retryable when provider failures prevented a conclusion.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(jsonResponse({ found: false, retryable: true })),
+    );
+
+    const result = await lookupBarcode("44444444");
+
+    expect(result).toEqual({ found: false, barcode: "44444444", reason: "unavailable" });
+  });
+
   it("returns unavailable, not not_found, when the response status is not ok", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({}, 502)));
 
