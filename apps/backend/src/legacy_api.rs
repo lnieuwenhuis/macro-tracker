@@ -42,6 +42,16 @@ const FOOD_PHOTO_REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
 const BENCHMARK_ROUTE_RUNTIME_BUDGET_MS: u64 = 270_000;
 const BENCHMARK_RUN_LOCK_TTL: Duration = Duration::from_secs(300);
 
+/// Pinned fixture-set identity (AI-02). Bump whenever any fixture id, provider
+/// image URL, expected macros, or checked-in thumbnail bytes change. Baselines
+/// carrying any other version are rejected so incompatible caches cannot be
+/// reused (AI-01).
+pub(super) const BENCHMARK_FIXTURE_SET_VERSION: &str = "2026-09-17-pinned-v1";
+/// Baseline reuse window, matching the admin client's 24h cache.
+const BENCHMARK_BASELINE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+/// Clock-skew tolerance for baseline `createdAt` values minted by client clocks.
+const BENCHMARK_BASELINE_FUTURE_TOLERANCE: Duration = Duration::from_secs(5 * 60);
+
 /// `generation` keeps an overrunning run's release from freeing its successor (API-08).
 #[derive(Clone, Copy)]
 struct BenchmarkRun {
@@ -1480,6 +1490,75 @@ fn configured_food_photo_models(config: &crate::config::Config) -> Vec<String> {
     seen
 }
 
+struct ValidatedBaseline {
+    created_at: String,
+    results: Vec<Value>,
+}
+
+/// Server-side baseline validation (AI-01). A baseline is reusable only when
+/// every identity matches the current run: configured current model, pinned
+/// fixture-set version (AI-02), ordered fixture ids, result shape, and age.
+/// Anything else is rejected so `usedBaseline` stays truthful and the
+/// user-visible call budget remains accurate.
+fn validate_benchmark_baseline(
+    baseline: &Value,
+    current_model: &str,
+    fixtures: &[&BenchmarkFixture],
+) -> Option<ValidatedBaseline> {
+    let record = baseline.as_object()?;
+    if record.get("currentModel").and_then(Value::as_str) != Some(current_model) {
+        return None;
+    }
+    if record.get("fixtureVersion").and_then(Value::as_str) != Some(BENCHMARK_FIXTURE_SET_VERSION) {
+        return None;
+    }
+    let expected_ids: Vec<&str> = fixtures.iter().map(|fixture| fixture.id).collect();
+    let baseline_ids: Vec<&str> = record
+        .get("fixtureIds")
+        .and_then(Value::as_array)
+        .map(|ids| ids.iter().filter_map(Value::as_str).collect())?;
+    if baseline_ids != expected_ids {
+        return None;
+    }
+    let results = record.get("results").and_then(Value::as_array)?.clone();
+    if results.len() != fixtures.len() {
+        return None;
+    }
+    for result in &results {
+        let result = result.as_object()?;
+        if result.get("ok").and_then(Value::as_bool) != Some(true) {
+            return None;
+        }
+        if result.get("wasSkipped").and_then(Value::as_bool) == Some(true) {
+            return None;
+        }
+        if result.get("model").and_then(Value::as_str) != Some(current_model) {
+            return None;
+        }
+        if !result
+            .get("estimate")
+            .is_some_and(|estimate| estimate.is_object())
+        {
+            return None;
+        }
+    }
+    let created_at = record.get("createdAt").and_then(Value::as_str)?.to_string();
+    let created = chrono::DateTime::parse_from_rfc3339(&created_at)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    let now = chrono::Utc::now();
+    if created > now + BENCHMARK_BASELINE_FUTURE_TOLERANCE {
+        return None;
+    }
+    if now.signed_duration_since(created).to_std().ok()? > BENCHMARK_BASELINE_TTL {
+        return None;
+    }
+    Some(ValidatedBaseline {
+        created_at,
+        results,
+    })
+}
+
 async fn run_macro_benchmark(
     state: &AppState,
     user_id: &str,
@@ -1492,26 +1571,67 @@ async fn run_macro_benchmark(
         .first()
         .cloned()
         .unwrap_or_else(|| DEFAULT_FOOD_PHOTO_MODELS[0].to_string());
+    let state_clone = state.clone();
+    let user_id_owned = user_id.to_string();
+    let runner = move |fixture: BenchmarkFixture, model: String| {
+        let state = state_clone.clone();
+        let user_id = user_id_owned.clone();
+        async move { run_fixture_for_model(&state, &fixture, &model, &user_id).await }
+    };
+    run_macro_benchmark_with_runner(
+        current_model,
+        candidate_model,
+        fixture_limit,
+        mode,
+        baseline,
+        runner,
+    )
+    .await
+}
+
+async fn run_macro_benchmark_with_runner<F, Fut>(
+    current_model: String,
+    candidate_model: &str,
+    fixture_limit: usize,
+    mode: &str,
+    baseline: Option<Value>,
+    runner: F,
+) -> Result<Value, String>
+where
+    F: Fn(BenchmarkFixture, String) -> Fut,
+    Fut: Future<Output = Value>,
+{
     let fixtures = BENCHMARK_FIXTURES
         .iter()
         .take(fixture_limit)
         .collect::<Vec<_>>();
     let compared_same_model = mode == "compare" && candidate_model == current_model;
-    let baseline_created_at = baseline
-        .as_ref()
-        .and_then(|value| value.get("createdAt"))
-        .and_then(Value::as_str)
-        .filter(|_| mode == "compare")
-        .map(str::to_string);
-    let used_baseline = baseline_created_at.is_some();
+    let validated = if mode == "compare" {
+        baseline
+            .as_ref()
+            .and_then(|value| validate_benchmark_baseline(value, &current_model, &fixtures))
+    } else {
+        None
+    };
+    let (used_baseline, baseline_created_at, reused_current) = match validated {
+        Some(valid) => (true, Some(valid.created_at), Some(valid.results)),
+        None => (false, None, None),
+    };
     let deadline = Instant::now() + Duration::from_millis(BENCHMARK_ROUTE_RUNTIME_BUDGET_MS);
     let mut cases = Vec::new();
     let mut current_results = Vec::new();
     let mut candidate_results = Vec::new();
 
-    for fixture in &fixtures {
+    for (index, fixture) in fixtures.iter().enumerate() {
+        // A validated baseline reuses the actual compatible current-model cases
+        // without any provider call (AI-01). The same `fixture.image_url`
+        // string reaches every compared model, so inputs are identical (AI-02).
         let current = if mode == "candidate_only" {
             skipped_result(&current_model, "Not run in candidate-only mode.", "unknown")
+        } else if let Some(ref reused) = reused_current {
+            reused.get(index).cloned().unwrap_or_else(|| {
+                skipped_result(&current_model, "Baseline case missing.", "unknown")
+            })
         } else if Instant::now() >= deadline {
             skipped_result(
                 &current_model,
@@ -1519,7 +1639,7 @@ async fn run_macro_benchmark(
                 "skipped",
             )
         } else {
-            run_fixture_for_model(state, fixture, &current_model, user_id).await
+            runner(**fixture, current_model.clone()).await
         };
         let candidate = if compared_same_model {
             current.clone()
@@ -1530,7 +1650,7 @@ async fn run_macro_benchmark(
                 "skipped",
             )
         } else {
-            run_fixture_for_model(state, fixture, candidate_model, user_id).await
+            runner(**fixture, candidate_model.to_string()).await
         };
         current_results.push(current.clone());
         candidate_results.push(candidate.clone());
@@ -1539,6 +1659,8 @@ async fn run_macro_benchmark(
             "fixtureName": fixture.name,
             "servingDescription": fixture.serving_description,
             "thumbnailUrl": format!("/benchmark-foods/{}", fixture.asset_file_name),
+            "imageUrl": fixture.image_url,
+            "imageSha256": fixture.image_sha256,
             "imageSourceUrl": fixture.image_source_url,
             "expected": fixture.expected_json(),
             "expectedSource": fixture.expected_source,
@@ -1553,6 +1675,7 @@ async fn run_macro_benchmark(
         "candidateModel": candidate_model,
         "fixtureCount": fixtures.len(),
         "totalFixtureCount": BENCHMARK_FIXTURES.len(),
+        "fixtureVersion": BENCHMARK_FIXTURE_SET_VERSION,
         "comparedSameModel": compared_same_model,
         "mode": mode,
         "usedBaseline": used_baseline,
@@ -2056,10 +2179,19 @@ struct BenchmarkFixture {
     name: &'static str,
     serving_description: &'static str,
     asset_file_name: &'static str,
-    /// Direct file URL fetched by the model; article URLs serve `text/html`, hence the pasta fixture's encoded parens.
+    /// Pinned stable file URL sent to the provider. Random per-request hosts
+    /// (for example loremflickr) must never be used: every compared model
+    /// receives this exact URL string for the fixture (AI-02).
     image_url: &'static str,
-    /// Commons article page shown in the admin UI for attribution. Never fetched.
+    /// Attribution page shown in the admin UI. Never fetched.
     image_source_url: &'static str,
+    /// SHA-256 (lowercase hex) of the checked-in thumbnail
+    /// `apps/web/public/benchmark-foods/<asset_file_name>`. The thumbnail is
+    /// the admin-visible frozen reference; provider URLs above are pinned
+    /// stable Commons files (not random). Thumbnail and provider photos may be
+    /// different shots of the same food type; ground truth remains
+    /// serving-based. Recorded so fixture changes invalidate baselines.
+    image_sha256: &'static str,
     expected_source: &'static str,
     category: &'static str,
     calories: f64,
@@ -2085,6 +2217,8 @@ impl BenchmarkFixture {
             "servingDescription": self.serving_description,
             "assetFileName": self.asset_file_name,
             "thumbnailUrl": format!("/benchmark-foods/{}", self.asset_file_name),
+            "imageUrl": self.image_url,
+            "imageSha256": self.image_sha256,
             "imageSourceUrl": self.image_source_url,
             "expected": self.expected_json(),
             "expectedSource": self.expected_source,

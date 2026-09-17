@@ -631,6 +631,7 @@ fn truncating_a_clarification_never_splits_a_character() {
 #[test]
 fn every_benchmark_fixture_points_at_a_direct_image_file() {
     // CONCERN-C3: an article page URL serves `text/html`, not the image, silently scoring models on a web page.
+    // AI-02: random per-request hosts are banned; every fixture must be a pinned stable file.
     for fixture in BENCHMARK_FIXTURES {
         assert!(
             !fixture.image_url.contains("/wiki/"),
@@ -643,6 +644,12 @@ fn every_benchmark_fixture_points_at_a_direct_image_file() {
             "{}: image_url must be https",
             fixture.id
         );
+        assert!(
+            !fixture.image_url.contains("loremflickr.com"),
+            "{}: random loremflickr inputs are not reproducible: {}",
+            fixture.id,
+            fixture.image_url
+        );
 
         if fixture
             .image_source_url
@@ -652,7 +659,7 @@ fn every_benchmark_fixture_points_at_a_direct_image_file() {
                 fixture
                     .image_url
                     .starts_with("https://upload.wikimedia.org/wikipedia/commons/")
-                    && fixture.image_url.ends_with(".jpg"),
+                    && fixture.image_url.to_ascii_lowercase().ends_with(".jpg"),
                 "{}: a Commons fixture must fetch the direct file URL, got {}",
                 fixture.id,
                 fixture.image_url
@@ -662,29 +669,429 @@ fn every_benchmark_fixture_points_at_a_direct_image_file() {
 }
 
 #[test]
-fn the_unreproducible_benchmark_fixtures_are_the_known_ten() {
-    // `loremflickr.com` redirects to a random photo per request; pinned so this set can't grow unnoticed.
-    let unreproducible = BENCHMARK_FIXTURES
+fn benchmark_fixtures_are_pinned_with_content_hashes() {
+    // AI-02: freeze verified bytes with hashes and attribution; any change must
+    // bump `BENCHMARK_FIXTURE_SET_VERSION` so old baselines are rejected.
+    use std::collections::HashSet;
+
+    assert_eq!(BENCHMARK_FIXTURES.len(), 18);
+    assert!(!BENCHMARK_FIXTURE_SET_VERSION.is_empty());
+
+    let mut ids = HashSet::new();
+    for fixture in BENCHMARK_FIXTURES {
+        assert!(
+            ids.insert(fixture.id),
+            "duplicate fixture id {}",
+            fixture.id
+        );
+        assert!(
+            CATEGORIES.contains(&fixture.category),
+            "{}: unknown category {}",
+            fixture.id,
+            fixture.category
+        );
+        assert!(
+            fixture.image_sha256.len() == 64
+                && fixture
+                    .image_sha256
+                    .chars()
+                    .all(|ch| ch.is_ascii_hexdigit())
+                && fixture.image_sha256 == fixture.image_sha256.to_ascii_lowercase(),
+            "{}: image_sha256 must be lowercase hex (64 chars), got {}",
+            fixture.id,
+            fixture.image_sha256
+        );
+        assert!(
+            !fixture.image_source_url.is_empty(),
+            "{}: missing image attribution",
+            fixture.id
+        );
+        let rendered = fixture.as_json();
+        assert_eq!(
+            rendered.get("imageUrl").and_then(Value::as_str),
+            Some(fixture.image_url),
+            "{}: as_json must expose the exact provider input",
+            fixture.id
+        );
+        assert_eq!(
+            rendered.get("imageSha256").and_then(Value::as_str),
+            Some(fixture.image_sha256),
+            "{}: as_json must expose the content hash",
+            fixture.id
+        );
+    }
+}
+
+fn stub_success_case(model: &str) -> Value {
+    json!({
+        "model": model,
+        "ok": true,
+        "latencyMs": 42,
+        "estimate": {
+            "label": "stub food",
+            "caloriesKcal": 100,
+            "proteinG": 5.0,
+            "carbsG": 10.0,
+            "fatG": 3.0,
+            "confidence": 0.9,
+            "notes": []
+        },
+        "absoluteError": {
+            "caloriesKcal": 0,
+            "proteinG": 0.0,
+            "carbsG": 0.0,
+            "fatG": 0.0
+        },
+        "normalizedErrorPct": 0.0,
+        "error": Value::Null
+    })
+}
+
+fn baseline_for_current(
+    current_model: &str,
+    fixture_limit: usize,
+    created_at: &str,
+    mutate: impl FnOnce(&mut serde_json::Map<String, Value>),
+) -> Value {
+    let fixtures = BENCHMARK_FIXTURES
         .iter()
-        .filter(|fixture| fixture.image_url.contains("loremflickr.com"))
-        .map(|fixture| fixture.id)
+        .take(fixture_limit)
         .collect::<Vec<_>>();
+    let mut record = serde_json::Map::new();
+    record.insert(
+        "currentModel".to_string(),
+        Value::String(current_model.to_string()),
+    );
+    record.insert(
+        "fixtureVersion".to_string(),
+        Value::String(BENCHMARK_FIXTURE_SET_VERSION.to_string()),
+    );
+    record.insert(
+        "fixtureIds".to_string(),
+        json!(
+            fixtures
+                .iter()
+                .map(|fixture| fixture.id)
+                .collect::<Vec<_>>()
+        ),
+    );
+    record.insert(
+        "results".to_string(),
+        json!(
+            fixtures
+                .iter()
+                .map(|_| stub_success_case(current_model))
+                .collect::<Vec<_>>()
+        ),
+    );
+    record.insert(
+        "createdAt".to_string(),
+        Value::String(created_at.to_string()),
+    );
+    mutate(&mut record);
+    Value::Object(record)
+}
+
+fn fresh_created_at() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+#[tokio::test]
+async fn valid_same_model_baseline_reuses_without_provider_calls() {
+    // AI-01 acceptance: valid same-model baseline makes 0 calls.
+    let current_model = "current/test-model";
+    let baseline = baseline_for_current(current_model, 4, &fresh_created_at(), |_| {});
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen_urls = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let calls_clone = calls.clone();
+    let seen_clone = seen_urls.clone();
+
+    let result = run_macro_benchmark_with_runner(
+        current_model.to_string(),
+        current_model,
+        4,
+        "compare",
+        Some(baseline.clone()),
+        move |fixture: BenchmarkFixture, model: String| {
+            let calls = calls_clone.clone();
+            let seen = seen_clone.clone();
+            let fixture_id = fixture.id.to_string();
+            let image_url = fixture.image_url.to_string();
+            let model = model.to_string();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                seen.lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push((model.clone(), image_url));
+                let _ = fixture_id;
+                stub_success_case(&model)
+            }
+        },
+    )
+    .await
+    .expect("benchmark should succeed");
 
     assert_eq!(
-        unreproducible,
-        vec![
-            "medium-carrot",
-            "white-bread-slice",
-            "cheddar-ounce",
-            "almonds-ounce",
-            "rolled-oats-40g",
-            "cooked-shrimp-100g",
-            "cooked-salmon-100g",
-            "cooked-lentils-cup",
-            "whole-milk-cup",
-            "nonfat-greek-yogurt-170g",
-        ]
+        calls.load(Ordering::SeqCst),
+        0,
+        "valid same-model baseline must make 0 provider calls"
     );
+    assert_eq!(
+        result.get("usedBaseline").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        result.get("baselineCreatedAt").and_then(Value::as_str),
+        baseline.get("createdAt").and_then(Value::as_str)
+    );
+    assert_eq!(
+        result.get("fixtureVersion").and_then(Value::as_str),
+        Some(BENCHMARK_FIXTURE_SET_VERSION)
+    );
+}
+
+#[tokio::test]
+async fn valid_different_model_baseline_runs_only_candidate_calls() {
+    // AI-01 acceptance: valid baseline with a different candidate makes only candidate calls.
+    let current_model = "current/test-model";
+    let candidate_model = "candidate/test-model";
+    let baseline = baseline_for_current(current_model, 4, &fresh_created_at(), |_| {});
+    let calls = Arc::new(AtomicUsize::new(0));
+    let seen_models = Arc::new(Mutex::new(Vec::<String>::new()));
+    let calls_clone = calls.clone();
+    let seen_clone = seen_models.clone();
+
+    let result = run_macro_benchmark_with_runner(
+        current_model.to_string(),
+        candidate_model,
+        4,
+        "compare",
+        Some(baseline),
+        move |_fixture: BenchmarkFixture, model: String| {
+            let calls = calls_clone.clone();
+            let seen = seen_clone.clone();
+            let model = model.to_string();
+            async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                seen.lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(model.clone());
+                stub_success_case(&model)
+            }
+        },
+    )
+    .await
+    .expect("benchmark should succeed");
+
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        4,
+        "valid baseline must run only the 4 candidate calls"
+    );
+    let seen = seen_models
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    assert!(
+        seen.iter().all(|model| model == candidate_model),
+        "current-model calls must be skipped, got {seen:?}"
+    );
+    assert_eq!(
+        result.get("usedBaseline").and_then(Value::as_bool),
+        Some(true)
+    );
+}
+
+#[tokio::test]
+async fn invalid_or_stale_baselines_are_rejected_truthfully() {
+    // AI-01 acceptance: absent/invalid/stale baselines follow an explicit truthful budget.
+    let current_model = "current/test-model";
+    let candidate_model = "candidate/test-model";
+    let stale = (chrono::Utc::now() - chrono::Duration::hours(25))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let cases: Vec<(&str, Option<Value>)> = vec![
+        ("absent", None),
+        (
+            "wrong-model",
+            Some(baseline_for_current(
+                "other/model",
+                4,
+                &fresh_created_at(),
+                |_| {},
+            )),
+        ),
+        (
+            "wrong-version",
+            Some(baseline_for_current(
+                current_model,
+                4,
+                &fresh_created_at(),
+                |record| {
+                    record.insert(
+                        "fixtureVersion".to_string(),
+                        Value::String("stale-version".to_string()),
+                    );
+                },
+            )),
+        ),
+        (
+            "wrong-ids",
+            Some(baseline_for_current(
+                current_model,
+                4,
+                &fresh_created_at(),
+                |record| {
+                    record.insert("fixtureIds".to_string(), json!(["wrong-id"]));
+                },
+            )),
+        ),
+        (
+            "stale",
+            Some(baseline_for_current(current_model, 4, &stale, |_| {})),
+        ),
+        (
+            "failed-row",
+            Some(baseline_for_current(
+                current_model,
+                4,
+                &fresh_created_at(),
+                |record| {
+                    let mut results = record
+                        .get("results")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    if let Some(first) = results.first_mut() {
+                        if let Some(object) = first.as_object_mut() {
+                            object.insert("ok".to_string(), Value::Bool(false));
+                        }
+                    }
+                    record.insert("results".to_string(), Value::Array(results));
+                },
+            )),
+        ),
+    ];
+
+    for (name, baseline) in cases {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_clone = calls.clone();
+        let result = run_macro_benchmark_with_runner(
+            current_model.to_string(),
+            candidate_model,
+            4,
+            "compare",
+            baseline,
+            move |_fixture: BenchmarkFixture, model: String| {
+                let calls = calls_clone.clone();
+                let model = model.to_string();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    stub_success_case(&model)
+                }
+            },
+        )
+        .await
+        .expect("benchmark should succeed");
+
+        assert_eq!(
+            result.get("usedBaseline").and_then(Value::as_bool),
+            Some(false),
+            "{name} baseline must not be marked reused"
+        );
+        assert_eq!(
+            result.get("baselineCreatedAt").and_then(Value::as_str),
+            None,
+            "{name} baseline must not report a reused timestamp"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            8,
+            "{name} baseline must fall back to the full 4+4 call budget"
+        );
+    }
+}
+
+#[tokio::test]
+async fn every_compared_model_receives_identical_image_inputs() {
+    // AI-02 acceptance: fake provider captures actual image inputs for every
+    // model; inputs are identical and fixture identities invalidate caches.
+    let current_model = "current/test-model";
+    let candidate_model = "candidate/test-model";
+    let seen = Arc::new(Mutex::new(Vec::<(String, String, String)>::new()));
+    let seen_clone = seen.clone();
+
+    let result = run_macro_benchmark_with_runner(
+        current_model.to_string(),
+        candidate_model,
+        8,
+        "compare",
+        None,
+        move |fixture: BenchmarkFixture, model: String| {
+            let seen = seen_clone.clone();
+            let fixture_id = fixture.id.to_string();
+            let image_url = fixture.image_url.to_string();
+            let image_sha = fixture.image_sha256.to_string();
+            let model = model.to_string();
+            async move {
+                seen.lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push((model.clone(), fixture_id, image_url.clone()));
+                let _ = image_sha;
+                stub_success_case(&model)
+            }
+        },
+    )
+    .await
+    .expect("benchmark should succeed");
+
+    let seen = seen
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone();
+    assert_eq!(seen.len(), 16, "8 fixtures x 2 models without a baseline");
+    for fixture in BENCHMARK_FIXTURES.iter().take(8) {
+        let inputs: Vec<&(String, String, String)> = seen
+            .iter()
+            .filter(|(_, fixture_id, _)| fixture_id == fixture.id)
+            .collect();
+        assert_eq!(
+            inputs.len(),
+            2,
+            "{}: both models must be called once",
+            fixture.id
+        );
+        assert_eq!(
+            inputs[0].2, inputs[1].2,
+            "{}: image inputs must be identical across models",
+            fixture.id
+        );
+        assert_eq!(
+            inputs[0].2, fixture.image_url,
+            "{}: captured input must equal the pinned fixture URL",
+            fixture.id
+        );
+    }
+    // Fixture identities are part of the result so incompatible caches invalidate.
+    let fixtures_json = result
+        .get("fixtures")
+        .and_then(Value::as_array)
+        .expect("result must carry fixtures");
+    assert_eq!(fixtures_json.len(), 8);
+    for (index, rendered) in fixtures_json.iter().enumerate() {
+        let expected = &BENCHMARK_FIXTURES[index];
+        assert_eq!(
+            rendered.get("id").and_then(Value::as_str),
+            Some(expected.id)
+        );
+        assert_eq!(
+            rendered.get("imageUrl").and_then(Value::as_str),
+            Some(expected.image_url)
+        );
+        assert_eq!(
+            rendered.get("imageSha256").and_then(Value::as_str),
+            Some(expected.image_sha256)
+        );
+    }
 }
 
 /// `BENCHMARK_LOCK` is process-global, so the tests that drive it have to take turns.
