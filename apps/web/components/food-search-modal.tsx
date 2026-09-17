@@ -8,7 +8,7 @@ import {
   hasCurrentFoodSearchResults,
   normalizeFoodSearchQuery,
 } from "@/lib/food-search-state";
-import { formatSelectedDate } from "@/lib/formatting";
+import { formatSelectedDateWithYear } from "@/lib/formatting";
 import { buildMealEntryCopyInput } from "@/lib/meal-entry-copy";
 import { createClientMutationIdStore } from "@/lib/client-mutation-id";
 import { getLocalDateString } from "@/lib/startup-date";
@@ -252,7 +252,7 @@ export function FoodSearchModal({ onClose, onViewDate, onEntrySaved }: FoodSearc
                     </p>
                     <div className="mt-0.5 flex flex-wrap items-center gap-x-2.5 gap-y-0.5">
                       <span className="text-[10px] font-medium text-[var(--color-muted)]">
-                        {formatSelectedDate(entry.date)}
+                        {formatSelectedDateWithYear(entry.date)}
                       </span>
                       <span className="text-[10px] font-semibold text-[var(--color-bar-protein)]">P {entry.proteinG}g</span>
                       <span className="text-[10px] font-semibold text-[var(--color-bar-carbs)]">C {entry.carbsG}g</span>

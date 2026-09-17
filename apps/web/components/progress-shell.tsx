@@ -16,7 +16,7 @@ import {
   saveWeightGoalAction,
   updateWeightEntryAction,
 } from "@/lib/actions";
-import { formatShortDate } from "@/lib/formatting";
+import { formatShortDateWithYear } from "@/lib/formatting";
 import { convertWeight } from "@/lib/onboarding-weight";
 import type { ProgressTab } from "@/lib/progress-tab";
 import { useActionRunner } from "@/lib/use-action-runner";
@@ -291,7 +291,7 @@ function WeightTrendChart({
   const chartLabel = [
     `Weight trend over ${points.length} entries`,
     first && last
-      ? `from ${formatWeight(first.weightKg, unit)} on ${formatShortDate(first.date)} to ${formatWeight(last.weightKg, unit)} on ${formatShortDate(last.date)}`
+      ? `from ${formatWeight(first.weightKg, unit)} on ${formatShortDateWithYear(first.date)} to ${formatWeight(last.weightKg, unit)} on ${formatShortDateWithYear(last.date)}`
       : null,
     weightData.goalWeightKg != null
       ? `goal ${formatWeight(weightData.goalWeightKg, unit)}`
@@ -477,7 +477,7 @@ function WeightPanel({
   const { stats, entries } = weightData;
   const projection = buildWeightGoalProjection(weightData, selectedDate);
   const estimatedGoalLabel = projection.estimatedGoalDate
-    ? formatShortDate(projection.estimatedGoalDate)
+    ? formatShortDateWithYear(projection.estimatedGoalDate)
     : "-";
 
   return (
@@ -700,7 +700,7 @@ function WeightPanel({
                     ) : null}
                   </p>
                   <p className="mt-0.5 text-xs text-[var(--color-muted)]">
-                    {formatShortDate(entry.date)}
+                    {formatShortDateWithYear(entry.date)}
                     {entry.notes ? ` - ${entry.notes}` : ""}
                   </p>
                 </div>
@@ -714,7 +714,7 @@ function WeightPanel({
                         ? "bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
                         : "text-[var(--color-muted)] hover:text-[var(--color-accent)]"
                     } disabled:opacity-50`}
-                    aria-label={`Edit entry from ${formatShortDate(entry.date)}`}
+                    aria-label={`Edit entry from ${formatShortDateWithYear(entry.date)}`}
                   >
                     <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M9.5 2.5l2 2L4 12H2v-2L9.5 2.5z" />
