@@ -1,6 +1,9 @@
 //! Weight-entry persistence and progress statistics.
 
-use super::{MAX_COLLECTION_ROWS, optional_f64, required_date, trim_optional_string};
+use super::{
+    MAX_COLLECTION_ROWS, map_named_unique_violation, optional_f64, required_date,
+    trim_optional_string,
+};
 use crate::errors::{AppError, AppResult};
 use crate::shared::{round1, round2};
 use chrono::{Duration, NaiveDate};
@@ -123,24 +126,32 @@ pub(super) async fn weight_page_data_json(
         .collect::<AppResult<Vec<_>>>()?;
     let today_date = NaiveDate::parse_from_str(today, "%Y-%m-%d")
         .map_err(|_| AppError::BadRequest("selectedDate must be YYYY-MM-DD.".to_string()))?;
-    let latest = stat_entries.last().copied();
+    // DATA-08: historical stats describe the selected reference date, so measurements after it
+    // must not become the current weight or the trend anchor. The full `entries` array above
+    // still carries every row for the chart.
+    let as_of_entries: Vec<WeightStatEntry> = stat_entries
+        .iter()
+        .copied()
+        .filter(|entry| entry.date <= today_date)
+        .collect();
+    let latest = as_of_entries.last().copied();
     let current_weight = latest.map(|entry| entry.weight_kg);
     let change_over = |days: i64| {
         latest.and_then(|latest| {
-            closest_weight_on_or_before(&stat_entries, today_date - Duration::days(days))
+            closest_weight_on_or_before(&as_of_entries, today_date - Duration::days(days))
                 .map(|entry| round2(latest.weight_kg - entry.weight_kg))
         })
     };
     let week_change = change_over(7);
     let month_change = change_over(30);
-    let trend_direction = match stat_entries.len() {
+    let trend_direction = match as_of_entries.len() {
         0 | 1 => None,
         2 => {
-            let diff = stat_entries[1].weight_kg - stat_entries[0].weight_kg;
+            let diff = as_of_entries[1].weight_kg - as_of_entries[0].weight_kg;
             Some(trend_direction_from_diff(diff))
         }
         len => {
-            let last3 = &stat_entries[len - 3..];
+            let last3 = &as_of_entries[len - 3..];
             let first_diff = last3[1].weight_kg - last3[0].weight_kg;
             let second_diff = last3[2].weight_kg - last3[1].weight_kg;
             Some(trend_direction_from_diff((first_diff + second_diff) / 2.0))
@@ -216,7 +227,12 @@ pub(super) async fn update_weight_entry_json(
     .bind(values.body_fat_pct)
     .bind(values.notes.as_deref())
     .fetch_optional(pool)
-    .await?
+    .await
+    // DATA-09: moving an entry onto an occupied date is an expected conflict, not a 500.
+    .map_err(map_named_unique_violation(
+        "weight_entries_user_date_key",
+        "A weight entry already exists for that date.",
+    ))?
     .is_some();
     if !updated {
         return Err(AppError::NotFound("Weight entry not found.".to_string()));
@@ -271,7 +287,7 @@ pub(super) fn normalize_weight_entry_input(
     input: &serde_json::Map<String, Value>,
 ) -> AppResult<WeightEntryValues> {
     // Rounds before the bound check: `numeric(5, 2)` also rejects values that only overflow after rounding.
-    let weight_kg = optional_f64(input, "weightKg")
+    let weight_kg = optional_f64(input, "weightKg")?
         .map(round2)
         .filter(|value| value.is_finite() && *value > 0.0)
         .ok_or_else(|| AppError::BadRequest("Weight must be a positive number.".to_string()))?;
@@ -280,7 +296,7 @@ pub(super) fn normalize_weight_entry_input(
             "Weight must be less than 1000 kg.".to_string(),
         ));
     }
-    let body_fat_pct = optional_f64(input, "bodyFatPct");
+    let body_fat_pct = optional_f64(input, "bodyFatPct")?;
     if let Some(value) = body_fat_pct
         && (!value.is_finite() || !(0.0..=100.0).contains(&value))
     {
