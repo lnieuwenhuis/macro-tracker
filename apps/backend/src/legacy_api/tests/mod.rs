@@ -7,7 +7,7 @@ use axum::{
 };
 use http_body_util::BodyExt;
 use std::sync::{
-    Arc,
+    Arc, OnceLock,
     atomic::{AtomicUsize, Ordering},
 };
 use tower::ServiceExt;
@@ -584,7 +584,24 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
     }
 }
 
+/// tracing-core caches each callsite's `Interest` process-wide on first execution. While at most
+/// one dispatcher has ever been registered, a first hit derives that interest from the
+/// *registering thread's* default subscriber (`Dispatchers::rebuilder()` -> `Rebuilder::JustOne`),
+/// so a parallel test thread without a scoped subscriber can cache `Interest::never` for the
+/// shared `upstream_photo_failure` callsite and silently drop SEC-04's captured warn events.
+/// Keeping one permanent no-op dispatcher registered forces the multi-dispatcher path
+/// (`Interest::and(never, always) == sometimes`, resolved per thread by `enabled()`), which makes
+/// captures deterministic without serializing tests or changing product logging. Rationale and
+/// the verified interleaving: `work/security-logtest/second-look.md` (tracing-core 0.1.36).
+static LOG_TEST_KEEPALIVE: OnceLock<tracing::Dispatch> = OnceLock::new();
+
+fn keep_log_callsites_global() {
+    LOG_TEST_KEEPALIVE
+        .get_or_init(|| tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default()));
+}
+
 fn capture_logs<T>(run: impl FnOnce() -> T) -> (T, String) {
+    keep_log_callsites_global();
     let buffer = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     let subscriber = tracing_subscriber::fmt()
         .with_writer(CaptureWriter(Arc::clone(&buffer)))
@@ -632,6 +649,37 @@ fn run_gateway_analysis(response_body: Value) -> (Value, String) {
                 .await
             })
     })
+}
+
+const FIRST_HIT_MARKER: &str = "first-hit-poison-guard-marker-6f4d2a";
+
+/// Callsite used only by the regression below, so a scopeless first hit here cannot poison any
+/// product callsite; `inline(never)` keeps this its own stable callsite.
+#[inline(never)]
+fn emit_first_hit_marker() {
+    tracing::warn!("{FIRST_HIT_MARKER}");
+}
+
+/// Invariant: a warn callsite first executed by a thread with no scoped subscriber must not stop a
+/// later capture on the subscriber-holding thread. Without `keep_log_callsites_global()`, running
+/// this test alone in a fresh process (`cargo test a_scopeless_first_hit -- --exact`) caches
+/// `Interest::never` on the first (scopeless) hit and the assertion fails; with the keepalive the
+/// registry is already on the multi-dispatcher path. In a full parallel suite earlier capture
+/// tests may already have registered a second dispatcher, so this test can pass vacuously there -
+/// it is the isolated run that reproduces the original flake deterministically.
+#[test]
+fn a_scopeless_first_hit_does_not_poison_a_later_capture() {
+    let ((), logs) = capture_logs(|| {
+        std::thread::spawn(emit_first_hit_marker)
+            .join()
+            .expect("marker thread should not panic");
+        emit_first_hit_marker();
+    });
+
+    assert!(
+        logs.contains(FIRST_HIT_MARKER),
+        "scopeless first hit dropped a later captured event: {logs:?}"
+    );
 }
 
 /// SEC-04: malformed model output must not be copied into application logs.
