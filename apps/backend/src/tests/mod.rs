@@ -224,15 +224,165 @@ async fn test_only_onboarding_rpc_still_dispatches_when_test_routes_are_enabled(
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
-fn bad_bearer_request(peer: SocketAddr) -> Request<Body> {
+fn bearer_request(peer: SocketAddr, token: &str) -> Request<Body> {
     Request::builder()
         .method("GET")
         .uri("/api/v1/me")
-        // SEC-09: well-formed prefix, so the `token_hash` lookup runs before the token is known worthless.
-        .header("authorization", "Bearer mtk_v1_notarealtokenatall")
+        .header("authorization", format!("Bearer {token}"))
         .extension(axum::extract::ConnectInfo(peer))
         .body(Body::empty())
         .expect("request should build")
+}
+
+fn bad_bearer_request(peer: SocketAddr) -> Request<Body> {
+    // SEC-09: well-formed prefix, so the `token_hash` lookup runs before the token is known worthless.
+    bearer_request(peer, "mtk_v1_notarealtokenatall")
+}
+
+fn anonymous_api_request(peer: SocketAddr) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri("/api/v1/me")
+        .extension(axum::extract::ConnectInfo(peer))
+        .body(Body::empty())
+        .expect("request should build")
+}
+
+fn anonymous_api_request_with_forwarded_headers(
+    peer: SocketAddr,
+    forwarded_for: &str,
+) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri("/api/v1/me")
+        .header("x-forwarded-for", forwarded_for)
+        .header("x-real-ip", "198.51.100.77")
+        .header("forwarded", "for=192.0.2.60")
+        .extension(axum::extract::ConnectInfo(peer))
+        .body(Body::empty())
+        .expect("request should build")
+}
+
+fn lazy_test_pool() -> sqlx::PgPool {
+    PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_millis(100))
+        .connect_lazy("postgres://postgres:***@127.0.0.1:1/macro_tracker")
+        .expect("test pool should be created lazily")
+}
+
+/// SEC-02: two clients behind one proxy peer must not share a bucket, so A's flood cannot 429 B.
+#[tokio::test]
+async fn a_flood_from_one_client_cannot_throttle_another_credential_behind_the_same_peer() {
+    // One-cell client budget with no refill, so every request past the first is refused.
+    let router = build_router_with_rate_limit(
+        test_state_with_db(test_config(), lazy_test_pool()),
+        60_000,
+        1,
+    );
+    let peer = SocketAddr::from(([203, 0, 113, 11], 51_000));
+
+    let mut flood_statuses = Vec::new();
+    for _ in 0..10 {
+        let response = router
+            .clone()
+            .oneshot(anonymous_api_request(peer))
+            .await
+            .expect("request should complete");
+        flood_statuses.push(response.status());
+    }
+    assert_eq!(
+        flood_statuses[0],
+        StatusCode::UNAUTHORIZED,
+        "the first anonymous request must reach the token lookup"
+    );
+    assert_eq!(
+        flood_statuses
+            .iter()
+            .filter(|status| **status == StatusCode::TOO_MANY_REQUESTS)
+            .count(),
+        9,
+        "the anonymous flood must be throttled on its own bucket: {flood_statuses:?}"
+    );
+
+    // B's own credential is a separate bucket, so it must be admitted despite A's flood.
+    let response = router
+        .oneshot(bearer_request(peer, "mtk_v1_anothercredential"))
+        .await
+        .expect("request should complete");
+    assert_ne!(
+        response.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "another credential behind the same proxy peer must stay available"
+    );
+}
+
+/// SEC-02: forwarding headers are caller-controlled and must not mint a fresh bucket.
+#[tokio::test]
+async fn spoofed_forwarding_headers_cannot_create_a_fresh_rate_limit_bucket() {
+    let router = build_router_with_rate_limit(
+        test_state_with_db(test_config(), lazy_test_pool()),
+        60_000,
+        1,
+    );
+    let peer = SocketAddr::from(([203, 0, 113, 12], 51_000));
+
+    let first = router
+        .clone()
+        .oneshot(anonymous_api_request_with_forwarded_headers(
+            peer,
+            "192.0.2.10",
+        ))
+        .await
+        .expect("request should complete");
+    assert_ne!(first.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let second = router
+        .oneshot(anonymous_api_request_with_forwarded_headers(
+            peer,
+            "192.0.2.99",
+        ))
+        .await
+        .expect("request should complete");
+    assert_eq!(
+        second.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "a spoofed forwarding header must not escape the peer bucket"
+    );
+}
+
+/// SEC-02: each credential keeps its own allowance.
+#[tokio::test]
+async fn distinct_credentials_get_independent_rate_limit_buckets() {
+    let router = build_router_with_rate_limit(
+        test_state_with_db(test_config(), lazy_test_pool()),
+        60_000,
+        1,
+    );
+    let peer = SocketAddr::from(([203, 0, 113, 13], 51_000));
+
+    let first = router
+        .clone()
+        .oneshot(bearer_request(peer, "mtk_v1_credential-a"))
+        .await
+        .expect("request should complete");
+    assert_ne!(first.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let exhausted = router
+        .clone()
+        .oneshot(bearer_request(peer, "mtk_v1_credential-a"))
+        .await
+        .expect("request should complete");
+    assert_eq!(exhausted.status(), StatusCode::TOO_MANY_REQUESTS);
+
+    let other = router
+        .oneshot(bearer_request(peer, "mtk_v1_credential-b"))
+        .await
+        .expect("request should complete");
+    assert_ne!(
+        other.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "a second credential must not inherit the first credential's bucket"
+    );
 }
 
 /// SEC-09: an unauthenticated `/api/v1` burst must be throttled before it starves the pool, and `/health` must keep answering through it.
