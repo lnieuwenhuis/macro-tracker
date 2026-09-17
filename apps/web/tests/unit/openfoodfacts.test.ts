@@ -152,4 +152,22 @@ describe("lookupBarcode", () => {
       reason: "unavailable",
     });
   });
+
+  it("keeps an HTML outage page an outage instead of auth recovery", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response("<html>503 Service Unavailable</html>", {
+          status: 503,
+          headers: { "content-type": "text/html" },
+        }),
+      ),
+    );
+
+    expect(await lookupBarcode("77777777")).toEqual({
+      found: false,
+      barcode: "77777777",
+      reason: "unavailable",
+    });
+  });
 });

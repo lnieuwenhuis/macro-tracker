@@ -104,16 +104,19 @@ export async function lookupBarcode(
       return { found: false, barcode, reason: "auth" };
     }
 
-    const contentType = response.headers.get("content-type") ?? "";
-    if (response.redirected || contentType.includes("text/html")) {
-      return { found: false, barcode, reason: "auth" };
-    }
-
+    // Outage pages from a hosting/proxy layer can be HTML too; an error status
+    // stays an outage. Auth recovery is only for the 2xx paths below, where a
+    // followed login redirect or an HTML login body is the session gate.
     if (!response.ok) {
       console.error(
         `Barcode lookup for ${barcode} failed with status ${response.status}`,
       );
       return { found: false, barcode, reason: "unavailable" };
+    }
+
+    const contentType = response.headers.get("content-type") ?? "";
+    if (response.redirected || contentType.includes("text/html")) {
+      return { found: false, barcode, reason: "auth" };
     }
 
     let data: unknown;
