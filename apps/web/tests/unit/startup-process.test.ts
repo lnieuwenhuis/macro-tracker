@@ -49,6 +49,40 @@ async function readMigrationLog(root: string) {
   return (await readFile(join(root, "migration"), "utf8")).replace(/\r\n/g, "\n");
 }
 
+// Windows environment variable names are case-insensitive, so an inherited
+// NPM_EXECPATH can shadow the fixture's lowercase name (or defeat deleting it).
+function removeCaseInsensitiveEnvKey(env: NodeJS.ProcessEnv, name: string) {
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === name) {
+      delete env[key];
+    }
+  }
+}
+
+// A package manager JavaScript entry that succeeds without recording migrations.
+// Used to simulate an inherited npm_execpath in a different key case.
+async function writeDecoyEntry() {
+  const directory = await mkdtemp(join(tmpdir(), "macro-startup-decoy-"));
+  directories.push(directory);
+  const entry = join(directory, "decoy-pnpm.cjs");
+  await writeFile(entry, "process.exit(0);\n");
+  return entry;
+}
+
+async function withInheritedExecpathVariant<T>(run: () => Promise<T>) {
+  const previous = process.env.NPM_EXECPATH;
+  process.env.NPM_EXECPATH = await writeDecoyEntry();
+  try {
+    return await run();
+  } finally {
+    if (previous === undefined) {
+      delete process.env.NPM_EXECPATH;
+    } else {
+      process.env.NPM_EXECPATH = previous;
+    }
+  }
+}
+
 afterEach(async () => {
   for (const child of children.splice(0)) {
     await waitForExit(child);
@@ -97,6 +131,7 @@ async function fixture({
     DATABASE_URL: databaseUrl,
     NEXT_SERVER_HOSTNAME: "127.0.0.1",
   };
+  removeCaseInsensitiveEnvKey(env, "npm_execpath");
 
   if (migrationRunner === "node-entry") {
     const entry = join(root, "fake-pnpm.mjs");
@@ -111,7 +146,6 @@ async function fixture({
     );
     env.npm_execpath = entry;
   } else {
-    delete env.npm_execpath;
     const bin = join(root, "bin");
     await mkdir(bin);
     if (process.platform === "win32") {
@@ -224,6 +258,26 @@ it("runs the package manager entry provided through npm_execpath", async () => {
   expect(await readMigrationLog(root)).toBe(
     "--filter @macro-tracker/db db:migrate\n",
   );
+});
+
+it("ignores an inherited case-variant npm_execpath in the path-shim fixture", async () => {
+  await withInheritedExecpathVariant(async () => {
+    const { root, ready } = await fixture();
+    await ready;
+    expect(await readMigrationLog(root)).toBe(
+      "--filter @macro-tracker/db db:migrate\n",
+    );
+  });
+});
+
+it("keeps the fixture npm_execpath entry over an inherited case-variant", async () => {
+  await withInheritedExecpathVariant(async () => {
+    const { root, ready } = await fixture({ migrationRunner: "node-entry" });
+    await ready;
+    expect(await readMigrationLog(root)).toBe(
+      "--filter @macro-tracker/db db:migrate\n",
+    );
+  });
 });
 
 it("loads the Next CLI in-process when standalone output is absent", async () => {
