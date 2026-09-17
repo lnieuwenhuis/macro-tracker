@@ -97,4 +97,89 @@ describe("lookupBarcode", () => {
 
     expect(result).toEqual({ found: false, barcode: "33333333", reason: "unavailable" });
   });
+
+  it("returns auth for direct 401 and 403 instead of a connectivity failure", async () => {
+    for (const status of [401, 403]) {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(jsonResponse({ error: "denied" }, status)),
+      );
+
+      const result = await lookupBarcode("44444444");
+
+      expect(result).toEqual({ found: false, barcode: "44444444", reason: "auth" });
+    }
+  });
+
+  it("returns auth for a redirected login page and HTML bodies", async () => {
+    const htmlHeaders = { "content-type": "text/html" };
+    const redirected = new Response("<html>login</html>", {
+      status: 200,
+      headers: htmlHeaders,
+    });
+    Object.defineProperty(redirected, "redirected", { value: true });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(redirected));
+    expect(await lookupBarcode("55555555")).toEqual({
+      found: false,
+      barcode: "55555555",
+      reason: "auth",
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response("<html>login</html>", { status: 200, headers: htmlHeaders }),
+      ),
+    );
+    expect(await lookupBarcode("55555555")).toEqual({
+      found: false,
+      barcode: "55555555",
+      reason: "auth",
+    });
+
+    // HTML login served as 200 without a content-type header is still auth.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(new Response("<!DOCTYPE html><html>login</html>", { status: 200 })),
+    );
+    expect(await lookupBarcode("55555555")).toEqual({
+      found: false,
+      barcode: "55555555",
+      reason: "auth",
+    });
+  });
+
+  it("keeps genuine misses and outages distinct from auth", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({ found: false })));
+    expect(await lookupBarcode("00000000")).toEqual({
+      found: false,
+      barcode: "00000000",
+      reason: "not_found",
+    });
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({}, 502)));
+    expect(await lookupBarcode("11111111")).toEqual({
+      found: false,
+      barcode: "11111111",
+      reason: "unavailable",
+    });
+  });
+
+  it("keeps an HTML outage page an outage instead of auth recovery", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response("<html>503 Service Unavailable</html>", {
+          status: 503,
+          headers: { "content-type": "text/html" },
+        }),
+      ),
+    );
+
+    expect(await lookupBarcode("77777777")).toEqual({
+      found: false,
+      barcode: "77777777",
+      reason: "unavailable",
+    });
+  });
 });

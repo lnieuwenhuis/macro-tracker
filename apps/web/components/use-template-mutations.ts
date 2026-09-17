@@ -8,6 +8,7 @@ import {
   saveTemplateAction,
   updateTemplateAction,
 } from "@/lib/actions";
+import { isFrameworkControlFlowError } from "@/lib/framework-control-flow";
 
 type TemplateMutationState =
   | { type: "save" }
@@ -46,6 +47,12 @@ export function useTemplateMutations({
 
       setLocalTemplates((prev) => sortTemplatesByLabel([...prev, savedTemplate]));
       return true;
+    } catch (error) {
+      if (isFrameworkControlFlowError(error)) {
+        throw error;
+      }
+      setPresetError("Unable to save template.");
+      return false;
     } finally {
       setPresetMutation(null);
     }
@@ -67,6 +74,13 @@ export function useTemplateMutations({
       }
 
       return true;
+    } catch (error) {
+      if (isFrameworkControlFlowError(error)) {
+        throw error;
+      }
+      setLocalTemplates(previousTemplates);
+      setPresetError("Unable to delete template.");
+      return false;
     } finally {
       setPresetMutation(null);
     }
@@ -93,6 +107,12 @@ export function useTemplateMutations({
         ),
       );
       return true;
+    } catch (error) {
+      if (isFrameworkControlFlowError(error)) {
+        throw error;
+      }
+      setPresetError("Unable to update template.");
+      return false;
     } finally {
       setPresetMutation(null);
     }

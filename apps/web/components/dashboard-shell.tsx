@@ -3,10 +3,11 @@
 import type { DailySummary, GymHomeSummary, MacroGoals, MealEntryRecord, MealEntryStatus, MealGroup, MealTemplate, QuickAddCandidate, RecipeSummary } from "@macro-tracker/db";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState, useTransition } from "react";
+import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import { applyTemplateAction, createMealGroupAction, deleteMealGroupAction, deleteMealEntryAction, loadRecipeSummariesAction, loadTemplatesAction, markMealEntryStatusAction, saveMealEntryAction, updateMealGroupAction } from "@/lib/actions";
 import type { ComposeAction } from "@/lib/compose";
+import { isFrameworkControlFlowError } from "@/lib/framework-control-flow";
 import { computeLiveTotalsByStatus, rankCandidates } from "@/lib/quick-add";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
 import type { OpenFoodFactsProduct } from "@/lib/openfoodfacts";
@@ -122,15 +123,127 @@ function upsertSavedMeal(meals: MealEntryRecord[], entry: MealEntryRecord) {
 
 function reconcileDraftsWithSavedMeals(
   currentDrafts: MealDraft[],
+  oldSavedMeals: MealEntryRecord[],
   meals: MealEntryRecord[],
 ) {
+  // UI-03: a refresh triggered by one card must not discard another card's
+  // unsaved edits. Fields that differ from the pre-refresh baseline stay local;
+  // everything else takes the fresh server row.
+  const oldById = new Map(oldSavedMeals.map((meal) => [meal.id, meal]));
   const savedDrafts = meals.map((meal) => {
     const existingDraft = currentDrafts.find((draft) => draft.id === meal.id);
-    return mealToDraftWithClientId(meal, existingDraft?.clientId ?? meal.id);
+    const clientId = existingDraft?.clientId ?? meal.id;
+    if (!existingDraft) {
+      return mealToDraftWithClientId(meal, clientId);
+    }
+    const oldSaved = oldById.get(meal.id);
+    if (!oldSaved) {
+      return mealToDraftWithClientId(meal, clientId);
+    }
+    return mergeServerMealPreservingDirty(existingDraft, oldSaved, meal, clientId);
   });
   const unsavedDrafts = currentDrafts.filter((draft) => !draft.id);
 
   return [...savedDrafts, ...unsavedDrafts];
+}
+
+// UI-03/UI-25: keep locally edited fields that differ from the baseline the
+// user last saw; adopt the server row for untouched fields. sortOrder always
+// follows the server so ordering stays authoritative.
+function mergeServerMealPreservingDirty(
+  currentDraft: MealDraft,
+  oldSaved: MealEntryRecord,
+  newSaved: MealEntryRecord,
+  clientId: string,
+) {
+  const serverDraft = mealToDraftWithClientId(newSaved, clientId);
+  const dirty = dirtyFieldsVsSaved(currentDraft, oldSaved);
+  if (!dirty) {
+    return serverDraft;
+  }
+  return { ...serverDraft, ...dirty };
+}
+
+function dirtyFieldsVsSaved(
+  draft: MealDraft,
+  saved: MealEntryRecord,
+): Partial<MealDraft> | null {
+  const dirty: Partial<MealDraft> = {};
+  const sameText = (a: string, b: string) => a === b;
+  const sameNumberText = (text: string, value: number) => {
+    if (text === String(value)) {
+      return true;
+    }
+    // "10.0" vs 10 is the same value; keep the server text to avoid churn.
+    const parsed = Number(text);
+    return text.trim() !== "" && Number.isFinite(parsed) && parsed === value;
+  };
+
+  if ((draft.mealGroupId ?? null) !== (saved.mealGroupId ?? null)) {
+    dirty.mealGroupId = draft.mealGroupId;
+  }
+  if (draft.status !== saved.status) {
+    dirty.status = draft.status;
+  }
+  if ((draft.productId ?? null) !== (saved.productId ?? null)) {
+    dirty.productId = draft.productId;
+  }
+  if (!sameText(draft.label, saved.label)) {
+    dirty.label = draft.label;
+  }
+  if (!sameNumberText(draft.quantity, saved.quantity)) {
+    dirty.quantity = draft.quantity;
+  }
+  if (draft.unit !== saved.unit) {
+    dirty.unit = draft.unit;
+  }
+  if (!sameNumberText(draft.servingMultiplier, saved.servingMultiplier)) {
+    dirty.servingMultiplier = draft.servingMultiplier;
+  }
+  if (!sameNumberText(draft.proteinG, saved.proteinG)) {
+    dirty.proteinG = draft.proteinG;
+  }
+  if (!sameNumberText(draft.carbsG, saved.carbsG)) {
+    dirty.carbsG = draft.carbsG;
+  }
+  if (!sameNumberText(draft.fatG, saved.fatG)) {
+    dirty.fatG = draft.fatG;
+  }
+  if (!sameNumberText(draft.caloriesKcal, saved.caloriesKcal)) {
+    dirty.caloriesKcal = draft.caloriesKcal;
+  }
+
+  return Object.keys(dirty).length > 0 ? dirty : null;
+}
+
+// UI-25: a save that completes after newer local edits were admitted must not
+// clobber them. Fields changed since submission stay local; the rest commit.
+function mergeSaveResultPreservingNewerEdits(
+  currentDraft: MealDraft,
+  submittedDraft: MealDraft,
+  savedEntry: MealEntryRecord,
+  clientId: string,
+) {
+  const serverDraft = mealToDraftWithClientId(savedEntry, clientId);
+  const merged: MealDraft = { ...serverDraft };
+  ([
+    "mealGroupId",
+    "status",
+    "productId",
+    "label",
+    "quantity",
+    "unit",
+    "servingMultiplier",
+    "proteinG",
+    "carbsG",
+    "fatG",
+    "caloriesKcal",
+  ] as const).forEach((field) => {
+    if (currentDraft[field] !== submittedDraft[field]) {
+      (merged as unknown as Record<string, unknown>)[field] = currentDraft[field];
+    }
+  });
+  return merged;
 }
 
 function baseDraft(
@@ -341,9 +454,31 @@ export function DashboardShell({
     dailySummary.meals,
   );
   const [errors, setErrors] = useState<ErrorState>({});
-  const [activeMutation, setActiveMutation] = useState<string | null>(null);
-  const [savingClientId, setSavingClientId] = useState<string | null>(null);
-  const [isPending, beginMutation] = useTransition();
+  // UI-25: pending operations tracked per entry, guarded synchronously so one
+  // card's save can never release (or admit edits on) another card.
+  const [pendingClientIds, setPendingClientIds] = useState<Set<string>>(new Set());
+  const pendingRef = useRef<Set<string>>(new Set());
+
+  function markPending(clientId: string) {
+    if (pendingRef.current.has(clientId)) {
+      return false;
+    }
+    pendingRef.current.add(clientId);
+    setPendingClientIds((prev) => new Set(prev).add(clientId));
+    return true;
+  }
+
+  function clearPending(clientId: string) {
+    pendingRef.current.delete(clientId);
+    setPendingClientIds((prev) => {
+      if (!prev.has(clientId)) {
+        return prev;
+      }
+      const next = new Set(prev);
+      next.delete(clientId);
+      return next;
+    });
+  }
 
   const [showPresetsModal, setShowPresetsModal] = useState(false);
   const [presetInitialKind, setPresetInitialKind] =
@@ -385,14 +520,17 @@ export function DashboardShell({
   useEffect(() => {
     setSavedMeals(dailySummary.meals);
     setLocalMealGroups(dailySummary.mealGroups);
+    // savedMeals here is the pre-refresh baseline for dirty detection.
+    const baseline = savedMeals;
     setDrafts((currentDrafts) => {
       if (selectedDateRef.current !== selectedDate) {
         return dailySummary.meals.map(mealToDraft);
       }
 
-      return reconcileDraftsWithSavedMeals(currentDrafts, dailySummary.meals);
+      return reconcileDraftsWithSavedMeals(currentDrafts, baseline, dailySummary.meals);
     });
     selectedDateRef.current = selectedDate;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dailySummary.mealGroups, dailySummary.meals, selectedDate]);
 
   const { copiedIds: copiedCardIds, flash: flashCopied } = useCopiedFlash(2000);
@@ -509,14 +647,48 @@ export function DashboardShell({
       return;
     }
 
-    setActiveMutation(clientId);
-    beginMutation(async () => {
-      const result = await saveMealEntryAction(mealDraftToSaveInput(draft, {
-        date: selectedDate,
-        mealGroupId,
-      }));
+    if (!markPending(clientId)) {
+      return;
+    }
+    void (async () => {
+      try {
+        const result = await saveMealEntryAction(mealDraftToSaveInput(draft, {
+          date: selectedDate,
+          mealGroupId,
+        }));
 
-      if (!result.ok) {
+        if (!result.ok) {
+          setDrafts((currentDrafts) =>
+            currentDrafts.map((item) =>
+              item.clientId === clientId
+                ? { ...item, mealGroupId: previousMealGroupId }
+                : item,
+            ),
+          );
+          setErrors((currentErrors) => ({
+            ...currentErrors,
+            [clientId]: result.error ?? "Unable to update group.",
+          }));
+          return;
+        }
+
+        if (result.entry) {
+          const savedEntry = result.entry;
+          setSavedMeals((meals) => upsertSavedMeal(meals, savedEntry));
+          setDrafts((currentDrafts) =>
+            currentDrafts.map((item) =>
+              item.clientId === clientId
+                ? mealToDraftWithClientId(savedEntry, clientId)
+                : item,
+            ),
+          );
+        }
+        router.refresh();
+      } catch (error) {
+        if (isFrameworkControlFlowError(error)) {
+          throw error;
+        }
+        // UI-05: transport rejection rolls back the optimistic group change.
         setDrafts((currentDrafts) =>
           currentDrafts.map((item) =>
             item.clientId === clientId
@@ -526,25 +698,12 @@ export function DashboardShell({
         );
         setErrors((currentErrors) => ({
           ...currentErrors,
-          [clientId]: result.error ?? "Unable to update group.",
+          [clientId]: "Unable to update group.",
         }));
-        setActiveMutation(null);
-        return;
+      } finally {
+        clearPending(clientId);
       }
-
-      if (result.entry) {
-        const savedEntry = result.entry;
-        setSavedMeals((meals) => upsertSavedMeal(meals, savedEntry));
-        setDrafts((currentDrafts) =>
-          currentDrafts.map((item) =>
-            item.clientId === clientId
-              ? mealToDraftWithClientId(savedEntry, clientId)
-              : item,
-          ),
-        );
-      }
-      router.refresh();
-    });
+    })();
   }
 
   function addCustomDraft() {
@@ -579,6 +738,12 @@ export function DashboardShell({
       ]);
       setShowPresetsModal(false);
       router.refresh();
+    } catch (error) {
+      if (isFrameworkControlFlowError(error)) {
+        throw error;
+      }
+      // UI-05: transport rejection surfaces locally instead of unhandled.
+      setPresetError("Unable to apply template.");
     } finally {
       setPresetMutation(null);
     }
@@ -628,17 +793,28 @@ export function DashboardShell({
     setSavedMeals((meals) => upsertSavedMeal(meals, entry));
     setDrafts((currentDrafts) => {
       const existingDraft = currentDrafts.find((draft) => draft.id === entry.id);
-      const savedDraft = mealToDraftWithClientId(
-        entry,
-        existingDraft?.clientId ?? entry.id,
-      );
 
       if (!existingDraft) {
-        return [...currentDrafts, savedDraft];
+        return [
+          ...currentDrafts,
+          mealToDraftWithClientId(entry, entry.id),
+        ];
+      }
+
+      // UI-03: a search-saved row for an already-dirty card must not wipe edits.
+      const oldSaved = savedMeals.find((meal) => meal.id === entry.id);
+      if (!oldSaved) {
+        return currentDrafts.map((draft) =>
+          draft.id === entry.id
+            ? mealToDraftWithClientId(entry, draft.clientId)
+            : draft,
+        );
       }
 
       return currentDrafts.map((draft) =>
-        draft.id === entry.id ? savedDraft : draft,
+        draft.id === entry.id
+          ? mergeServerMealPreservingDirty(draft, oldSaved, entry, draft.clientId)
+          : draft,
       );
     });
   }
@@ -685,15 +861,32 @@ export function DashboardShell({
       return false;
     }
 
-    setSavingClientId(clientId);
+    // UI-25: synchronous per-card guard; only this card's marker is released.
+    if (!markPending(clientId)) {
+      return false;
+    }
+    const submittedDraft = { ...draft };
     try {
       const mutationKey = `draft:${clientId}:${selectedDate}`;
-      const result = await saveMealEntryAction(
-        mealDraftToSaveInput(draft, {
-          date: selectedDate,
-          clientMutationId: mutationIds.current.take(mutationKey),
-        }),
-      );
+      let result: Awaited<ReturnType<typeof saveMealEntryAction>>;
+      try {
+        result = await saveMealEntryAction(
+          mealDraftToSaveInput(submittedDraft, {
+            date: selectedDate,
+            clientMutationId: mutationIds.current.take(mutationKey),
+          }),
+        );
+      } catch (error) {
+        if (isFrameworkControlFlowError(error)) {
+          throw error;
+        }
+        // UI-05: transport rejection is a local error, not a hang.
+        setErrors((currentErrors) => ({
+          ...currentErrors,
+          [clientId]: "Unable to save food item.",
+        }));
+        return false;
+      }
 
       if (result.ok) {
         mutationIds.current.settle(mutationKey);
@@ -719,7 +912,7 @@ export function DashboardShell({
       setDrafts((currentDrafts) =>
         currentDrafts.map((d) =>
           d.clientId === clientId
-            ? mealToDraftWithClientId(savedEntry, clientId)
+            ? mergeSaveResultPreservingNewerEdits(d, submittedDraft, savedEntry, clientId)
             : d,
         ),
       );
@@ -727,7 +920,7 @@ export function DashboardShell({
       router.refresh();
       return true;
     } finally {
-      setSavingClientId(null);
+      clearPending(clientId);
     }
   }
 
@@ -742,25 +935,39 @@ export function DashboardShell({
       return;
     }
 
-    setActiveMutation(clientId);
-    beginMutation(async () => {
-      const result = await deleteMealEntryAction({
-        id: draft.id!,
-      });
+    if (!markPending(clientId)) {
+      return;
+    }
+    void (async () => {
+      try {
+        const result = await deleteMealEntryAction({
+          id: draft.id!,
+        });
 
-      if (!result.ok) {
+        if (!result.ok) {
+          setErrors((currentErrors) => ({
+            ...currentErrors,
+            [clientId]: result.error ?? "Unable to delete food item.",
+          }));
+          return;
+        }
+
+        setSavedMeals((meals) => meals.filter((meal) => meal.id !== draft.id));
+        removeLocalDraft(clientId);
+        router.refresh();
+      } catch (error) {
+        if (isFrameworkControlFlowError(error)) {
+          throw error;
+        }
+        // UI-05: transport rejection surfaces locally for this card only.
         setErrors((currentErrors) => ({
           ...currentErrors,
-          [clientId]: result.error ?? "Unable to delete food item.",
+          [clientId]: "Unable to delete food item.",
         }));
-        setActiveMutation(null);
-        return;
+      } finally {
+        clearPending(clientId);
       }
-
-      setSavedMeals((meals) => meals.filter((meal) => meal.id !== draft.id));
-      removeLocalDraft(clientId);
-      router.refresh();
-    });
+    })();
   }
 
   function handleStatusChange(clientId: string, status: MealEntryStatus) {
@@ -774,41 +981,73 @@ export function DashboardShell({
       return;
     }
 
-    setActiveMutation(clientId);
-    beginMutation(async () => {
-      const result = await markMealEntryStatusAction({
-        id: draft.id!,
-        status,
-      });
+    if (!markPending(clientId)) {
+      return;
+    }
+    // UI-03: capture pre-status edits so the server row cannot wipe them.
+    const submittedDraft = { ...draft };
+    const baseline = savedMeals.find((meal) => meal.id === draft.id);
+    void (async () => {
+      try {
+        let result: Awaited<ReturnType<typeof markMealEntryStatusAction>>;
+        try {
+          result = await markMealEntryStatusAction({
+            id: submittedDraft.id!,
+            status,
+          });
+        } catch (error) {
+          if (isFrameworkControlFlowError(error)) {
+            throw error;
+          }
+          // UI-05: transport rejection keeps local edits and reports per card.
+          setErrors((currentErrors) => ({
+            ...currentErrors,
+            [clientId]: "Unable to update status.",
+          }));
+          return;
+        }
 
-      if (!result.ok) {
-        setErrors((currentErrors) => ({
-          ...currentErrors,
-          [clientId]: result.error ?? "Unable to update status.",
-        }));
-        setActiveMutation(null);
-        return;
-      }
+        if (!result.ok) {
+          setErrors((currentErrors) => ({
+            ...currentErrors,
+            [clientId]: result.error ?? "Unable to update status.",
+          }));
+          return;
+        }
 
-      if (result.entry) {
-        const savedEntry = result.entry;
-        setSavedMeals((meals) => upsertSavedMeal(meals, savedEntry));
-        setDrafts((currentDrafts) =>
-          currentDrafts.map((item) =>
-            item.clientId === clientId
-              ? mealToDraftWithClientId(savedEntry, clientId)
-              : item,
-          ),
-        );
-      } else {
-        setDrafts((currentDrafts) =>
-          currentDrafts.map((item) =>
-            item.clientId === clientId ? { ...item, status } : item,
-          ),
-        );
+        if (result.entry) {
+          const savedEntry = result.entry;
+          setSavedMeals((meals) => upsertSavedMeal(meals, savedEntry));
+          setDrafts((currentDrafts) =>
+            currentDrafts.map((item) => {
+              if (item.clientId !== clientId) {
+                return item;
+              }
+              // Preserve fields the user edited before tapping status; the
+              // status endpoint only moves status, so dirty values win locally
+              // until the user explicitly saves them.
+              const dirty = baseline ? dirtyFieldsVsSaved(submittedDraft, baseline) : null;
+              const serverDraft = mealToDraftWithClientId(savedEntry, clientId);
+              if (!dirty) {
+                return serverDraft;
+              }
+              const preserved = { ...dirty };
+              delete preserved.status;
+              return { ...serverDraft, ...preserved };
+            }),
+          );
+        } else {
+          setDrafts((currentDrafts) =>
+            currentDrafts.map((item) =>
+              item.clientId === clientId ? { ...item, status } : item,
+            ),
+          );
+        }
+        router.refresh();
+      } finally {
+        clearPending(clientId);
       }
-      router.refresh();
-    });
+    })();
   }
 
   async function handleCreateMealGroup() {
@@ -826,6 +1065,12 @@ export function DashboardShell({
 
       setLocalMealGroups((groups) => [...groups, result.group!]);
       setNewGroupLabel("");
+    } catch (error) {
+      if (isFrameworkControlFlowError(error)) {
+        throw error;
+      }
+      // UI-05: transport rejection surfaces locally instead of unhandled.
+      setGroupError("Unable to create group.");
     } finally {
       setGroupMutationId(null);
     }
@@ -849,6 +1094,13 @@ export function DashboardShell({
         setLocalMealGroups(previousGroups);
         setGroupError(result.error ?? "Unable to rename group.");
       }
+    } catch (error) {
+      if (isFrameworkControlFlowError(error)) {
+        throw error;
+      }
+      // UI-05: transport rejection rolls back the optimistic rename.
+      setLocalMealGroups(previousGroups);
+      setGroupError("Unable to rename group.");
     } finally {
       setGroupMutationId(null);
     }
@@ -880,6 +1132,14 @@ export function DashboardShell({
         ),
       );
       router.refresh();
+    } catch (error) {
+      if (isFrameworkControlFlowError(error)) {
+        throw error;
+      }
+      // UI-05: transport rejection rolls back the optimistic removal.
+      setLocalMealGroups(previousGroups);
+      setDrafts(previousDrafts);
+      setGroupError("Unable to delete group.");
     } finally {
       setGroupMutationId(null);
     }
@@ -994,32 +1254,47 @@ export function DashboardShell({
     const draft = drafts.find((d) => d.clientId === clientId);
     if (!draft) return;
 
+    // Intentional add-to-today semantics preserved: a historical view copies
+    // onto the local today, never onto the viewed date.
     const mutationKey = `copy:${draft.id ?? clientId}:${todayStr}`;
-    setActiveMutation(clientId);
-    beginMutation(async () => {
-      const result = await saveMealEntryAction(mealDraftToSaveInput(draft, {
-        date: todayStr,
-        includeId: false,
-        includeSortOrder: false,
-        status: "eaten",
-        clientMutationId: mutationIds.current.take(mutationKey),
-      }));
+    if (!markPending(clientId)) {
+      return;
+    }
+    void (async () => {
+      try {
+        const result = await saveMealEntryAction(mealDraftToSaveInput(draft, {
+          date: todayStr,
+          includeId: false,
+          includeSortOrder: false,
+          status: "eaten",
+          clientMutationId: mutationIds.current.take(mutationKey),
+        }));
 
-      if (result.ok) {
-        mutationIds.current.settle(mutationKey);
-      }
+        if (result.ok) {
+          mutationIds.current.settle(mutationKey);
+        }
 
-      if (!result.ok) {
+        if (!result.ok) {
+          setErrors((currentErrors) => ({
+            ...currentErrors,
+            [clientId]: result.error ?? "Unable to copy entry to today.",
+          }));
+        } else {
+          flashCopied(clientId);
+        }
+      } catch (error) {
+        if (isFrameworkControlFlowError(error)) {
+          throw error;
+        }
+        // UI-05: transport rejection surfaces locally for this card only.
         setErrors((currentErrors) => ({
           ...currentErrors,
-          [clientId]: result.error ?? "Unable to copy entry to today.",
+          [clientId]: "Unable to copy entry to today.",
         }));
-      } else {
-        flashCopied(clientId);
+      } finally {
+        clearPending(clientId);
       }
-
-      setActiveMutation(null);
-    });
+    })();
   }
 
   function openPresetModal(initialKind: PresetTemplateKind | null = null) {
@@ -1316,9 +1591,9 @@ export function DashboardShell({
                 </h3>
                 <div className="space-y-3">
                   {groupDrafts.map((draft) => {
-                    const busy =
-                      savingClientId === draft.clientId ||
-                      (isPending && activeMutation === draft.clientId);
+                    // UI-25: per-card pending state; one card's mutation never
+                    // enables, admits edits on, or releases another card.
+                    const busy = pendingClientIds.has(draft.clientId);
 
                     return (
                       <MealCard
@@ -1438,9 +1713,7 @@ export function DashboardShell({
               appendMacroSelectionAsDraft(macros);
               setShowPhotoModal(false);
             }}
-            onSaveAsPreset={(input) => {
-              handleSavePreset(input);
-            }}
+            onSaveAsPreset={(input) => handleSavePreset(input)}
           />
         </ModalChunkDismissProvider>
       )}
@@ -1458,9 +1731,7 @@ export function DashboardShell({
             onAddToLog={(macros) => {
               appendMacroSelectionAsDraft(macros);
             }}
-            onSaveAsPreset={(input) => {
-              handleSavePreset(input);
-            }}
+            onSaveAsPreset={(input) => handleSavePreset(input)}
           />
         </ModalChunkDismissProvider>
       )}
