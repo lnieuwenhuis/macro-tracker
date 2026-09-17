@@ -20,7 +20,8 @@ type BarcodeResultProps = {
   product: OpenFoodFactsProduct | null;
   notFoundBarcode: string | null;
   onAddToLog: (input: BarcodeFoodSelection) => void;
-  onSaveAsPreset: (input: BarcodeFoodSelection) => void;
+  // UI-01: resolves true only when the template actually persisted.
+  onSaveAsPreset: (input: BarcodeFoodSelection) => Promise<boolean>;
   onScanAnother: () => void;
   onClose: () => void;
 };
@@ -113,38 +114,43 @@ function NotFoundForm({
     setIsSaving(true);
     setSaveError(null);
 
-    const result = await saveBarcodeFoodProductAction({
-      barcode,
-      name,
-      brands: form.brands.trim(),
-      caloriesKcal,
-      proteinG,
-      carbsG,
-      fatG,
-      servingSizeG,
-    });
+    try {
+      const result = await saveBarcodeFoodProductAction({
+        barcode,
+        name,
+        brands: form.brands.trim(),
+        caloriesKcal,
+        proteinG,
+        carbsG,
+        fatG,
+        servingSizeG,
+      });
 
-    setIsSaving(false);
+      if (!result.ok || !result.product) {
+        setSaveError(result.error ?? "Failed to save product.");
+        return;
+      }
 
-    if (!result.ok || !result.product) {
-      setSaveError(result.error ?? "Failed to save product.");
-      return;
+      // Hand the saved product back up so the normal product view can render
+      onProductSaved({
+        productId: result.product.id,
+        name: result.product.name,
+        brands: result.product.brand,
+        barcode: result.product.barcode ?? barcode,
+        proteinG: result.product.proteinPer100,
+        carbsG: result.product.carbsPer100,
+        fatG: result.product.fatPer100,
+        caloriesKcal: result.product.caloriesPer100,
+        servingSizeG: result.product.servingWeightG,
+        imageUrl: null,
+        source: "custom",
+      });
+    } catch {
+      // Transport rejection (UI-05): keep the form open with a retryable error.
+      setSaveError("Failed to save product.");
+    } finally {
+      setIsSaving(false);
     }
-
-    // Hand the saved product back up so the normal product view can render
-    onProductSaved({
-      productId: result.product.id,
-      name: result.product.name,
-      brands: result.product.brand,
-      barcode: result.product.barcode ?? barcode,
-      proteinG: result.product.proteinPer100,
-      carbsG: result.product.carbsPer100,
-      fatG: result.product.fatPer100,
-      caloriesKcal: result.product.caloriesPer100,
-      servingSizeG: result.product.servingWeightG,
-      imageUrl: null,
-      source: "custom",
-    });
   }
 
   if (!showForm) {
@@ -375,6 +381,8 @@ export function BarcodeResult({
   const defaultServing = displayProduct?.servingSizeG ?? 100;
   const [servingG, setServingG] = useState(String(defaultServing));
   const [savedPreset, setSavedPreset] = useState(false);
+  const [isSavingPreset, setIsSavingPreset] = useState(false);
+  const [presetError, setPresetError] = useState<string | null>(null);
   // While editing, add-to-log and save-as-template send these raw values instead of the scaled ones.
   const [isEditing, setIsEditing] = useState(false);
   const [edited, setEdited] = useState<EditedValues>(emptyEdited);
@@ -461,6 +469,28 @@ export function BarcodeResult({
       return;
     }
     setEdited((prev) => ({ ...prev, [field]: value.replace(/,/g, ".") }));
+  }
+
+  // UI-01: only mark Saved after the async save actually succeeds; failures
+  // (resolved false or transport rejection) keep retry available.
+  async function handleSavePreset() {
+    if (savedPreset || isSavingPreset) {
+      return;
+    }
+    setIsSavingPreset(true);
+    setPresetError(null);
+    try {
+      const saved = await onSaveAsPreset(valuesToSubmit());
+      if (saved) {
+        setSavedPreset(true);
+      } else {
+        setPresetError("Unable to save template.");
+      }
+    } catch {
+      setPresetError("Unable to save template.");
+    } finally {
+      setIsSavingPreset(false);
+    }
   }
 
   function sourceLabel(
@@ -655,17 +685,19 @@ export function BarcodeResult({
             >
               Add to log
             </button>
+            {presetError ? (
+              <p className="rounded-lg bg-[color-mix(in_srgb,var(--color-danger)_12%,transparent)] px-3 py-2 text-xs text-[var(--color-danger)]">
+                {presetError}
+              </p>
+            ) : null}
             <div className="flex gap-2">
               <button
                 type="button"
-                disabled={savedPreset}
-                onClick={() => {
-                  onSaveAsPreset(valuesToSubmit());
-                  setSavedPreset(true);
-                }}
+                disabled={savedPreset || isSavingPreset}
+                onClick={() => void handleSavePreset()}
                 className="flex-1 rounded-xl border border-[var(--color-accent)] py-2.5 text-sm font-semibold text-[var(--color-accent)] transition hover:-translate-y-0.5 disabled:opacity-50"
               >
-                {savedPreset ? "Saved!" : "Save as template"}
+                {savedPreset ? "Saved!" : isSavingPreset ? "Saving…" : "Save as template"}
               </button>
               <button
                 type="button"

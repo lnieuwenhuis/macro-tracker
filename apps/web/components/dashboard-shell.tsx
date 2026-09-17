@@ -1438,9 +1438,7 @@ export function DashboardShell({
               appendMacroSelectionAsDraft(macros);
               setShowPhotoModal(false);
             }}
-            onSaveAsPreset={(input) => {
-              handleSavePreset(input);
-            }}
+            onSaveAsPreset={(input) => handleSavePreset(input)}
           />
         </ModalChunkDismissProvider>
       )}
@@ -1458,9 +1456,7 @@ export function DashboardShell({
             onAddToLog={(macros) => {
               appendMacroSelectionAsDraft(macros);
             }}
-            onSaveAsPreset={(input) => {
-              handleSavePreset(input);
-            }}
+            onSaveAsPreset={(input) => handleSavePreset(input)}
           />
         </ModalChunkDismissProvider>
       )}

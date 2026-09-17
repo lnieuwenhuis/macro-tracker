@@ -25,13 +25,15 @@ type AiFoodPhotoModalProps = {
     fatG: number;
     caloriesKcal: number;
   }) => void;
+  // UI-01: resolves true only when the template actually persisted, so the
+  // dialog never shows Saved for a failed save.
   onSaveAsPreset: (input: {
     label: string;
     proteinG: number;
     carbsG: number;
     fatG: number;
     caloriesKcal: number;
-  }) => void;
+  }) => Promise<boolean>;
 };
 
 type ApiResponse =
@@ -70,6 +72,8 @@ export function AiFoodPhotoModal({
   const [estimate, setEstimate] = useState<FoodPhotoEstimate | null>(null);
   const [savedPreset, setSavedPreset] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [presetError, setPresetError] = useState<string | null>(null);
+  const [isSavingPreset, setIsSavingPreset] = useState(false);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [isOptimizing, setIsOptimizing] = useState(false);
 
@@ -100,6 +104,7 @@ export function AiFoodPhotoModal({
     setQuestion(null);
     setClarification("");
     setSavedPreset(false);
+    setPresetError(null);
     setError(null);
 
     if (!file) {
@@ -205,6 +210,28 @@ export function AiFoodPhotoModal({
   function handleAddEstimate() {
     if (!estimate) return;
     onAddToLog(estimateToMacros(estimate));
+  }
+
+  // UI-01: only mark Saved after the async save actually succeeds; failures
+  // (resolved false or transport rejection) keep retry available.
+  async function handleSavePreset() {
+    if (!estimate || isSavingPreset || savedPreset) {
+      return;
+    }
+    setIsSavingPreset(true);
+    setPresetError(null);
+    try {
+      const saved = await onSaveAsPreset(estimateToMacros(estimate));
+      if (saved) {
+        setSavedPreset(true);
+      } else {
+        setPresetError("Unable to save template.");
+      }
+    } catch {
+      setPresetError("Unable to save template.");
+    } finally {
+      setIsSavingPreset(false);
+    }
   }
 
   return (
@@ -375,6 +402,12 @@ export function AiFoodPhotoModal({
               </p>
             ) : null}
 
+            {presetError ? (
+              <p className="rounded-lg bg-[color-mix(in_srgb,var(--color-danger)_12%,transparent)] px-3 py-2 text-xs text-[var(--color-danger)]">
+                {presetError}
+              </p>
+            ) : null}
+
             <div className="space-y-2">
               {!estimate ? (
                 <button
@@ -402,14 +435,11 @@ export function AiFoodPhotoModal({
                   </button>
                   <button
                     type="button"
-                    disabled={savedPreset}
-                    onClick={() => {
-                      onSaveAsPreset(estimateToMacros(estimate));
-                      setSavedPreset(true);
-                    }}
+                    disabled={savedPreset || isSavingPreset}
+                    onClick={() => void handleSavePreset()}
                     className="w-full rounded-xl border border-[var(--color-accent)] py-2.5 text-sm font-semibold text-[var(--color-accent)] transition hover:-translate-y-0.5 disabled:opacity-50"
                   >
-                    {savedPreset ? "Saved!" : "Save template"}
+                    {savedPreset ? "Saved!" : isSavingPreset ? "Saving…" : "Save template"}
                   </button>
                 </>
               )}

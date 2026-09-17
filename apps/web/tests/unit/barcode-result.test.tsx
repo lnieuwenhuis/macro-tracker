@@ -133,3 +133,96 @@ describe("BarcodeResult edited values (UI-09)", () => {
     expect(submitted.proteinG).toBe(1.5);
   });
 });
+
+describe("BarcodeResult template save feedback (UI-01)", () => {
+  const product = {
+    productId: null,
+    name: "Test bar",
+    brands: "",
+    barcode: "12345678",
+    proteinG: 10,
+    carbsG: 10,
+    fatG: 10,
+    caloriesKcal: 100,
+    servingSizeG: 100,
+    imageUrl: null,
+    source: "openfoodfacts",
+  } as const;
+
+  function renderResult(onSaveAsPreset: (input: unknown) => Promise<boolean>) {
+    render(
+      <BarcodeResult
+        product={{ ...product }}
+        notFoundBarcode={null}
+        onAddToLog={vi.fn()}
+        onSaveAsPreset={onSaveAsPreset as never}
+        onScanAnother={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+  }
+
+  it("marks Saved only after the save succeeds", async () => {
+    renderResult(async () => true);
+    fireEvent.click(screen.getByRole("button", { name: /save as template/i }));
+    await screen.findByRole("button", { name: /saved!/i });
+  });
+
+  it("shows pending, then an error on resolved failure, and retries to Saved", async () => {
+    let resolveSave!: (saved: boolean) => void;
+    const onSaveAsPreset = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    renderResult(onSaveAsPreset);
+
+    fireEvent.click(screen.getByRole("button", { name: /save as template/i }));
+    await screen.findByRole("button", { name: /saving/i });
+
+    await act(async () => {
+      resolveSave(false);
+    });
+    await screen.findByText(/unable to save template/i);
+    expect(screen.queryByRole("button", { name: /saved!/i })).toBeNull();
+
+    onSaveAsPreset.mockResolvedValueOnce(true);
+    fireEvent.click(screen.getByRole("button", { name: /save as template/i }));
+    await screen.findByRole("button", { name: /saved!/i });
+  });
+
+  it("never shows Saved when the save transport rejects", async () => {
+    renderResult(async () => {
+      throw new Error("offline");
+    });
+    fireEvent.click(screen.getByRole("button", { name: /save as template/i }));
+    await screen.findByText(/unable to save template/i);
+    expect(screen.queryByRole("button", { name: /saved!/i })).toBeNull();
+  });
+
+  it("surfaces a retryable error when the manual product save transport rejects", async () => {
+    mocked.saveBarcodeFoodProductAction.mockRejectedValue(new Error("offline"));
+    render(
+      <BarcodeResult
+        product={null}
+        notFoundBarcode="0000000000000"
+        onAddToLog={vi.fn()}
+        onSaveAsPreset={async () => true}
+        onScanAnother={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /add product/i }));
+    fireEvent.change(screen.getByPlaceholderText("e.g. Pindakaas"), {
+      target: { value: "Peanut Butter" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^save product$/i }));
+
+    await screen.findByText(/failed to save product/i);
+    // The form stays open for retry instead of hanging on Saving…
+    expect(
+      (screen.getByRole("button", { name: /^save product$/i }) as HTMLButtonElement).disabled,
+    ).toBe(false);
+  });
+});
