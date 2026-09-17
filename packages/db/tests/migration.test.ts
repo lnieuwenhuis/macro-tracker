@@ -33,6 +33,9 @@ const migrationFiles = [
   "0019_meal_entries_healthkit_sync.sql",
 ] as const;
 
+// Journal tags (file names without `.sql`), matching `meta/_journal.json`.
+const migrationTags = migrationFiles.map((fileName) => fileName.replace(/\.sql$/, ""));
+
 // Index of `0013_deduplicate_default_meal_groups.sql`, applied by hand in several tests.
 const DEDUPLICATE_DEFAULT_MEAL_GROUPS_INDEX = 13;
 
@@ -64,6 +67,128 @@ async function createPartialMigrationsFolder(count: number) {
   }
 
   return folder;
+}
+
+const JOURNAL_PATH = fileURLToPath(
+  new URL("../drizzle/meta/_journal.json", import.meta.url),
+);
+
+function readJournalWhenByTag() {
+  const journal = JSON.parse(readFileSync(JOURNAL_PATH, "utf8")) as {
+    entries: { tag: string; when: number }[];
+  };
+  return new Map(journal.entries.map((entry) => [entry.tag, entry.when]));
+}
+
+const JOURNAL_WHEN_BY_TAG = readJournalWhenByTag();
+
+// MIG-01: the staging line used these `when` values for 0015/0016 before the
+// HealthKit line was reunified. Keep them as fixtures so the upgrade paths that
+// real databases traversed stay covered.
+const PRE_UNIFICATION_JOURNAL_WHEN: Record<string, number> = {
+  "0015_admin_audit_events_actor_set_null": 1785283200000,
+  "0016_enum_check_constraints": 1785369600000,
+};
+
+type HistoricalMigration = { tag: string; when: number; source?: string };
+
+// Builds a migrations folder whose journal describes an already-shipped history:
+// real SQL files, explicit historical `when` values. Used to upgrade a PGlite
+// database through the real migrator, never by applying SQL by hand.
+async function createHistoricalMigrationsFolder(entries: HistoricalMigration[]) {
+  const folder = await mkdtemp(join(tmpdir(), "macro-tracker-historical-migrations-"));
+  await mkdir(join(folder, "meta"));
+
+  await writeFile(
+    join(folder, "meta", "_journal.json"),
+    JSON.stringify({
+      version: "7",
+      dialect: "postgresql",
+      entries: entries.map((entry, index) => ({
+        idx: index,
+        version: "7",
+        when: entry.when,
+        tag: entry.tag,
+        breakpoints: true,
+      })),
+    }),
+  );
+  for (const entry of entries) {
+    await writeFile(
+      join(folder, `${entry.tag}.sql`),
+      await readFile(
+        fileURLToPath(
+          new URL(`../drizzle/${entry.source ?? entry.tag}.sql`, import.meta.url),
+        ),
+        "utf8",
+      ),
+    );
+  }
+
+  return folder;
+}
+
+function migrationsThroughPreUnification(lastTag: string) {
+  const lastIndex = migrationTags.indexOf(lastTag);
+  if (lastIndex < 0) {
+    throw new Error(`unknown migration tag: ${lastTag}`);
+  }
+
+  return migrationTags.slice(0, lastIndex + 1).map((tag) => ({
+    tag,
+    when: PRE_UNIFICATION_JOURNAL_WHEN[tag] ?? JOURNAL_WHEN_BY_TAG.get(tag)!,
+  }));
+}
+
+async function createProbeMigrationsFolder(tag: string, statements: string[]) {
+  const folder = await mkdtemp(join(tmpdir(), "macro-tracker-probe-migrations-"));
+  await mkdir(join(folder, "meta"));
+  await writeFile(
+    join(folder, "meta", "_journal.json"),
+    JSON.stringify({
+      version: "7",
+      dialect: "postgresql",
+      entries: [{ idx: 0, version: "7", when: 1_800_000_000_000, tag, breakpoints: true }],
+    }),
+  );
+  await writeFile(join(folder, `${tag}.sql`), statements.join("--> statement-breakpoint\n"));
+  return folder;
+}
+
+async function readMigrationJournalState(runtime: DatabaseRuntime) {
+  const result = await runtime.db.execute<{ count: number; latest: string | null }>(
+    sql.raw(`
+      SELECT count(*)::int AS count, max(created_at)::text AS latest
+      FROM drizzle."__drizzle_migrations"
+    `),
+  );
+  const row = result.rows[0];
+  return {
+    count: Number(row?.count ?? 0),
+    latest: row?.latest == null ? null : Number(row.latest),
+  };
+}
+
+async function countConstraintsNamed(runtime: DatabaseRuntime, constraintName: string) {
+  const result = await runtime.db.execute<{ count: number }>(sql.raw(`
+    SELECT count(*)::int AS count
+    FROM pg_constraint
+    WHERE conname = '${constraintName}'
+  `));
+  return Number(result.rows[0]?.count ?? 0);
+}
+
+async function countColumnsNamed(runtime: DatabaseRuntime, tableName: string, columnName: string) {
+  const result = await runtime.db.execute<{ count: number }>(sql.raw(`
+    SELECT count(*)::int AS count
+    FROM information_schema.columns
+    WHERE table_name = '${tableName}' AND column_name = '${columnName}'
+  `));
+  return Number(result.rows[0]?.count ?? 0);
+}
+
+function sleep(ms: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
 async function applyMigration(runtime: DatabaseRuntime, fileName: string) {
@@ -765,6 +890,139 @@ describe("database migrations", () => {
       `)),
     ).rejects.toThrow();
   });
+
+  // MIG-01: the HealthKit branch shipped `0015_meal_entries_healthkit_sync`, while
+  // the staging branch shipped its own 0015-0018. Reunification moved the audit
+  // migrations above production's HealthKit timestamp and re-tagged HealthKit as
+  // 0019. These fixtures replay each real history through the real migrator and
+  // prove every path converges without re-running 0016's unconditional DDL.
+  it("converges a clean install through the real migrator (MIG-01)", async () => {
+    runtime = await createDatabaseRuntime("memory:");
+
+    await migrateDatabase(runtime);
+
+    expect(await readMigrationJournalState(runtime)).toEqual({
+      count: migrationFiles.length,
+      latest: JOURNAL_WHEN_BY_TAG.get("0019_meal_entries_healthkit_sync"),
+    });
+    for (const constraint of [
+      "users_role_check",
+      "users_preferred_weight_unit_check",
+      "meal_entries_status_check",
+      "meal_templates_type_check",
+      "food_products_scope_check",
+      "food_products_source_check",
+    ]) {
+      expect(await countConstraintsNamed(runtime, constraint)).toBe(1);
+    }
+    expect(await countColumnsNamed(runtime, "meal_entries", "healthkit_synced_at")).toBe(1);
+  });
+
+  it("upgrades a database that stopped at old 0016 without failing on the rerun (MIG-01)", async () => {
+    runtime = await createDatabaseRuntime("memory:");
+    const folders: string[] = [];
+    try {
+      const legacyFolder = await createHistoricalMigrationsFolder(
+        migrationsThroughPreUnification("0016_enum_check_constraints"),
+      );
+      folders.push(legacyFolder);
+      await migrateDatabase(runtime, legacyFolder);
+
+      // Precondition: this fixture really is the pre-unification history.
+      expect(await readMigrationJournalState(runtime)).toEqual({
+        count: 17,
+        latest: PRE_UNIFICATION_JOURNAL_WHEN["0016_enum_check_constraints"],
+      });
+
+      await migrateDatabase(runtime);
+
+      // Drizzle re-selects 0015/0016 for this history and records them again at the
+      // reunified timestamps (17 + 5 appended rows). Their DDL is guarded, so no
+      // constraint is applied twice; only the journal gains the re-based rows.
+      expect(await readMigrationJournalState(runtime)).toEqual({
+        count: 22,
+        latest: JOURNAL_WHEN_BY_TAG.get("0019_meal_entries_healthkit_sync"),
+      });
+      expect(await countConstraintsNamed(runtime, "users_role_check")).toBe(1);
+      expect(await countConstraintsNamed(runtime, "meal_entries_status_check")).toBe(1);
+
+      // An interrupted or retried upgrade must stay a no-op, never a 42710 duplicate.
+      await migrateDatabase(runtime);
+      expect(await readMigrationJournalState(runtime)).toEqual({
+        count: 22,
+        latest: JOURNAL_WHEN_BY_TAG.get("0019_meal_entries_healthkit_sync"),
+      });
+      expect(await countConstraintsNamed(runtime, "users_role_check")).toBe(1);
+    } finally {
+      await Promise.all(folders.map((folder) => rm(folder, { recursive: true, force: true })));
+    }
+  });
+
+  it("upgrades a database that stopped at old 0018 (MIG-01)", async () => {
+    runtime = await createDatabaseRuntime("memory:");
+    const folders: string[] = [];
+    try {
+      const legacyFolder = await createHistoricalMigrationsFolder(
+        migrationsThroughPreUnification("0018_gym_friend_codes"),
+      );
+      folders.push(legacyFolder);
+      await migrateDatabase(runtime, legacyFolder);
+
+      expect(await readMigrationJournalState(runtime)).toEqual({
+        count: 19,
+        latest: JOURNAL_WHEN_BY_TAG.get("0018_gym_friend_codes"),
+      });
+
+      // Only 0019 is pending; the already-applied 0015/0016 must not rerun.
+      await migrateDatabase(runtime);
+
+      expect(await readMigrationJournalState(runtime)).toEqual({
+        count: migrationFiles.length,
+        latest: JOURNAL_WHEN_BY_TAG.get("0019_meal_entries_healthkit_sync"),
+      });
+      expect(await countConstraintsNamed(runtime, "users_role_check")).toBe(1);
+      expect(await countColumnsNamed(runtime, "meal_entries", "healthkit_synced_at")).toBe(1);
+    } finally {
+      await Promise.all(folders.map((folder) => rm(folder, { recursive: true, force: true })));
+    }
+  });
+
+  it("upgrades a production-line database that applied HealthKit sync as old 0015 (MIG-01)", async () => {
+    runtime = await createDatabaseRuntime("memory:");
+    const folders: string[] = [];
+    try {
+      const productionFolder = await createHistoricalMigrationsFolder([
+        ...migrationTags.slice(0, 15).map((tag) => ({
+          tag,
+          when: JOURNAL_WHEN_BY_TAG.get(tag)!,
+        })),
+        {
+          tag: "0015_meal_entries_healthkit_sync",
+          when: 1787875200000,
+          // The historical SQL and the guarded 0019 reach the same end state.
+          source: "0019_meal_entries_healthkit_sync",
+        },
+      ]);
+      folders.push(productionFolder);
+      await migrateDatabase(runtime, productionFolder);
+
+      expect(await readMigrationJournalState(runtime)).toEqual({
+        count: 16,
+        latest: 1787875200000,
+      });
+
+      await migrateDatabase(runtime);
+
+      expect(await readMigrationJournalState(runtime)).toEqual({
+        count: 21,
+        latest: JOURNAL_WHEN_BY_TAG.get("0019_meal_entries_healthkit_sync"),
+      });
+      expect(await countColumnsNamed(runtime, "meal_entries", "healthkit_synced_at")).toBe(1);
+      expect(await countConstraintsNamed(runtime, "users_role_check")).toBe(1);
+    } finally {
+      await Promise.all(folders.map((folder) => rm(folder, { recursive: true, force: true })));
+    }
+  });
 });
 
 describe.skipIf(!process.env.TEST_DATABASE_URL)("PostgreSQL migration regressions", () => {
@@ -1048,37 +1306,202 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)("PostgreSQL migration regression
     }
   });
 
-  it("sets lock_timeout and statement_timeout on the migration connection before migrating (DB-02)", async () => {
+  it("applies the migration timeouts during the run and restores the connection's previous settings (TEST-02)", async () => {
     const previousPoolMax = process.env.POSTGRES_POOL_MAX;
+    const previousLockTimeoutEnv = process.env.MIGRATION_LOCK_TIMEOUT_MS;
     // Forces a single physical connection so the one we inspect is the one the migration ran on.
     process.env.POSTGRES_POOL_MAX = "1";
+    process.env.MIGRATION_LOCK_TIMEOUT_MS = "500";
 
     const postgresRuntime = await requirePostgresRuntime(
-      "migration connection timeout regression test",
+      "migration connection timeout restoration test",
     );
+    let probeFolder: string | undefined;
     try {
       await resetPostgresSchema(postgresRuntime);
 
-      await migrateDatabase(postgresRuntime);
+      // Distinct non-default previous settings, so a restore is distinguishable from a reset.
+      await postgresRuntime.db.execute(sql.raw("SET lock_timeout = '7s'"));
+      await postgresRuntime.db.execute(sql.raw("SET statement_timeout = '11s'"));
 
-      // `SET` persists for the session, so this reconnect on the single pooled connection (POSTGRES_POOL_MAX=1) sees the migration's settings.
-      const lockTimeoutResult = await postgresRuntime.migrationPool?.query<{
+      probeFolder = await createProbeMigrationsFolder("0000_migration_timeout_probe", [
+        `CREATE TABLE migration_timeout_probe AS
+           SELECT current_setting('lock_timeout') AS lock_timeout,
+                  current_setting('statement_timeout') AS statement_timeout`,
+      ]);
+
+      await migrateDatabase(postgresRuntime, probeFolder);
+
+      // The migration ran with the configured timeouts...
+      const probe = await postgresRuntime.db.execute<{
         lock_timeout: string;
-      }>("SHOW lock_timeout");
-      const statementTimeoutResult = await postgresRuntime.migrationPool?.query<{
         statement_timeout: string;
-      }>("SHOW statement_timeout");
+      }>(sql.raw("SELECT lock_timeout, statement_timeout FROM migration_timeout_probe"));
+      expect(probe.rows).toEqual([
+        { lock_timeout: "500ms", statement_timeout: "5min" },
+      ]);
 
-      expect(lockTimeoutResult?.rows[0]?.lock_timeout).toBe("3s");
-      expect(statementTimeoutResult?.rows[0]?.statement_timeout).toBe("5min");
+      // ...and the reusable connection went back to its previous session settings.
+      if (!postgresRuntime.migrationPool) {
+        throw new Error("Expected a migration pool");
+      }
+      const restored = await postgresRuntime.migrationPool.query<{
+        lock_timeout: string;
+        statement_timeout: string;
+      }>(
+        "SELECT current_setting('lock_timeout') AS lock_timeout, current_setting('statement_timeout') AS statement_timeout",
+      );
+      expect(restored.rows).toEqual([
+        { lock_timeout: "7s", statement_timeout: "11s" },
+      ]);
     } finally {
-      await resetPostgresSchema(postgresRuntime);
-      await migrateDatabase(postgresRuntime);
+      await resetPostgresSchema(postgresRuntime).catch(() => undefined);
       await postgresRuntime.close();
+      if (probeFolder) {
+        await rm(probeFolder, { recursive: true, force: true });
+      }
       if (previousPoolMax === undefined) {
         delete process.env.POSTGRES_POOL_MAX;
       } else {
         process.env.POSTGRES_POOL_MAX = previousPoolMax;
+      }
+      if (previousLockTimeoutEnv === undefined) {
+        delete process.env.MIGRATION_LOCK_TIMEOUT_MS;
+      } else {
+        process.env.MIGRATION_LOCK_TIMEOUT_MS = previousLockTimeoutEnv;
+      }
+    }
+  });
+
+  it("restores session settings after a failed migration and leaves no open transaction (TEST-02)", async () => {
+    const previousPoolMax = process.env.POSTGRES_POOL_MAX;
+    const previousLockTimeoutEnv = process.env.MIGRATION_LOCK_TIMEOUT_MS;
+    process.env.POSTGRES_POOL_MAX = "1";
+    process.env.MIGRATION_LOCK_TIMEOUT_MS = "500";
+
+    const postgresRuntime = await requirePostgresRuntime(
+      "failed migration cleanup regression test",
+    );
+    let failingFolder: string | undefined;
+    try {
+      await resetPostgresSchema(postgresRuntime);
+      await postgresRuntime.db.execute(sql.raw("SET lock_timeout = '9s'"));
+      await postgresRuntime.db.execute(sql.raw("SET statement_timeout = '13s'"));
+
+      failingFolder = await createProbeMigrationsFolder("0000_failing_migration", [
+        "CREATE TABLE migration_failure_probe (id integer)",
+        "SELECT 1 / 0",
+      ]);
+
+      await expect(migrateDatabase(postgresRuntime, failingFolder)).rejects.toThrow();
+
+      if (!postgresRuntime.migrationPool) {
+        throw new Error("Expected a migration pool");
+      }
+      const restored = await postgresRuntime.migrationPool.query<{
+        lock_timeout: string;
+        statement_timeout: string;
+      }>(
+        "SELECT current_setting('lock_timeout') AS lock_timeout, current_setting('statement_timeout') AS statement_timeout",
+      );
+      expect(restored.rows).toEqual([
+        { lock_timeout: "9s", statement_timeout: "13s" },
+      ]);
+
+      // The failed migration transaction rolled back, and the connection is usable.
+      const rolledBack = await postgresRuntime.db.execute<{ name: string | null }>(
+        sql.raw("SELECT to_regclass('migration_failure_probe')::text AS name"),
+      );
+      expect(rolledBack.rows).toEqual([{ name: null }]);
+      const usable = await postgresRuntime.db.execute<{ ok: number }>(
+        sql.raw("SELECT 1 AS ok"),
+      );
+      expect(usable.rows).toEqual([{ ok: 1 }]);
+    } finally {
+      await resetPostgresSchema(postgresRuntime).catch(() => undefined);
+      await postgresRuntime.close();
+      if (failingFolder) {
+        await rm(failingFolder, { recursive: true, force: true });
+      }
+      if (previousPoolMax === undefined) {
+        delete process.env.POSTGRES_POOL_MAX;
+      } else {
+        process.env.POSTGRES_POOL_MAX = previousPoolMax;
+      }
+      if (previousLockTimeoutEnv === undefined) {
+        delete process.env.MIGRATION_LOCK_TIMEOUT_MS;
+      } else {
+        process.env.MIGRATION_LOCK_TIMEOUT_MS = previousLockTimeoutEnv;
+      }
+    }
+  });
+
+  it("leaves the reused migration connection able to wait out a controlled lock (TEST-02)", async () => {
+    const previousPoolMax = process.env.POSTGRES_POOL_MAX;
+    const previousLockTimeoutEnv = process.env.MIGRATION_LOCK_TIMEOUT_MS;
+    process.env.POSTGRES_POOL_MAX = "1";
+    process.env.MIGRATION_LOCK_TIMEOUT_MS = "500";
+
+    const migratedRuntime = await requirePostgresRuntime(
+      "migrated lock-wait regression test",
+    );
+    const blockerRuntime = await requirePostgresRuntime(
+      "migrated lock-wait regression test",
+    );
+    try {
+      await resetPostgresSchema(migratedRuntime);
+      await migrateDatabase(migratedRuntime);
+      await migratedRuntime.db.execute(
+        sql.raw("CREATE TABLE lock_wait_probe (id integer PRIMARY KEY)"),
+      );
+      await migratedRuntime.db.execute(sql.raw("INSERT INTO lock_wait_probe VALUES (1)"));
+
+      if (!blockerRuntime.migrationPool) {
+        throw new Error("Expected a migration pool");
+      }
+      const blocker = await blockerRuntime.migrationPool.connect();
+      try {
+        await blocker.query("BEGIN");
+        await blocker.query("UPDATE lock_wait_probe SET id = id WHERE id = 1");
+
+        let state: "pending" | "resolved" | "rejected" = "pending";
+        // Uses the same single pooled connection the migration ran on.
+        const waiting = migratedRuntime.db.execute(
+          sql.raw("UPDATE lock_wait_probe SET id = id WHERE id = 1"),
+        );
+        waiting.then(
+          () => {
+            state = "resolved";
+          },
+          () => {
+            state = "rejected";
+          },
+        );
+
+        // A leaked migration lock_timeout (500ms here) would reject long before this.
+        await sleep(1_500);
+        expect(state).toBe("pending");
+
+        await blocker.query("COMMIT");
+        await waiting;
+        expect(state).toBe("resolved");
+      } finally {
+        await blocker.query("ROLLBACK").catch(() => undefined);
+        blocker.release();
+      }
+    } finally {
+      await resetPostgresSchema(migratedRuntime).catch(() => undefined);
+      await migratedRuntime.close();
+      await blockerRuntime.close();
+      if (previousPoolMax === undefined) {
+        delete process.env.POSTGRES_POOL_MAX;
+      } else {
+        process.env.POSTGRES_POOL_MAX = previousPoolMax;
+      }
+      if (previousLockTimeoutEnv === undefined) {
+        delete process.env.MIGRATION_LOCK_TIMEOUT_MS;
+      } else {
+        process.env.MIGRATION_LOCK_TIMEOUT_MS = previousLockTimeoutEnv;
       }
     }
   });

@@ -269,68 +269,29 @@ fn object(value: Value) -> Map<String, Value> {
 
 #[test]
 fn meal_entry_patches_cannot_set_the_private_recalculation_flag() {
-    // DATA-02: `proteinG` should force recalculation, but the caller tries to override the flag to `false`.
-    let merged = merge_meal_entry_patch(
-        object(json!({
-            "id": "11111111-1111-4111-8111-111111111111",
-            "productId": "22222222-2222-4222-8222-222222222222",
-            "label": "Oats",
-            "quantity": 1.0,
-            "unit": "serving",
-            "proteinG": 10.0,
-            "carbsG": 20.0,
-            "fatG": 5.0,
-            "caloriesKcal": 165
-        })),
-        object(json!({
-            "proteinG": 1,
-            "caloriesKcal": -2_000_000_000i64,
-            "__recalculateProductMacros": false
-        })),
-    );
+    // DATA-02: the caller tries to set the internal recalculation flag; forwarding must strip it.
+    let stripped = strip_private_input_keys(object(json!({
+        "proteinG": 1,
+        "caloriesKcal": -2_000_000_000i64,
+        "__recalculateProductMacros": false
+    })));
 
     assert!(
-        !merged.contains_key("__recalculateProductMacros"),
-        "a client must not be able to control the recalculation flag: {merged:?}"
+        !stripped.contains_key("__recalculateProductMacros"),
+        "a client must not be able to control the recalculation flag: {stripped:?}"
     );
-    assert_eq!(merged["proteinG"], json!(1));
+    assert_eq!(stripped["proteinG"], json!(1));
 }
 
 #[test]
 fn meal_entry_patches_drop_every_reserved_key() {
-    let merged = merge_meal_entry_patch(
-        object(json!({ "label": "Oats" })),
-        object(json!({ "__anythingElse": "nope", "label": "Toast" })),
-    );
+    let stripped = strip_private_input_keys(object(json!({
+        "__anythingElse": "nope",
+        "label": "Toast"
+    })));
 
-    assert!(!merged.contains_key("__anythingElse"));
-    assert_eq!(merged["label"], json!("Toast"));
-}
-
-#[test]
-fn product_linked_entries_keep_their_snapshot_when_no_macro_field_is_patched() {
-    // Renaming a product-linked entry must not recompute its macros.
-    let merged = merge_meal_entry_patch(
-        object(json!({
-            "productId": "22222222-2222-4222-8222-222222222222",
-            "label": "Oats",
-            "proteinG": 10.0
-        })),
-        object(json!({ "label": "Breakfast oats" })),
-    );
-
-    assert_eq!(merged["__recalculateProductMacros"], json!(false));
-    assert_eq!(merged["label"], json!("Breakfast oats"));
-}
-
-#[test]
-fn entries_without_a_product_never_carry_the_recalculation_flag() {
-    let merged = merge_meal_entry_patch(
-        object(json!({ "label": "Oats", "proteinG": 10.0 })),
-        object(json!({ "label": "Toast" })),
-    );
-
-    assert!(!merged.contains_key("__recalculateProductMacros"));
+    assert!(!stripped.contains_key("__anythingElse"));
+    assert_eq!(stripped["label"], json!("Toast"));
 }
 
 #[test]

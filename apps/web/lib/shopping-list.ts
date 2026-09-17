@@ -35,6 +35,26 @@ type ShoppingSummary = {
   meals: Array<MealEntryRecord | PlannedShoppingEntry>;
 };
 
+// DATA-16: serving/count nutrition is quantity x servingMultiplier, so the shopping amount has
+// to match it; gram/ml nutrition ignores the multiplier and keeps summing raw amounts.
+function effectiveShoppingQuantity(meal: {
+  quantity: number;
+  unit: QuantityUnit;
+  servingMultiplier: number;
+}) {
+  const quantity =
+    Number.isFinite(meal.quantity) && meal.quantity > 0 ? meal.quantity : 0;
+  if (meal.unit === "g" || meal.unit === "ml") {
+    return quantity;
+  }
+
+  const multiplier =
+    Number.isFinite(meal.servingMultiplier) && meal.servingMultiplier > 0
+      ? meal.servingMultiplier
+      : 1;
+  return quantity * multiplier;
+}
+
 export function buildShoppingList(summaries: ShoppingSummary[]): ShoppingListItem[] {
   const itemsByKey = new Map<string, ShoppingListItem>();
 
@@ -50,8 +70,7 @@ export function buildShoppingList(summaries: ShoppingSummary[]): ShoppingListIte
       }
 
       const key = `${normalizedLabel}|${meal.unit}`;
-      const quantity =
-        Number.isFinite(meal.quantity) && meal.quantity > 0 ? meal.quantity : 0;
+      const quantity = effectiveShoppingQuantity(meal);
       const existing = itemsByKey.get(key);
 
       if (!existing) {

@@ -42,6 +42,16 @@ const FOOD_PHOTO_REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
 const BENCHMARK_ROUTE_RUNTIME_BUDGET_MS: u64 = 270_000;
 const BENCHMARK_RUN_LOCK_TTL: Duration = Duration::from_secs(300);
 
+/// Pinned fixture-set identity (AI-02). Bump whenever any fixture id, frozen
+/// input bytes, expected macros, or provenance attribution changes. Baselines
+/// carrying any other version are rejected so incompatible caches cannot be
+/// reused (AI-01).
+pub(super) const BENCHMARK_FIXTURE_SET_VERSION: &str = "2026-09-17-pinned-v2";
+/// Baseline reuse window, matching the admin client's 24h cache.
+const BENCHMARK_BASELINE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+/// Clock-skew tolerance for baseline `createdAt` values minted by client clocks.
+const BENCHMARK_BASELINE_FUTURE_TOLERANCE: Duration = Duration::from_secs(5 * 60);
+
 /// `generation` keeps an overrunning run's release from freeing its successor (API-08).
 #[derive(Clone, Copy)]
 struct BenchmarkRun {
@@ -60,22 +70,51 @@ fn food_photo_slots() -> &'static tokio::sync::Semaphore {
     FOOD_PHOTO_SLOTS.get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_FOOD_PHOTO_UPLOADS))
 }
 
-/// Per-account share of the global slots, so one account cannot starve the feature (API-04).
-const MAX_FOOD_PHOTO_UPLOADS_PER_USER: usize = 2;
-static FOOD_PHOTO_USER_SLOTS: OnceLock<Mutex<HashMap<Uuid, usize>>> = OnceLock::new();
+/// Tracks in-flight work per account, so one account cannot hold every shared slot (API-04, SEC-05).
+struct UserSlotTracker {
+    max_per_user: usize,
+    slots: OnceLock<Mutex<HashMap<Uuid, usize>>>,
+}
 
-fn food_photo_user_slots() -> &'static Mutex<HashMap<Uuid, usize>> {
-    FOOD_PHOTO_USER_SLOTS.get_or_init(|| Mutex::new(HashMap::new()))
+impl UserSlotTracker {
+    const fn new(max_per_user: usize) -> Self {
+        Self {
+            max_per_user,
+            slots: OnceLock::new(),
+        }
+    }
+
+    /// Returns `None` at the account's cap rather than waiting in the shared queue.
+    fn acquire(&'static self, user_id: Uuid) -> Option<UserSlot> {
+        let mut slots = self
+            .slots
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let count = slots.get(&user_id).copied().unwrap_or(0);
+        if count >= self.max_per_user {
+            return None;
+        }
+        slots.insert(user_id, count + 1);
+        Some(UserSlot {
+            tracker: self,
+            user_id,
+        })
+    }
 }
 
 /// Releases the account's slot on drop, including on an early return or a panic.
-struct FoodPhotoUserSlot {
+struct UserSlot {
+    tracker: &'static UserSlotTracker,
     user_id: Uuid,
 }
 
-impl Drop for FoodPhotoUserSlot {
+impl Drop for UserSlot {
     fn drop(&mut self) {
-        let mut slots = food_photo_user_slots()
+        let mut slots = self
+            .tracker
+            .slots
+            .get_or_init(|| Mutex::new(HashMap::new()))
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if let Some(count) = slots.get_mut(&self.user_id) {
@@ -88,18 +127,15 @@ impl Drop for FoodPhotoUserSlot {
     }
 }
 
-/// Returns `None` at the account's cap rather than waiting in the shared queue.
-fn acquire_food_photo_user_slot(user_id: Uuid) -> Option<FoodPhotoUserSlot> {
-    let mut slots = food_photo_user_slots()
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let count = slots.get(&user_id).copied().unwrap_or(0);
-    if count >= MAX_FOOD_PHOTO_UPLOADS_PER_USER {
-        return None;
-    }
-    slots.insert(user_id, count + 1);
-    Some(FoodPhotoUserSlot { user_id })
-}
+/// Per-account share of the global slots, so one account cannot starve the feature (API-04).
+const MAX_FOOD_PHOTO_UPLOADS_PER_USER: usize = 2;
+static FOOD_PHOTO_USER_SLOTS: UserSlotTracker =
+    UserSlotTracker::new(MAX_FOOD_PHOTO_UPLOADS_PER_USER);
+
+/// Per-account share of the provider fan-out, so one account cannot occupy every lookup slot (SEC-05).
+const MAX_BARCODE_LOOKUPS_PER_USER: usize = 2;
+static BARCODE_LOOKUP_USER_SLOTS: UserSlotTracker =
+    UserSlotTracker::new(MAX_BARCODE_LOOKUPS_PER_USER);
 
 /// One lookup fans out to up to five buffered upstream reads; providers rate-limit by source IP.
 const MAX_CONCURRENT_BARCODE_LOOKUPS: usize = 8;
@@ -146,15 +182,20 @@ async fn read_capped_json_result(
     Ok(serde_json::from_slice(&buffer).ok())
 }
 
-async fn fetch_provider_json(request: reqwest::RequestBuilder, timeout: Duration) -> Option<Value> {
+/// `Ok(Some(json))` is a usable body; `Ok(None)` an unusable one; `Err(())` a failed request.
+/// The distinction lets a caller tell "the catalogue has no such product" from "we could not ask" (API-04).
+async fn fetch_provider_json_result(
+    request: reqwest::RequestBuilder,
+    timeout: Duration,
+) -> Result<Option<Value>, ()> {
     let response = tokio::time::timeout(timeout, request.send())
         .await
-        .ok()?
-        .ok()?;
+        .map_err(|_| ())?
+        .map_err(|_| ())?;
     if !response.status().is_success() {
-        return None;
+        return Err(());
     }
-    read_capped_json(response).await
+    read_capped_json_result(response).await.map_err(|_| ())
 }
 
 async fn acquire_food_photo_slot(
@@ -260,6 +301,22 @@ async fn lookup_barcode(
         );
     }
 
+    // SEC-05: before the shared permit, so an account at its cap never consumes the global wait budget.
+    let _user_slot = match BARCODE_LOOKUP_USER_SLOTS.acquire(user.id) {
+        Some(slot) => slot,
+        None => {
+            return legacy_json(
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({
+                    "found": false,
+                    "barcode": barcode,
+                    "error": "Barcode lookup is busy. Please try again.",
+                    "retryable": true
+                }),
+            );
+        }
+    };
+
     lookup_barcode_for_user(&state, barcode).await
 }
 
@@ -308,6 +365,16 @@ async fn lookup_barcode_for_user(state: &AppState, barcode: String) -> Response 
             StatusCode::OK,
             json!({ "found": false, "barcode": barcode }),
         ),
+        // Provider failures are not evidence the product is missing, so they must not read as a miss (API-04).
+        BarcodeLookup::Unavailable => legacy_json(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({
+                "found": false,
+                "barcode": barcode,
+                "error": "Barcode lookup is temporarily unavailable. Please try again.",
+                "retryable": true
+            }),
+        ),
         // Overload is not evidence the product is missing, so it must not read as a miss.
         BarcodeLookup::Busy => legacy_json(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -321,11 +388,41 @@ async fn lookup_barcode_for_user(state: &AppState, barcode: String) -> Response 
     }
 }
 
+/// SEC-03: `Sec-Fetch-Site` wins when present; otherwise the `Origin` must be a configured trusted
+/// origin. Requests carrying neither header are non-browser clients and stay allowed.
+fn same_origin_browser_request(headers: &HeaderMap, trusted_origins: &[String]) -> bool {
+    if let Some(site) = headers
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok())
+    {
+        return site.trim().eq_ignore_ascii_case("same-origin");
+    }
+
+    match headers
+        .get(header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+    {
+        Some(origin) => trusted_origins
+            .iter()
+            .any(|trusted| trusted == origin.trim()),
+        None => true,
+    }
+}
+
 async fn food_photo(
     State(state): State<AppState>,
     headers: HeaderMap,
     multipart: Multipart,
 ) -> Response {
+    // SEC-03: a same-site sibling origin can send simple multipart requests with the victim's
+    // cookies, so a browser call must prove same-origin before any paid provider work happens.
+    if !same_origin_browser_request(&headers, &state.config.trusted_origins) {
+        return legacy_json(
+            StatusCode::FORBIDDEN,
+            json!({ "ok": false, "error": "Cross-origin request refused." }),
+        );
+    }
+
     let user = match auth::current_user_from_headers(State(state.clone()), headers).await {
         Ok(user) => user,
         Err(_) => {
@@ -344,7 +441,7 @@ async fn food_photo(
     }
 
     // Before the shared permit, so an account at its own cap never eats the shared wait budget (API-04).
-    let _user_slot = match acquire_food_photo_user_slot(user.id) {
+    let _user_slot = match FOOD_PHOTO_USER_SLOTS.acquire(user.id) {
         Some(slot) => slot,
         None => {
             return retryable_food_photo_failure(
@@ -530,17 +627,26 @@ async fn admin_benchmark(
     }
 }
 
-async fn lookup_open_food_facts(state: &AppState, barcode: &str) -> Option<Value> {
+async fn lookup_open_food_facts(state: &AppState, barcode: &str) -> ProviderOutcome<Value> {
     let url = format!(
         "{}/api/v2/product/{}.json",
         state.config.open_food_facts_base_url.trim_end_matches('/'),
         url::form_urlencoded::byte_serialize(barcode.as_bytes()).collect::<String>()
     );
-    let data: Value = fetch_provider_json(state.http.get(url), PROVIDER_REQUEST_TIMEOUT).await?;
-    if data.get("status").and_then(Value::as_i64) != Some(1) {
-        return None;
+    let data = match fetch_provider_json_result(state.http.get(url), PROVIDER_REQUEST_TIMEOUT).await
+    {
+        Ok(Some(data)) => data,
+        Ok(None) | Err(()) => return ProviderOutcome::Unavailable,
+    };
+    match data.get("status").and_then(Value::as_i64) {
+        // Open Food Facts answers 0 for "no such product"; a missing or unknown status is not a miss.
+        Some(0) => return ProviderOutcome::NotFound,
+        Some(1) => {}
+        _ => return ProviderOutcome::Unavailable,
     }
-    let product = data.get("product")?;
+    let Some(product) = data.get("product") else {
+        return ProviderOutcome::Unavailable;
+    };
     let nutriments = product.get("nutriments").unwrap_or(&Value::Null);
     let name = product
         .get("product_name")
@@ -556,7 +662,7 @@ async fn lookup_open_food_facts(state: &AppState, barcode: &str) -> Option<Value
         .map(|value| json!(value))
         .unwrap_or(Value::Null);
 
-    Some(json!({
+    ProviderOutcome::Found(json!({
         "name": name,
         "brands": product.get("brands").and_then(Value::as_str).unwrap_or(""),
         "barcode": barcode,
@@ -570,11 +676,21 @@ async fn lookup_open_food_facts(state: &AppState, barcode: &str) -> Option<Value
     }))
 }
 
+/// A provider answer keeps "not in this catalogue" apart from "we could not ask" (API-04).
+#[derive(Debug)]
+enum ProviderOutcome<T> {
+    Found(T),
+    NotFound,
+    Unavailable,
+}
+
 /// Distinguishes "the catalogue does not have it" from "we could not ask".
 #[derive(Debug)]
 enum BarcodeLookup {
     Found(Value),
     NotFound,
+    /// Provider failures prevented a conclusion; the caller should retry.
+    Unavailable,
     /// The concurrency limiter was saturated; the caller should retry.
     Busy,
 }
@@ -594,8 +710,11 @@ async fn lookup_barcode_provider_chain(state: &AppState, barcode: &str) -> Barco
     };
 
     // Alone on the first hop: it covers most barcodes, so a hit costs one outbound request.
-    if let Some(product) = lookup_open_food_facts(state, barcode).await {
-        return BarcodeLookup::Found(product);
+    let mut open_food_facts_missed = true;
+    match lookup_open_food_facts(state, barcode).await {
+        ProviderOutcome::Found(product) => return BarcodeLookup::Found(product),
+        ProviderOutcome::NotFound => {}
+        ProviderOutcome::Unavailable => open_food_facts_missed = false,
     }
 
     // Both supermarkets run together; Albert Heijn keeps priority without waiting on Jumbo.
@@ -605,33 +724,52 @@ async fn lookup_barcode_provider_chain(state: &AppState, barcode: &str) -> Barco
     )
     .await
     {
-        Some(product) => BarcodeLookup::Found(product),
-        None => BarcodeLookup::NotFound,
+        ProviderOutcome::Found(product) => BarcodeLookup::Found(product),
+        // A miss is authoritative only when every provider that answered established absence (API-04).
+        ProviderOutcome::NotFound if open_food_facts_missed => BarcodeLookup::NotFound,
+        ProviderOutcome::NotFound | ProviderOutcome::Unavailable => BarcodeLookup::Unavailable,
     }
 }
 
 async fn prefer_primary_provider<T, Primary, Fallback>(
     primary: Primary,
     fallback: Fallback,
-) -> Option<T>
+) -> ProviderOutcome<T>
 where
-    Primary: Future<Output = Option<T>>,
-    Fallback: Future<Output = Option<T>>,
+    Primary: Future<Output = ProviderOutcome<T>>,
+    Fallback: Future<Output = ProviderOutcome<T>>,
 {
     tokio::pin!(primary);
     tokio::pin!(fallback);
 
     tokio::select! {
         primary_result = &mut primary => match primary_result {
-            Some(value) => Some(value),
-            None => fallback.await,
+            // A primary hit short-circuits; the fallback is never awaited.
+            ProviderOutcome::Found(value) => ProviderOutcome::Found(value),
+            primary_result => merge_provider_outcomes(primary_result, fallback.await),
         },
-        fallback_result = &mut fallback => primary.await.or(fallback_result),
+        fallback_result = &mut fallback => merge_provider_outcomes(primary.await, fallback_result),
     }
 }
 
-async fn lookup_albert_heijn(state: &AppState, barcode: &str) -> Option<Value> {
-    let token = get_albert_heijn_token(state).await?;
+/// A hit from either provider wins; only two successful misses establish absence.
+fn merge_provider_outcomes<T>(
+    primary: ProviderOutcome<T>,
+    fallback: ProviderOutcome<T>,
+) -> ProviderOutcome<T> {
+    match (primary, fallback) {
+        (ProviderOutcome::Found(value), _) | (_, ProviderOutcome::Found(value)) => {
+            ProviderOutcome::Found(value)
+        }
+        (ProviderOutcome::NotFound, ProviderOutcome::NotFound) => ProviderOutcome::NotFound,
+        _ => ProviderOutcome::Unavailable,
+    }
+}
+
+async fn lookup_albert_heijn(state: &AppState, barcode: &str) -> ProviderOutcome<Value> {
+    let Some(token) = get_albert_heijn_token(state).await else {
+        return ProviderOutcome::Unavailable;
+    };
     let headers = |request: reqwest::RequestBuilder| {
         request
             .header("User-Agent", "Appie/8.8.2 Model/phone Android/7.0-API24")
@@ -643,12 +781,18 @@ async fn lookup_albert_heijn(state: &AppState, barcode: &str) -> Option<Value> {
         "{base_url}/mobile-services/product/search/v2?query={}&size=1",
         url::form_urlencoded::byte_serialize(barcode.as_bytes()).collect::<String>()
     );
-    let search_data: Value = fetch_provider_json(
+    let search_data = match fetch_provider_json_result(
         headers(state.http.get(search_url)),
         PROVIDER_REQUEST_TIMEOUT,
     )
-    .await?;
-    let product = first_albert_heijn_product(&search_data)?;
+    .await
+    {
+        Ok(Some(data)) => data,
+        Ok(None) | Err(()) => return ProviderOutcome::Unavailable,
+    };
+    let Some(product) = first_albert_heijn_product(&search_data) else {
+        return ProviderOutcome::NotFound;
+    };
 
     let name = string_field(product, &["title", "description"]).unwrap_or("Unknown product");
     let brands = string_field(product, &["brand"]).unwrap_or("Albert Heijn");
@@ -667,7 +811,8 @@ async fn lookup_albert_heijn(state: &AppState, barcode: &str) -> Option<Value> {
             "{base_url}/mobile-services/product/detail/v4/fir/{}",
             url::form_urlencoded::byte_serialize(product_id.as_bytes()).collect::<String>()
         );
-        if let Some(detail) = fetch_provider_json(
+        // A hit with unreadable nutrition details is still a hit; only the search miss is authoritative.
+        if let Ok(Some(detail)) = fetch_provider_json_result(
             headers(state.http.get(detail_url)),
             PROVIDER_REQUEST_TIMEOUT,
         )
@@ -684,7 +829,7 @@ async fn lookup_albert_heijn(state: &AppState, barcode: &str) -> Option<Value> {
         }
     }
 
-    Some(provider_product_json(
+    ProviderOutcome::Found(provider_product_json(
         barcode,
         name,
         brands,
@@ -699,7 +844,7 @@ async fn get_albert_heijn_token(state: &AppState) -> Option<String> {
         "{}/mobile-auth/v1/auth/token/anonymous",
         state.config.albert_heijn_base_url.trim_end_matches('/')
     );
-    fetch_provider_json(
+    let data = fetch_provider_json_result(
         state
             .http
             .post(url)
@@ -709,30 +854,39 @@ async fn get_albert_heijn_token(state: &AppState) -> Option<String> {
             .json(&json!({ "clientId": "appie" })),
         ALBERT_HEIJN_TOKEN_TIMEOUT,
     )
-    .await?
-    .get("access_token")
-    .and_then(Value::as_str)
-    .filter(|token| !token.is_empty())
-    .map(str::to_string)
+    .await
+    .ok()
+    .flatten()?;
+    data.get("access_token")
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty())
+        .map(str::to_string)
 }
 
-async fn lookup_jumbo(state: &AppState, barcode: &str) -> Option<Value> {
+async fn lookup_jumbo(state: &AppState, barcode: &str) -> ProviderOutcome<Value> {
     let base_url = state.config.jumbo_base_url.trim_end_matches('/');
     let search_url = format!(
         "{base_url}/v17/search?q={}&offset=0&limit=1",
         url::form_urlencoded::byte_serialize(barcode.as_bytes()).collect::<String>()
     );
     let user_agent = "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.120 Mobile Safari/537.36";
-    let search_data: Value = fetch_provider_json(
+    let search_data = match fetch_provider_json_result(
         state.http.get(search_url).header("User-Agent", user_agent),
         PROVIDER_REQUEST_TIMEOUT,
     )
-    .await?;
-    let product = search_data
+    .await
+    {
+        Ok(Some(data)) => data,
+        Ok(None) | Err(()) => return ProviderOutcome::Unavailable,
+    };
+    let Some(product) = search_data
         .get("products")
         .and_then(|products| products.get("data"))
         .and_then(Value::as_array)
-        .and_then(|products| products.first())?;
+        .and_then(|products| products.first())
+    else {
+        return ProviderOutcome::NotFound;
+    };
     let name = product
         .get("title")
         .and_then(Value::as_str)
@@ -749,7 +903,8 @@ async fn lookup_jumbo(state: &AppState, barcode: &str) -> Option<Value> {
             "{base_url}/v17/products/{}",
             url::form_urlencoded::byte_serialize(product_id.as_bytes()).collect::<String>()
         );
-        if let Some(detail) = fetch_provider_json(
+        // A hit with unreadable nutrition details is still a hit; only the search miss is authoritative.
+        if let Ok(Some(detail)) = fetch_provider_json_result(
             state.http.get(detail_url).header("User-Agent", user_agent),
             PROVIDER_REQUEST_TIMEOUT,
         )
@@ -767,7 +922,7 @@ async fn lookup_jumbo(state: &AppState, barcode: &str) -> Option<Value> {
         }
     }
 
-    Some(provider_product_json(
+    ProviderOutcome::Found(provider_product_json(
         barcode, name, "Jumbo", image_url, macros, "jumbo",
     ))
 }
@@ -1149,7 +1304,12 @@ async fn analyze_food_photo_url_with_limits(
                 }
                 let kind = classify_food_photo_failure(&error, Some(status));
                 let retryable = is_retryable_upstream_error(&error, Some(status));
-                let failure = upstream_photo_failure(&error, kind, Some(status), retryable);
+                let failure = upstream_photo_failure(
+                    "provider returned an error status",
+                    kind,
+                    Some(status),
+                    retryable,
+                );
                 if !retryable {
                     return failure;
                 }
@@ -1175,7 +1335,12 @@ async fn analyze_food_photo_url_with_limits(
                     {
                         let kind = classify_food_photo_failure(message, None);
                         let retryable = is_retryable_upstream_error(message, None);
-                        let failure = upstream_photo_failure(message, kind, None, retryable);
+                        let failure = upstream_photo_failure(
+                            "provider reported an error",
+                            kind,
+                            None,
+                            retryable,
+                        );
                         if !retryable {
                             return failure;
                         }
@@ -1199,7 +1364,12 @@ async fn analyze_food_photo_url_with_limits(
                             .unwrap_or("The AI provider returned an error.");
                         let kind = classify_food_photo_failure(error, None);
                         let retryable = is_retryable_upstream_error(error, None);
-                        let failure = upstream_photo_failure(error, kind, None, retryable);
+                        let failure = upstream_photo_failure(
+                            "provider reported an error",
+                            kind,
+                            None,
+                            retryable,
+                        );
                         if !retryable {
                             return failure;
                         }
@@ -1211,10 +1381,10 @@ async fn analyze_food_photo_url_with_limits(
                         .and_then(|item| item.get("message"))
                         .and_then(|message| message.get("content"))
                         .and_then(extract_message_content);
-                    // The payload carries provider, model and spend, so it is logged, never returned (API-02).
+                    // The payload carries provider, model and spend; it is neither returned (API-02) nor logged (SEC-04).
                     let Some(content) = content else {
                         last_failure = Some(upstream_photo_failure(
-                            &payload.to_string(),
+                            "provider response carried no message content",
                             "empty_response",
                             None,
                             true,
@@ -1224,12 +1394,9 @@ async fn analyze_food_photo_url_with_limits(
                     match parse_food_photo_analysis(&content) {
                         Ok(analysis) => return json!({ "ok": true, "analysis": analysis }),
                         Err(error) => {
-                            last_failure = Some(upstream_photo_failure(
-                                &format!("{error} Model output: {content}"),
-                                "invalid_json",
-                                None,
-                                true,
-                            ));
+                            // The parser error is a fixed category string, never the model output (SEC-04).
+                            last_failure =
+                                Some(upstream_photo_failure(&error, "invalid_json", None, true));
                         }
                     }
                 }
@@ -1480,6 +1647,81 @@ fn configured_food_photo_models(config: &crate::config::Config) -> Vec<String> {
     seen
 }
 
+struct ValidatedBaseline {
+    created_at: String,
+    results: Vec<Value>,
+}
+
+/// Server-side baseline validation (AI-01). A baseline is reusable only when
+/// every identity matches the current run: configured current model, pinned
+/// fixture-set version (AI-02), ordered fixture ids, result shape, and age.
+/// Anything else is rejected so `usedBaseline` stays truthful and the
+/// user-visible call budget remains accurate.
+fn validate_benchmark_baseline(
+    baseline: &Value,
+    current_model: &str,
+    fixtures: &[&BenchmarkFixture],
+) -> Option<ValidatedBaseline> {
+    let record = baseline.as_object()?;
+    if record.get("currentModel").and_then(Value::as_str) != Some(current_model) {
+        return None;
+    }
+    if record.get("fixtureVersion").and_then(Value::as_str) != Some(BENCHMARK_FIXTURE_SET_VERSION) {
+        return None;
+    }
+    let expected_ids: Vec<&str> = fixtures.iter().map(|fixture| fixture.id).collect();
+    let baseline_ids: Vec<&str> = record
+        .get("fixtureIds")
+        .and_then(Value::as_array)
+        .map(|ids| ids.iter().filter_map(Value::as_str).collect())?;
+    if baseline_ids != expected_ids {
+        return None;
+    }
+    let results = record.get("results").and_then(Value::as_array)?.clone();
+    if results.len() != fixtures.len() {
+        return None;
+    }
+    for result in &results {
+        let result = result.as_object()?;
+        if result.get("ok").and_then(Value::as_bool) != Some(true) {
+            return None;
+        }
+        if result.get("wasSkipped").and_then(Value::as_bool) == Some(true) {
+            return None;
+        }
+        if result.get("model").and_then(Value::as_str) != Some(current_model) {
+            return None;
+        }
+        if !result
+            .get("estimate")
+            .is_some_and(|estimate| estimate.is_object())
+        {
+            return None;
+        }
+    }
+    let created_at = record.get("createdAt").and_then(Value::as_str)?.to_string();
+    let created = chrono::DateTime::parse_from_rfc3339(&created_at)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    let now = chrono::Utc::now();
+    if created > now + BENCHMARK_BASELINE_FUTURE_TOLERANCE {
+        return None;
+    }
+    // Compare against the TTL as a duration from "now". A timestamp within the
+    // future tolerance yields a negative age and is accepted (client clock
+    // skew); calling `to_std()` on it would reject every future timestamp and
+    // make the tolerance below dead code.
+    let age = now.signed_duration_since(created);
+    let ttl = chrono::Duration::from_std(BENCHMARK_BASELINE_TTL).ok()?;
+    if age > ttl {
+        return None;
+    }
+    Some(ValidatedBaseline {
+        created_at,
+        results,
+    })
+}
+
 async fn run_macro_benchmark(
     state: &AppState,
     user_id: &str,
@@ -1492,26 +1734,68 @@ async fn run_macro_benchmark(
         .first()
         .cloned()
         .unwrap_or_else(|| DEFAULT_FOOD_PHOTO_MODELS[0].to_string());
+    let state_clone = state.clone();
+    let user_id_owned = user_id.to_string();
+    let runner = move |fixture: BenchmarkFixture, model: String| {
+        let state = state_clone.clone();
+        let user_id = user_id_owned.clone();
+        async move { run_fixture_for_model(&state, &fixture, &model, &user_id).await }
+    };
+    run_macro_benchmark_with_runner(
+        current_model,
+        candidate_model,
+        fixture_limit,
+        mode,
+        baseline,
+        runner,
+    )
+    .await
+}
+
+async fn run_macro_benchmark_with_runner<F, Fut>(
+    current_model: String,
+    candidate_model: &str,
+    fixture_limit: usize,
+    mode: &str,
+    baseline: Option<Value>,
+    runner: F,
+) -> Result<Value, String>
+where
+    F: Fn(BenchmarkFixture, String) -> Fut,
+    Fut: Future<Output = Value>,
+{
     let fixtures = BENCHMARK_FIXTURES
         .iter()
         .take(fixture_limit)
         .collect::<Vec<_>>();
     let compared_same_model = mode == "compare" && candidate_model == current_model;
-    let baseline_created_at = baseline
-        .as_ref()
-        .and_then(|value| value.get("createdAt"))
-        .and_then(Value::as_str)
-        .filter(|_| mode == "compare")
-        .map(str::to_string);
-    let used_baseline = baseline_created_at.is_some();
+    let validated = if mode == "compare" {
+        baseline
+            .as_ref()
+            .and_then(|value| validate_benchmark_baseline(value, &current_model, &fixtures))
+    } else {
+        None
+    };
+    let (used_baseline, baseline_created_at, reused_current) = match validated {
+        Some(valid) => (true, Some(valid.created_at), Some(valid.results)),
+        None => (false, None, None),
+    };
     let deadline = Instant::now() + Duration::from_millis(BENCHMARK_ROUTE_RUNTIME_BUDGET_MS);
     let mut cases = Vec::new();
     let mut current_results = Vec::new();
     let mut candidate_results = Vec::new();
 
-    for fixture in &fixtures {
+    for (index, fixture) in fixtures.iter().enumerate() {
+        // A validated baseline reuses the actual compatible current-model cases
+        // without any provider call (AI-01). Every compared model receives the
+        // same frozen `fixture.image_data_url()` bytes, so inputs are identical
+        // and their hash matches the fixture `image_sha256` (AI-02).
         let current = if mode == "candidate_only" {
             skipped_result(&current_model, "Not run in candidate-only mode.", "unknown")
+        } else if let Some(ref reused) = reused_current {
+            reused.get(index).cloned().unwrap_or_else(|| {
+                skipped_result(&current_model, "Baseline case missing.", "unknown")
+            })
         } else if Instant::now() >= deadline {
             skipped_result(
                 &current_model,
@@ -1519,7 +1803,7 @@ async fn run_macro_benchmark(
                 "skipped",
             )
         } else {
-            run_fixture_for_model(state, fixture, &current_model, user_id).await
+            runner(**fixture, current_model.clone()).await
         };
         let candidate = if compared_same_model {
             current.clone()
@@ -1530,7 +1814,7 @@ async fn run_macro_benchmark(
                 "skipped",
             )
         } else {
-            run_fixture_for_model(state, fixture, candidate_model, user_id).await
+            runner(**fixture, candidate_model.to_string()).await
         };
         current_results.push(current.clone());
         candidate_results.push(candidate.clone());
@@ -1539,7 +1823,10 @@ async fn run_macro_benchmark(
             "fixtureName": fixture.name,
             "servingDescription": fixture.serving_description,
             "thumbnailUrl": format!("/benchmark-foods/{}", fixture.asset_file_name),
+            "imageFileUrl": fixture.image_file_url,
+            "imageSha256": fixture.image_sha256,
             "imageSourceUrl": fixture.image_source_url,
+            "imageLicense": fixture.image_license,
             "expected": fixture.expected_json(),
             "expectedSource": fixture.expected_source,
             "category": fixture.category,
@@ -1553,6 +1840,7 @@ async fn run_macro_benchmark(
         "candidateModel": candidate_model,
         "fixtureCount": fixtures.len(),
         "totalFixtureCount": BENCHMARK_FIXTURES.len(),
+        "fixtureVersion": BENCHMARK_FIXTURE_SET_VERSION,
         "comparedSameModel": compared_same_model,
         "mode": mode,
         "usedBaseline": used_baseline,
@@ -1574,10 +1862,12 @@ async fn run_fixture_for_model(
 ) -> Value {
     let started = Instant::now();
     let clarification = format!("Benchmark fixture: {}", fixture.serving_description);
+    // Frozen checked-in bytes as a data URL: byte-identical for every compared
+    // model and offline-verifiable against `image_sha256` (AI-02).
+    let image_data_url = fixture.image_data_url();
     let result = analyze_food_photo_url(
         state,
-        // The direct file URL, not the Commons article page (see `BenchmarkFixture::image_url`).
-        fixture.image_url,
+        &image_data_url,
         &clarification,
         Some(model),
         user_id,
@@ -1801,7 +2091,8 @@ fn public_provider_status(kind: &str) -> u16 {
     }
 }
 
-/// Logs the raw provider text and exposes only the stable `kind` plus server-owned copy and status.
+/// Exposes only the stable `kind` plus server-owned copy and status; the diagnostic is a bounded,
+/// content-free summary (SEC-04) because provider bodies can echo the uploaded photo or clarification.
 fn upstream_photo_failure(
     provider_error: &str,
     kind: &str,
@@ -1811,7 +2102,7 @@ fn upstream_photo_failure(
     tracing::warn!(
         provider_status = ?provider_status,
         kind,
-        provider_error,
+        provider_error = %bounded_log_detail(provider_error),
         "food photo provider request failed"
     );
 
@@ -1821,6 +2112,16 @@ fn upstream_photo_failure(
         Some(public_provider_status(kind)),
         Some(retryable),
     )
+}
+
+/// Caps a diagnostic string before it reaches the log; callers must pass summaries, not raw bodies.
+fn bounded_log_detail(value: &str) -> String {
+    const MAX_LOG_DETAIL_CHARS: usize = 200;
+    let mut bounded = value.chars().take(MAX_LOG_DETAIL_CHARS).collect::<String>();
+    if value.chars().nth(MAX_LOG_DETAIL_CHARS).is_some() {
+        bounded.push('…');
+    }
+    bounded
 }
 
 fn photo_failure(
@@ -2055,11 +2356,21 @@ struct BenchmarkFixture {
     id: &'static str,
     name: &'static str,
     serving_description: &'static str,
+    /// File name of the frozen bytes under
+    /// `apps/backend/assets/benchmark-foods/`, mirrored byte-for-byte in
+    /// `apps/web/public/benchmark-foods/` so the admin thumbnail is the input.
     asset_file_name: &'static str,
-    /// Direct file URL fetched by the model; article URLs serve `text/html`, hence the pasta fixture's encoded parens.
-    image_url: &'static str,
-    /// Commons article page shown in the admin UI for attribution. Never fetched.
+    /// Direct Commons file URL the frozen bytes were derived from. Provenance
+    /// only: it is never fetched at benchmark time.
+    image_file_url: &'static str,
+    /// Attribution page shown in the admin UI. Never fetched.
     image_source_url: &'static str,
+    /// Commons license short name recorded on the attribution page.
+    image_license: &'static str,
+    /// SHA-256 (lowercase hex) of the frozen bytes in `image_bytes()`. Those
+    /// exact bytes are what every compared model receives (as a data URL), so
+    /// the hash describes the consumed input and is verifiable offline.
+    image_sha256: &'static str,
     expected_source: &'static str,
     category: &'static str,
     calories: f64,
@@ -2069,6 +2380,92 @@ struct BenchmarkFixture {
 }
 
 impl BenchmarkFixture {
+    /// Frozen input bytes for this fixture (AI-02), embedded at compile time.
+    fn image_bytes(&self) -> &'static [u8] {
+        match self.asset_file_name {
+            "banana.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/banana.jpg"
+            )),
+            "apple.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/apple.jpg"
+            )),
+            "hard-boiled-egg.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/hard-boiled-egg.jpg"
+            )),
+            "orange.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/orange.jpg"
+            )),
+            "white-rice.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/white-rice.jpg"
+            )),
+            "pasta.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/pasta.jpg"
+            )),
+            "avocado.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/avocado.jpg"
+            )),
+            "broccoli.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/broccoli.jpg"
+            )),
+            "carrot.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/carrot.jpg"
+            )),
+            "white-bread.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/white-bread.jpg"
+            )),
+            "cheddar.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/cheddar.jpg"
+            )),
+            "almonds.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/almonds.jpg"
+            )),
+            "oats.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/oats.jpg"
+            )),
+            "shrimp.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/shrimp.jpg"
+            )),
+            "salmon.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/salmon.jpg"
+            )),
+            "lentils.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/lentils.jpg"
+            )),
+            "whole-milk.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/whole-milk.jpg"
+            )),
+            "greek-yogurt.jpg" => include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/assets/benchmark-foods/greek-yogurt.jpg"
+            )),
+            other => panic!("no frozen benchmark bytes for asset {other}"),
+        }
+    }
+
+    /// The exact provider input string for this fixture: a data URL carrying
+    /// the frozen bytes, so every compared model receives identical bytes and
+    /// no remote host can serve a different photo per request (AI-02).
+    fn image_data_url(&self) -> String {
+        food_photo_data_url(self.image_bytes(), "image/jpeg")
+    }
+
     fn expected_json(&self) -> Value {
         json!({
             "caloriesKcal": self.calories,
@@ -2085,7 +2482,10 @@ impl BenchmarkFixture {
             "servingDescription": self.serving_description,
             "assetFileName": self.asset_file_name,
             "thumbnailUrl": format!("/benchmark-foods/{}", self.asset_file_name),
+            "imageFileUrl": self.image_file_url,
+            "imageSha256": self.image_sha256,
             "imageSourceUrl": self.image_source_url,
+            "imageLicense": self.image_license,
             "expected": self.expected_json(),
             "expectedSource": self.expected_source,
             "category": self.category

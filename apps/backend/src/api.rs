@@ -337,13 +337,11 @@ async fn dispatch_api_request(
             if has_non_null(&patch, "productId") {
                 require_scope(&auth, "read:foods")?;
             }
-            let existing = require_found(
-                user_rpc!(state, auth, "getMealEntryById", "entryId": entry_id).await?,
-                "Meal entry not found.",
-            )?;
-            let merged = merge_meal_entry_patch(require_object(existing)?, patch);
+            // DATA-01/DATA-02: forward only the supplied fields. The persistence layer merges
+            // them onto the locked row and recalculates only when a nutrition input changed,
+            // so a stale premerged snapshot can neither lose an update nor rewrite history.
             ok(
-                user_rpc!(state, auth, "updateMealEntry", "entryId": entry_id, "input": merged)
+                user_rpc!(state, auth, "updateMealEntry", "entryId": entry_id, "input": strip_private_input_keys(patch))
                     .await?,
             )
         }
@@ -613,11 +611,19 @@ async fn dispatch_api_request(
             let merged = apply_client_patch(require_object(existing)?, patch);
             let date = require_string_field(&merged, "date", "Date must use YYYY-MM-DD.")?;
             require_date(&date)?;
-            // A unique violation already becomes `weight_conflict()` in `api_failure_from_app_error`.
-            ok(
-                user_rpc!(state, auth, "updateWeightEntry", "entryId": entry_id, "input": merged)
-                    .await?,
+            // DATA-09: persistence maps the unique violation to a conflict; the public API keeps
+            // its documented weight-specific code for it.
+            match rpc(
+                state,
+                "updateWeightEntry",
+                json!({ "userId": auth.user_id, "entryId": entry_id, "input": merged }),
             )
+            .await
+            {
+                Ok(value) => ok(value),
+                Err(failure) if failure.code == "conflict" => Err(weight_conflict()),
+                Err(failure) => Err(failure),
+            }
         }
         (Some("weight"), Some("entries"), Some(entry_id), "DELETE") => require_deleted(
             user_rpc!(state, auth, "deleteWeightEntry", "entryId": require_uuid(entry_id)?).await?,
@@ -669,8 +675,9 @@ async fn dispatch_api_request(
         (Some("sync"), Some("healthkit"), None, "GET") => {
             let days = bounded_query_int(uri, "days", 7, 1, 30)?;
             let limit = bounded_query_int(uri, "limit", 100, 1, 200)?;
+            let timezone_offset_minutes = bounded_query_int(uri, "tzOffsetMinutes", 0, -840, 840)?;
             ok(
-                user_rpc!(state, auth, "getHealthkitSyncEntries", "days": days, "limit": limit)
+                user_rpc!(state, auth, "getHealthkitSyncEntries", "days": days, "limit": limit, "timezoneOffsetMinutes": timezone_offset_minutes)
                     .await?,
             )
         }
@@ -1019,29 +1026,12 @@ fn apply_client_patch(
     record
 }
 
-/// Merges a meal-entry patch and re-derives the product-snapshot flag from the stored row and the patch's key set only.
-fn merge_meal_entry_patch(
-    existing: Map<String, Value>,
-    patch: Map<String, Value>,
-) -> Map<String, Value> {
-    let preserve_product_snapshot = existing.get("productId").and_then(Value::as_str).is_some()
-        && !patch.contains_key("productId")
-        && ![
-            "quantity",
-            "unit",
-            "servingMultiplier",
-            "proteinG",
-            "carbsG",
-            "fatG",
-            "caloriesKcal",
-        ]
-        .iter()
-        .any(|key| patch.contains_key(*key));
-    let mut merged = apply_client_patch(existing, patch);
-    if preserve_product_snapshot {
-        merged.insert("__recalculateProductMacros".to_string(), Value::Bool(false));
-    }
-    merged
+/// Drops reserved `__` control flags so a client patch can never set one (DATA-01).
+fn strip_private_input_keys(patch: Map<String, Value>) -> Map<String, Value> {
+    patch
+        .into_iter()
+        .filter(|(key, _)| !key.starts_with(PRIVATE_INPUT_KEY_PREFIX))
+        .collect()
 }
 
 fn merge_goals(current: Value, patch: Value) -> ApiResult<Value> {

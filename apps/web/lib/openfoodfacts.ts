@@ -106,11 +106,16 @@ export async function lookupBarcode(
     const data = (await response.json()) as unknown;
     const envelope =
       typeof data === "object" && data !== null
-        ? (data as { found?: unknown; product?: unknown })
+        ? (data as { found?: unknown; product?: unknown; retryable?: unknown })
         : null;
 
     if (envelope?.found !== true) {
-      return { found: false, barcode, reason: "not_found" };
+      // API-04: the backend marks "we could not ask" as retryable; that is not a catalogue miss.
+      return {
+        found: false,
+        barcode,
+        reason: envelope?.retryable === true ? "unavailable" : "not_found",
+      };
     }
 
     const product = toProduct(envelope.product, barcode);
