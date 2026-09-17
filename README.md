@@ -107,7 +107,7 @@ The production build uses Next.js standalone output. The direct Node command abo
 
 Macro Tracker API v1 is available under `/api/v1/*`. Create personal access tokens from `/settings/api`, then send them as `Authorization: Bearer <token>`. Tokens start with `mtk_v1_`, are shown only once, store only a hash in the database, and can be scoped to read or write daily logs, foods, templates, recipes, weight, goals, and stats.
 
-OpenAPI JSON is available at `/api/v1/openapi.json`, and the readable docs page is `/docs/api`. API responses use `{ "ok": true, "data": ... }` for success and `{ "ok": false, "error": { "code": "...", "message": "..." } }` for failures. Public API dates use `YYYY-MM-DD`.
+OpenAPI JSON is available at `/api/v1/openapi.json`, and the readable docs page is `/docs/api`. API responses use `{ "ok": true, "data": ... }` for success and `{ "ok": false, "error": { "code": "...", "message": "..." } }` for failures. Public API dates use `YYYY-MM-DD`. The backend bounds one request at 30 seconds and answers a longer one with `504` and `error.code` `"timeout"`; the web proxy waits 35 seconds so that envelope normally wins, then aborts the call and answers the same `504` timeout envelope itself. Timed-out requests are never retried, so a timed-out mutation may still have been applied.
 
 Self-hosted instances need the latest database migrations so the `api_tokens` table exists before users create tokens.
 
