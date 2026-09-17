@@ -4,7 +4,8 @@ import { describe, expect, it } from "vitest";
 import { API_V1_ENDPOINTS } from "@/lib/api-v1-openapi";
 
 type Operation = {
-  responses: Record<string, unknown>;
+  responses: Record<string, { headers?: Record<string, unknown> }>;
+  parameters?: { name: string }[];
   requestBody?: unknown;
   "x-required-scopes"?: string[];
   "x-conditional-required-scopes"?: { scopes: string[]; when: string }[];
@@ -64,5 +65,42 @@ describe("generated API v1 contract", () => {
         );
       }
     }
+  });
+
+  it("documents opt-in pagination and truncation headers for the capped collections", async () => {
+    const { paths } = await readGeneratedContract();
+    const headerNames = (path: string) =>
+      Object.keys(paths[path]?.get?.responses["200"]?.headers ?? {});
+
+    for (const path of ["/templates", "/recipes", "/weight/entries"]) {
+      const operation = paths[path]!.get!;
+      expect(operation.parameters?.map((parameter) => parameter.name)).toEqual(
+        expect.arrayContaining(["limit", "cursor"]),
+      );
+      expect(Object.keys(operation.responses)).toContain("400");
+      expect(headerNames(path)).toEqual(
+        expect.arrayContaining([
+          "x-result-limit",
+          "x-result-count",
+          "x-result-truncated",
+        ]),
+      );
+      // The readable docs table must carry the same contract notes.
+      const documented = API_V1_ENDPOINTS.find(
+        (endpoint) => endpoint.path === path,
+      )!.methods.find((method) => method.method === "get")!;
+      expect(documented.notes?.length ?? 0).toBeGreaterThan(0);
+    }
+
+    expect(headerNames("/stats")).toEqual(
+      expect.arrayContaining([
+        "x-daily-totals-limit",
+        "x-daily-totals-count",
+        "x-daily-totals-truncated",
+        "x-smoothed-weight-trend-limit",
+        "x-smoothed-weight-trend-count",
+        "x-smoothed-weight-trend-truncated",
+      ]),
+    );
   });
 });

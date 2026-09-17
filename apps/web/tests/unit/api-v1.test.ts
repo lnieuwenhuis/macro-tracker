@@ -1241,6 +1241,185 @@ describe("Macro Tracker API v1", () => {
     });
   });
 
+  it("keeps the legacy weight array and walks opt-in cursor pages exactly once", async () => {
+    const dates = ["2026-04-01", "2026-04-02", "2026-04-03"];
+    for (const [index, date] of dates.entries()) {
+      const response = await apiRequest("POST", "/weight/entries", {
+        token: fullToken,
+        body: { date, weightKg: 80 + index },
+      });
+      expect(response.status).toBe(201);
+    }
+
+    // No page parameters: the documented bare array with no truncation metadata.
+    const legacy = await apiRequest("GET", "/weight/entries", { token: fullToken });
+    expect(legacy.status).toBe(200);
+    expect(legacy.headers.get("x-result-truncated")).toBeNull();
+    const legacyPayload = await legacy.json();
+    expect(Array.isArray(legacyPayload.data)).toBe(true);
+    expect(legacyPayload.data.map((entry: { date: string }) => entry.date)).toEqual(dates);
+
+    const first = await apiRequest("GET", "/weight/entries?limit=2", { token: fullToken });
+    expect(first.status).toBe(200);
+    expect(first.headers.get("x-result-limit")).toBe("2");
+    expect(first.headers.get("x-result-count")).toBe("2");
+    expect(first.headers.get("x-result-truncated")).toBe("true");
+    const firstPayload = await first.json();
+    expect(firstPayload.data.nextCursor).toEqual(expect.any(String));
+    expect(
+      firstPayload.data.items.map((entry: { date: string }) => entry.date),
+    ).toEqual(["2026-04-02", "2026-04-03"]);
+
+    const second = await apiRequest(
+      "GET",
+      `/weight/entries?limit=2&cursor=${encodeURIComponent(firstPayload.data.nextCursor)}`,
+      { token: fullToken },
+    );
+    expect(second.status).toBe(200);
+    expect(second.headers.get("x-result-truncated")).toBeNull();
+    const secondPayload = await second.json();
+    expect(secondPayload.data.nextCursor).toBeNull();
+    expect(
+      secondPayload.data.items.map((entry: { date: string }) => entry.date),
+    ).toEqual(["2026-04-01"]);
+
+    const walked = [
+      ...firstPayload.data.items,
+      ...secondPayload.data.items,
+    ].map((entry: { date: string }) => entry.date);
+    expect([...walked].sort()).toEqual(dates);
+  });
+
+  it("paginates templates with an opt-in cursor while the default response stays an array", async () => {
+    for (const label of ["Day A", "Day B", "Day C"]) {
+      const response = await apiRequest("POST", "/templates", {
+        token: fullToken,
+        body: {
+          type: "meal",
+          label,
+          items: [
+            {
+              label: "Oats",
+              quantity: 1,
+              unit: "serving",
+              servingMultiplier: 1,
+              proteinG: 10,
+              carbsG: 20,
+              fatG: 5,
+              caloriesKcal: 165,
+            },
+          ],
+        },
+      });
+      expect(response.status).toBe(201);
+    }
+
+    const legacy = await apiRequest("GET", "/templates", { token: fullToken });
+    expect(legacy.headers.get("x-result-truncated")).toBeNull();
+    const legacyPayload = await legacy.json();
+    expect(Array.isArray(legacyPayload.data)).toBe(true);
+    expect(legacyPayload.data).toHaveLength(3);
+
+    const first = await apiRequest("GET", "/templates?limit=2", { token: fullToken });
+    expect(first.headers.get("x-result-truncated")).toBe("true");
+    const firstPayload = await first.json();
+    expect(firstPayload.data.items).toHaveLength(2);
+    expect(firstPayload.data.nextCursor).toEqual(expect.any(String));
+
+    const second = await apiRequest(
+      "GET",
+      `/templates?limit=2&cursor=${encodeURIComponent(firstPayload.data.nextCursor)}`,
+      { token: fullToken },
+    );
+    const secondPayload = await second.json();
+    expect(secondPayload.data.nextCursor).toBeNull();
+    expect(secondPayload.data.items).toHaveLength(1);
+
+    const walkedIds = [
+      ...firstPayload.data.items,
+      ...secondPayload.data.items,
+    ].map((template: { id: string }) => template.id);
+    expect(new Set(walkedIds).size).toBe(3);
+    expect(new Set(legacyPayload.data.map((template: { id: string }) => template.id))).toEqual(
+      new Set(walkedIds),
+    );
+  });
+
+  it("rejects invalid pagination parameters and cursors from another user", async () => {
+    for (const date of ["2026-05-01", "2026-05-02"]) {
+      await apiRequest("POST", "/weight/entries", {
+        token: fullToken,
+        body: { date, weightKg: 80 },
+      });
+    }
+
+    for (const path of [
+      "/weight/entries?limit=0",
+      "/weight/entries?limit=1001",
+      "/weight/entries?limit=abc",
+      "/weight/entries?limit=",
+      "/weight/entries?cursor=not-a-cursor",
+    ]) {
+      const response = await apiRequest("GET", path, { token: fullToken });
+      expect(response.status, path).toBe(400);
+      await expect(response.json(), path).resolves.toMatchObject({
+        ok: false,
+        error: { code: "bad_request" },
+      });
+    }
+
+    const other = await upsertUserFromShooProfile({
+      pairwiseSub: "api-user-other",
+      email: "api-other@example.com",
+      displayName: "API Other",
+    });
+    await completeUserOnboarding(other.id, { preferredWeightUnit: "kg" });
+    const otherToken = (
+      await createApiToken(other.id, { name: "Other API", scopes: getApiScopes() })
+    ).token;
+    for (const date of ["2026-05-01", "2026-05-02"]) {
+      const response = await apiRequest("POST", "/weight/entries", {
+        token: otherToken,
+        body: { date, weightKg: 70 },
+      });
+      expect(response.status).toBe(201);
+    }
+
+    const otherPage = await apiRequest("GET", "/weight/entries?limit=1", {
+      token: otherToken,
+    });
+    const otherCursor = (await otherPage.json()).data.nextCursor;
+    expect(otherCursor).toEqual(expect.any(String));
+
+    const crossUser = await apiRequest(
+      "GET",
+      `/weight/entries?limit=1&cursor=${encodeURIComponent(otherCursor)}`,
+      { token: fullToken },
+    );
+    expect(crossUser.status).toBe(400);
+    await expect(crossUser.json()).resolves.toMatchObject({
+      ok: false,
+      error: { code: "bad_request" },
+    });
+
+    // The owner can still walk their own two entries without seeing the other account's rows.
+    const ownFirst = await apiRequest("GET", "/weight/entries?limit=1", {
+      token: fullToken,
+    });
+    const ownFirstPayload = await ownFirst.json();
+    const ownSecond = await apiRequest(
+      "GET",
+      `/weight/entries?limit=1&cursor=${encodeURIComponent(ownFirstPayload.data.nextCursor)}`,
+      { token: fullToken },
+    );
+    const ownSecondPayload = await ownSecond.json();
+    const ownDates = [
+      ...ownFirstPayload.data.items,
+      ...ownSecondPayload.data.items,
+    ].map((entry: { date: string }) => entry.date);
+    expect([...ownDates].sort()).toEqual(["2026-05-01", "2026-05-02"]);
+  });
+
   it("returns method_not_allowed for known routes with unsupported methods", async () => {
     for (const request of [
       { method: "POST", path: "/goals" },

@@ -30,6 +30,8 @@ type ApiEndpointMethod = {
   successStatus?: 200 | 201;
   requestBody?: ApiRequestBodyKey;
   hasConflictResponse?: boolean;
+  /** API-01 docs: pagination, truncation metadata and other readable contract notes. */
+  notes?: string[];
 };
 
 type ApiEndpoint = {
@@ -39,6 +41,13 @@ type ApiEndpoint = {
 
 const PRODUCT_ID_CONDITIONAL_SCOPES: NonNullable<ApiEndpointMethod["conditionalRequiredScopes"]> = [
   { scopes: ["read:foods"], when: "non-null productId is supplied" },
+];
+
+const CAPPED_COLLECTION_NOTES = [
+  "Returns a bare array capped at the newest 5000 rows.",
+  "Send limit (1-1000) and/or cursor to get { items, nextCursor } and walk every row exactly once; nextCursor is null on the last page.",
+  "A truncated response carries x-result-limit, x-result-count, and x-result-truncated; a complete one carries none of them.",
+  "Invalid limit values and malformed or foreign cursors return 400.",
 ];
 
 export const API_V1_ENDPOINTS: ApiEndpoint[] = [
@@ -125,7 +134,7 @@ export const API_V1_ENDPOINTS: ApiEndpoint[] = [
   {
     path: "/templates",
     methods: [
-      { method: "get", summary: "List meal templates", scopes: ["read:templates"] },
+      { method: "get", summary: "List meal templates", scopes: ["read:templates"], notes: CAPPED_COLLECTION_NOTES },
       { method: "post", summary: "Create a meal template", scopes: ["write:templates"], successStatus: 201, requestBody: "templateMutation" },
     ],
   },
@@ -148,7 +157,7 @@ export const API_V1_ENDPOINTS: ApiEndpoint[] = [
   {
     path: "/recipes",
     methods: [
-      { method: "get", summary: "List recipes", scopes: ["read:recipes"] },
+      { method: "get", summary: "List recipes", scopes: ["read:recipes"], notes: CAPPED_COLLECTION_NOTES },
       { method: "post", summary: "Create a recipe", scopes: ["write:recipes"], successStatus: 201, requestBody: "recipeMutation" },
     ],
   },
@@ -171,7 +180,7 @@ export const API_V1_ENDPOINTS: ApiEndpoint[] = [
   {
     path: "/weight/entries",
     methods: [
-      { method: "get", summary: "List weight entries", scopes: ["read:weight"] },
+      { method: "get", summary: "List weight entries", scopes: ["read:weight"], notes: CAPPED_COLLECTION_NOTES },
       { method: "post", summary: "Create a weight entry", scopes: ["write:weight"], successStatus: 201, requestBody: "weightEntry", hasConflictResponse: true },
     ],
   },
@@ -191,7 +200,17 @@ export const API_V1_ENDPOINTS: ApiEndpoint[] = [
   },
   {
     path: "/stats",
-    methods: [{ method: "get", summary: "Read stats", scopes: ["read:stats", "read:weight", "read:goals"] }],
+    methods: [
+      {
+        method: "get",
+        summary: "Read stats",
+        scopes: ["read:stats", "read:weight", "read:goals"],
+        notes: [
+          "allDailyTotals and smoothedWeightTrend are bounded to the newest 1000 rows while the lifetime aggregates stay full-history.",
+          "When a series is truncated the response carries x-daily-totals-* or x-smoothed-weight-trend-* (limit, count, truncated); otherwise those headers are absent.",
+        ],
+      },
+    ],
   },
   {
     path: "/summary",
