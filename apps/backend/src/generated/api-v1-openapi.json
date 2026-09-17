@@ -240,7 +240,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "date"
             }
           }
         ],
@@ -317,7 +318,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "date"
             }
           }
         ],
@@ -501,7 +503,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -659,7 +662,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -731,7 +735,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -965,7 +970,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -1056,7 +1062,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -1436,7 +1443,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -1910,6 +1918,9 @@
           "403": {
             "$ref": "#/components/responses/Forbidden"
           },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
           },
@@ -1945,7 +1956,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -2014,7 +2026,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -2185,7 +2198,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -2257,7 +2271,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -2697,6 +2712,9 @@
           "403": {
             "$ref": "#/components/responses/Forbidden"
           },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
           },
@@ -2732,7 +2750,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -2801,7 +2820,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -2965,7 +2985,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -3022,6 +3043,7 @@
     "/recipes/{id}/log": {
       "post": {
         "summary": "Log a recipe portion",
+        "description": "When `status` is omitted, the logged entry defaults to `planned` for a future date and `eaten` otherwise, compared in UTC.",
         "security": [
           {
             "bearerAuth": []
@@ -3037,7 +3059,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -3146,8 +3169,10 @@
             "name": "date",
             "in": "query",
             "required": false,
+            "description": "Reference date in UTC. Defaults to the current UTC date when omitted; there is no browser-timezone inference.",
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "date"
             }
           }
         ],
@@ -3448,7 +3473,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -3559,7 +3585,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -3770,8 +3797,10 @@
             "name": "date",
             "in": "query",
             "required": false,
+            "description": "Reference date in UTC. Defaults to the current UTC date when omitted; there is no browser-timezone inference.",
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "date"
             }
           }
         ],
@@ -3879,8 +3908,10 @@
             "name": "date",
             "in": "query",
             "required": false,
+            "description": "Reference date in UTC. Defaults to the current UTC date when omitted; there is no browser-timezone inference.",
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "date"
             }
           }
         ],
@@ -3947,8 +3978,10 @@
             "name": "date",
             "in": "query",
             "required": false,
+            "description": "Reference date in UTC. Defaults to the current UTC date when omitted; there is no browser-timezone inference.",
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "date"
             }
           }
         ],
@@ -5086,7 +5119,7 @@
             ]
           }
         },
-        "description": "Percentage of days in the window that met each goal."
+        "description": "Percentage of qualifying tracked days in the window that met each goal. The denominator counts days with at least one eaten entry, including zero-calorie eaten days; days without an eaten entry are excluded."
       },
       "StatsPageData": {
         "type": "object",
