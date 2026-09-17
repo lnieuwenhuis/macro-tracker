@@ -6,7 +6,8 @@ watchPatterns = [
   "/packages/db/**",
   "/package.json",
   "/pnpm-lock.yaml",
-  "/pnpm-workspace.yaml"
+  "/pnpm-workspace.yaml",
+  "/railpack.json"
 ]
 
 [deploy]
