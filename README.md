@@ -124,7 +124,7 @@ Useful optional environment variables:
 | `NEXT_CACHE_MAX_MEMORY_MB` | Optional Next.js in-memory cache cap in MB. Defaults to `0`, which disables the in-memory data cache entirely; set a non-zero value where cached fetches are expected to hit. |
 | `AI_GATEWAY_URL` | OpenAI-compatible chat-completions URL that powers food-photo estimates, for example `http://cliproxyapi.railway.internal:8317/v1/chat/completions`. Must be `https` unless the host is loopback or `*.railway.internal`. See `infra/cliproxyapi/`. Food-photo analysis is unavailable without it. |
 | `AI_GATEWAY_API_KEY` | Backend-only bearer key for the AI gateway. Required for food-photo estimates. |
-| `AI_GATEWAY_MODELS` | Optional comma-separated model list. Defaults to `gpt-5.6-luna(low),gpt-5.6-luna(medium)`; the effort suffix is translated by CLIProxyAPI into the reasoning-effort parameter. Set on the web service too (for the admin benchmark page) if customized. |
+| `AI_GATEWAY_MODELS` | Optional comma-separated model list. Defaults to `gpt-6-luna(low),gpt-6-luna(medium)`; the effort suffix is translated by CLIProxyAPI into the reasoning-effort parameter. Set on the web service too (for the admin benchmark page) if customized. |
 | `AI_GATEWAY_MODEL_TIMEOUT_MS` | Optional per-model attempt timeout for food-photo estimates. Defaults to `20000`, clamped to 3–30s. |
 | `ENABLE_TEST_ROUTES` | Enables controlled test-only routes. Leave off in production unless you are doing a controlled test run. |
 | `TEST_ROUTES_SECRET` | Required whenever `ENABLE_TEST_ROUTES=true`; send it in the `x-test-route-secret` header. |

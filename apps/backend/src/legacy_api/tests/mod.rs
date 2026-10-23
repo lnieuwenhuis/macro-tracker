@@ -352,7 +352,7 @@ async fn food_photo_succeeds_through_the_gateway() {
         .await;
 
     let result = analyze_food_photo_url_with_limits(
-        &gateway_test_state(&endpoint, Some("gpt-5.6-luna(low)")),
+        &gateway_test_state(&endpoint, Some("gpt-6-luna(low)")),
         "data:image/png;base64,AA==",
         "",
         None,
@@ -404,17 +404,17 @@ fn gateway_models_come_from_config_with_luna_defaults() {
     assert_eq!(
         configured_food_photo_models(&config),
         vec![
-            "gpt-5.6-luna(low)".to_string(),
-            "gpt-5.6-luna(medium)".to_string()
+            "gpt-6-luna(low)".to_string(),
+            "gpt-6-luna(medium)".to_string()
         ]
     );
 
     config.ai_gateway_models =
-        Some("gpt-5.6-luna(medium), gpt-5.6-terra(low)\ngpt-5.6-luna(medium)".to_string());
+        Some("gpt-6-luna(medium), gpt-5.6-terra(low)\ngpt-6-luna(medium)".to_string());
     assert_eq!(
         configured_food_photo_models(&config),
         vec![
-            "gpt-5.6-luna(medium)".to_string(),
+            "gpt-6-luna(medium)".to_string(),
             "gpt-5.6-terra(low)".to_string()
         ]
     );
@@ -423,7 +423,7 @@ fn gateway_models_come_from_config_with_luna_defaults() {
 #[test]
 fn food_photo_request_body_omits_fields_reasoning_models_reject() {
     let body = serde_json::to_value(build_food_photo_request_body(
-        "gpt-5.6-luna(low)",
+        "gpt-6-luna(low)",
         "data:image/png;base64,AA==",
         "",
         "user-1",
@@ -431,7 +431,7 @@ fn food_photo_request_body_omits_fields_reasoning_models_reject() {
     ))
     .expect("request body should serialize");
 
-    assert_eq!(body["model"], json!("gpt-5.6-luna(low)"));
+    assert_eq!(body["model"], json!("gpt-6-luna(low)"));
     assert_eq!(body["max_tokens"], json!(4000));
     // Reasoning models reject temperature pins; provider-specific routing fields would be meaningless too.
     for absent in [
