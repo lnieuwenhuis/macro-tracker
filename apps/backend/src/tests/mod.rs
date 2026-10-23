@@ -130,6 +130,25 @@ fn authenticated_backend_listens_on_all_interfaces() {
     assert_eq!(listen_address(&config), IpAddr::V4(Ipv4Addr::UNSPECIFIED));
 }
 
+#[test]
+fn postgres_pool_releases_idle_connections_quickly() {
+    let options = postgres_pool_options(&test_config());
+
+    assert_eq!(
+        options.get_max_connections(),
+        test_config().postgres_pool_max
+    );
+    assert_eq!(options.get_acquire_timeout(), POSTGRES_ACQUIRE_TIMEOUT);
+    assert_eq!(
+        options.get_idle_timeout(),
+        Some(std::time::Duration::from_secs(60))
+    );
+    assert_eq!(
+        options.get_max_lifetime(),
+        Some(std::time::Duration::from_secs(10 * 60))
+    );
+}
+
 #[tokio::test]
 async fn internal_rpc_rejects_missing_backend_secret_config() {
     let mut config = test_config();
