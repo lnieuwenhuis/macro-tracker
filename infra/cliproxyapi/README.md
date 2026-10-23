@@ -60,7 +60,7 @@ strangers' traffic with it.
 
 Fallback if the panel flow fails: run the proxy locally with Docker
 (`docker run --rm -it -p 1455:1455 -v ${PWD}/auths:/root/.cli-proxy-api
-eceasy/cli-proxy-api:v7.2.132 /CLIProxyAPI/CLIProxyAPI --codex-login`),
+eceasy/cli-proxy-api:v8.0.38 /CLIProxyAPI/CLIProxyAPI --codex-login`),
 complete the browser login it opens, then upload the JSON file it writes
 into `auths/` through the management panel's Auth Files upload.
 
