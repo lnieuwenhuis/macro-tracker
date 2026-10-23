@@ -171,6 +171,16 @@ describe("backend client", () => {
     expect(sentSignal(fetchMock).aborted).toBe(false);
   });
 
+  it("releases the deadline when the body is cancelled", async () => {
+    const fetchMock = mockStreamingFetch(["{"], { endStream: false });
+
+    const response = await backendFetch("/internal/rpc", { timeoutMs: 30 });
+    await response.body!.cancel();
+    await sleep(60);
+
+    expect(sentSignal(fetchMock).aborted).toBe(false);
+  });
+
   it("still times out a body that stalls after the headers", async () => {
     mockStreamingFetch(["{"], { endStream: false });
 

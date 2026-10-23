@@ -89,7 +89,7 @@ export async function backendFetch(path: string, init: BackendFetchInit = {}) {
               new DOMException("The operation was aborted due to timeout", "TimeoutError"),
             ),
           timeoutMs,
-        )
+        ).unref()
       : undefined;
   const forwardCallerAbort = () => controller.abort(signal?.reason);
   const release = () => {
