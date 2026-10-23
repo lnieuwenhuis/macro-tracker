@@ -56,7 +56,7 @@ strangers' traffic with it.
    address bar and paste it back into the panel's callback field. The
    panel exchanges it and writes the credential to `/data/auths`.
 4. Verify: `curl -H "Authorization: Bearer $AI_GATEWAY_API_KEY"
-   https://<public-domain>/v1/models` should list `gpt-5.6-*` models.
+   https://<public-domain>/v1/models` should list `gpt-6-*` models.
 
 Fallback if the panel flow fails: run the proxy locally with Docker
 (`docker run --rm -it -p 1455:1455 -v ${PWD}/auths:/root/.cli-proxy-api
@@ -78,7 +78,7 @@ if customized) so the admin AI-benchmark page reflects the gateway models;
 it does not need the API key.
 
 `AI_GATEWAY_MODELS` is optional and defaults to
-`gpt-5.6-luna(low),gpt-5.6-luna(medium)` — low effort first (~2s to first
+`gpt-6-luna(low),gpt-6-luna(medium)` — low effort first (~2s to first
 token), medium as the retry fallback. `AI_GATEWAY_MODEL_TIMEOUT_MS` bounds
 each model attempt (defaults to 20s, clamped to 3–30s).
 

@@ -45,8 +45,8 @@ export type AnalyzeFoodPhotoResult =
 
 // Mirrors the backend's defaults for the AI gateway; the effort suffix is translated into the reasoning parameter.
 export const DEFAULT_FOOD_PHOTO_MODELS = [
-  "gpt-5.6-luna(low)",
-  "gpt-5.6-luna(medium)",
+  "gpt-6-luna(low)",
+  "gpt-6-luna(medium)",
 ] as const;
 
 function parseModelList(value: string | undefined) {

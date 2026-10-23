@@ -23,18 +23,18 @@ describe("food photo model config", () => {
     expect(getConfiguredFoodPhotoModels()).toEqual([
       ...DEFAULT_FOOD_PHOTO_MODELS,
     ]);
-    expect(getConfiguredFoodPhotoModel()).toBe("gpt-5.6-luna(low)");
+    expect(getConfiguredFoodPhotoModel()).toBe("gpt-6-luna(low)");
   });
 
   it("parses and dedupes the configured model list", () => {
     process.env.AI_GATEWAY_MODELS =
-      "gpt-5.6-luna(medium), gpt-5.6-terra(low)\ngpt-5.6-luna(medium)";
+      "gpt-6-luna(medium), gpt-5.6-terra(low)\ngpt-6-luna(medium)";
 
     expect(getConfiguredFoodPhotoModels()).toEqual([
-      "gpt-5.6-luna(medium)",
+      "gpt-6-luna(medium)",
       "gpt-5.6-terra(low)",
     ]);
-    expect(getConfiguredFoodPhotoModel()).toBe("gpt-5.6-luna(medium)");
+    expect(getConfiguredFoodPhotoModel()).toBe("gpt-6-luna(medium)");
   });
 
   it("falls back to the defaults when the list is only separators", () => {
