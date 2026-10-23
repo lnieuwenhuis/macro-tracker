@@ -54,6 +54,18 @@ pub fn build_http_client() -> reqwest::Result<reqwest::Client> {
 /// Applied to the internal RPC and health routes.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const POSTGRES_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+// Each idle server connection holds 2-6 MB in Postgres (growing with its statement cache); sqlx defaults keep them 10-30 min.
+const POSTGRES_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const POSTGRES_MAX_LIFETIME: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+fn postgres_pool_options(config: &Config) -> PgPoolOptions {
+    PgPoolOptions::new()
+        .max_connections(config.postgres_pool_max)
+        // Below `REQUEST_TIMEOUT`, so a starved pool fails fast instead of queueing past sqlx's 30s default.
+        .acquire_timeout(POSTGRES_ACQUIRE_TIMEOUT)
+        .idle_timeout(POSTGRES_IDLE_TIMEOUT)
+        .max_lifetime(POSTGRES_MAX_LIFETIME)
+}
 
 // SEC-09: bounds the per-IP arrival rate at the edge, ahead of the `api_tokens` lookup. Availability, not brute force.
 const API_RATE_LIMIT_REPLENISH_MS: u64 = 50;
@@ -238,10 +250,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = Config::from_env()?;
-    let db = PgPoolOptions::new()
-        .max_connections(config.postgres_pool_max)
-        // Below `REQUEST_TIMEOUT`, so a starved pool fails fast instead of queueing past sqlx's 30s default.
-        .acquire_timeout(POSTGRES_ACQUIRE_TIMEOUT)
+    let db = postgres_pool_options(&config)
         .connect_with(config.postgres_connect_options()?)
         .await
         .context("failed to connect to PostgreSQL")?;

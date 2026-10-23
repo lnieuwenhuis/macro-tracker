@@ -78,15 +78,73 @@ export async function backendFetch(path: string, init: BackendFetchInit = {}) {
     }
   }
 
+  // Not AbortSignal.timeout: until it fires, it keeps the whole finished request reachable (~2x server memory under load).
+  const controller = new AbortController();
   // Without this the Next.js worker inherits undici's 300s default and hangs for as long as the backend does.
-  const signals = [signal, timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : null].filter(
-    (value): value is AbortSignal => value != null,
-  );
+  const timer =
+    timeoutMs > 0
+      ? setTimeout(
+          () =>
+            controller.abort(
+              new DOMException("The operation was aborted due to timeout", "TimeoutError"),
+            ),
+          timeoutMs,
+        ).unref()
+      : undefined;
+  const forwardCallerAbort = () => controller.abort(signal?.reason);
+  const release = () => {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", forwardCallerAbort);
+  };
+  if (signal?.aborted) {
+    forwardCallerAbort();
+  } else {
+    signal?.addEventListener("abort", forwardCallerAbort, { once: true });
+  }
 
-  return fetch(url, {
-    ...rest,
-    headers,
-    ...(signals.length > 0 ? { signal: AbortSignal.any(signals) } : {}),
+  let response: Response;
+  try {
+    response = await fetch(url, { ...rest, headers, signal: controller.signal });
+  } catch (error) {
+    release();
+    throw error;
+  }
+
+  if (!response.body) {
+    release();
+    return response;
+  }
+
+  return new Response(releaseWhenSettled(response.body, release), {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
+
+// The deadline also covers the body, so it is only released once the body ends, errors or is cancelled.
+function releaseWhenSettled(body: ReadableStream<Uint8Array>, release: () => void) {
+  const reader = body.getReader();
+
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          release();
+          controller.close();
+        } else {
+          controller.enqueue(value);
+        }
+      } catch (error) {
+        release();
+        controller.error(error);
+      }
+    },
+    cancel(reason) {
+      release();
+      return reader.cancel(reason);
+    },
   });
 }
 
