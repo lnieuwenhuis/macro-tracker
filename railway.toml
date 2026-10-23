@@ -27,7 +27,9 @@ watchPatterns = [
 ]
 
 [deploy]
-startCommand = "node apps/web/scripts/start-with-migrations.mjs"
+# Without a cap V8 sizes the heap from the 8 GB container limit and keeps a
+# traffic peak's heap resident; live heap after load measured ~45-75 MB.
+startCommand = "node --max-old-space-size=192 apps/web/scripts/start-with-migrations.mjs"
 # NOT "/": the session proxy 307-redirects unauthenticated requests, and as of
 # 2026-08-31 Railway's healthcheck rejects non-2xx (the 2026-08-19 deploy
 # passed with the identical app returning 307 on "/", so the platform
