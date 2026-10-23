@@ -79,6 +79,10 @@ if [ "${CLIPROXY_SKIP_EXEC:-0}" = "1" ]; then
   exit 0
 fi
 
+# Soft heap target: each multi-MB photo request is ~30x its size in garbage,
+# which the Go default (GOGC=100, no limit) keeps resident long after the burst.
+export GOMEMLIMIT="${GOMEMLIMIT:-64MiB}"
+
 # config.yaml sits at the binary's default lookup path (its working
 # directory), so no config flag is needed.
 cd /CLIProxyAPI
