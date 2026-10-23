@@ -1,12 +1,21 @@
 "use client";
 
+import type { ChangeEvent, Ref } from "react";
+
 type NumberInputFieldProps = {
   label: string;
   value: string;
   unit: string;
   step: string;
+  min?: string;
+  max?: string;
+  name?: string;
+  required?: boolean;
+  invalid?: boolean;
+  describedBy?: string;
   disabled?: boolean;
-  onChange: (value: string) => void;
+  inputRef?: Ref<HTMLInputElement>;
+  onChange: (value: string, input: HTMLInputElement | null) => void;
   variant?: "default" | "card";
   labelClassName?: string;
   fieldClassName?: string;
@@ -53,7 +62,14 @@ export function NumberInputField({
   value,
   unit,
   step,
+  min = "0",
+  max,
+  name,
+  required,
+  invalid,
+  describedBy,
   disabled,
+  inputRef,
   onChange,
   variant = "default",
   labelClassName,
@@ -71,11 +87,19 @@ export function NumberInputField({
         <input
           type="number"
           inputMode="decimal"
-          min="0"
+          min={min}
+          max={max}
+          name={name}
+          required={required}
+          aria-invalid={invalid || undefined}
+          aria-describedby={describedBy}
+          ref={inputRef}
           step={step}
           value={value}
           disabled={disabled}
-          onChange={(event) => onChange(event.target.value)}
+          onChange={(event: ChangeEvent<HTMLInputElement>) =>
+            onChange(event.target.value, event.target)
+          }
           className={inputClassName ?? classes.inputClassName}
         />
         <span className={unitClassName ?? classes.unitClassName}>{unit}</span>

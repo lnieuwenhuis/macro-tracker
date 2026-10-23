@@ -29,6 +29,27 @@ migration set hand-authored from `0005` onward, which is what actually happened.
 therefore no `db:generate` script in `package.json`, and there won't be one until someone
 does that backfill.
 
+## Reunified migration histories and re-runs
+
+In August 2026 the HealthKit line and the staging line split the migration sequence twice:
+production applied `0015_meal_entries_healthkit_sync` at `when=1787875200000`, while staging
+applied its own `0015_admin_audit_events_actor_set_null`/`0016_enum_check_constraints` at the
+older `when` values `1785283200000`/`1785369600000`. The merge that reunified them re-tagged the
+HealthKit migration as `0019` and moved `0015`/`0016` above production's HealthKit timestamp, so
+each line sees exactly the migrations it is missing:
+
+- production re-runs the (now guarded) HealthKit migration as `0019`;
+- staging databases that stopped at the old `0016` re-run the (now guarded) `0015`/`0016`.
+
+Do not "repair" this by moving `0015`/`0016` back to their old `when` values: production never
+applied them, so it would silently skip both forever. The identities in `_journal.json` are
+deployed history.
+
+The lasting rule: a migration that is re-selected for any already-deployed history must be a
+strict no-op there. Guard every statement (`IF NOT EXISTS`, catalog checks, `DROP ... IF EXISTS`)
+and keep the old behavior for databases that never applied it. New migrations never change an
+existing entry's `when` or tag — always append above the current maximum.
+
 ## Adding a new migration by hand
 
 1. Write the migration SQL directly in `packages/db/drizzle/`, named `NNNN_description.sql`

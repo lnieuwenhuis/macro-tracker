@@ -5,6 +5,7 @@ import {
   readCachedBaseline,
   shouldCacheBenchmarkBaseline,
 } from "@/components/admin-ai-benchmark-client";
+import { BENCHMARK_FIXTURE_VERSION } from "@/lib/ai-model-benchmark";
 import type {
   MacroBenchmarkModelCaseResult,
   MacroBenchmarkResult,
@@ -53,6 +54,7 @@ function failedResult(
 function benchmarkResult(params?: {
   currentResults?: MacroBenchmarkModelCaseResult[];
   mode?: MacroBenchmarkResult["mode"];
+  fixtureVersion?: string;
 }): MacroBenchmarkResult {
   const currentResults = params?.currentResults ?? [
     successResult,
@@ -73,6 +75,7 @@ function benchmarkResult(params?: {
     candidateModel: "candidate/free",
     fixtureCount: currentResults.length,
     totalFixtureCount: currentResults.length,
+    fixtureVersion: params?.fixtureVersion ?? BENCHMARK_FIXTURE_VERSION,
     comparedSameModel: false,
     mode: params?.mode ?? "compare",
     usedBaseline: false,
@@ -83,7 +86,10 @@ function benchmarkResult(params?: {
       fixtureName: `Fixture ${index}`,
       servingDescription: "One serving.",
       thumbnailUrl: "/benchmark-foods/test.jpg",
+      imageFileUrl: "https://upload.wikimedia.org/wikipedia/commons/test.jpg",
+      imageSha256: "a".repeat(64),
       imageSourceUrl: "https://example.com/test.jpg",
+      imageLicense: "CC BY-SA 4.0",
       expected: {
         caloriesKcal: 105,
         proteinG: 1.3,
@@ -224,6 +230,14 @@ describe("shouldCacheBenchmarkBaseline", () => {
       ),
     ).toBe(false);
   });
+
+  it("rejects baselines with a stale fixture version", () => {
+    expect(
+      shouldCacheBenchmarkBaseline(
+        benchmarkResult({ fixtureVersion: "stale-version" }),
+      ),
+    ).toBe(false);
+  });
 });
 
 describe("readCachedBaseline", () => {
@@ -231,46 +245,143 @@ describe("readCachedBaseline", () => {
     vi.unstubAllGlobals();
   });
 
-  it("requires an exact configured current-model match", () => {
-    const createdAt = new Date().toISOString();
-    const storageEntries: Record<string, string> = {
-      "macro-benchmark-baseline:v2:current/free:4": JSON.stringify({
-        currentModel: "current/free",
-        createdAt,
-        fixtureLimit: 4,
-        fixtureIds: ["fixture-0"],
-        results: [successResult],
-      }),
-      "macro-benchmark-baseline:v2:old/free:4": JSON.stringify({
-        currentModel: "old/free",
-        createdAt: new Date(Date.now() + 1000).toISOString(),
-        fixtureLimit: 4,
-        fixtureIds: ["fixture-0"],
-        results: [successResult],
-      }),
-    };
-
+  function storageWith(entries: Record<string, string>) {
     vi.stubGlobal("window", {
       localStorage: {
         get length() {
-          return Object.keys(storageEntries).length;
+          return Object.keys(entries).length;
         },
         key(index: number) {
-          return Object.keys(storageEntries)[index] ?? null;
+          return Object.keys(entries)[index] ?? null;
         },
         getItem(key: string) {
-          return storageEntries[key] ?? null;
+          return entries[key] ?? null;
         },
         removeItem(key: string) {
-          delete storageEntries[key];
+          delete entries[key];
         },
       },
     });
+  }
+
+  it("requires an exact configured current-model match", () => {
+    const createdAt = new Date().toISOString();
+    const storageEntries: Record<string, string> = {
+      "macro-benchmark-baseline:v3:current/free:4": JSON.stringify({
+        currentModel: "current/free",
+        createdAt,
+        fixtureLimit: 4,
+        fixtureVersion: BENCHMARK_FIXTURE_VERSION,
+        fixtureIds: ["fixture-0", "fixture-1", "fixture-2", "fixture-3"],
+        results: [successResult, successResult, successResult, successResult],
+      }),
+      "macro-benchmark-baseline:v3:old/free:4": JSON.stringify({
+        currentModel: "old/free",
+        createdAt: new Date(Date.now() + 1000).toISOString(),
+        fixtureLimit: 4,
+        fixtureVersion: BENCHMARK_FIXTURE_VERSION,
+        fixtureIds: ["fixture-0", "fixture-1", "fixture-2", "fixture-3"],
+        results: [successResult, successResult, successResult, successResult],
+      }),
+    };
+
+    storageWith(storageEntries);
 
     expect(readCachedBaseline(4, "current/free")?.currentModel).toBe(
       "current/free",
     );
     expect(readCachedBaseline(4, "new/free")).toBeNull();
+  });
+
+  it("rejects stale fixture versions and mismatched lengths", () => {
+    const createdAt = new Date().toISOString();
+    const storageEntries: Record<string, string> = {
+      "macro-benchmark-baseline:v3:current/free:4": JSON.stringify({
+        currentModel: "current/free",
+        createdAt,
+        fixtureLimit: 4,
+        fixtureVersion: "stale-version",
+        fixtureIds: ["fixture-0", "fixture-1", "fixture-2", "fixture-3"],
+        results: [successResult, successResult, successResult, successResult],
+      }),
+    };
+
+    storageWith(storageEntries);
+    expect(readCachedBaseline(4, "current/free")).toBeNull();
+
+    const shortEntries: Record<string, string> = {
+      "macro-benchmark-baseline:v3:current/free:4": JSON.stringify({
+        currentModel: "current/free",
+        createdAt,
+        fixtureLimit: 4,
+        fixtureVersion: BENCHMARK_FIXTURE_VERSION,
+        fixtureIds: ["fixture-0"],
+        results: [successResult],
+      }),
+    };
+    vi.unstubAllGlobals();
+    storageWith(shortEntries);
+    expect(readCachedBaseline(4, "current/free")).toBeNull();
+  });
+
+  it("rejects cached baselines whose rows are not all reusable current-model cases", () => {
+    // AI-01 regression: the server rejects such baselines and spends the full
+    // budget, so the client must not advertise a 0-call run for them.
+    const createdAt = new Date().toISOString();
+    const skippedResult: MacroBenchmarkModelCaseResult = {
+      ...successResult,
+      ok: false,
+      estimate: null,
+      wasSkipped: true,
+      error: "Skipped to keep the benchmark within the route runtime budget.",
+    };
+
+    const cases: Array<{ name: string; results: unknown[] }> = [
+      {
+        name: "failed row",
+        results: [successResult, failedResult(), successResult, successResult],
+      },
+      {
+        name: "skipped row",
+        results: [successResult, skippedResult, successResult, successResult],
+      },
+      {
+        name: "foreign-model row",
+        results: [
+          successResult,
+          { ...successResult, model: "other/free" },
+          successResult,
+          successResult,
+        ],
+      },
+      {
+        name: "missing estimate",
+        results: [
+          successResult,
+          { ...successResult, estimate: null },
+          successResult,
+          successResult,
+        ],
+      },
+    ];
+
+    for (const entry of cases) {
+      vi.unstubAllGlobals();
+      storageWith({
+        "macro-benchmark-baseline:v3:current/free:4": JSON.stringify({
+          currentModel: "current/free",
+          createdAt,
+          fixtureLimit: 4,
+          fixtureVersion: BENCHMARK_FIXTURE_VERSION,
+          fixtureIds: ["fixture-0", "fixture-1", "fixture-2", "fixture-3"],
+          results: entry.results,
+        }),
+      });
+      expect(
+        readCachedBaseline(4, "current/free"),
+        entry.name,
+      ).toBeNull();
+    }
   });
 });
 
@@ -279,6 +390,7 @@ describe("getBenchmarkCallCountText", () => {
     currentModel: "current/free",
     createdAt: new Date().toISOString(),
     fixtureIds: [],
+    fixtureVersion: BENCHMARK_FIXTURE_VERSION,
     results: [],
   };
 
@@ -304,5 +416,19 @@ describe("getBenchmarkCallCountText", () => {
         model: "candidate/free",
       }),
     ).toBe("This run will make up to 4 AI provider calls using a cached baseline.");
+  });
+
+  it("ignores cached baselines with a stale fixture version", () => {
+    expect(
+      getBenchmarkCallCountText({
+        cachedBaseline: { ...cachedBaseline, fixtureVersion: "stale-version" },
+        candidateOnly: false,
+        currentModel: "current/free",
+        fixtureLimit: 4,
+        model: "candidate/free",
+      }),
+    ).toBe(
+      "This run will make up to 8 AI provider calls. Same-model runs are deduplicated automatically.",
+    );
   });
 });

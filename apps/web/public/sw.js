@@ -33,6 +33,22 @@ self.addEventListener("activate", (event) => {
 
 const CACHEABLE_DESTINATIONS = ["script", "style", "image", "font"];
 
+// The manifest reports destination "manifest", so the asset-cache write
+// check below never refreshes it: the precached copy answers every request
+// while the background revalidation is discarded. It gets its own
+// network-first path instead of joining the stale-while-revalidate asset flow.
+function isManifestRequest(request) {
+  if (request.destination === "manifest") {
+    return true;
+  }
+
+  try {
+    return new URL(request.url).pathname.endsWith("/manifest.webmanifest");
+  } catch {
+    return false;
+  }
+}
+
 /**
  * The origin server gets the final say. Without this a response marked
  * `no-store` or `private` was still written to the cache purely because its
@@ -89,6 +105,37 @@ self.addEventListener("fetch", (event) => {
 
   event.respondWith(
     caches.match(event.request).then((cachedResponse) => {
+      // Network-first for the manifest: a fresh install prompt/theme must
+      // never be pinned behind the precached copy. A failed fetch falls
+      // back to the cache; the origin's no-store/private verdict is still
+      // honored before anything is written.
+      if (isManifestRequest(event.request)) {
+        return fetch(event.request).then(
+          (networkResponse) => {
+            if (
+              networkResponse.ok &&
+              !networkResponse.redirected &&
+              !/(^|,)\s*(no-store|no-cache|private)\s*(,|;|$)/.test(
+                (
+                  networkResponse.headers.get("cache-control") ?? ""
+                ).toLowerCase(),
+              )
+            ) {
+              putInCache(event.request, networkResponse);
+            }
+
+            return networkResponse;
+          },
+          () => {
+            if (cachedResponse) {
+              return cachedResponse;
+            }
+
+            throw new TypeError("Manifest unavailable offline.");
+          },
+        );
+      }
+
       const revalidate = () =>
         fetch(event.request).then((networkResponse) => {
           if (isCacheable(event.request, networkResponse)) {

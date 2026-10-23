@@ -1,7 +1,14 @@
 "use client";
 
 import type { MealTemplate } from "@macro-tracker/db";
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+
+import {
+  getNumberFieldError,
+  findBlockingNumberInput,
+  snapshotNumberValidity,
+} from "@/lib/number-input-validity";
+import { parseDecimalInput } from "@/lib/numbers";
 
 import {
   canEditAsSingleFoodTemplate,
@@ -18,7 +25,12 @@ import {
 import { ConfirmDeleteButton } from "./confirm-delete-button";
 import { CloseButton } from "./close-button";
 import { NumberInputField } from "./number-input-field";
-import { OverlayPortal, useBodyScrollLock, useEscapeDismiss } from "./overlay-portal";
+import {
+  OverlayPortal,
+  useBodyScrollLock,
+  useEscapeDismiss,
+  useFocusTrap,
+} from "./overlay-portal";
 
 type PresetMutationState =
   | { type: "save" }
@@ -80,6 +92,45 @@ export function presetDraftToInput(draft: PresetDraft): TemplateMacroInput {
 
 export type { PresetDraft };
 
+const PRESET_MACRO_FIELDS = [
+  { key: "proteinG", label: "Protein" },
+  { key: "carbsG", label: "Carbs" },
+  { key: "fatG", label: "Fat" },
+  { key: "caloriesKcal", label: "Calories" },
+] as const;
+
+/**
+ * UI-21: empty strings stay legitimate (they map to 0 in `presetDraftToInput`);
+ * present invalid text such as `-5` must fail before the save converts it.
+ * Incomplete exponents (`1e`) arrive as `""` with native `badInput`, so callers
+ * must also check `findBlockingNumberInput` against the live dialog.
+ */
+export function getPresetDraftError(draft: PresetDraft): string | null {
+  for (const field of PRESET_MACRO_FIELDS) {
+    const value = draft[field.key];
+    if (!value.trim()) {
+      continue;
+    }
+
+    const parsed = parseDecimalInput(value);
+    if (parsed == null || parsed < 0) {
+      return getNumberFieldError({
+        value,
+        label: field.label,
+        optional: true,
+        min: 0,
+      });
+    }
+  }
+
+  return null;
+}
+
+function describeBlockingInput(input: HTMLInputElement): string {
+  const label = input.closest("label")?.querySelector("span")?.textContent?.trim();
+  return label || input.getAttribute("name") || "Number";
+}
+
 const PRESET_NUMBER_INPUT_CLASS =
   "w-full rounded-xl border border-[var(--color-border-strong)] bg-[var(--color-card-muted)] px-3 py-2 pr-9 text-sm text-[var(--color-ink)] outline-none transition focus:border-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-60";
 
@@ -117,6 +168,8 @@ export function PresetModal({
   const [draft, setDraft] = useState<PresetDraft>(emptyDraft);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState<PresetDraft>(emptyDraft);
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
   const mutationsDisabled = mutation !== null;
   const foodItemPresets = useMemo(
     () => presets.filter(isFoodItemTemplate),
@@ -137,6 +190,28 @@ export function PresetModal({
   const visiblePresets = activeKind === "food" ? foodItemPresets : dayPresets;
   const activeLabel = activeKind === "food" ? "food item templates" : "day templates";
   useBodyScrollLock();
+  // UI-06: reuse the established focus trap so Tab stays inside the dialog,
+  // initial focus moves in, and trigger focus restores on unmount.
+  useFocusTrap(true, dialogRef);
+
+  function checkNativeValidity(): string | null {
+    const blocking = findBlockingNumberInput(dialogRef.current);
+    if (!blocking) {
+      return null;
+    }
+
+    // Snapshot for a specific message (range vs. incomplete input).
+    const snapshot = snapshotNumberValidity(blocking);
+    if (snapshot.rangeUnderflow) {
+      return `${describeBlockingInput(blocking)} must be at least 0.`;
+    }
+
+    if (snapshot.rangeOverflow) {
+      return `${describeBlockingInput(blocking)} is too large.`;
+    }
+
+    return `${describeBlockingInput(blocking)} is not a valid number yet. Finish or clear it before saving.`;
+  }
 
   function dismissModal() {
     if (mutation) {
@@ -158,6 +233,7 @@ export function PresetModal({
 
     setSelectedKind(kind);
     setEditingId(null);
+    setValidationError(null);
     if (kind === "day") {
       setShowCreateForm(false);
     }
@@ -167,6 +243,14 @@ export function PresetModal({
 
   async function handleSave() {
     if (!draft.label.trim()) return;
+    const nativeError = checkNativeValidity();
+    const draftError = nativeError ?? getPresetDraftError(draft);
+    if (draftError) {
+      setValidationError(draftError);
+      return;
+    }
+
+    setValidationError(null);
     const saved = await onSave(presetDraftToInput(draft));
 
     if (!saved) {
@@ -185,10 +269,19 @@ export function PresetModal({
     setEditingId(preset.id);
     setEditDraft(presetToDraft(preset));
     setShowCreateForm(false);
+    setValidationError(null);
   }
 
   async function handleUpdate() {
     if (!editDraft.label.trim() || !editingId) return;
+    const nativeError = checkNativeValidity();
+    const draftError = nativeError ?? getPresetDraftError(editDraft);
+    if (draftError) {
+      setValidationError(draftError);
+      return;
+    }
+
+    setValidationError(null);
     const updated = await onUpdate(editingId, presetDraftToInput(editDraft));
 
     if (!updated) {
@@ -207,10 +300,12 @@ export function PresetModal({
       />
 
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label="Meal Templates"
         aria-busy={mutation ? "true" : "false"}
+        tabIndex={-1}
         className="fixed inset-x-4 top-[8%] z-50 mx-auto max-h-[82vh] max-w-sm overflow-y-auto rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-5 shadow-2xl"
       >
         <div className="mb-4 flex items-center justify-between">
@@ -226,6 +321,12 @@ export function PresetModal({
         {errorMessage ? (
           <p className="mb-4 rounded-xl border border-[var(--color-danger)]/20 bg-[var(--color-danger)]/8 px-3 py-2 text-sm text-[var(--color-danger)]">
             {errorMessage}
+          </p>
+        ) : null}
+
+        {validationError ? (
+          <p role="alert" className="mb-4 rounded-xl border border-[var(--color-danger)]/20 bg-[var(--color-danger)]/8 px-3 py-2 text-sm text-[var(--color-danger)]">
+            {validationError}
           </p>
         ) : null}
 
@@ -286,7 +387,7 @@ export function PresetModal({
                     />
                   </label>
                   <div className="mt-2 grid grid-cols-2 gap-2">
-                    <PresetMacroFields draft={editDraft} disabled={mutationsDisabled} onPatch={(patch) => setEditDraft({ ...editDraft, ...patch })} />
+                    <PresetMacroFields draft={editDraft} disabled={mutationsDisabled} onPatch={(patch) => { setEditDraft({ ...editDraft, ...patch }); setValidationError(null); }} />
                   </div>
                   <div className="mt-3 flex gap-2">
                     <button
@@ -407,7 +508,7 @@ export function PresetModal({
             </label>
 
             <div className="mt-2 grid grid-cols-2 gap-2">
-              <PresetMacroFields draft={draft} disabled={mutationsDisabled} onPatch={(patch) => setDraft({ ...draft, ...patch })} />
+              <PresetMacroFields draft={draft} disabled={mutationsDisabled} onPatch={(patch) => { setDraft({ ...draft, ...patch }); setValidationError(null); }} />
             </div>
 
             <button

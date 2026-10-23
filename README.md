@@ -37,7 +37,7 @@ Macro Tracker runs as two services: a Rust backend that owns database access and
 
 Requirements:
 
-- Node.js 20+
+- Node.js 22.22.2 or newer 22.x, 24.15.0 or newer 24.x, or 26+ (the locked `jsdom@30.0.1` requires `^22.22.2 || ^24.15.0 || >=26.0.0`; CI runs Node 22)
 - pnpm 10+
 - A PostgreSQL database
 - A Google sign-in flow through Shoo, which is the auth broker this app uses
@@ -99,15 +99,24 @@ pnpm backend:start:release
 node apps/web/scripts/start-with-migrations.mjs
 ```
 
-For a deployed instance, set `APP_URL` to the public URL, `BACKEND_URL` to the backend service URL reachable from the frontend server, and use real random values for `SESSION_SECRET` and `BACKEND_INTERNAL_SECRET`. If you use remote PostgreSQL, `DATABASE_URL` uses TLS with certificate verification by default when `sslmode` is omitted or set to `verify-full`; use `sslmode=require` only when your provider requires encrypted TLS without certificate verification.
+For a deployed instance, set `APP_URL` to the public URL, `BACKEND_URL` to the backend service URL reachable from the frontend server, and use real random values for `SESSION_SECRET` and `BACKEND_INTERNAL_SECRET`. Remote PostgreSQL TLS is selected by `sslmode` in `DATABASE_URL`, and the two runtimes treat `require` differently:
 
-The production build uses Next.js standalone output. The direct Node command above runs startup migrations when explicitly enabled, then loads the generated server in the same process. Both Railway frontend configs use this command to avoid keeping pnpm and a launcher parent resident. `pnpm --filter @macro-tracker/web start` remains available locally; without standalone output the launcher loads the Next CLI. PostgreSQL pools default to 10 connections; set `POSTGRES_POOL_MAX` if you need a different cap. The old default of 3 was low enough that a burst of unauthenticated requests could exhaust it before any credential check ran.
+| `sslmode` | Rust backend (`sqlx`) | JS migrations, tests and helpers (`pg`) |
+| --- | --- | --- |
+| omitted | TLS with full certificate verification | TLS with full certificate verification |
+| `verify-full` | TLS with full certificate verification | TLS with full certificate verification |
+| `require` | TLS; verifies the server certificate only when a root CA is supplied (`sslrootcert` in the URL or `PGSSLROOTCERT`), which this project does not configure | TLS with verification, except Railway private Postgres (`*.railway.internal`), whose self-signed chain is accepted |
+| `disable`, `allow`, `prefer`, `no-verify` | rejected | rejected |
+
+Local and loopback hosts connect without TLS in both runtimes. Prefer `sslmode=verify-full` (or omit `sslmode`) with a provider CA chain the system trust store accepts: `require` is not portable between the runtimes, and because the JS tooling verifies certificates by default it must not be treated as a safe unverified mode. To verify a provider CA only in the Rust backend, set `sslmode=verify-full` together with `sslrootcert`; the JS tooling reads no `sslrootcert` parameter and relies on the system trust store. `ALLOW_UNVERIFIED_DB_TLS=true` is a deliberately loud JS-tooling-only opt-out (it prints a warning and disables certificate verification) and must never be set in a normal deployment; the Rust backend has no equivalent opt-out apart from `sslmode=require`.
+
+The production build uses Next.js standalone output. The direct Node command above runs startup migrations when explicitly enabled, then loads the generated server in the same process. Both Railway frontend configs use this command to avoid keeping pnpm and a launcher parent resident. `pnpm --filter @macro-tracker/web start` remains available locally; without standalone output the launcher loads the Next CLI. PostgreSQL pool settings are per runtime. The Rust backend opens up to `POSTGRES_POOL_MAX` connections (default 10, allowed 1-256): the old default of 3 was low enough that a burst of unauthenticated requests could exhaust the pool before any credential check ran. The JS migration and test pool defaults to 3 (`POSTGRES_POOL_MAX`) with a 10s idle timeout (`POSTGRES_POOL_IDLE_TIMEOUT_MS`) and a 5s connection timeout (`POSTGRES_POOL_CONNECTION_TIMEOUT_MS`); those variables do not change the Rust pool.
 
 ## API Access
 
 Macro Tracker API v1 is available under `/api/v1/*`. Create personal access tokens from `/settings/api`, then send them as `Authorization: Bearer <token>`. Tokens start with `mtk_v1_`, are shown only once, store only a hash in the database, and can be scoped to read or write daily logs, foods, templates, recipes, weight, goals, and stats.
 
-OpenAPI JSON is available at `/api/v1/openapi.json`, and the readable docs page is `/docs/api`. API responses use `{ "ok": true, "data": ... }` for success and `{ "ok": false, "error": { "code": "...", "message": "..." } }` for failures. Public API dates use `YYYY-MM-DD`.
+OpenAPI JSON is available at `/api/v1/openapi.json`, and the readable docs page is `/docs/api`. API responses use `{ "ok": true, "data": ... }` for success and `{ "ok": false, "error": { "code": "...", "message": "..." } }` for failures. Public API dates use `YYYY-MM-DD`. The backend bounds one request at 30 seconds and answers a longer one with `504` and `error.code` `"timeout"`; the web proxy waits 35 seconds so that envelope normally wins, then aborts the call and answers the same `504` timeout envelope itself. Timed-out requests are never retried, so a timed-out mutation may still have been applied.
 
 Self-hosted instances need the latest database migrations so the `api_tokens` table exists before users create tokens.
 
@@ -118,9 +127,9 @@ Useful optional environment variables:
 | `APP_TRUSTED_ORIGINS` | Extra comma-separated origins that are allowed during auth flows. |
 | `SHOO_BASE_URL` | Alternate Shoo base URL. Defaults to `https://shoo.dev`. The Content-Security-Policy is built per request in `apps/web/proxy.ts`, so the runtime value is the one that matters; `connect-src` is derived from it so the browser can reach this origin for the sign-in token exchange. |
 | `ADMIN_OWNER_EMAILS` | Comma-separated emails that should get owner-level admin access. |
-| `POSTGRES_POOL_MAX` | Optional PostgreSQL pool cap. Defaults to `3` for small deployments. |
-| `POSTGRES_POOL_IDLE_TIMEOUT_MS` | Optional idle timeout for pooled PostgreSQL clients. Defaults to `10000`. |
-| `POSTGRES_POOL_CONNECTION_TIMEOUT_MS` | Optional PostgreSQL connection timeout. Defaults to `5000`. |
+| `POSTGRES_POOL_MAX` | PostgreSQL pool cap. The Rust backend defaults to `10` (allowed `1`-`256`); the JS migration and test pool defaults to `3`. |
+| `POSTGRES_POOL_IDLE_TIMEOUT_MS` | Optional idle timeout for pooled JS migration/test PostgreSQL clients. Defaults to `10000`. |
+| `POSTGRES_POOL_CONNECTION_TIMEOUT_MS` | Optional connection timeout for pooled JS migration/test PostgreSQL clients. Defaults to `5000`. |
 | `NEXT_CACHE_MAX_MEMORY_MB` | Optional Next.js in-memory cache cap in MB. Defaults to `0`, which disables the in-memory data cache entirely; set a non-zero value where cached fetches are expected to hit. |
 | `AI_GATEWAY_URL` | OpenAI-compatible chat-completions URL that powers food-photo estimates, for example `http://cliproxyapi.railway.internal:8317/v1/chat/completions`. Must be `https` unless the host is loopback or `*.railway.internal`. See `infra/cliproxyapi/`. Food-photo analysis is unavailable without it. |
 | `AI_GATEWAY_API_KEY` | Backend-only bearer key for the AI gateway. Required for food-photo estimates. |
@@ -178,8 +187,13 @@ pnpm --filter @macro-tracker/db exec tsc --noEmit
 # before Playwright so global setup, the frontend, and the Rust backend share state.
 DATABASE_URL="$E2E_DATABASE_URL" pnpm db:migrate
 
-# terminal 1: keep the backend running against $E2E_DATABASE_URL
-DATABASE_URL="$E2E_DATABASE_URL" pnpm backend:start
+# terminal 1: keep the backend running against $E2E_DATABASE_URL.
+# Playwright sets ENABLE_TEST_ROUTES, TEST_ROUTES_SECRET and BACKEND_ENABLE_TEST_ROUTES
+# for the Next dev server it starts, but not for this separately started Rust backend.
+# BACKEND_ENABLE_TEST_ROUTES enables the test-only role-assignment RPCs the suite calls;
+# it is accepted only while APP_URL points at localhost. Leave it unset everywhere except
+# this isolated test backend.
+DATABASE_URL="$E2E_DATABASE_URL" BACKEND_ENABLE_TEST_ROUTES=true pnpm backend:start
 
 # terminal 2: run Playwright against that backend/database
 DATABASE_URL="$E2E_DATABASE_URL" pnpm test:e2e

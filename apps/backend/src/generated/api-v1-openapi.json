@@ -240,7 +240,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "date"
             }
           }
         ],
@@ -317,7 +318,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "date"
             }
           }
         ],
@@ -501,7 +503,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -659,7 +662,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -731,7 +735,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -965,7 +970,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -1056,7 +1062,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -1436,7 +1443,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -1643,6 +1651,7 @@
     "/templates": {
       "get": {
         "summary": "List meal templates",
+        "description": "Returns the newest 5000 templates as a bare array. Send `limit` and/or `cursor` to opt into cursor pagination: the response becomes `{ items, nextCursor }` and pages walk a stable `(updatedAt DESC, createdAt DESC, id DESC)` keyset. A truncated response always carries `x-result-limit`, `x-result-count`, and `x-result-truncated`; a complete one carries none of them.",
         "security": [
           {
             "bearerAuth": []
@@ -1651,9 +1660,51 @@
         "x-required-scopes": [
           "read:templates"
         ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Opt in to cursor pagination: 1-1000 rows per page (default 1000 when only `cursor` is sent). Invalid values return 400.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "Opaque continuation cursor from `nextCursor`. Bound to the authenticated user; a malformed or foreign cursor returns 400.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful response",
+            "headers": {
+              "x-result-limit": {
+                "description": "Present only when the response was truncated: the applied row limit (5000 for the legacy answer, otherwise `limit`).",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "x-result-count": {
+                "description": "Present only when the response was truncated: the number of rows actually returned.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "x-result-truncated": {
+                "description": "Present only when the response was truncated; always `true`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1667,15 +1718,44 @@
                       "const": true
                     },
                     "data": {
-                      "type": "array",
-                      "items": {
-                        "$ref": "#/components/schemas/Template"
-                      }
+                      "description": "The capped bare array by default; the opt-in envelope when `limit` or `cursor` is sent.",
+                      "oneOf": [
+                        {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/Template"
+                          }
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "items",
+                            "nextCursor"
+                          ],
+                          "properties": {
+                            "items": {
+                              "type": "array",
+                              "items": {
+                                "$ref": "#/components/schemas/Template"
+                              }
+                            },
+                            "nextCursor": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            }
+                          }
+                        }
+                      ]
                     }
                   }
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -1838,6 +1918,9 @@
           "403": {
             "$ref": "#/components/responses/Forbidden"
           },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
           },
@@ -1873,7 +1956,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -1942,7 +2026,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -2113,7 +2198,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -2185,7 +2271,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -2365,6 +2452,7 @@
     "/recipes": {
       "get": {
         "summary": "List recipes",
+        "description": "Returns the newest 5000 recipes as a bare array. Send `limit` and/or `cursor` to opt into cursor pagination: the response becomes `{ items, nextCursor }` and pages walk a stable `(updatedAt DESC, createdAt DESC, id DESC)` keyset. A truncated response always carries `x-result-limit`, `x-result-count`, and `x-result-truncated`; a complete one carries none of them.",
         "security": [
           {
             "bearerAuth": []
@@ -2373,9 +2461,51 @@
         "x-required-scopes": [
           "read:recipes"
         ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Opt in to cursor pagination: 1-1000 rows per page (default 1000 when only `cursor` is sent). Invalid values return 400.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "Opaque continuation cursor from `nextCursor`. Bound to the authenticated user; a malformed or foreign cursor returns 400.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful response",
+            "headers": {
+              "x-result-limit": {
+                "description": "Present only when the response was truncated: the applied row limit (5000 for the legacy answer, otherwise `limit`).",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "x-result-count": {
+                "description": "Present only when the response was truncated: the number of rows actually returned.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "x-result-truncated": {
+                "description": "Present only when the response was truncated; always `true`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2389,15 +2519,44 @@
                       "const": true
                     },
                     "data": {
-                      "type": "array",
-                      "items": {
-                        "$ref": "#/components/schemas/Recipe"
-                      }
+                      "description": "The capped bare array by default; the opt-in envelope when `limit` or `cursor` is sent.",
+                      "oneOf": [
+                        {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/Recipe"
+                          }
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "items",
+                            "nextCursor"
+                          ],
+                          "properties": {
+                            "items": {
+                              "type": "array",
+                              "items": {
+                                "$ref": "#/components/schemas/Recipe"
+                              }
+                            },
+                            "nextCursor": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            }
+                          }
+                        }
+                      ]
                     }
                   }
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -2553,6 +2712,9 @@
           "403": {
             "$ref": "#/components/responses/Forbidden"
           },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
           "405": {
             "$ref": "#/components/responses/MethodNotAllowed"
           },
@@ -2588,7 +2750,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -2657,7 +2820,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -2821,7 +2985,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -2878,6 +3043,7 @@
     "/recipes/{id}/log": {
       "post": {
         "summary": "Log a recipe portion",
+        "description": "When `status` is omitted, the logged entry defaults to `planned` for a future date and `eaten` otherwise, compared in UTC.",
         "security": [
           {
             "bearerAuth": []
@@ -2893,7 +3059,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -3002,8 +3169,10 @@
             "name": "date",
             "in": "query",
             "required": false,
+            "description": "Reference date in UTC. Defaults to the current UTC date when omitted; there is no browser-timezone inference.",
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "date"
             }
           }
         ],
@@ -3057,6 +3226,7 @@
     "/weight/entries": {
       "get": {
         "summary": "List weight entries",
+        "description": "Returns the newest 5000 entries as a bare array, oldest first. Send `limit` and/or `cursor` to opt into cursor pagination: the response becomes `{ items, nextCursor }` and pages walk a stable `(date DESC, id DESC)` keyset, each page still re-sorted ascending. A truncated response always carries `x-result-limit`, `x-result-count`, and `x-result-truncated`; a complete one carries none of them.",
         "security": [
           {
             "bearerAuth": []
@@ -3065,9 +3235,51 @@
         "x-required-scopes": [
           "read:weight"
         ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Opt in to cursor pagination: 1-1000 rows per page (default 1000 when only `cursor` is sent). Invalid values return 400.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "Opaque continuation cursor from `nextCursor`. Bound to the authenticated user; a malformed or foreign cursor returns 400.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful response",
+            "headers": {
+              "x-result-limit": {
+                "description": "Present only when the response was truncated: the applied row limit (5000 for the legacy answer, otherwise `limit`).",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "x-result-count": {
+                "description": "Present only when the response was truncated: the number of rows actually returned.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "x-result-truncated": {
+                "description": "Present only when the response was truncated; always `true`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -3081,15 +3293,44 @@
                       "const": true
                     },
                     "data": {
-                      "type": "array",
-                      "items": {
-                        "$ref": "#/components/schemas/WeightEntry"
-                      }
+                      "description": "The capped bare array by default; the opt-in envelope when `limit` or `cursor` is sent.",
+                      "oneOf": [
+                        {
+                          "type": "array",
+                          "items": {
+                            "$ref": "#/components/schemas/WeightEntry"
+                          }
+                        },
+                        {
+                          "type": "object",
+                          "required": [
+                            "items",
+                            "nextCursor"
+                          ],
+                          "properties": {
+                            "items": {
+                              "type": "array",
+                              "items": {
+                                "$ref": "#/components/schemas/WeightEntry"
+                              }
+                            },
+                            "nextCursor": {
+                              "type": [
+                                "string",
+                                "null"
+                              ]
+                            }
+                          }
+                        }
+                      ]
                     }
                   }
                 }
               }
             }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
@@ -3232,7 +3473,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -3343,7 +3585,8 @@
             "in": "path",
             "required": true,
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "uuid"
             }
           }
         ],
@@ -3538,6 +3781,7 @@
     "/stats": {
       "get": {
         "summary": "Read stats",
+        "description": "Lifetime aggregates cover the full history, but `allDailyTotals` and `smoothedWeightTrend` are bounded to the newest 1000 rows. When that bound truncates a series, the response carries the matching `x-daily-totals-*` or `x-smoothed-weight-trend-*` headers; otherwise none of those headers are present.",
         "security": [
           {
             "bearerAuth": []
@@ -3553,14 +3797,54 @@
             "name": "date",
             "in": "query",
             "required": false,
+            "description": "Reference date in UTC. Defaults to the current UTC date when omitted; there is no browser-timezone inference.",
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "date"
             }
           }
         ],
         "responses": {
           "200": {
             "description": "Successful response",
+            "headers": {
+              "x-daily-totals-limit": {
+                "description": "Present only when `allDailyTotals` was truncated: always 1000.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "x-daily-totals-count": {
+                "description": "Present only when `allDailyTotals` was truncated: the rows actually returned.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "x-daily-totals-truncated": {
+                "description": "Present only when `allDailyTotals` was truncated; always `true`.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "x-smoothed-weight-trend-limit": {
+                "description": "Present only when `smoothedWeightTrend` was truncated: always 1000.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "x-smoothed-weight-trend-count": {
+                "description": "Present only when `smoothedWeightTrend` was truncated: the rows actually returned.",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "x-smoothed-weight-trend-truncated": {
+                "description": "Present only when `smoothedWeightTrend` was truncated; always `true`.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -3624,8 +3908,10 @@
             "name": "date",
             "in": "query",
             "required": false,
+            "description": "Reference date in UTC. Defaults to the current UTC date when omitted; there is no browser-timezone inference.",
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "date"
             }
           }
         ],
@@ -3692,8 +3978,10 @@
             "name": "date",
             "in": "query",
             "required": false,
+            "description": "Reference date in UTC. Defaults to the current UTC date when omitted; there is no browser-timezone inference.",
             "schema": {
-              "type": "string"
+              "type": "string",
+              "format": "date"
             }
           }
         ],
@@ -3775,6 +4063,18 @@
               "default": 100
             },
             "description": "Maximum entries returned in one page."
+          },
+          {
+            "name": "tzOffsetMinutes",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": -840,
+              "maximum": 840,
+              "default": 0
+            },
+            "description": "Client UTC offset in minutes (east positive); the day window and `sampleTime` clamp use this local day. Defaults to UTC when omitted."
           }
         ],
         "responses": {
@@ -4819,7 +5119,7 @@
             ]
           }
         },
-        "description": "Percentage of days in the window that met each goal."
+        "description": "Percentage of qualifying tracked days in the window that met each goal. The denominator counts days with at least one eaten entry, including zero-calorie eaten days; days without an eaten entry are excluded."
       },
       "StatsPageData": {
         "type": "object",

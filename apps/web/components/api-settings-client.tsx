@@ -9,6 +9,8 @@ import {
 } from "@/lib/api-token-actions";
 import type { ApiScope, ApiTokenRecord } from "@macro-tracker/db";
 
+import { useHydrated } from "@/lib/use-hydrated";
+
 import { ConfirmSubmitButton } from "./confirm-delete-button";
 
 type ApiSettingsClientProps = {
@@ -99,18 +101,46 @@ export function getVisibleApiTokens(
   return [stateRecord, ...tokens];
 }
 
-// Built once rather than per token row; Intl constructors are costly.
-const tokenDateFormat = new Intl.DateTimeFormat(undefined, {
-  dateStyle: "medium",
-  timeStyle: "short",
+// Stable server-agreeing render first: the same instant formats 10:00 in UTC
+// and 12:00 in Europe/Amsterdam, so rendering local time during SSR can
+// disagree with hydration. The initial markup uses a pinned en-US/UTC
+// rendering; the browser-local rendering is applied after hydration.
+// The stable UTC formatter is built once (Intl constructors are costly).
+// The local formatter is built per call so it always reflects the viewer's
+// current zone instead of the zone pinned at module load.
+// dateStyle/timeStyle cannot be combined with timeZoneName, so the fields
+// are spelled out to keep the same shape with an explicit zone suffix.
+const stableTokenDateFormat = new Intl.DateTimeFormat("en-US", {
+  month: "short",
+  day: "numeric",
+  year: "numeric",
+  hour: "numeric",
+  minute: "2-digit",
+  timeZone: "UTC",
+  timeZoneName: "short",
 });
 
-function formatDate(value: string | null) {
+export function formatStableTokenDate(value: string | null) {
   if (!value) {
     return "Never";
   }
 
-  return tokenDateFormat.format(new Date(value));
+  return stableTokenDateFormat.format(new Date(value));
+}
+
+function formatLocalTokenDate(value: string | null) {
+  if (!value) {
+    return "Never";
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    timeZoneName: "short",
+  }).format(new Date(value));
 }
 
 export function ApiSettingsClient({ tokens, scopes }: ApiSettingsClientProps) {
@@ -121,6 +151,10 @@ export function ApiSettingsClient({ tokens, scopes }: ApiSettingsClientProps) {
   const [tokenName, setTokenName] = useState("");
   const [expires, setExpires] = useState<"90" | "never">("90");
   const [selectedScopes, setSelectedScopes] = useState<ApiScope[]>(scopes);
+  // False during SSR and the first client render (which must match SSR);
+  // flips after hydration so dates can show in the viewer's own zone.
+  const hydrated = useHydrated();
+  const formatDate = hydrated ? formatLocalTokenDate : formatStableTokenDate;
   const visibleTokens = useMemo(
     () => getVisibleApiTokens(tokens, state.record),
     [state.record, tokens],

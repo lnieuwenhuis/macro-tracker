@@ -15,6 +15,29 @@ function getRoleLabel(role: AdminRole) {
   return role === "owner" ? "Owner" : role === "admin" ? "Admin" : "User";
 }
 
+export type AdminNavLink = { href: string; label: string };
+
+function isNavMatch(pathname: string, href: string) {
+  return (
+    pathname === href || (href !== "/admin" && pathname.startsWith(`${href}/`))
+  );
+}
+
+// Flat navigation shows one active item: the longest matching href wins, so
+// /admin/barcodes/review highlights only the Review Queue, not Barcodes too.
+export function getActiveAdminHref(pathname: string, links: AdminNavLink[]) {
+  let active: string | null = null;
+  for (const link of links) {
+    if (
+      isNavMatch(pathname, link.href) &&
+      (active === null || link.href.length > active.length)
+    ) {
+      active = link.href;
+    }
+  }
+  return active;
+}
+
 export function AdminShell({ userEmail, role, children }: AdminShellProps) {
   const pathname = usePathname();
   const links = [
@@ -57,16 +80,14 @@ export function AdminShell({ userEmail, role, children }: AdminShellProps) {
           <div className="mt-5 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
             <nav className="flex flex-wrap gap-2">
               {links.map((link) => {
-                const active =
-                  pathname === link.href ||
-                  (link.href !== "/admin" &&
-                    pathname.startsWith(`${link.href}/`));
+                const active = getActiveAdminHref(pathname, links) === link.href;
 
                 return (
                   <Link
                     prefetch={false}
                     key={link.href}
                     href={link.href}
+                    aria-current={active ? "page" : undefined}
                     className={`rounded-full px-4 py-2 text-sm font-semibold transition ${
                       active
                         ? "bg-[var(--color-accent)] text-white"

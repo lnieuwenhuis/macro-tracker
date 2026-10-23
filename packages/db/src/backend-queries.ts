@@ -46,11 +46,15 @@ import type {
   WeightPageData,
 } from "./types";
 
+/** Mirrors the Rust `leaderboard_json` payload: streaks, tracked days and the record days. */
 export type LeaderboardStats = {
-  bestCalorieDay: StatsPageData["bestCalorieDay"];
   currentStreak: number;
   longestStreak: number;
-  topLabels: StatsPageData["topLabels"];
+  totalDaysTracked: number;
+  bestCalorieDay: StatsPageData["bestCalorieDay"];
+  bestProteinDay: { date: string; proteinG: number } | null;
+  bestCarbsDay: { date: string; carbsG: number } | null;
+  mostActiveDay: { date: string; entryCount: number } | null;
 };
 
 type BackendTestFault = {

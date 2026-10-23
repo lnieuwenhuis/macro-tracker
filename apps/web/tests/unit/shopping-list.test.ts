@@ -86,8 +86,8 @@ describe("buildShoppingList", () => {
       entryCount: 2,
       plannedCaloriesKcal: 0,
       meals: [
-        { label: "Greek yogurt", quantity: 1.45, unit: "g" },
-        { label: " greek   yogurt ", quantity: 2.55, unit: "g" },
+        { label: "Greek yogurt", quantity: 1.45, unit: "g", servingMultiplier: 1 },
+        { label: " greek   yogurt ", quantity: 2.55, unit: "g", servingMultiplier: 1 },
       ],
     };
 
@@ -96,6 +96,51 @@ describe("buildShoppingList", () => {
     expect(compactItems).toEqual(fullItems);
     expect(formatShoppingListText(compactItems)).toBe(formatShoppingListText(fullItems));
     expect(formatShoppingListText(compactItems)).toBe("- Greek yogurt: 4 g (2 planned entries)");
+  });
+
+  it("multiplies serving and count quantities by the serving multiplier (DATA-16)", () => {
+    const items = buildShoppingList([
+      summary("2026-06-01", [
+        meal({ id: "a", label: "Yogurt", quantity: 2, unit: "serving", servingMultiplier: 3 }),
+        meal({ id: "b", label: "Eggs", quantity: 2, unit: "count", servingMultiplier: 3 }),
+      ]),
+    ]);
+
+    expect(items).toEqual([
+      expect.objectContaining({ label: "Eggs", unit: "count", quantity: 6 }),
+      expect.objectContaining({ label: "Yogurt", unit: "serving", quantity: 6 }),
+    ]);
+  });
+
+  it("keeps gram and millilitre amounts independent of the multiplier (DATA-16)", () => {
+    const items = buildShoppingList([
+      summary("2026-06-01", [
+        meal({ id: "a", label: "Oats", quantity: 80, unit: "g", servingMultiplier: 3 }),
+        meal({ id: "b", label: "Milk", quantity: 250, unit: "ml", servingMultiplier: 3 }),
+      ]),
+    ]);
+
+    expect(items).toEqual([
+      expect.objectContaining({ label: "Milk", unit: "ml", quantity: 250 }),
+      expect.objectContaining({ label: "Oats", unit: "g", quantity: 80 }),
+    ]);
+  });
+
+  it("keeps the compact projection equal to the full summary for multiplied serving amounts (DATA-16)", () => {
+    const fullDailySummary = summary("2026-06-01", [
+      meal({ id: "a", label: "Yogurt", quantity: 2, unit: "serving", servingMultiplier: 3 }),
+    ]);
+    const compactSummary: PlannedShoppingSummary = {
+      date: "2026-06-01",
+      entryCount: 1,
+      plannedCaloriesKcal: 0,
+      meals: [{ label: "Yogurt", quantity: 2, unit: "serving", servingMultiplier: 3 }],
+    };
+
+    expect(buildShoppingList([compactSummary])).toEqual(
+      buildShoppingList([fullDailySummary]),
+    );
+    expect(buildShoppingList([compactSummary])[0]?.quantity).toBe(6);
   });
 
   it("keeps matching labels with different units separate", () => {

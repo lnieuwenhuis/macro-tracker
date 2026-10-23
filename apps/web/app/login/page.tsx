@@ -3,19 +3,13 @@ import { redirect } from "next/navigation";
 import { ShooLoginButton } from "@/components/shoo-login-button";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { getCurrentSessionUser } from "@/lib/auth";
+import { getLoginErrorMessage } from "@/lib/login-errors";
 
 type LoginPageProps = {
   searchParams: Promise<{
     error?: string;
     loggedOut?: string;
   }>;
-};
-
-const ERROR_MESSAGES: Record<string, string> = {
-  login_failed: "Sign-in did not complete. Please try again.",
-  missing_email: "Google did not provide an email address for this account.",
-  invalid_token: "The Shoo token could not be verified.",
-  session_expired: "Your local session expired. Please sign in again.",
 };
 
 const shooBaseUrl =
@@ -31,7 +25,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
 
   const params = await searchParams;
   const clearIdentityOnMount = params.loggedOut === "1";
-  const errorMessage = params.error ? ERROR_MESSAGES[params.error] : null;
+  const errorMessage = getLoginErrorMessage(params.error);
   const loggedOut = clearIdentityOnMount;
 
   return (

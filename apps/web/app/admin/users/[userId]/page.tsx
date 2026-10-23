@@ -13,6 +13,7 @@ import {
 import { ConfirmSubmitButton } from "@/components/confirm-delete-button";
 import { changeUserRoleAction } from "@/lib/admin-actions";
 import { requireAdminUser } from "@/lib/auth";
+import { isRouteUuid } from "@/lib/input-validation";
 import { getTemplateMacroTotals } from "@/lib/template-macros";
 
 type AdminUserDetailPageProps = {
@@ -46,6 +47,9 @@ export default async function AdminUserDetailPage({
 }: AdminUserDetailPageProps) {
   const adminUser = await requireAdminUser();
   const [{ userId }, query] = await Promise.all([params, searchParams]);
+  if (!isRouteUuid(userId)) {
+    notFound();
+  }
   const detail = await getAdminUserDetail(adminUser.id, userId);
 
   if (!detail) {

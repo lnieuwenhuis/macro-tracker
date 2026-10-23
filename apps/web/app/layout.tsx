@@ -8,6 +8,7 @@ import { LayoutNav } from "@/components/layout-nav";
 import { OfflineBanner } from "@/components/offline-banner";
 import { OrientationLock } from "@/components/orientation-lock";
 import { ServiceWorkerRegister } from "@/components/service-worker-register";
+import { getRequestTodayFromHeaders } from "@/lib/server-timezone";
 import {
   TIMEZONE_COOKIE_MAX_AGE_SECONDS,
   TIMEZONE_COOKIE_NAME,
@@ -83,7 +84,11 @@ export default async function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const nonce = (await headers()).get(NONCE_HEADER) ?? undefined;
+  const requestHeaders = await headers();
+  const nonce = requestHeaders.get(NONCE_HEADER) ?? undefined;
+  // Stable per-request day snapshot for the bottom nav so SSR and the
+  // first client render agree; the browser corrects post-hydration.
+  const today = getRequestTodayFromHeaders(requestHeaders);
 
   return (
     <html
@@ -102,7 +107,7 @@ export default async function RootLayout({
         <ServiceWorkerRegister />
         <OfflineBanner />
         <Suspense fallback={null}>
-          <LayoutNav />
+          <LayoutNav todayStr={today} />
         </Suspense>
         {children}
       </body>

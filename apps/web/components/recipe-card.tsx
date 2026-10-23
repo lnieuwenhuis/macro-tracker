@@ -119,14 +119,11 @@ export const RecipeCard = memo(function RecipeCard({
 
   return (
     <article className="rounded-2xl border border-[var(--color-border)] bg-[var(--color-card-subtle)] shadow-[0_4px_16px_rgba(74,45,28,0.05)]">
-      <div
-        className="flex items-center gap-2 px-4 py-3 cursor-pointer"
+      <button
+        type="button"
+        aria-expanded={isExpanded}
         onClick={() => setIsExpanded(!isExpanded)}
-        role="button"
-        tabIndex={0}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") setIsExpanded(!isExpanded);
-        }}
+        className="flex w-full items-center gap-2 px-4 py-3 text-left"
       >
         <div className="min-w-0 flex-1">
           <h3 className="truncate text-sm font-semibold text-[var(--color-ink)]">
@@ -155,14 +152,9 @@ export const RecipeCard = memo(function RecipeCard({
           {recipe.portions} portion{recipe.portions !== 1 ? "s" : ""}
         </span>
 
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            setIsExpanded(!isExpanded);
-          }}
+        <span
+          aria-hidden="true"
           className="shrink-0 rounded-lg p-1 text-[var(--color-muted)] transition hover:text-[var(--color-ink)]"
-          aria-label={isExpanded ? "Collapse" : "Expand"}
         >
           <svg
             width="16"
@@ -180,8 +172,8 @@ export const RecipeCard = memo(function RecipeCard({
               <polyline points="4,6 8,10 12,6" />
             )}
           </svg>
-        </button>
-      </div>
+        </span>
+      </button>
 
       {isExpanded && (
         <div className="border-t border-[var(--color-border)] px-4 pb-4 pt-3">

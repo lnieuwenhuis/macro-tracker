@@ -6,16 +6,26 @@ use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 /// Pending eaten entries not yet acked, oldest first; an acked entry never re-enters (avoids double-counting samples).
-/// Day window and row limit bound a first-ever sync; backfills clamp to 18:00 UTC (right day west of UTC+6).
+/// Day window, sample clamp and eligibility are computed in the caller's local day from
+/// `timezone_offset_minutes` (DATA-04), so an eastern-timezone backfill still maps its sample
+/// timestamp back to `entry_date` locally and nothing future-dated is returned.
 pub(super) async fn healthkit_sync_entries_json(
     pool: &PgPool,
     user_id: Uuid,
     days: i32,
     limit: i32,
+    timezone_offset_minutes: i32,
 ) -> AppResult<Value> {
     let row = sqlx::query(
         r#"
-        WITH pending AS (
+        WITH now_utc AS (
+          SELECT (now() AT TIME ZONE 'UTC') AS ts
+        ),
+        local_today AS (
+          SELECT (ts + make_interval(mins => $4))::date AS day
+          FROM now_utc
+        ),
+        pending AS (
           SELECT
             id,
             entry_date,
@@ -25,21 +35,22 @@ pub(super) async fn healthkit_sync_entries_json(
             fat_g,
             calories_kcal,
             created_at,
-            -- Clamp the sample timestamp into the entry's day; HealthKit rejects future-dated samples.
+            -- Clamp into the entry's local day; HealthKit rejects future-dated samples.
             GREATEST(
               LEAST(
                 updated_at,
-                (entry_date::timestamp + interval '18 hours') AT TIME ZONE 'UTC'
+                ((entry_date::timestamp + interval '1 day' - make_interval(mins => $4)) AT TIME ZONE 'UTC') - interval '1 second',
+                now_utc.ts
               ),
-              entry_date::timestamp AT TIME ZONE 'UTC'
+              (entry_date::timestamp - make_interval(mins => $4)) AT TIME ZONE 'UTC'
             ) AS sample_time,
             count(*) OVER () AS pending_total
-          FROM meal_entries
+          FROM meal_entries, now_utc
           WHERE user_id = $1
             AND status = 'eaten'
             AND healthkit_synced_at IS NULL
-            AND entry_date <= (now() AT TIME ZONE 'UTC')::date
-            AND entry_date >= (now() AT TIME ZONE 'UTC')::date - $2
+            AND entry_date <= (SELECT day FROM local_today)
+            AND entry_date >= (SELECT day FROM local_today) - $2
           ORDER BY entry_date, created_at, id
           LIMIT $3
         )
@@ -65,6 +76,7 @@ pub(super) async fn healthkit_sync_entries_json(
     .bind(user_id)
     .bind(days)
     .bind(limit)
+    .bind(timezone_offset_minutes)
     .fetch_one(pool)
     .await?;
     Ok(row.try_get("data")?)

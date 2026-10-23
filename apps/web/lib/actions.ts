@@ -39,7 +39,7 @@ import {
 } from "@macro-tracker/db";
 import type {
   BarcodeFoodProductInput,
-  FoodProduct,
+  BrowserFoodProduct,
   GymSlot,
   GymSlotInput,
   GymSlotStatus,
@@ -56,6 +56,7 @@ import { revalidatePath } from "next/cache";
 
 import { ActionError, toActionError } from "./action-errors";
 import { requireSessionUser } from "./auth";
+import { toBrowserFoodProduct, toBrowserFoodProducts } from "./browser-product";
 import { buildRecipePortionMealEntryInput } from "./recipe-portion";
 
 type ActionResult = {
@@ -466,7 +467,7 @@ export async function deleteRecipeAction(
 
 type SearchFoodsResult = ActionResult & {
   results?: MealEntryRecord[];
-  products?: FoodProduct[];
+  products?: BrowserFoodProduct[];
 };
 
 export async function searchFoodsAction(
@@ -487,7 +488,9 @@ export async function searchFoodsAction(
     const results =
       historyResult.status === "fulfilled" ? historyResult.value : [];
     const products =
-      productsResult.status === "fulfilled" ? productsResult.value : [];
+      productsResult.status === "fulfilled"
+        ? toBrowserFoodProducts(productsResult.value)
+        : [];
 
     if (historyResult.status === "rejected" && productsResult.status === "rejected") {
       return { ok: false, error: toActionError(historyResult.reason) };
@@ -564,7 +567,7 @@ export async function logRecipePortionAction(
 }
 
 type SaveBarcodeFoodProductResult = ActionResult & {
-  product?: FoodProduct;
+  product?: BrowserFoodProduct;
 };
 
 export async function saveBarcodeFoodProductAction(
@@ -572,7 +575,7 @@ export async function saveBarcodeFoodProductAction(
 ): Promise<SaveBarcodeFoodProductResult> {
   return runSessionAction(async (sessionUser) => {
     const product = await saveBarcodeFoodProduct(sessionUser.userId, input);
-    return { ok: true, product };
+    return { ok: true, product: toBrowserFoodProduct(product) };
   });
 }
 

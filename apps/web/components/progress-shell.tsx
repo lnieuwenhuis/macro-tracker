@@ -7,7 +7,7 @@ import type {
   WeightUnit,
 } from "@macro-tracker/db";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   deleteWeightEntryAction,
@@ -16,7 +16,12 @@ import {
   saveWeightGoalAction,
   updateWeightEntryAction,
 } from "@/lib/actions";
-import { formatShortDate } from "@/lib/formatting";
+import { formatShortDateWithYear } from "@/lib/formatting";
+import {
+  getPositiveOptionalFieldError,
+  snapshotNumberValidity,
+} from "@/lib/number-input-validity";
+import { parsePositiveNumber } from "@/lib/numbers";
 import { convertWeight } from "@/lib/onboarding-weight";
 import type { ProgressTab } from "@/lib/progress-tab";
 import { useActionRunner } from "@/lib/use-action-runner";
@@ -24,6 +29,7 @@ import { buildWeightGoalProjection } from "@/lib/weight-trend";
 
 import { ConfirmDeleteButton } from "./confirm-delete-button";
 import { AppShell, SettingsButton } from "./app-shell";
+import { useTabsKeyboard } from "./accessible-tabs";
 import {
   MacroCalculatorPanel,
   formatMacroInputValue,
@@ -53,39 +59,69 @@ function formatWeight(weightKg: number | null | undefined, unit: WeightUnit) {
 }
 
 function toNullableNumber(value: string): number | null {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const parsed = Number(trimmed);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  // Locale-aware: "72,5" parses as 72.5. Empty stays null (explicit clear);
+  // callers validate badInput/range first so invalid text never clears silently.
+  return parsePositiveNumber(value);
 }
 
 function toInputString(value: number | null | undefined): string {
   return value != null ? String(value) : "";
 }
 
-function GoalsPanel({
+// Exported for the UI-20 controlled-input regression test.
+export function GoalsPanel({
   goals,
   initialWeightKg,
 }: {
   goals: MacroGoals;
   initialWeightKg: number | null;
 }) {
-  const { run, isPending, error, clearError } = useActionRunner();
+  const { run, isPending, error, setError, clearError } = useActionRunner();
   const [saved, setSaved] = useState(false);
   const [calories, setCalories] = useState(toInputString(goals.caloriesKcal));
   const [protein, setProtein] = useState(toInputString(goals.proteinG));
   const [carbs, setCarbs] = useState(toInputString(goals.carbsG));
   const [fat, setFat] = useState(toInputString(goals.fatG));
+  const [invalidFields, setInvalidFields] = useState<Record<string, boolean>>({});
+  const caloriesRef = useRef<HTMLInputElement>(null);
+  const proteinRef = useRef<HTMLInputElement>(null);
+  const carbsRef = useRef<HTMLInputElement>(null);
+  const fatRef = useRef<HTMLInputElement>(null);
 
-  function update(setter: (value: string) => void) {
+  function update(setter: (value: string) => void, field: string) {
     return (value: string) => {
       setter(value);
       setSaved(false);
       clearError();
+      setInvalidFields((prev) => ({ ...prev, [field]: false }));
     };
   }
 
   function handleSave() {
+    // UI-20: distinguish an explicitly empty optional field (saves null) from
+    // invalid input (`-5`, incomplete `1e` with native badInput). Invalid input
+    // blocks with a field error and makes no mutation call.
+    const checks = [
+      { label: "Calories", value: calories, ref: caloriesRef },
+      { label: "Protein", value: protein, ref: proteinRef },
+      { label: "Carbs", value: carbs, ref: carbsRef },
+      { label: "Fat", value: fat, ref: fatRef },
+    ] as const;
+
+    for (const check of checks) {
+      const fieldError = getPositiveOptionalFieldError(
+        check.value,
+        check.label,
+        snapshotNumberValidity(check.ref.current),
+      );
+      if (fieldError) {
+        setInvalidFields({ [check.label]: true });
+        setError(fieldError);
+        return;
+      }
+    }
+
+    setInvalidFields({});
     run(
       () =>
         saveGoalsAction({
@@ -149,12 +185,12 @@ function GoalsPanel({
 
       <div className="grid gap-3 sm:grid-cols-2">
         {[
-          { label: "Calories", unit: "kcal", step: "1", value: calories, set: setCalories },
-          { label: "Protein", unit: "g", step: "0.1", value: protein, set: setProtein },
-          { label: "Carbs", unit: "g", step: "0.1", value: carbs, set: setCarbs },
-          { label: "Fat", unit: "g", step: "0.1", value: fat, set: setFat },
-        ].map(({ label, unit, step, value, set }) => (
-          <NumberInputField key={label} label={label} unit={unit} step={step} value={value} disabled={isPending} variant="card" onChange={update(set)} />
+          { label: "Calories", unit: "kcal", step: "1", value: calories, set: setCalories, ref: caloriesRef },
+          { label: "Protein", unit: "g", step: "0.1", value: protein, set: setProtein, ref: proteinRef },
+          { label: "Carbs", unit: "g", step: "0.1", value: carbs, set: setCarbs, ref: carbsRef },
+          { label: "Fat", unit: "g", step: "0.1", value: fat, set: setFat, ref: fatRef },
+        ].map(({ label, unit, step, value, set, ref }) => (
+          <NumberInputField key={label} label={label} unit={unit} step={step} value={value} disabled={isPending} variant="card" inputRef={ref} invalid={invalidFields[label]} onChange={update(set, label)} />
         ))}
       </div>
 
@@ -291,7 +327,7 @@ function WeightTrendChart({
   const chartLabel = [
     `Weight trend over ${points.length} entries`,
     first && last
-      ? `from ${formatWeight(first.weightKg, unit)} on ${formatShortDate(first.date)} to ${formatWeight(last.weightKg, unit)} on ${formatShortDate(last.date)}`
+      ? `from ${formatWeight(first.weightKg, unit)} on ${formatShortDateWithYear(first.date)} to ${formatWeight(last.weightKg, unit)} on ${formatShortDateWithYear(last.date)}`
       : null,
     weightData.goalWeightKg != null
       ? `goal ${formatWeight(weightData.goalWeightKg, unit)}`
@@ -477,7 +513,7 @@ function WeightPanel({
   const { stats, entries } = weightData;
   const projection = buildWeightGoalProjection(weightData, selectedDate);
   const estimatedGoalLabel = projection.estimatedGoalDate
-    ? formatShortDate(projection.estimatedGoalDate)
+    ? formatShortDateWithYear(projection.estimatedGoalDate)
     : "-";
 
   return (
@@ -700,7 +736,7 @@ function WeightPanel({
                     ) : null}
                   </p>
                   <p className="mt-0.5 text-xs text-[var(--color-muted)]">
-                    {formatShortDate(entry.date)}
+                    {formatShortDateWithYear(entry.date)}
                     {entry.notes ? ` - ${entry.notes}` : ""}
                   </p>
                 </div>
@@ -714,7 +750,7 @@ function WeightPanel({
                         ? "bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
                         : "text-[var(--color-muted)] hover:text-[var(--color-accent)]"
                     } disabled:opacity-50`}
-                    aria-label={`Edit entry from ${formatShortDate(entry.date)}`}
+                    aria-label={`Edit entry from ${formatShortDateWithYear(entry.date)}`}
                   >
                     <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M9.5 2.5l2 2L4 12H2v-2L9.5 2.5z" />
@@ -765,6 +801,10 @@ export function ProgressShell({
     });
   }
 
+  const progressTabIds = ["goals", "weight"] as const;
+  const { tabProps: progressTabProps, panelProps: progressPanelProps } =
+    useTabsKeyboard(progressTabIds, activeTab, handleTabChange);
+
   return (
     <AppShell
       userEmail={userEmail}
@@ -784,15 +824,15 @@ export function ProgressShell({
               {([
                 { id: "goals", label: "Goals" },
                 { id: "weight", label: "Weight" },
-              ] as const).map((tab) => {
+              ] as const).map((tab, index) => {
                 const isActive = activeTab === tab.id;
                 return (
                   <button
                     key={tab.id}
                     type="button"
                     role="tab"
-                    aria-selected={isActive}
                     onClick={() => handleTabChange(tab.id)}
+                    {...progressTabProps(tab.id, index, "progress-views")}
                     className={[
                       "h-full rounded-[1.05rem] px-4 text-sm font-semibold transition",
                       isActive
@@ -811,12 +851,16 @@ export function ProgressShell({
       )}
     >
       {activeTab === "goals" ? (
+        <div {...progressPanelProps("goals", "progress-views")}>
         <GoalsPanel
           goals={goals}
           initialWeightKg={weightData.stats.currentWeight}
         />
+        </div>
       ) : (
+        <div {...progressPanelProps("weight", "progress-views")}>
         <WeightPanel selectedDate={selectedDate} weightData={weightData} unit={weightUnit} />
+        </div>
       )}
     </AppShell>
   );

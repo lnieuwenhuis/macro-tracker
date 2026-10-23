@@ -20,6 +20,17 @@ export function formatShortDate(value: string) {
   return format(parseISO(value), "d MMM");
 }
 
+// Unbounded history can hold the same day/month from different years, so
+// these labels always carry the year; bounded single-week views keep the
+// shorter form above.
+export function formatShortDateWithYear(value: string) {
+  return format(parseISO(value), "d MMM yyyy");
+}
+
+export function formatSelectedDateWithYear(value: string) {
+  return format(parseISO(value), "EEE, d MMM yyyy");
+}
+
 export function formatPeriodRange(startDate: string, endDate: string) {
   return `${formatShortDate(startDate)} to ${formatShortDate(endDate)}`;
 }

@@ -147,6 +147,54 @@ describe("useActionRunner", () => {
     expect(result.current.isPending).toBe(false);
   });
 
+  it("routes a rejected transport promise through fallbackError and onError without refresh", async () => {
+    const { result } = renderHook(() => useActionRunner());
+    const onSuccess = vi.fn();
+    const onError = vi.fn();
+
+    await act(async () => {
+      result.current.run(
+        () => Promise.reject(new Error("network down")),
+        {
+          fallbackError: "Unable to save.",
+          refresh: true,
+          onSuccess,
+          onError,
+        },
+      );
+    });
+
+    expect(result.current.error).toBe("Unable to save.");
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(mocked.refresh).not.toHaveBeenCalled();
+    expect(result.current.isPending).toBe(false);
+  });
+
+  it("recovers after a transport rejection: the next mutation can succeed", async () => {
+    const { result } = renderHook(() => useActionRunner());
+    const onError = vi.fn();
+    const onSuccess = vi.fn();
+
+    await act(async () => {
+      result.current.run(() => Promise.reject(new Error("offline")), {
+        fallbackError: "Unable to save.",
+        onError,
+      });
+    });
+    expect(result.current.error).toBe("Unable to save.");
+    expect(onError).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      result.current.run(async () => ({ ok: true as const }), {
+        fallbackError: "Unable to save.",
+        onSuccess,
+      });
+    });
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+    expect(result.current.error).toBeNull();
+  });
+
   it("clears the error on clearError", async () => {
     const { result } = renderHook(() => useActionRunner());
 

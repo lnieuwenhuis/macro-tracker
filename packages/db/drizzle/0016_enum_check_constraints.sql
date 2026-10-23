@@ -32,26 +32,103 @@
 -- confirmed clean (e.g. `SELECT DISTINCT type FROM meal_templates` inspected
 -- against the allowed set), a follow-up hand-authored migration should run
 -- `ALTER TABLE ... VALIDATE CONSTRAINT ...` to close the gap fully.
-ALTER TABLE "users"
-  ADD CONSTRAINT "users_role_check"
-  CHECK ("role" IN ('user', 'admin', 'owner')) NOT VALID;
+--
+-- History note (why every statement is guarded): before the HealthKit and
+-- staging migration lines were reunified, this file shipped to the staging
+-- line with an earlier `when` value (1785369600000). Databases that applied
+-- that older history still have the exact constraints below; the reunified
+-- journal re-selects this migration for them, and an unguarded ADD CONSTRAINT
+-- would fail with 42710 and roll back every pending migration. The guards make
+-- the rerun a strict no-op for those databases while a clean install or a
+-- production-line database (which never applied 0016) still gets each
+-- constraint exactly once. Do not "fix" a future history by moving this
+-- migration's `when`; keep the journal identities and keep re-runs safe.
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conrelid = '"users"'::regclass
+      AND conname = 'users_role_check'
+  ) THEN
+    ALTER TABLE "users"
+      ADD CONSTRAINT "users_role_check"
+      CHECK ("role" IN ('user', 'admin', 'owner')) NOT VALID;
+  END IF;
+END
+$$;
 --> statement-breakpoint
-ALTER TABLE "users"
-  ADD CONSTRAINT "users_preferred_weight_unit_check"
-  CHECK ("preferred_weight_unit" IN ('kg', 'lb')) NOT VALID;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conrelid = '"users"'::regclass
+      AND conname = 'users_preferred_weight_unit_check'
+  ) THEN
+    ALTER TABLE "users"
+      ADD CONSTRAINT "users_preferred_weight_unit_check"
+      CHECK ("preferred_weight_unit" IN ('kg', 'lb')) NOT VALID;
+  END IF;
+END
+$$;
 --> statement-breakpoint
-ALTER TABLE "meal_entries"
-  ADD CONSTRAINT "meal_entries_status_check"
-  CHECK ("status" IN ('planned', 'eaten', 'skipped')) NOT VALID;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conrelid = '"meal_entries"'::regclass
+      AND conname = 'meal_entries_status_check'
+  ) THEN
+    ALTER TABLE "meal_entries"
+      ADD CONSTRAINT "meal_entries_status_check"
+      CHECK ("status" IN ('planned', 'eaten', 'skipped')) NOT VALID;
+  END IF;
+END
+$$;
 --> statement-breakpoint
-ALTER TABLE "meal_templates"
-  ADD CONSTRAINT "meal_templates_type_check"
-  CHECK ("type" IN ('meal', 'day')) NOT VALID;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conrelid = '"meal_templates"'::regclass
+      AND conname = 'meal_templates_type_check'
+  ) THEN
+    ALTER TABLE "meal_templates"
+      ADD CONSTRAINT "meal_templates_type_check"
+      CHECK ("type" IN ('meal', 'day')) NOT VALID;
+  END IF;
+END
+$$;
 --> statement-breakpoint
-ALTER TABLE "food_products"
-  ADD CONSTRAINT "food_products_scope_check"
-  CHECK ("scope" IN ('global', 'personal', 'legacy')) NOT VALID;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conrelid = '"food_products"'::regclass
+      AND conname = 'food_products_scope_check'
+  ) THEN
+    ALTER TABLE "food_products"
+      ADD CONSTRAINT "food_products_scope_check"
+      CHECK ("scope" IN ('global', 'personal', 'legacy')) NOT VALID;
+  END IF;
+END
+$$;
 --> statement-breakpoint
-ALTER TABLE "food_products"
-  ADD CONSTRAINT "food_products_source_check"
-  CHECK ("source" IN ('manual', 'barcode', 'ai_photo', 'legacy', 'recipe')) NOT VALID;
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conrelid = '"food_products"'::regclass
+      AND conname = 'food_products_source_check'
+  ) THEN
+    ALTER TABLE "food_products"
+      ADD CONSTRAINT "food_products_source_check"
+      CHECK ("source" IN ('manual', 'barcode', 'ai_photo', 'legacy', 'recipe')) NOT VALID;
+  END IF;
+END
+$$;

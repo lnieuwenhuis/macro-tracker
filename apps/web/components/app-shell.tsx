@@ -19,6 +19,7 @@ import { getLocalDateString, getStartupDateRedirect } from "@/lib/startup-date";
 
 import { ProfileSheet } from "./profile-sheet";
 import { LinkPendingPulse, TransitionLink } from "./transition-link";
+import { shouldSuppressGlobalShortcut } from "./overlay-portal";
 
 type AppShellProps = {
   userEmail: string;
@@ -128,6 +129,12 @@ export function AppShell({
       }
 
       if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") {
+        return;
+      }
+
+      // UI-08: dialogs/menus own arrow keys while open; a consumed event must
+      // not also navigate the day and remount the keyed page beneath them.
+      if (shouldSuppressGlobalShortcut(event)) {
         return;
       }
 

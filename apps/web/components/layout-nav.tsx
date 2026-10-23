@@ -6,6 +6,7 @@ import { useState, useTransition } from "react";
 import type { ComposeAction } from "@/lib/compose";
 import { getLocalDateString } from "@/lib/startup-date";
 import { prepareNavigationMotion } from "@/lib/navigation-motion";
+import { useHydrated } from "@/lib/use-hydrated";
 
 import { AddSheet } from "./add-sheet";
 import { BottomNav } from "./bottom-nav";
@@ -38,16 +39,23 @@ function pathnameToActiveTab(
   return "log";
 }
 
-export function LayoutNav() {
+export function LayoutNav({ todayStr: todayStrProp }: { todayStr?: string }) {
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const router = useRouter();
   const [, startNavigation] = useTransition();
   const [addSheetOpen, setAddSheetOpen] = useState(false);
-  const selectedDate = searchParams.get("date") ?? getLocalDateString();
+  // Stable snapshot: the query wins when present; otherwise the server
+  // prop wins for SSR and the first client render. The browser-local day
+  // only applies after hydration (AppShell then corrects the URL when the
+  // server fallback disagrees), so opposite-zone renders never mismatch.
+  const hydrated = useHydrated();
+  const browserToday = hydrated ? getLocalDateString() : null;
+  const queryDate = searchParams.get("date");
+  const selectedDate = queryDate ?? todayStrProp ?? browserToday ?? "";
   const showAppNavigation = isAppPathname(pathname);
 
-  if (!showAppNavigation) {
+  if (!showAppNavigation || !selectedDate) {
     return null;
   }
 

@@ -1,0 +1,161 @@
+/** @vitest-environment jsdom */
+import { act, renderHook } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const mocked = vi.hoisted(() => ({
+  saveTemplateAction: vi.fn(),
+  deleteTemplateAction: vi.fn(),
+  updateTemplateAction: vi.fn(),
+}));
+
+vi.mock("@/lib/actions", () => ({
+  saveTemplateAction: mocked.saveTemplateAction,
+  deleteTemplateAction: mocked.deleteTemplateAction,
+  updateTemplateAction: mocked.updateTemplateAction,
+}));
+
+import { useState } from "react";
+import { useTemplateMutations } from "@/components/use-template-mutations";
+
+function setup(initialLabels: string[] = []) {
+  const initial = initialLabels.map((label, index) => ({
+    id: `preset-${index}`,
+    userId: "user-1",
+    label,
+    proteinG: 10,
+    carbsG: 10,
+    fatG: 10,
+    caloriesKcal: 100,
+  }));
+  const presetErrorSpy = vi.fn();
+
+  function useHarness() {
+    const [items, setItems] = useState(initial);
+    const [mutation, setMutation] = useState<never | null>(null);
+    const mutations = useTemplateMutations({
+      localTemplates: items as never,
+      setLocalTemplates: setItems as never,
+      setPresetError: presetErrorSpy,
+      setPresetMutation: setMutation as never,
+    });
+    return {
+      handleSavePreset: mutations.handleSavePreset,
+      handleDeletePreset: mutations.handleDeletePreset,
+      items: items as typeof initial,
+      mutation,
+    };
+  }
+
+  const { result } = renderHook(() => useHarness());
+  return { presetErrorSpy, getLatest: () => result.current };
+}
+
+describe("useTemplateMutations transport rejection (UI-05)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("reports a local error and returns false when the save transport rejects", async () => {
+    mocked.saveTemplateAction.mockRejectedValue(new Error("network down"));
+    const { getLatest } = setup();
+
+    let saved: boolean | undefined;
+    await act(async () => {
+      saved = await getLatest().handleSavePreset({
+        label: "Oats",
+        proteinG: 10,
+        carbsG: 20,
+        fatG: 5,
+        caloriesKcal: 200,
+      });
+    });
+
+    expect(saved).toBe(false);
+    expect(getLatest().items).toHaveLength(0);
+    expect(getLatest().mutation).toBeNull();
+  });
+
+  it("rolls back the optimistic delete when the delete transport rejects", async () => {
+    mocked.deleteTemplateAction.mockRejectedValue(new Error("offline"));
+    const { getLatest } = setup(["Oats"]);
+
+    let deleted: boolean | undefined;
+    await act(async () => {
+      deleted = await getLatest().handleDeletePreset("preset-0");
+    });
+
+    expect(deleted).toBe(false);
+    expect(getLatest().items.map((t) => t.id)).toEqual(["preset-0"]);
+    expect(getLatest().mutation).toBeNull();
+  });
+
+  it("recovers: a rejected save is followed by a successful save", async () => {
+    mocked.saveTemplateAction
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce({
+        ok: true,
+        template: {
+          id: "preset-new",
+          userId: "user-1",
+          label: "Oats",
+          proteinG: 10,
+          carbsG: 20,
+          fatG: 5,
+          caloriesKcal: 200,
+        },
+      });
+    const { getLatest } = setup();
+
+    await act(async () => {
+      expect(
+        await getLatest().handleSavePreset({
+          label: "Oats",
+          proteinG: 10,
+          carbsG: 20,
+          fatG: 5,
+          caloriesKcal: 200,
+        }),
+      ).toBe(false);
+    });
+
+    let saved: boolean | undefined;
+    await act(async () => {
+      saved = await getLatest().handleSavePreset({
+        label: "Oats",
+        proteinG: 10,
+        carbsG: 20,
+        fatG: 5,
+        caloriesKcal: 200,
+      });
+    });
+
+    expect(saved).toBe(true);
+    expect(getLatest().items.map((t) => t.id)).toEqual(["preset-new"]);
+  });
+
+  it("rethrows framework control flow instead of reporting it as a failed save", async () => {
+    const redirect = Object.assign(new Error("redirect"), {
+      digest: "NEXT_REDIRECT;replace;/login;307;",
+    });
+    mocked.saveTemplateAction.mockRejectedValue(redirect);
+    const { presetErrorSpy, getLatest } = setup();
+
+    let caught: unknown;
+    await act(async () => {
+      try {
+        await getLatest().handleSavePreset({
+          label: "Oats",
+          proteinG: 10,
+          carbsG: 20,
+          fatG: 5,
+          caloriesKcal: 200,
+        });
+      } catch (error) {
+        caught = error;
+      }
+    });
+
+    expect(caught).toBe(redirect);
+    expect(presetErrorSpy).not.toHaveBeenCalledWith("Unable to save template.");
+  });
+});

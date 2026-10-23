@@ -22,6 +22,7 @@ import { gymStatusLabel } from "@/lib/gym-time";
 import { useActionRunner } from "@/lib/use-action-runner";
 
 import { AppShell } from "./app-shell";
+import { useTabsKeyboard } from "./accessible-tabs";
 import { CompactModal } from "./compact-modal";
 import { ConfirmDeleteButton } from "./confirm-delete-button";
 import { BuddiesPanel } from "./gym-buddies-panel";
@@ -123,6 +124,12 @@ export function GymShell({
 
   const buddyLists = data.buddies;
   const pendingInviteCount = buddyLists.pendingIncoming.length;
+  const gymTabIds = ["schedule", "buddies"] as const;
+  const { tabProps: gymTabProps, panelProps: gymPanelProps } = useTabsKeyboard(
+    gymTabIds,
+    activeTab,
+    setActiveTab,
+  );
 
   const statusLabelFor = (slot: GymResolvedSlot, status: GymSlotStatus) =>
     gymStatusLabel(status, {
@@ -155,7 +162,7 @@ export function GymShell({
             {([
               { id: "schedule", label: "Schedule" },
               { id: "buddies", label: "Buddies" },
-            ] as const).map((tab) => {
+            ] as const).map((tab, index) => {
               const isActive = activeTab === tab.id;
               const showDot = tab.id === "buddies" && pendingInviteCount > 0;
               return (
@@ -163,8 +170,8 @@ export function GymShell({
                   key={tab.id}
                   type="button"
                   role="tab"
-                  aria-selected={isActive}
                   onClick={() => setActiveTab(tab.id)}
+                  {...gymTabProps(tab.id, index, "gym-views")}
                   className={[
                     "relative h-full rounded-[1.05rem] px-4 text-sm font-semibold transition",
                     isActive
@@ -195,7 +202,7 @@ export function GymShell({
         ) : null}
 
         {activeTab === "schedule" ? (
-          <div className="space-y-6">
+          <div {...gymPanelProps("schedule", "gym-views")} className="space-y-6">
             {data.overlaps.length > 0 ? (
               <section>
                 <h2 className={SECTION_HEADING_CLASS}>Gym buddies overlap</h2>
@@ -355,6 +362,7 @@ export function GymShell({
             </section>
           </div>
         ) : (
+          <div {...gymPanelProps("buddies", "gym-views")}>
           <BuddiesPanel
             lists={buddyLists}
             friendCode={data.friendCode}
@@ -376,6 +384,7 @@ export function GymShell({
               runAction(() => removeGymBuddyAction({ buddyId }))
             }
           />
+          </div>
         )}
       </AppShell>
 

@@ -2,22 +2,108 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { afterEach, expect, it } from "vitest";
 
 const directories: string[] = [];
 const children: ChildProcess[] = [];
-afterEach(async () => {
-  for (const child of children.splice(0)) {
-    if (child.exitCode === null && child.signalCode === null) {
-      const exited = once(child, "exit");
-      // The fixture uses a process group so the old launcher also cleans up on failure.
+
+async function waitForExit(child: ChildProcess, timeoutMs = 5000) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+
+  const exited = once(child, "exit");
+
+  if (process.platform === "win32") {
+    // Windows has no POSIX process-group signaling, so terminate the owned child directly.
+    child.kill();
+  } else {
+    try {
       process.kill(-child.pid!, "SIGTERM");
-      await exited;
+    } catch {
+      child.kill("SIGTERM");
     }
   }
-  await Promise.all(directories.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
-});
+
+  await Promise.race([
+    exited,
+    new Promise((resolveTimeout) => setTimeout(resolveTimeout, timeoutMs)),
+  ]);
+}
+
+async function removeWithRetry(directory: string) {
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      await rm(directory, { recursive: true, force: true });
+      return;
+    } catch {
+      // Windows can hold the directory briefly after a killed child releases it.
+      await new Promise((resolveTimeout) => setTimeout(resolveTimeout, 250));
+    }
+  }
+}
+
+async function readMigrationLog(root: string) {
+  // cmd.exe appends CRLF when the fixture shim writes its arguments.
+  return (await readFile(join(root, "migration"), "utf8")).replace(/\r\n/g, "\n");
+}
+
+// Windows environment variable names are case-insensitive, so an inherited
+// NPM_EXECPATH can shadow the fixture's lowercase name (or defeat deleting it).
+function removeCaseInsensitiveEnvKey(env: NodeJS.ProcessEnv, name: string) {
+  for (const key of Object.keys(env)) {
+    if (key.toLowerCase() === name) {
+      delete env[key];
+    }
+  }
+}
+
+// A package manager JavaScript entry that succeeds without recording migrations.
+// Used to simulate an inherited npm_execpath in a different key case.
+async function writeDecoyEntry() {
+  const directory = await mkdtemp(join(tmpdir(), "macro-startup-decoy-"));
+  directories.push(directory);
+  const entry = join(directory, "decoy-pnpm.cjs");
+  await writeFile(entry, "process.exit(0);\n");
+  return entry;
+}
+
+async function withInheritedExecpathVariant<T>(run: () => Promise<T>) {
+  const previous = process.env.NPM_EXECPATH;
+  process.env.NPM_EXECPATH = await writeDecoyEntry();
+  try {
+    return await run();
+  } finally {
+    if (previous === undefined) {
+      delete process.env.NPM_EXECPATH;
+    } else {
+      process.env.NPM_EXECPATH = previous;
+    }
+  }
+}
+
+afterEach(async () => {
+  for (const child of children.splice(0)) {
+    await waitForExit(child);
+    if (child.exitCode === null && child.signalCode === null) {
+      throw new Error(`fixture child ${child.pid} survived termination`);
+    }
+  }
+
+  await Promise.all(
+    directories.splice(0).map((directory) => removeWithRetry(directory)),
+  );
+}, 30_000);
+
+type FixtureOptions = {
+  standalone?: boolean;
+  migrationExit?: number;
+  runMigrations?: string;
+  databaseUrl?: string;
+  serverThrows?: boolean;
+  migrationRunner?: "path-shim" | "node-entry";
+};
 
 async function fixture({
   standalone = true,
@@ -25,7 +111,8 @@ async function fixture({
   runMigrations = "true",
   databaseUrl = "postgres://localhost/test",
   serverThrows = false,
-} = {}) {
+  migrationRunner = "path-shim",
+}: FixtureOptions = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "macro-startup-")));
   directories.push(root);
   const app = join(root, "apps/web");
@@ -36,9 +123,46 @@ async function fixture({
   await mkdir(dirname(config), { recursive: true });
   await cp(resolve("../../packages/db/src/postgres-config.js"), config);
   await writeFile(join(root, "package.json"), '{"type":"module"}');
-  const bin = join(root, "bin");
-  await mkdir(bin);
-  await writeFile(join(bin, "pnpm"), `#!/bin/sh\necho "$*" > "${root}/migration"\nexit ${migrationExit}\n`, { mode: 0o755 });
+
+  const migrationFile = join(root, "migration");
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    LEGACY_FRONTEND_RUN_MIGRATIONS: runMigrations,
+    DATABASE_URL: databaseUrl,
+    NEXT_SERVER_HOSTNAME: "127.0.0.1",
+  };
+  removeCaseInsensitiveEnvKey(env, "npm_execpath");
+
+  if (migrationRunner === "node-entry") {
+    const entry = join(root, "fake-pnpm.mjs");
+    await writeFile(
+      entry,
+      [
+        'import { writeFileSync } from "node:fs";',
+        `writeFileSync(${JSON.stringify(migrationFile)}, process.argv.slice(2).join(" ") + "\\n");`,
+        `process.exit(${migrationExit});`,
+        "",
+      ].join("\n"),
+    );
+    env.npm_execpath = entry;
+  } else {
+    const bin = join(root, "bin");
+    await mkdir(bin);
+    if (process.platform === "win32") {
+      await writeFile(
+        join(bin, "pnpm.cmd"),
+        `@echo off\r\n>"${migrationFile}" echo %*\r\nexit /b ${migrationExit}\r\n`,
+      );
+    } else {
+      await writeFile(
+        join(bin, "pnpm"),
+        `#!/bin/sh\necho "$*" > "${migrationFile}"\nexit ${migrationExit}\n`,
+        { mode: 0o755 },
+      );
+    }
+    env.PATH = `${bin}${delimiter}${process.env.PATH ?? ""}`;
+  }
+
   const server = standalone
     ? join(app, ".next/standalone/apps/web/server.js")
     : join(app, "node_modules/next/dist/bin/next");
@@ -50,36 +174,110 @@ async function fixture({
     process.on('SIGINT', () => process.exit(0));
     setInterval(() => {}, 1000);
   `);
+
   const child = spawn(process.execPath, [launcher], {
-    cwd: root, detached: true,
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, LEGACY_FRONTEND_RUN_MIGRATIONS: runMigrations, DATABASE_URL: databaseUrl, NEXT_SERVER_HOSTNAME: "127.0.0.1" },
+    cwd: root,
+    detached: true,
+    env,
     stdio: ["ignore", "pipe", "pipe"],
   });
   children.push(child);
+
   let output = "";
   let errors = "";
-  child.stderr!.on("data", (data) => { errors += data; });
-  const ready = new Promise<{ pid: number; hostname: string; argv: string[] }>((resolveReady, reject) => {
-    child.stdout!.on("data", (data) => {
-      output += data;
-      const match = output.match(/FIXTURE:(.*)\n/);
-      if (match) resolveReady(JSON.parse(match[1]));
-    });
-    child.on("error", reject);
-    child.on("exit", (code) => reject(new Error(`exit ${code}: ${output} ${errors}`)));
+  child.stderr!.on("data", (data) => {
+    errors += data;
   });
+
+  const ready = new Promise<{ pid: number; hostname: string; argv: string[] }>(
+    (resolveReady, reject) => {
+      const timer = setTimeout(() => {
+        reject(
+          new Error(`fixture did not become ready; output: ${output} errors: ${errors}`),
+        );
+      }, 20_000);
+
+      child.stdout!.on("data", (data) => {
+        output += data;
+        const match = output.match(/FIXTURE:(.*)\n/);
+        if (match) {
+          clearTimeout(timer);
+          resolveReady(JSON.parse(match[1]));
+        }
+      });
+      child.on("error", (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      child.on("exit", (code) => {
+        clearTimeout(timer);
+        reject(new Error(`exit ${code}: ${output} ${errors}`));
+      });
+    },
+  );
+
   return { root, child, ready };
 }
 
-it.each(["SIGTERM", "SIGINT"] as const)("runs migrations then serves in the launcher PID and handles %s", async (signal) => {
-  const { root, child, ready } = await fixture();
-  const server = await ready;
-  expect(await readFile(join(root, "migration"), "utf8")).toBe("--filter @macro-tracker/db db:migrate\n");
-  expect(server.pid).toBe(child.pid);
-  expect(server.hostname).toBe("127.0.0.1");
-  const exited = once(child, "exit");
-  child.kill(signal);
-  expect(await exited).toEqual([0, null]);
+it.skipIf(process.platform === "win32").each(["SIGTERM", "SIGINT"] as const)(
+  "runs migrations then serves in the launcher PID and handles %s",
+  async (signal) => {
+    const { root, child, ready } = await fixture();
+    const server = await ready;
+    expect(await readMigrationLog(root)).toBe(
+      "--filter @macro-tracker/db db:migrate\n",
+    );
+    expect(server.pid).toBe(child.pid);
+    expect(server.hostname).toBe("127.0.0.1");
+    const exited = once(child, "exit");
+    child.kill(signal);
+    expect(await exited).toEqual([0, null]);
+  },
+);
+
+it.skipIf(process.platform !== "win32")(
+  "runs migrations then serves and terminates on kill on Windows",
+  async () => {
+    const { root, child, ready } = await fixture();
+    const server = await ready;
+    expect(await readMigrationLog(root)).toBe(
+      "--filter @macro-tracker/db db:migrate\n",
+    );
+    expect(server.pid).toBe(child.pid);
+    expect(server.hostname).toBe("127.0.0.1");
+    const exited = once(child, "exit");
+    child.kill();
+    await exited;
+    expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
+  },
+);
+
+it("runs the package manager entry provided through npm_execpath", async () => {
+  const { root, ready } = await fixture({ migrationRunner: "node-entry" });
+  await ready;
+  expect(await readMigrationLog(root)).toBe(
+    "--filter @macro-tracker/db db:migrate\n",
+  );
+});
+
+it("ignores an inherited case-variant npm_execpath in the path-shim fixture", async () => {
+  await withInheritedExecpathVariant(async () => {
+    const { root, ready } = await fixture();
+    await ready;
+    expect(await readMigrationLog(root)).toBe(
+      "--filter @macro-tracker/db db:migrate\n",
+    );
+  });
+});
+
+it("keeps the fixture npm_execpath entry over an inherited case-variant", async () => {
+  await withInheritedExecpathVariant(async () => {
+    const { root, ready } = await fixture({ migrationRunner: "node-entry" });
+    await ready;
+    expect(await readMigrationLog(root)).toBe(
+      "--filter @macro-tracker/db db:migrate\n",
+    );
+  });
 });
 
 it("loads the Next CLI in-process when standalone output is absent", async () => {

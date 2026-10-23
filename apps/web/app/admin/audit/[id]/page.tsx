@@ -9,6 +9,7 @@ import {
   formatAdminTimestamp,
 } from "@/components/admin-ui";
 import { requireOwnerUser } from "@/lib/auth";
+import { isRouteUuid } from "@/lib/input-validation";
 
 type AdminAuditDetailPageProps = {
   params: Promise<{ id: string }>;
@@ -50,6 +51,9 @@ export default async function AdminAuditDetailPage({
 }: AdminAuditDetailPageProps) {
   const ownerUser = await requireOwnerUser();
   const { id } = await params;
+  if (!isRouteUuid(id)) {
+    notFound();
+  }
   const event = await getAdminAuditEventById(ownerUser.id, id);
 
   if (!event) {

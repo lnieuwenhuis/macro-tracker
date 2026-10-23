@@ -36,7 +36,7 @@ export default function ApiDocsPage() {
         <h2 className="font-serif text-2xl font-semibold">Authentication</h2>
         <pre className="overflow-x-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-4 text-sm">
           <code>{`curl /api/v1/goals \\
-  -H "Authorization: Bearer mtk_v1_your_token"`}</code>
+  -H "Authorization: Bearer $API_TOKEN"`}</code>
         </pre>
         <p className="text-sm text-[var(--color-muted)]">
           API responses are wrapped as {"{"} ok, data {"}"} or {"{"} ok, error {"}"}. Dates use YYYY-MM-DD.
@@ -95,6 +95,13 @@ export default function ApiDocsPage() {
                     <td className="px-4 py-3 font-mono">{endpoint.path}</td>
                     <td className="px-4 py-3 text-[var(--color-muted)]">
                       {formatApiV1ScopeSummary(method)}
+                      {method.notes ? (
+                        <ul className="mt-2 list-disc space-y-1 pl-4 text-xs">
+                          {method.notes.map((note) => (
+                            <li key={note}>{note}</li>
+                          ))}
+                        </ul>
+                      ) : null}
                     </td>
                   </tr>
                 )),
@@ -108,10 +115,27 @@ export default function ApiDocsPage() {
       </section>
 
       <section className="space-y-3">
+        <h2 className="font-serif text-2xl font-semibold">Pagination and truncation</h2>
+        <p className="text-sm text-[var(--color-muted)]">
+          Template, recipe, and weight-entry lists return a bare array capped at the newest 5000
+          rows. Add limit (1-1000) and/or cursor to opt in to stable keyset pagination: the response
+          becomes {"{"} items, nextCursor {"}"} and walking nextCursor returns every row exactly
+          once. A truncated response carries x-result-limit, x-result-count, and x-result-truncated
+          headers, which CORS exposes to browser clients. The stats chart series are bounded to the
+          newest 1000 rows and report x-daily-totals-* or x-smoothed-weight-trend-* headers when
+          that bound truncates them.
+        </p>
+        <pre className="overflow-x-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-4 text-sm">
+          <code>{`curl "/api/v1/templates?limit=1000" \\
+  -H "Authorization: Bearer $API_TOKEN"`}</code>
+        </pre>
+      </section>
+
+      <section className="space-y-3">
         <h2 className="font-serif text-2xl font-semibold">Example Request</h2>
         <pre className="overflow-x-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-strong)] p-4 text-sm">
           <code>{`curl -X POST /api/v1/days/2026-03-19/entries \\
-  -H "Authorization: Bearer mtk_v1_your_token" \\
+  -H "Authorization: Bearer $API_TOKEN" \\
   -H "Content-Type: application/json" \\
   -d '{
     "label": "Greek yogurt",

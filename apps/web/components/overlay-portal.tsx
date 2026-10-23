@@ -178,6 +178,31 @@ export function useFocusTrap<T extends HTMLElement>(
   }, [active, containerRef]);
 }
 
+// UI-08: global day shortcuts must yield while an overlay owns keyboard
+// interaction. Dialogs/menus render through portals, so the page handler
+// checks the live document instead of local state.
+export function shouldSuppressGlobalShortcut(event: KeyboardEvent): boolean {
+  if (event.defaultPrevented) {
+    return true;
+  }
+
+  const target = event.target as HTMLElement | null;
+  if (target && typeof target.closest === "function") {
+    if (target.closest('[role="dialog"], [role="menu"], [role="listbox"]')) {
+      return true;
+    }
+  }
+
+  if (
+    typeof document !== "undefined" &&
+    document.querySelector('[role="dialog"], [role="menu"]')
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
 export function OverlayPortal({ children }: { children: ReactNode }) {
   if (typeof document === "undefined") {
     return null;

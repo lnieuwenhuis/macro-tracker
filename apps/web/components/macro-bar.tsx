@@ -22,12 +22,14 @@ function MacroBar({
   goal,
   fallbackMax,
 }: MacroBarProps) {
-  const max = goal ?? fallbackMax;
+  // A valid API zero goal shows no target; like an unset goal it still
+  // scales against the visual fallback so consumption remains visible.
+  const hasGoal = goal !== null && goal > 0;
+  const max = hasGoal ? goal! : fallbackMax;
   const percentage = max > 0 ? Math.min((value / max) * 100, 100) : 0;
   const projectedValue = value + plannedValue;
   const projectedPercentage =
     max > 0 ? Math.min((projectedValue / max) * 100, 100) : 0;
-  const hasGoal = goal !== null && goal > 0;
   const hasPlannedValue = plannedValue > 0;
   const testIdPrefix = label.toLowerCase().replace(/\s+/g, "-");
 

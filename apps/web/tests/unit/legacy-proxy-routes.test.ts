@@ -35,6 +35,7 @@ describe("legacy backend proxy route failures", () => {
     const response = await foodPhotoPost(
       new Request("http://localhost/api/ai/food-photo", {
         method: "POST",
+        headers: { "sec-fetch-site": "same-origin" },
         body: JSON.stringify({ image: "data:image/png;base64,abc" }),
       }),
     );
@@ -44,6 +45,41 @@ describe("legacy backend proxy route failures", () => {
       kind: "backend_unavailable",
       error: "Food photo analysis service is unavailable.",
     });
+  });
+
+  it("refuses a same-site sibling origin before contacting the gateway", async () => {
+    // SEC-03: SameSite=Lax still attaches the victim's cookies to a same-site request.
+    const response = await foodPhotoPost(
+      new Request("http://localhost/api/ai/food-photo", {
+        method: "POST",
+        headers: {
+          origin: "https://evil.example.com",
+          "sec-fetch-site": "same-site",
+          cookie: "mt_session=victim-session",
+        },
+        body: "image-bytes",
+      }),
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toMatchObject({ kind: "forbidden" });
+    expect(mocked.backendFetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["cross-site", { "sec-fetch-site": "cross-site", origin: "https://evil.example.com" }],
+    ["absent fetch metadata", {}],
+  ])("refuses a %s food-photo request", async (_label, headers) => {
+    const response = await foodPhotoPost(
+      new Request("http://localhost/api/ai/food-photo", {
+        method: "POST",
+        headers,
+        body: "image-bytes",
+      }),
+    );
+
+    expect(response.status).toBe(403);
+    expect(mocked.backendFetch).not.toHaveBeenCalled();
   });
 
   it("returns a shaped JSON error when benchmark backendFetch throws", async () => {

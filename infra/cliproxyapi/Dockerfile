@@ -4,7 +4,7 @@
 #
 # Upstream: https://github.com/router-for-me/CLIProxyAPI (MIT).
 # Pinned by version tag; bump deliberately after checking upstream releases.
-FROM eceasy/cli-proxy-api:v7.2.132
+FROM eceasy/cli-proxy-api:v8.0.38
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

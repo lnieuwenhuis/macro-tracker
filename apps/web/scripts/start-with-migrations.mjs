@@ -24,9 +24,45 @@ function getWorkspaceRoot() {
   return resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 }
 
+// Windows exposes the package manager as pnpm.CMD, which child_process cannot launch
+// directly without a shell. Prefer the package manager's JavaScript entry (pnpm/npm
+// provide it as npm_execpath) and run it with the current Node binary; otherwise fall
+// back to the platform launcher. `command` and `args` are fixed literals from this
+// module, never caller- or request-supplied input.
+export function getPackageManagerCommand(
+  command,
+  args,
+  env = process.env,
+  platform = process.platform,
+) {
+  const execPath = env.npm_execpath?.trim();
+
+  if (execPath && /\.(cjs|mjs|js)$/i.test(execPath) && existsSync(execPath)) {
+    return { command: process.execPath, args: [execPath, ...args] };
+  }
+
+  if (platform === "win32") {
+    return {
+      command: env.ComSpec?.trim() || "cmd.exe",
+      args: ["/d", "/s", "/c", command, ...args],
+    };
+  }
+
+  return { command, args };
+}
+
 function runCommand(command, args, options) {
+  const invocation = getPackageManagerCommand(
+    command,
+    args,
+    options?.env ?? process.env,
+  );
+
   return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(command, args, { stdio: "inherit", ...options });
+    const child = spawn(invocation.command, invocation.args, {
+      stdio: "inherit",
+      ...options,
+    });
 
     child.on("error", rejectPromise);
     child.on("exit", (code, signal) => {

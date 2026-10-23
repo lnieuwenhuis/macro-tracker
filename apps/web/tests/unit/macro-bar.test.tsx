@@ -44,6 +44,27 @@ describe("MacroBarGroup", () => {
     expect(readoutTexts().some((text) => text.includes("/"))).toBe(false);
   });
 
+  it("scales a valid zero goal against the fallback so consumption stays visible", () => {
+    const { container } = render(
+      <MacroBarGroup
+        caloriesKcal={900}
+        proteinG={40}
+        carbsG={80}
+        fatG={20}
+        goals={{ caloriesKcal: 0, proteinG: 0, carbsG: 0, fatG: 0 }}
+      />,
+    );
+
+    // No target is shown for zero goals, but the bar must not imply zero
+    // consumption: 900 of the 2500 kcal fallback fills 36%.
+    expect(readoutTexts()).toContain("900 kcal");
+    expect(readoutTexts().some((text) => text.includes("/"))).toBe(false);
+    const fill = container.querySelector<HTMLElement>(
+      '[data-testid="macro-bar-calories-eaten-fill"]',
+    );
+    expect(fill?.style.width).toBe("36%");
+  });
+
   it("caps the eaten fill at 100% once the goal is exceeded", () => {
     const { container } = render(
       <MacroBarGroup

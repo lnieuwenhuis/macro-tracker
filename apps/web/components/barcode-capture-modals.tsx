@@ -16,7 +16,8 @@ type BarcodeCaptureModalsProps = {
   setScanResult: (product: OpenFoodFactsProduct | null) => void;
   setNotFoundBarcode: (barcode: string | null) => void;
   onAddToLog: (input: BarcodeFoodSelection) => void;
-  onSaveAsPreset: (input: BarcodeFoodSelection) => void;
+  // UI-01: resolves true only when the template actually persisted.
+  onSaveAsPreset: (input: BarcodeFoodSelection) => Promise<boolean>;
 };
 
 export function BarcodeCaptureModals({

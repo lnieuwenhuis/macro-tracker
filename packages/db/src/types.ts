@@ -227,6 +227,26 @@ export type FoodProduct = Required<
   deletedAt: string | null;
 };
 
+/** SEC-06: internal provenance a full product row carries server-side but the browser never needs. */
+export const INTERNAL_FOOD_PRODUCT_FIELDS = [
+  "ownerUserId",
+  "submittedByUserId",
+  "deletedByUserId",
+  "sourceProvider",
+  "sourceConfidence",
+  "sourceMetadata",
+  "correctedFromProductId",
+] as const;
+
+/**
+ * A product as session/browser consumers receive it: the internal provenance fields above are
+ * omitted. Admin views that need them use the full `FoodProduct` from their own RPCs.
+ */
+export type BrowserFoodProduct = Omit<
+  FoodProduct,
+  (typeof INTERNAL_FOOD_PRODUCT_FIELDS)[number]
+>;
+
 export type MealGroup = {
   id: string;
   userId: string;
@@ -427,7 +447,7 @@ export type MealTemplateSummary = Pick<
 /** A planned entry carries only the shopping-list fields. */
 export type PlannedShoppingEntry = Pick<
   MealEntryRecord,
-  "label" | "quantity" | "unit"
+  "label" | "quantity" | "unit" | "servingMultiplier"
 >;
 
 /** One day in the planner's preloaded shopping range. */
@@ -451,7 +471,8 @@ export type BarcodeFoodProductInput = {
 
 export type AdminAuditEvent = {
   id: string;
-  actorUserId: string;
+  /** Null once the acting user is deleted: `admin_audit_events.actor_user_id` is `ON DELETE SET NULL`. */
+  actorUserId: string | null;
   actorEmail: string | null;
   actorDisplayName: string | null;
   actorRole: AdminRole;
