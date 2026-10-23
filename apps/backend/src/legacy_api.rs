@@ -29,7 +29,7 @@ mod benchmark_fixtures;
 use benchmark_fixtures::{BENCHMARK_FIXTURES, CATEGORIES};
 
 /// The `(effort)` suffix is CLIProxyAPI's reasoning-effort selector; the retry raises it.
-const DEFAULT_FOOD_PHOTO_MODELS: &[&str] = &["gpt-5.6-luna(low)", "gpt-5.6-luna(medium)"];
+const DEFAULT_FOOD_PHOTO_MODELS: &[&str] = &["gpt-6-luna(low)", "gpt-6-luna(medium)"];
 /// Output budget shared by the reasoning tokens and the ~300-token JSON answer.
 const FOOD_PHOTO_MAX_TOKENS: u16 = 4_000;
 /// Reasoning models need headroom per attempt even at low effort.
@@ -581,7 +581,7 @@ async fn admin_benchmark(
             StatusCode::BAD_REQUEST,
             json!({
                 "ok": false,
-                "error": "Enter a model id, for example gpt-5.6-luna(low)."
+                "error": "Enter a model id, for example gpt-6-luna(low)."
             }),
         );
     };
