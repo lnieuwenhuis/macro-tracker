@@ -25,7 +25,7 @@ a ChatGPT/Codex subscription). Configure it on the backend environment:
 ```bash
 AI_GATEWAY_URL=http://cliproxyapi.railway.internal:8317/v1/chat/completions
 AI_GATEWAY_API_KEY=...
-AI_GATEWAY_MODELS=gpt-5.6-luna(low),gpt-5.6-luna(medium)
+AI_GATEWAY_MODELS=gpt-6-luna(low),gpt-6-luna(medium)
 AI_GATEWAY_MODEL_TIMEOUT_MS=20000
 ```
 
