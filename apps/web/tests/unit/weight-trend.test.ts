@@ -109,6 +109,92 @@ describe("buildWeightGoalProjection", () => {
     });
   });
 
+  it("projects only from entries on or before the selected date", () => {
+    const projection = buildWeightGoalProjection(
+      buildWeightData({
+        entries: [
+          {
+            id: "w1",
+            userId: "user",
+            date: "2026-06-01",
+            weightKg: 84,
+            bodyFatPct: null,
+            notes: null,
+          },
+          {
+            id: "w2",
+            userId: "user",
+            date: "2026-06-15",
+            weightKg: 82,
+            bodyFatPct: null,
+            notes: null,
+          },
+          {
+            id: "w3",
+            userId: "user",
+            date: "2026-07-01",
+            weightKg: 85,
+            bodyFatPct: null,
+            notes: null,
+          },
+        ],
+      }),
+      "2026-06-15",
+    );
+
+    expect(projection).toMatchObject({
+      status: "moving_toward",
+      goalDeltaKg: -2,
+    });
+  });
+
+  it("reports insufficient data when the selected date is before every entry", () => {
+    const projection = buildWeightGoalProjection(buildWeightData(), "2026-05-15");
+
+    expect(projection).toMatchObject({
+      status: "insufficient_data",
+    });
+  });
+
+  it("reports insufficient data when only one entry is on or before the selected date", () => {
+    const projection = buildWeightGoalProjection(
+      buildWeightData({
+        entries: [
+          {
+            id: "w1",
+            userId: "user",
+            date: "2026-06-01",
+            weightKg: 84,
+            bodyFatPct: null,
+            notes: null,
+          },
+          {
+            id: "w2",
+            userId: "user",
+            date: "2026-06-15",
+            weightKg: 82,
+            bodyFatPct: null,
+            notes: null,
+          },
+          {
+            id: "w3",
+            userId: "user",
+            date: "2026-07-01",
+            weightKg: 85,
+            bodyFatPct: null,
+            notes: null,
+          },
+        ],
+      }),
+      "2026-06-01",
+    );
+
+    expect(projection).toMatchObject({
+      status: "insufficient_data",
+      message: "Log at least two weight entries to calculate a trend.",
+    });
+  });
+
   it("detects moving away from goal", () => {
     expect(
       buildWeightGoalProjection(
