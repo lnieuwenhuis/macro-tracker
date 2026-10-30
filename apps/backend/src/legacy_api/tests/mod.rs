@@ -2247,3 +2247,257 @@ async fn a_successful_fallback_wins_over_an_outage() {
     assert_eq!(payload["found"], json!(true));
     assert_eq!(payload["product"]["source"], json!("jumbo"));
 }
+
+// Pure provider-parsing helpers. Every test here is named `provider_parse_*`
+// so the whole set runs without Postgres or provider stubs.
+
+#[test]
+fn provider_parse_number_from_value_accepts_numbers_and_numeric_strings() {
+    assert_eq!(number_from_value(&json!(12.5)), Some(12.5));
+    assert_eq!(number_from_value(&json!("12,5")), Some(12.5));
+    assert_eq!(number_from_value(&json!(" 3 ")), Some(3.0));
+}
+
+#[test]
+fn provider_parse_number_from_value_rejects_non_finite_and_non_numeric_input() {
+    // `str::parse::<f64>` accepts "NaN", "inf" and "infinity" in any case; those must stay missing.
+    for value in [
+        json!("abc"),
+        json!("NaN"),
+        json!("nan"),
+        json!("inf"),
+        json!("Infinity"),
+        json!("-infinity"),
+        Value::Null,
+        json!(true),
+    ] {
+        assert_eq!(
+            number_from_value(&value),
+            None,
+            "{value} must parse as missing, not as a number"
+        );
+    }
+}
+
+#[test]
+fn provider_parse_safe_number_maps_missing_and_non_finite_input_to_zero() {
+    assert_eq!(safe_number(Some(&json!("inf"))), 0.0);
+    assert_eq!(safe_number(Some(&json!("NaN"))), 0.0);
+    assert_eq!(safe_number(Some(&json!(12.5))), 12.5);
+    assert_eq!(safe_number(None), 0.0);
+}
+
+#[test]
+fn provider_parse_assign_nutrient_maps_energy_kcal_to_calories() {
+    let mut macros = ParsedMacros::default();
+    let mut found = false;
+
+    // `assign_nutrient_from_item` lowercases the provider name before calling in.
+    assign_nutrient("energie", "kcal", 123.4, &mut macros, &mut found);
+
+    assert_eq!(macros.calories_kcal, 123.0);
+    assert!(found);
+}
+
+#[test]
+fn provider_parse_assign_nutrient_ignores_energy_without_kcal() {
+    let mut macros = ParsedMacros::default();
+    let mut found = false;
+
+    assign_nutrient("energie", "kJ", 516.0, &mut macros, &mut found);
+
+    assert_eq!(macros.calories_kcal, 0.0);
+    assert!(!found, "a kJ energy row must not count as a match");
+}
+
+#[test]
+fn provider_parse_assign_nutrient_rounds_protein_to_one_decimal() {
+    let mut macros = ParsedMacros::default();
+    let mut found = false;
+
+    assign_nutrient("eiwitten", "g", 4.256, &mut macros, &mut found);
+    assert_eq!(macros.protein_g, 4.3);
+    assert!(found);
+
+    let mut macros = ParsedMacros::default();
+    let mut found = false;
+    assign_nutrient("protein", "g", 8.04, &mut macros, &mut found);
+    assert_eq!(macros.protein_g, 8.0);
+    assert!(found);
+}
+
+#[test]
+fn provider_parse_assign_nutrient_carbs_ignore_sugar_subcategories() {
+    let mut macros = ParsedMacros::default();
+    let mut found = false;
+
+    assign_nutrient("koolhydraten", "g", 12.04, &mut macros, &mut found);
+    assert_eq!(macros.carbs_g, 12.0);
+    assign_nutrient("waarvan suikers", "g", 8.0, &mut macros, &mut found);
+    assert_eq!(
+        macros.carbs_g, 12.0,
+        "sugars must not overwrite total carbs"
+    );
+    assert!(found);
+
+    let mut macros = ParsedMacros::default();
+    let mut found = false;
+    assign_nutrient("carbohydrates", "g", 30.0, &mut macros, &mut found);
+    assign_nutrient("of which sugars", "g", 5.0, &mut macros, &mut found);
+    assert_eq!(
+        macros.carbs_g, 30.0,
+        "sugars must not overwrite total carbs"
+    );
+    assert!(found);
+}
+
+#[test]
+fn provider_parse_assign_nutrient_fat_ignores_fatty_acid_subcategories() {
+    let mut macros = ParsedMacros::default();
+    let mut found = false;
+
+    assign_nutrient("vetten", "g", 5.96, &mut macros, &mut found);
+    assert_eq!(macros.fat_g, 6.0);
+    assign_nutrient("waarvan verzadigd", "g", 3.0, &mut macros, &mut found);
+    assert_eq!(
+        macros.fat_g, 6.0,
+        "saturated fat must not overwrite total fat"
+    );
+    assert!(found);
+}
+
+#[test]
+fn provider_parse_assign_nutrient_found_only_when_something_was_assigned() {
+    let mut macros = ParsedMacros::default();
+    let mut found = false;
+
+    assign_nutrient("natrium", "g", 0.5, &mut macros, &mut found);
+    assert!(!found, "an unrecognised nutrient must not set found");
+
+    assign_nutrient("protein", "g", 1.0, &mut macros, &mut found);
+    assert!(found, "an assigned nutrient must set found");
+}
+
+#[test]
+fn provider_parse_albert_heijn_walks_nested_nutrient_arrays() {
+    let raw = json!([
+        {
+            "name": "Voedingswaarden",
+            "nutrients": [
+                { "name": "Energie", "value": 250.4, "unit": "kcal" },
+                {
+                    "name": "Eiwit",
+                    "children": [
+                        { "name": "Eiwitten", "value": 8.1, "unit": "g" }
+                    ]
+                }
+            ]
+        }
+    ]);
+
+    let macros = parse_albert_heijn_nutrients(Some(&raw))
+        .expect("nested nutrients/children arrays should be walked");
+    assert_eq!(macros.calories_kcal, 250.0);
+    assert_eq!(macros.protein_g, 8.1);
+}
+
+#[test]
+fn provider_parse_albert_heijn_parses_nutrition_table_objects() {
+    let raw = json!({
+        "nutritionTable": [
+            { "name": "Energie kcal", "value": 120, "unit": "kcal" },
+            { "name": "Eiwitten", "value": 4.2, "unit": "g" }
+        ]
+    });
+
+    let macros =
+        parse_albert_heijn_nutrients(Some(&raw)).expect("a nutritionTable array should be parsed");
+    assert_eq!(macros.calories_kcal, 120.0);
+    assert_eq!(macros.protein_g, 4.2);
+}
+
+#[test]
+fn provider_parse_albert_heijn_empty_array_is_missing() {
+    assert!(parse_albert_heijn_nutrients(Some(&json!([]))).is_none());
+    assert!(parse_albert_heijn_nutrients(None).is_none());
+}
+
+#[test]
+fn provider_parse_albert_heijn_nan_value_string_is_missing_not_nan() {
+    let raw = json!([
+        { "name": "Eiwitten", "value": "NaN", "unit": "g" }
+    ]);
+
+    let macros = parse_albert_heijn_nutrients(Some(&raw))
+        .expect("a row with an unusable value should still count as found");
+    assert_eq!(macros.protein_g, 0.0);
+    assert!(
+        macros.protein_g.is_finite(),
+        "a NaN string must not survive as NaN"
+    );
+}
+
+#[test]
+fn provider_parse_jumbo_object_form_maps_energy_and_protein() {
+    let raw = json!({ "energy kcal": 250, "protein": "8,0" });
+
+    let macros = parse_jumbo_nutrients(Some(&raw)).expect("an object payload should be parsed");
+    assert_eq!(macros.calories_kcal, 250.0);
+    assert_eq!(macros.protein_g, 8.0);
+}
+
+#[test]
+fn provider_parse_jumbo_array_form_maps_named_rows() {
+    // Jumbo rows carry no unit (`JUMBO_NUTRIENT_KEYS` has none), so the kcal
+    // marker must live in the name for energy rows to count.
+    let raw = json!([
+        { "name": "Energie kcal", "value": 120 },
+        { "name": "Eiwit", "value": "4,5" }
+    ]);
+
+    let macros = parse_jumbo_nutrients(Some(&raw)).expect("an array payload should be parsed");
+    assert_eq!(macros.calories_kcal, 120.0);
+    assert_eq!(macros.protein_g, 4.5);
+}
+
+#[test]
+fn provider_parse_strip_markdown_fence_removes_lower_case_json_tag() {
+    assert_eq!(strip_markdown_fence("```json\n{}\n```"), "{}");
+}
+
+#[test]
+fn provider_parse_strip_markdown_fence_removes_upper_case_json_tag() {
+    assert_eq!(strip_markdown_fence("```JSON\n{}\n```"), "{}");
+}
+
+#[test]
+fn provider_parse_strip_markdown_fence_removes_bare_fence() {
+    assert_eq!(strip_markdown_fence("```\n{}\n```"), "{}");
+}
+
+#[test]
+fn provider_parse_strip_markdown_fence_leaves_plain_json_alone() {
+    assert_eq!(strip_markdown_fence("{}"), "{}");
+}
+
+#[test]
+fn provider_parse_strip_markdown_fence_opening_fence_only_is_trimmed() {
+    assert_eq!(
+        strip_markdown_fence("  ```json\nsome text  "),
+        "```json\nsome text"
+    );
+}
+
+#[test]
+fn provider_parse_food_photo_analysis_accepts_upper_case_json_fence() {
+    let fenced = "```JSON\n\
+        {\"status\":\"ready\",\"estimate\":{\"label\":\"Test meal\",\"caloriesKcal\":100,\"proteinG\":10,\"carbsG\":12,\"fatG\":2,\"confidence\":0.9,\"notes\":[]}}\n\
+        ```";
+
+    let response = parse_food_photo_analysis(fenced)
+        .expect("an upper-case fenced ready response should parse");
+
+    assert_eq!(response["status"], json!("ready"));
+    assert_eq!(response["estimate"]["label"], json!("Test meal"));
+    assert_eq!(response["estimate"]["caloriesKcal"], json!(100));
+}
