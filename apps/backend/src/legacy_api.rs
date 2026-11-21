@@ -2164,11 +2164,17 @@ fn extract_message_content(value: &Value) -> Option<String> {
 fn strip_markdown_fence(content: &str) -> &str {
     let trimmed = content.trim();
     if trimmed.starts_with("```") && trimmed.ends_with("```") {
-        let without_start = trimmed
-            .trim_start_matches("```json")
-            .trim_start_matches("```")
-            .trim();
-        without_start.trim_end_matches("```").trim()
+        let without_start = trimmed.trim_start_matches("```");
+        // Models vary the info string's case ("```JSON"); strip it case-insensitively.
+        let without_start = if without_start
+            .get(..4)
+            .is_some_and(|tag| tag.eq_ignore_ascii_case("json"))
+        {
+            &without_start[4..]
+        } else {
+            without_start
+        };
+        without_start.trim().trim_end_matches("```").trim()
     } else {
         trimmed
     }
@@ -2305,10 +2311,17 @@ fn safe_number(value: Option<&Value>) -> f64 {
     value.and_then(number_from_value).map(round1).unwrap_or(0.0)
 }
 
+/// `str::parse::<f64>` accepts "NaN", "inf" and "infinity" in any case, so a
+/// non-finite provider string must be treated as missing, not as a value.
 fn number_from_value(value: &Value) -> Option<f64> {
     match value {
-        Value::Number(number) => number.as_f64(),
-        Value::String(text) => text.trim().replace(',', ".").parse::<f64>().ok(),
+        Value::Number(number) => number.as_f64().filter(|value| value.is_finite()),
+        Value::String(text) => text
+            .trim()
+            .replace(',', ".")
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite()),
         _ => None,
     }
 }
