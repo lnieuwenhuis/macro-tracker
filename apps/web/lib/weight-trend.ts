@@ -54,6 +54,9 @@ export function buildWeightGoalProjection(
 ): WeightGoalProjection {
   const currentWeightKg = weightData.stats.currentWeight;
   const goalWeightKg = weightData.goalWeightKg;
+  // Only weigh-ins on or before the selected date are in scope, matching the
+  // backend, which computes stats from those entries alone (DATA-08).
+  const entries = weightData.entries.filter((entry) => entry.date <= referenceDate);
 
   if (goalWeightKg == null) {
     return {
@@ -68,7 +71,7 @@ export function buildWeightGoalProjection(
     };
   }
 
-  if (currentWeightKg == null || weightData.entries.length < 2) {
+  if (currentWeightKg == null || entries.length < 2) {
     return {
       status: "insufficient_data",
       currentWeightKg,
@@ -83,7 +86,7 @@ export function buildWeightGoalProjection(
     };
   }
 
-  const recentEntries = getRecentTrendEntries(weightData.entries);
+  const recentEntries = getRecentTrendEntries(entries);
   const latest = recentEntries[recentEntries.length - 1]!;
   const earliest = recentEntries[0]!;
   const elapsedDays = daysBetween(earliest.date, latest.date);
