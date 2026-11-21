@@ -58,10 +58,10 @@ pub(super) async fn weight_entries_json_limited(
     Ok(row.try_get("data")?)
 }
 
-#[derive(Clone, Copy)]
-struct WeightStatEntry {
-    date: NaiveDate,
-    weight_kg: f64,
+#[derive(Clone, Copy, Debug)]
+pub(super) struct WeightStatEntry {
+    pub(super) date: NaiveDate,
+    pub(super) weight_kg: f64,
 }
 
 fn weight_stat_entry(entry: &Value) -> AppResult<WeightStatEntry> {
@@ -107,38 +107,22 @@ fn trend_direction_from_diff(diff: f64) -> &'static str {
     }
 }
 
-pub(super) async fn weight_page_data_json(
-    pool: &PgPool,
-    user_id: Uuid,
-    today: &str,
-) -> AppResult<Value> {
-    let entries = weight_entries_json(pool, user_id).await?;
-    let row =
-        sqlx::query("SELECT goal_weight_kg::float8 AS goal_weight_kg FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_one(pool)
-            .await?;
-    let goal_weight_kg: Option<f64> = row.try_get("goal_weight_kg")?;
-    let entry_array = entries.as_array().map(Vec::as_slice).unwrap_or_default();
-    let stat_entries = entry_array
-        .iter()
-        .map(weight_stat_entry)
-        .collect::<AppResult<Vec<_>>>()?;
-    let today_date = NaiveDate::parse_from_str(today, "%Y-%m-%d")
-        .map_err(|_| AppError::BadRequest("selectedDate must be YYYY-MM-DD.".to_string()))?;
-    // DATA-08: historical stats describe the selected reference date, so measurements after it
-    // must not become the current weight or the trend anchor. The full `entries` array above
-    // still carries every row for the chart.
-    let as_of_entries: Vec<WeightStatEntry> = stat_entries
+/// Builds the `stats` object of the weight page from the user's entries as of `today`.
+///
+/// DATA-08: historical stats describe the selected reference date, so entries dated after
+/// `today` must not become the current weight or the trend anchor. The caller keeps the
+/// full `entries` array for the chart.
+pub(super) fn weight_stats(entries: &[WeightStatEntry], today: NaiveDate) -> Map<String, Value> {
+    let as_of_entries: Vec<WeightStatEntry> = entries
         .iter()
         .copied()
-        .filter(|entry| entry.date <= today_date)
+        .filter(|entry| entry.date <= today)
         .collect();
     let latest = as_of_entries.last().copied();
     let current_weight = latest.map(|entry| entry.weight_kg);
     let change_over = |days: i64| {
         latest.and_then(|latest| {
-            closest_weight_on_or_before(&as_of_entries, today_date - Duration::days(days))
+            closest_weight_on_or_before(&as_of_entries, today - Duration::days(days))
                 .map(|entry| round2(latest.weight_kg - entry.weight_kg))
         })
     };
@@ -162,6 +146,29 @@ pub(super) async fn weight_page_data_json(
     stats.insert("weekChange".to_string(), json!(week_change));
     stats.insert("monthChange".to_string(), json!(month_change));
     stats.insert("trendDirection".to_string(), json!(trend_direction));
+    stats
+}
+
+pub(super) async fn weight_page_data_json(
+    pool: &PgPool,
+    user_id: Uuid,
+    today: &str,
+) -> AppResult<Value> {
+    let entries = weight_entries_json(pool, user_id).await?;
+    let row =
+        sqlx::query("SELECT goal_weight_kg::float8 AS goal_weight_kg FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await?;
+    let goal_weight_kg: Option<f64> = row.try_get("goal_weight_kg")?;
+    let entry_array = entries.as_array().map(Vec::as_slice).unwrap_or_default();
+    let stat_entries = entry_array
+        .iter()
+        .map(weight_stat_entry)
+        .collect::<AppResult<Vec<_>>>()?;
+    let today_date = NaiveDate::parse_from_str(today, "%Y-%m-%d")
+        .map_err(|_| AppError::BadRequest("selectedDate must be YYYY-MM-DD.".to_string()))?;
+    let stats = weight_stats(&stat_entries, today_date);
     let mut response = Map::with_capacity(3);
     response.insert("entries".to_string(), entries);
     response.insert("goalWeightKg".to_string(), json!(goal_weight_kg));
